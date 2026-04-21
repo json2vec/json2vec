@@ -1,0 +1,61 @@
+[project]
+name = "json2vec"
+version = "0.1.0"
+description = "JSON -> [*]"
+readme = "docs/README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "beartype>=0.21.0",
+    "pluggy>=1.6.0",
+    "faker>=37.4.0", # FIXME this can be removed (use other source for random naming?)
+    "rich>=14.0.0",
+    "pydantic>=2.11.7",
+    "pydantic-settings>=2.10.1",
+    "jmespath>=1.0.1",
+    "loguru>=0.7.3",
+    "anytree>=2.13.0",
+    "ordered-set>=4.1.0",
+    "pyarrow>=21.0.0",
+    "polars>=1.35.2",
+    "numpy>=2.2.6",
+    "lightning>=2.5.2",
+    "litserve>=0.2.13",
+    "tensordict>=0.10.0",
+    "torch>=2.7.1",
+    "lightning-thunder>=0.2.5", # FIXME this should be an optional dependency
+    "ipython>=9.9.0",
+    "jsonpatch>=1.33",
+    "jsonnet>=0.21.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.12",
+    "pytest>=8.4.1",
+    "ipykernel>=6.29.5",
+    "ty>=0.0.1a20",
+    "pre-commit>=4.3.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["json2vec*"]
+
+[project.scripts]
+train = "json2vec.__main__:train"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 120
+lint.extend-select = ["I"]
