@@ -9,7 +9,7 @@ The model is defined as a tree of contexts and typed fields. Leaf tensorfield pl
 This repository currently contains:
 
 - the core library under `src/json2vec/`
-- tensorfield plugins for `number`, `category`, `dateparts`, `entity`, and `vector`
+- tensorfield plugins for `number`, `category`, `dateparts`, `entity`, `vector`, and `text`
 - a processor registry for dataset-specific preprocessing
 - a LitServe deployment entrypoint for serving from checkpoints
 - tests covering structure loading, data processing, tensorfields, training helpers, logging, and inference
@@ -156,8 +156,11 @@ The current built-in tensorfield types are:
 - `dateparts`
 - `entity`
 - `vector`
+- `text`
 
 Each tensorfield plugin provides a request schema plus the model components needed to encode values, decode predictions, compute losses, and optionally serialize outputs.
+
+The `text` tensorfield requires the optional `transformers` dependency and is not installed by default.
 
 ## Runtime Environment
 

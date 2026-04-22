@@ -29,6 +29,11 @@ dependencies = [
     "jsonnet>=0.21.0",
 ]
 
+[project.optional-dependencies]
+text = [
+    "transformers>=4.55.0",
+]
+
 [dependency-groups]
 dev = [
     "ruff>=0.12.12",
