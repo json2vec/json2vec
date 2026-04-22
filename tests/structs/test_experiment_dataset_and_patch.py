@@ -13,7 +13,7 @@ def _processor_name() -> str:
         return observation
 
     _dataset_test_processor.__name__ = "__dataset_test_processor"
-    register(_dataset_test_processor)
+    register.transformation(_dataset_test_processor)
     return _dataset_test_processor.__name__
 
 

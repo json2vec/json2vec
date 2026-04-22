@@ -13,7 +13,7 @@ def _processor_name() -> str:
         return observation
 
     _session_test_processor.__name__ = "__session_test_processor"
-    register(_session_test_processor)
+    register.transformation(_session_test_processor)
     return _session_test_processor.__name__
 
 

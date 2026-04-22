@@ -46,9 +46,9 @@ def test_is_assigned_to_worker_single_worker():
 
 
 def test_query():
-    expr = datasets.query("foo.bar")
-    result = expr.search({"foo": {"bar": 42}})
-    assert result == 42
+    expr = datasets.query("[*].foo.bar")
+    result = expr.search([[{"foo": {"bar": 42}}]])
+    assert result == [[42]]
 
 
 def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -209,14 +209,14 @@ def test_read_unsupported_suffix_raises_value_error():
         )
 
 
-def test_process_returning_processor_wraps_non_list_output(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_returning", kwargs={}))
+def test_process_transformation_processor_wraps_dict_output(monkeypatch: pytest.MonkeyPatch):
+    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_transformation", kwargs={}))
 
-    def returning(observation: dict):
-        return observation["id"]
+    def transformation(observation: dict):
+        return {"id": observation["id"]}
 
-    processor = Processor(name="__test_returning", func=returning, mode=ProcessorMode.returning)
-    monkeypatch.setitem(datasets.PROCESSORS, "__test_returning", processor)
+    processor = Processor(name="__test_transformation", func=transformation, mode=ProcessorMode.transformation)
+    monkeypatch.setitem(datasets.PROCESSORS, "__test_transformation", processor)
 
     output = list(
         datasets.process.__wrapped__(
@@ -226,18 +226,17 @@ def test_process_returning_processor_wraps_non_list_output(monkeypatch: pytest.M
             state={},
         )
     )
-    assert output == [[1], [2]]
+    assert output == [[{"id": 1}], [{"id": 2}]]
 
 
-def test_process_yielding_processor_skips_none_outputs(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_yielding", kwargs={}))
+def test_process_generator_processor_wraps_list_outputs(monkeypatch: pytest.MonkeyPatch):
+    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_generator", kwargs={}))
 
-    def yielding(observation: dict):
-        yield None
-        yield observation["id"]
+    def generator(observation: dict):
+        return [{"id": observation["id"]}, {"id": observation["id"] + 100}]
 
-    processor = Processor(name="__test_yielding", func=yielding, mode=ProcessorMode.yielding)
-    monkeypatch.setitem(datasets.PROCESSORS, "__test_yielding", processor)
+    processor = Processor(name="__test_generator", func=generator, mode=ProcessorMode.generator)
+    monkeypatch.setitem(datasets.PROCESSORS, "__test_generator", processor)
 
     output = list(
         datasets.process.__wrapped__(
@@ -247,17 +246,17 @@ def test_process_yielding_processor_skips_none_outputs(monkeypatch: pytest.Monke
             state={},
         )
     )
-    assert output == [[1]]
+    assert output == [[{"id": 1}], [{"id": 101}]]
 
 
-def test_process_yielding_processor_receives_strata_and_state(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_yielding_context", kwargs={}))
+def test_process_generator_processor_receives_strata_and_state(monkeypatch: pytest.MonkeyPatch):
+    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_generator_context", kwargs={}))
 
-    def yielding(observation: dict, strata, state):
+    def generator(observation: dict, strata, state):
         yield {"id": observation["id"], "strata": strata, "marker": state["marker"]}
 
-    processor = Processor(name="__test_yielding_context", func=yielding, mode=ProcessorMode.yielding)
-    monkeypatch.setitem(datasets.PROCESSORS, "__test_yielding_context", processor)
+    processor = Processor(name="__test_generator_context", func=generator, mode=ProcessorMode.generator)
+    monkeypatch.setitem(datasets.PROCESSORS, "__test_generator_context", processor)
 
     output = list(
         datasets.process.__wrapped__(
@@ -270,12 +269,20 @@ def test_process_yielding_processor_receives_strata_and_state(monkeypatch: pytes
     assert output == [[{"id": 1, "strata": Strata.validate, "marker": "seen"}]]
 
 
-def test_process_unsupported_mode_raises(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_invalid_mode", kwargs={}))
-    processor = SimpleNamespace(name="__test_invalid_mode", func=lambda _: None, mode="invalid")
-    monkeypatch.setitem(datasets.PROCESSORS, "__test_invalid_mode", processor)
+def test_process_transformation_processor_rejects_non_dict(monkeypatch: pytest.MonkeyPatch):
+    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_invalid_transformation", kwargs={}))
 
-    with pytest.raises(ValueError, match="unsupported processor mode"):
+    def transformation(observation: dict):
+        return observation["id"]
+
+    processor = Processor(
+        name="__test_invalid_transformation",
+        func=transformation,
+        mode=ProcessorMode.transformation,
+    )
+    monkeypatch.setitem(datasets.PROCESSORS, "__test_invalid_transformation", processor)
+
+    with pytest.raises(TypeError, match="must produce dict objects"):
         list(
             datasets.process.__wrapped__(
                 [{"id": 1}],
@@ -284,6 +291,20 @@ def test_process_unsupported_mode_raises(monkeypatch: pytest.MonkeyPatch):
                 state={},
             )
         )
+
+
+def test_process_without_processor_still_wraps_root_context():
+    session = SimpleNamespace(dataset=SimpleNamespace(processor=None, kwargs={}))
+
+    output = list(
+        datasets.process.__wrapped__(
+            [{"id": 1}, {"id": 2}],
+            session=session,
+            strata=Strata.train,
+            state={},
+        )
+    )
+    assert output == [[{"id": 1}], [{"id": 2}]]
 
 
 def test_batch_splits_and_preserves_tail():

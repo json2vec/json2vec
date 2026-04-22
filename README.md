@@ -139,12 +139,11 @@ Deployment.serve()
 
 Processors are registered Python callables. The built-in `default` processor returns each observation unchanged.
 
-Custom processors live under `src/json2vec/processors/extensions/` and are registered with `@register`. A processor can:
+Custom processors live under `src/json2vec/processors/extensions/` and are registered with either `@register.transformation` or `@register.generator`.
 
-- return one observation
-- return a list of observations
-- yield observations from a generator
-- filter an item by returning `None`
+- transformation processors must return a single `dict`
+- generator processors may yield `dict` objects or return a `list[dict]`
+- every emitted object is wrapped as a single-item root context before tensorization
 
 Configured `dataset.kwargs` are passed into the processor, with unsupported keyword arguments automatically ignored.
 

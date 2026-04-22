@@ -17,7 +17,7 @@ def _processor_name() -> str:
         return observation
 
     _experiment_loading_processor.__name__ = "__experiment_loading_processor"
-    register(_experiment_loading_processor)
+    register.transformation(_experiment_loading_processor)
     return _experiment_loading_processor.__name__
 
 

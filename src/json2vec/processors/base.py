@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import ast
 import enum
 import inspect
-import textwrap
+from collections.abc import Callable, Iterator
 from functools import cache
-from typing import Any, Callable
+from typing import Any
 
 import pluggy
 import pydantic
@@ -18,44 +17,8 @@ pm.add_hookspecs(module_or_class=PluginSpec)
 
 
 class ProcessorMode(enum.StrEnum):
-    yielding = "yield"
-    returning = "return"
-
-
-def has_yield_expression(node: ast.AST, root: bool = False) -> bool:
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.Yield, ast.YieldFrom)):
-            return True
-
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            if root and has_yield_expression(child):
-                return True
-            continue
-
-        if has_yield_expression(child):
-            return True
-
-    return False
-
-
-def is_yielding_processor(func: Callable[..., Any]) -> bool:
-    try:
-        source: str = textwrap.dedent(inspect.getsource(func))
-    except (OSError, TypeError):
-        return inspect.isgeneratorfunction(func)
-
-    module: ast.Module = ast.parse(source)
-    candidates: list[ast.FunctionDef | ast.AsyncFunctionDef] = [
-        node
-        for node in module.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-
-    target = next((node for node in candidates if node.name == func.__name__), None)
-    if target is None:
-        return inspect.isgeneratorfunction(func)
-
-    return has_yield_expression(target, root=True)
+    generator = "generator"
+    transformation = "transformation"
 
 
 class Processor(pydantic.BaseModel):
@@ -66,6 +29,38 @@ class Processor(pydantic.BaseModel):
 
     def __call__(self, observation: dict, **kwargs) -> Any:
         return self.func(observation, **_filter_supported_kwargs(self.func, kwargs))
+
+    def outputs(self, observation: dict, **kwargs) -> Iterator[list[dict[str, Any]]]:
+        result = self(observation, **kwargs)
+
+        if self.mode == ProcessorMode.transformation:
+            yield [self._normalize_object(result, mode=self.mode)]
+            return
+
+        if self.mode == ProcessorMode.generator:
+            if isinstance(result, list):
+                iterable: list[Any] | Iterator[Any] = result
+            elif isinstance(result, Iterator):
+                iterable = result
+            else:
+                raise TypeError(
+                    f"generator processor '{self.name}' must yield dict objects or return a list of dict objects, "
+                    f"got {type(result).__name__}"
+                )
+
+            for output in iterable:
+                yield [self._normalize_object(output, mode=self.mode)]
+            return
+
+        raise ValueError(f"unsupported processor mode: {self.mode}")
+
+    def _normalize_object(self, output: Any, *, mode: ProcessorMode) -> dict[str, Any]:
+        if not isinstance(output, dict):
+            raise TypeError(
+                f"{mode} processor '{self.name}' must produce dict objects, got {type(output).__name__}"
+            )
+
+        return output
 
 
 @cache
@@ -90,13 +85,25 @@ def _filter_supported_kwargs(func: Callable[..., Any], kwargs: dict[str, Any]) -
 PROCESSORS: dict[str, Processor] = {}
 
 
-def register(func: Callable[..., Any]) -> Callable[..., Any]:
+def _register(func: Callable[..., Any], *, mode: ProcessorMode) -> Callable[..., Any]:
     name = func.__name__
 
     if name in PROCESSORS:
         raise ValueError(f"Processor '{name}' is already registered.")
 
-    mode: ProcessorMode = ProcessorMode.yielding if is_yielding_processor(func) else ProcessorMode.returning
     PROCESSORS[name] = Processor(name=name, func=func, mode=mode)
 
     return func
+
+
+class _RegisterNamespace:
+    __slots__ = ()
+
+    def generator(self, func: Callable[..., Any]) -> Callable[..., Any]:
+        return _register(func, mode=ProcessorMode.generator)
+
+    def transformation(self, func: Callable[..., Any]) -> Callable[..., Any]:
+        return _register(func, mode=ProcessorMode.transformation)
+
+
+register = _RegisterNamespace()

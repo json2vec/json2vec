@@ -21,7 +21,7 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from json2vec.data.processing import Pipeline
-from json2vec.processors.base import PROCESSORS, Processor, ProcessorMode
+from json2vec.processors.base import PROCESSORS, Processor
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.environment import DataLoaderEnvironment
 from json2vec.structs.experiment import Session, Structure
@@ -249,35 +249,14 @@ def process(
 ) -> Iterator[Any]:
 
     if session.dataset.processor is None:
-        yield from pipe
+        for item in pipe:
+            yield [item]
 
     else:
         processor: Processor = PROCESSORS[session.dataset.processor]
 
         for item in pipe:
-            if processor.mode == ProcessorMode.yielding:
-                for output in processor(item, **session.dataset.kwargs, strata=strata, state=state):
-                    if output is None:
-                        continue
-
-                    if isinstance(output, list):
-                        yield output
-                    else:
-                        yield [output]
-
-            elif processor.mode == ProcessorMode.returning:
-                output = processor(item, **session.dataset.kwargs, strata=strata, state=state)
-                if output is None:
-                    continue
-
-                if isinstance(output, list):
-                    yield output
-                else:
-                    yield [output]
-                
-
-            else:
-                raise ValueError(f"unsupported processor mode: {processor.mode}")
+            yield from processor.outputs(item, **session.dataset.kwargs, strata=strata, state=state)
 
 
 @beartype
