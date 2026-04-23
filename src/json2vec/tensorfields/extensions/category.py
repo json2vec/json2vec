@@ -31,16 +31,24 @@ if TYPE_CHECKING:
     from json2vec.structs.experiment import Session, Structure
 
 category: Plugin = Plugin(name="category")
+# This is a content-level fallback for OOV categories. The field is still present,
+# so we keep state=`valued` and route the content into a reserved bucket instead of
+# collapsing it into state=`null`.
+UNAVAILABLE_LABEL = "<unavailable>"
 
 class Vocabulary:
-    
-    def __init__(self, master: ListProxy, lock: Lock):
+    def __init__(self, master: ListProxy, lock: Lock, max_vocab_size: int):
 
         self.master: ListProxy[str] = master
         self.lock: Lock = lock
+        self.max_vocab_size: int = max_vocab_size
         self.vocab: OrderedSet[str] = OrderedSet(list(master))
 
-    def __call__(self, word: str, update: bool) -> int|None:
+    @property
+    def unavailable_index(self) -> int:
+        return self.max_vocab_size
+
+    def __call__(self, word: str, update: bool) -> int | None:
 
         if word is None:
             return None
@@ -49,11 +57,21 @@ class Vocabulary:
             return self.vocab.index(word)
 
         if not update:
-            return None
+            # Validation/test/inference should preserve "field exists" semantics even when
+            # the label was never seen during training.
+            return self.unavailable_index
 
         # OK, it is not known locally... We will lock the global state and update the local vocab
         with self.lock:
             self.vocab: OrderedSet[str] = OrderedSet(list(self.master))
+
+            if word in self.vocab:
+                return self.vocab.index(word)
+
+            if len(self.vocab) >= self.max_vocab_size:
+                # Once the learned vocabulary is full, new labels also fall back to the
+                # reserved unavailable bucket instead of evicting existing ids.
+                return self.unavailable_index
 
             if word not in self.vocab:
                 self.vocab.add(word)
@@ -66,9 +84,10 @@ class Vocabulary:
         return len(self.vocab)
 
 class OnlineVocabularyModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, max_vocab_size: int):
         super().__init__()
 
+        self.max_vocab_size: int = max_vocab_size
         self.manager: SyncManager = Manager()
         self.master: ListProxy[str] = self.manager.list()
         self.lock: Lock = self.manager.Lock()
@@ -98,7 +117,7 @@ class OnlineVocabularyModel(torch.nn.Module):
     @property
     def state(self) -> Vocabulary:
 
-        return Vocabulary(master=self.master, lock=self.lock)
+        return Vocabulary(master=self.master, lock=self.lock, max_vocab_size=self.max_vocab_size)
 
     def snapshot(self) -> list[str]:
         size = len(self.master)
@@ -114,6 +133,7 @@ class Request(RequestBase):
     type: Literal["category"]
     max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)]
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)]
+    p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)]
     topk: Annotated[list[int], pydantic.Field(default_factory=list)]
 
     @pydantic.model_validator(mode="after")
@@ -173,6 +193,21 @@ class TensorField(TensorFieldBase):
 
         state_tensor = torch.tensor(states, dtype=torch.int64)
         content = torch.tensor(data=data, dtype=torch.int64)
+        if strata == Strata.train:
+            p_unavailable: float = session.structure.requests[address].p_unavailable
+            unavailable_index: int = session.structure.requests[address].max_vocab_size
+
+            if p_unavailable > 0.0:
+                # Unavailable content never appears naturally during training, because the
+                # train split is exactly where the vocabulary is built. We simulate a small
+                # amount of OOV behavior here so the decoder learns to use that bucket.
+                is_known = state_tensor.eq(Tokens.valued.value) & content.ne(unavailable_index)
+                if is_known.any():
+                    simulated = (
+                        torch.rand_like(input=state_tensor, dtype=torch.float).lt(other=p_unavailable) & is_known
+                    )
+                    if simulated.any():
+                        content = content.masked_fill(simulated, unavailable_index)
 
         return cls(
             state=state_tensor,
@@ -248,7 +283,9 @@ class Embedder(EmbedderBase):
         self.destination: Address = request.parent.address
         self.max_vocab_size: int = request.max_vocab_size
 
-        self.vocab: OnlineVocabularyModel = OnlineVocabularyModel()
+        self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(max_vocab_size=request.max_vocab_size)
+        # One extra slot is reserved for UNAVAILABLE_LABEL on top of the learned vocabulary.
+        self.n_content_tokens: int = request.max_vocab_size + 1
 
         self.embeddings = torch.nn.ModuleDict(
             {
@@ -257,7 +294,7 @@ class Embedder(EmbedderBase):
                     embedding_dim=structure.d_model,
                 ),
                 TensorKey.content.name: torch.nn.Embedding(
-                    num_embeddings=request.max_vocab_size,
+                    num_embeddings=self.n_content_tokens,
                     embedding_dim=structure.d_model,
                 ),
             }
@@ -273,7 +310,7 @@ class Embedder(EmbedderBase):
         content = inputs.content.reshape(-1)
         valued = state.eq(Tokens.valued.value)
 
-        if valued.any() and (content.masked_select(valued) >= self.max_vocab_size).any().item():
+        if valued.any() and (content.masked_select(valued) >= self.n_content_tokens).any().item():
             raise ValueError(f"Token in address {self.origin} exceeds max vocab size of {self.max_vocab_size}")
 
         safe_content = content.masked_fill(~valued, 0)
@@ -312,7 +349,7 @@ class Decoder(DecoderBase):
                 ),
                 TensorKey.content.name: torch.nn.Linear(
                     in_features=structure.d_model,
-                    out_features=request.max_vocab_size,
+                    out_features=request.max_vocab_size + 1,
                 ),
             }
         )
@@ -320,7 +357,7 @@ class Decoder(DecoderBase):
         self.counters = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: Counter(address=address, size=len(Tokens)),
-                TensorKey.content.name: Counter(address=address, size=request.max_vocab_size),
+                TensorKey.content.name: Counter(address=address, size=request.max_vocab_size + 1),
             }
         )
 
@@ -418,6 +455,7 @@ def write(module: JSON2Vec, prediction: Prediction):
     node = module.nodes[prediction.address]
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     content_logits: torch.Tensor = prediction.payload[TensorKey.content]
+    unavailable_index: int = module.session.structure.requests[prediction.address].max_vocab_size
 
     tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
     state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
@@ -428,6 +466,9 @@ def write(module: JSON2Vec, prediction: Prediction):
     }
 
     vocab = np.array(node.embedder.vocab.snapshot(), dtype=object)
+    # Reporting only exposes realized vocab entries plus the reserved unavailable label;
+    # unused capacity between len(vocab) and max_vocab_size is intentionally hidden.
+    labels = np.concatenate([vocab, np.array([UNAVAILABLE_LABEL], dtype=object)])
     content_shape = tuple(state_distribution.shape[:-1])
     content_labels = np.full(content_shape, None, dtype=object)
     content_probabilities = np.zeros(content_shape, dtype=np.float32)
@@ -451,28 +492,31 @@ def write(module: JSON2Vec, prediction: Prediction):
         return [_empty_candidates(shape[1:]) for _ in range(shape[0])]
 
     topk_payload: list | None = _empty_candidates(content_shape)
+    candidate_indices = torch.tensor(
+        [*range(len(vocab)), unavailable_index],
+        device=content_logits.device,
+        dtype=torch.int64,
+    )
+    candidate_logits = content_logits.index_select(dim=-1, index=candidate_indices)
+    log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
+    max_logits, max_indices = candidate_logits.max(dim=-1)
+    content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
 
-    if len(vocab) > 0:
-        narrow: torch.Tensor = content_logits.narrow(dim=-1, start=0, length=len(vocab))
-        log_norm = narrow.logsumexp(dim=-1, keepdim=True)
-        max_logits, max_indices = narrow.max(dim=-1)
-        content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
+    max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
+    content_labels = labels[max_indices_np]
 
-        max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
-        content_labels = vocab[max_indices_np]
+    if max_requested_k > 0:
+        topk: int = min(max_requested_k, candidate_logits.shape[-1])
+        topk_logits, topk_indices = candidate_logits.topk(k=topk, dim=-1)
+        topk_probabilities = (topk_logits - log_norm).exp()
 
-        if max_requested_k > 0:
-            topk: int = min(max_requested_k, narrow.shape[-1])
-            topk_logits, topk_indices = narrow.topk(k=topk, dim=-1)
-            topk_probabilities = (topk_logits - log_norm).exp()
-
-            topk_indices_np: np.ndarray = topk_indices.detach().cpu().numpy().astype(np.int32)
-            topk_labels_np: np.ndarray = vocab[topk_indices_np]
-            topk_probabilities_np: np.ndarray = topk_probabilities.detach().float().cpu().numpy()
-            topk_payload = _pack_candidates(
-                labels=topk_labels_np,
-                probabilities=topk_probabilities_np,
-            )
+        topk_indices_np: np.ndarray = topk_indices.detach().cpu().numpy().astype(np.int32)
+        topk_labels_np: np.ndarray = labels[topk_indices_np]
+        topk_probabilities_np: np.ndarray = topk_probabilities.detach().float().cpu().numpy()
+        topk_payload = _pack_candidates(
+            labels=topk_labels_np,
+            probabilities=topk_probabilities_np,
+        )
 
     return {
         TensorKey.state.name: state_payload,

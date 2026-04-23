@@ -7,10 +7,16 @@ from tensordict import TensorDict
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.packages import Prediction
 from json2vec.structs.structure import Structure
-from json2vec.tensorfields.extensions.category import Decoder, TensorField, loss, write
+from json2vec.tensorfields.extensions.category import (
+    UNAVAILABLE_LABEL,
+    Decoder,
+    TensorField,
+    loss,
+    write,
+)
 
 
-def _structure_payload(*, topk: list[int] | None = None) -> dict:
+def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | None = None) -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
@@ -19,6 +25,8 @@ def _structure_payload(*, topk: list[int] | None = None) -> dict:
     }
     if topk is not None:
         field["topk"] = topk
+    if p_unavailable is not None:
+        field["p_unavailable"] = p_unavailable
 
     return {
         "name": "demo",
@@ -41,16 +49,24 @@ def _session(structure: Structure):
 
 
 class _DummyState:
-    def __init__(self):
+    def __init__(self, max_vocab_size: int = 8):
         self.vocab: list[str] = []
+        self.max_vocab_size = max_vocab_size
 
     def __call__(self, word: str, update: bool = True) -> int:
-        if not update:
+        if word is None:
+            return None
+
+        if word in self.vocab:
             return self.vocab.index(word)
 
-        if word not in self.vocab:
-            self.vocab.append(word)
+        if not update:
+            return self.max_vocab_size
 
+        if len(self.vocab) >= self.max_vocab_size:
+            return self.max_vocab_size
+
+        self.vocab.append(word)
         return self.vocab.index(word)
 
     def __len__(self) -> int:
@@ -58,7 +74,7 @@ class _DummyState:
 
 
 def test_category_tensorfield_separates_state_and_content():
-    structure = Structure.model_validate(_structure_payload())
+    structure = Structure.model_validate(_structure_payload(p_unavailable=0.0))
     session = _session(structure)
     state = _DummyState()
 
@@ -92,6 +108,62 @@ def test_category_tensorfield_separates_state_and_content():
     )
 
 
+def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
+    structure = Structure.model_validate(_structure_payload(p_unavailable=0.0))
+    session = _session(structure)
+    state = _DummyState(max_vocab_size=structure.requests["root/category"].max_vocab_size)
+
+    TensorField.new(
+        values=[["ALPHA"]],
+        address="root/category",
+        session=session,
+        strata=Strata.train,
+        state=state,
+    )
+
+    field = TensorField.new(
+        values=[["OMEGA"]],
+        address="root/category",
+        session=session,
+        strata=Strata.validate,
+        state=state,
+    )
+
+    assert torch.equal(
+        field.state,
+        torch.tensor([[Tokens.valued.value, Tokens.padded.value]], dtype=torch.int64),
+    )
+    assert torch.equal(
+        field.content,
+        torch.tensor([[structure.requests["root/category"].max_vocab_size, 0]], dtype=torch.int64),
+    )
+
+
+def test_category_tensorfield_can_simulate_unavailable_during_training():
+    structure = Structure.model_validate(_structure_payload(p_unavailable=1.0))
+    session = _session(structure)
+    state = _DummyState(max_vocab_size=structure.requests["root/category"].max_vocab_size)
+
+    field = TensorField.new(
+        values=[["ALPHA", None], ["BETA"]],
+        address="root/category",
+        session=session,
+        strata=Strata.train,
+        state=state,
+    )
+
+    assert torch.equal(
+        field.content,
+        torch.tensor(
+            [
+                [structure.requests["root/category"].max_vocab_size, 0],
+                [structure.requests["root/category"].max_vocab_size, 0],
+            ],
+            dtype=torch.int64,
+        ),
+    )
+
+
 class _DummyVocab:
     def snapshot(self) -> list[str]:
         return ["ALPHA", "BETA", "GAMMA", "DELTA", "EPS"]
@@ -112,7 +184,7 @@ class _DummyModule:
         self.nodes = {"root/category": _DummyNode()}
         self.session = SimpleNamespace(
             structure=SimpleNamespace(
-                requests={"root/category": SimpleNamespace(topk=[2, 3, 5, 10])}
+                requests={"root/category": SimpleNamespace(topk=[2, 3, 5, 10], max_vocab_size=8)}
             )
         )
 
@@ -127,8 +199,8 @@ def test_category_write_emits_state_and_content_payloads():
     )
     content_logits = torch.tensor(
         [
-            [[0.1, 0.9, 0.2, 0.3, 0.4]],
-            [[0.1, 0.2, 0.8, 0.3, 0.4]],
+            [[0.1, 0.9, 0.2, 0.3, 0.4, 0.0, 0.0, 0.0, -1.0]],
+            [[0.1, 0.2, 0.8, 0.3, 0.4, 0.0, 0.0, 0.0, 1.2]],
         ]
     )
     prediction = Prediction(
@@ -152,12 +224,13 @@ def test_category_write_emits_state_and_content_payloads():
     assert state_payload[Tokens.valued.name][0, 0] > 0.99
     assert state_payload[Tokens.padded.name][1, 0] > 0.99
 
-    assert content_payload["value"].tolist() == [["BETA"], ["GAMMA"]]
+    assert content_payload["value"].tolist() == [["BETA"], [UNAVAILABLE_LABEL]]
     assert content_payload[TensorKey.probability.name].shape == (2, 1)
 
     assert len(topk_payload) == 2
-    assert len(topk_payload[0][0]) == 5
-    assert len(topk_payload[1][0]) == 5
+    assert len(topk_payload[0][0]) == 6
+    assert len(topk_payload[1][0]) == 6
+    assert any(candidate["label"] == UNAVAILABLE_LABEL for candidate in topk_payload[1][0])
 
     for row in topk_payload:
         assert set(row[0][0].keys()) == {"label", "probability"}
@@ -177,7 +250,7 @@ class _TrackingModule:
 
 
 def test_category_loss_updates_state_and_content_counters():
-    structure = Structure.model_validate(_structure_payload())
+    structure = Structure.model_validate(_structure_payload(p_unavailable=0.0))
     session = _session(structure)
     state = _DummyState()
 
@@ -200,7 +273,7 @@ def test_category_loss_updates_state_and_content_counters():
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
                 TensorKey.content: torch.zeros(
                     *field.content.shape,
-                    structure.requests["root/category"].max_vocab_size,
+                    structure.requests["root/category"].max_vocab_size + 1,
                 ),
             },
             batch_size=field.batch_size,
@@ -217,11 +290,11 @@ def test_category_loss_updates_state_and_content_counters():
     content_targets = field.targets[TensorKey.content]
     valued = state_targets.eq(Tokens.valued.value)
     expected_content_counts = torch.ones(
-        structure.requests["root/category"].max_vocab_size,
+        structure.requests["root/category"].max_vocab_size + 1,
         dtype=torch.int64,
     )
     expected_content_counts += torch.bincount(
         content_targets.masked_select(valued).reshape(-1),
-        minlength=structure.requests["root/category"].max_vocab_size,
+        minlength=structure.requests["root/category"].max_vocab_size + 1,
     )
     assert torch.equal(decoder.counters[TensorKey.content.name].counts, expected_content_counts)
