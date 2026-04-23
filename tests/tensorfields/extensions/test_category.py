@@ -1,3 +1,4 @@
+from threading import Lock
 from types import SimpleNamespace
 
 import polars as pl
@@ -11,6 +12,7 @@ from json2vec.tensorfields.extensions.category import (
     UNAVAILABLE_LABEL,
     Decoder,
     TensorField,
+    Vocabulary,
     loss,
     write,
 )
@@ -71,6 +73,17 @@ class _DummyState:
 
     def __len__(self) -> int:
         return len(self.vocab)
+
+
+def test_category_vocabulary_refreshes_stale_validation_snapshot():
+    master: list[str] = []
+    lock = Lock()
+    validation_state = Vocabulary(master=master, lock=lock, max_vocab_size=8)
+    training_state = Vocabulary(master=master, lock=lock, max_vocab_size=8)
+
+    assert training_state("ALPHA", update=True) == 0
+    assert validation_state("ALPHA", update=False) == 0
+    assert len(validation_state) == 1
 
 
 def test_category_tensorfield_separates_state_and_content():

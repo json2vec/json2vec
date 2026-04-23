@@ -13,8 +13,8 @@ from beartype import beartype
 from ordered_set import OrderedSet
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.plot import Pane
 from json2vec.architecture.counter import Counter
+from json2vec.architecture.plot import Pane
 from json2vec.data.processing import apply, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
@@ -45,6 +45,12 @@ class Vocabulary:
         self.max_vocab_size: int = max_vocab_size
         self.vocab: OrderedSet[str] = OrderedSet(list(master))
 
+    def refresh(self, force: bool = False) -> None:
+        if not force and len(self.master) == len(self.vocab):
+            return
+
+        self.vocab = OrderedSet(list(self.master))
+
     @property
     def unavailable_index(self) -> int:
         return self.max_vocab_size
@@ -58,13 +64,17 @@ class Vocabulary:
             return self.vocab.index(word)
 
         if not update:
+            self.refresh()
+            if word in self.vocab:
+                return self.vocab.index(word)
+
             # Validation/test/inference should preserve "field exists" semantics even when
             # the label was never seen during training.
             return self.unavailable_index
 
         # OK, it is not known locally... We will lock the global state and update the local vocab
         with self.lock:
-            self.vocab: OrderedSet[str] = OrderedSet(list(self.master))
+            self.refresh(force=True)
 
             if word in self.vocab:
                 return self.vocab.index(word)
@@ -81,6 +91,7 @@ class Vocabulary:
         return self.vocab.index(word)
 
     def __len__(self) -> int:
+        self.refresh()
 
         return len(self.vocab)
 
