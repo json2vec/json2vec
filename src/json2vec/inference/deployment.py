@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from typing import Any, Type, TypeAlias
 
 import litserve as ls
@@ -18,14 +17,14 @@ from json2vec.tensorfields.base import TensorFieldBase
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 
 
-@dataclass
-class ErrorItem:
+class ErrorItem(pydantic.BaseModel):
     status_code: int
     message: str
 
 
-@dataclass
-class BatchItem:
+class BatchItem(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
     data: Input | None
     valid_indices: list[int]
     items: list[Input | ErrorItem]

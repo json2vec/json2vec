@@ -13,6 +13,7 @@ from beartype import beartype
 from ordered_set import OrderedSet
 from tensordict import TensorDict, tensorclass
 
+from json2vec.architecture.plot import Pane
 from json2vec.architecture.counter import Counter
 from json2vec.data.processing import apply, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
@@ -526,3 +527,25 @@ def write(module: JSON2Vec, prediction: Prediction):
             TensorKey.topk.name: topk_payload,
         },
     }
+
+
+@category.register
+def plot(
+    module: JSON2Vec,
+    address: Address,
+    branch: Pane,
+    detail: bool,
+):
+    if not detail:
+        return
+
+    embedder: Embedder = module.nodes[address].embedder
+    vocabulary = embedder.vocab.snapshot()
+    branch.add_section(
+        "state",
+        {
+            "vocabulary_size": len(vocabulary),
+            "vocabulary": vocabulary,
+            "unavailable_label": UNAVAILABLE_LABEL,
+        },
+    )

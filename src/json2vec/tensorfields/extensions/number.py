@@ -10,6 +10,7 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
+from json2vec.architecture.plot import Pane
 from json2vec.architecture.counter import Counter
 from json2vec.data.processing import pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
@@ -398,3 +399,25 @@ def write(module: JSON2Vec, prediction: Prediction):
     }
 
     return output
+
+
+@number.register
+def plot(
+    module: JSON2Vec,
+    address: Address,
+    branch: Pane,
+    detail: bool,
+):
+    if not detail:
+        return
+
+    normalizer: GlobalOnlineNormalizer = module.nodes[address].embedder.normalizer
+    branch.add_section(
+        "state",
+        {
+            "mean": float(normalizer.mean.item()),
+            "variance": float(normalizer.var.item()),
+            "std_dev": float(torch.sqrt(normalizer.var + normalizer.epsilon).item()),
+            "count": int(normalizer.count.item()),
+        },
+    )

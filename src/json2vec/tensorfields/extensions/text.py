@@ -6,7 +6,6 @@ import warnings
 from functools import cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-import numpy as np
 import pydantic
 import torch
 from beartype import beartype
@@ -191,7 +190,7 @@ class TensorField(TensorFieldBase):
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
-        del strata, state
+        pass
 
         request: Request = session.structure.requests[address]
         context_shape: tuple[int, ...] = session.structure.shapes[address]
@@ -545,5 +544,4 @@ def loss(
 
 @text.register
 def write(module: JSON2Vec, prediction: Prediction):
-    del module, prediction
-    return None
+    pass

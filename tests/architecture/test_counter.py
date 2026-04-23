@@ -29,3 +29,18 @@ def test_counter_stops_counting_when_about_to_overflow():
 
     assert counter.is_full is True
     assert torch.equal(counter.counts, before)
+
+
+def test_counter_str_exposes_plot_details():
+    counter = Counter(address=Address("details"), size=3)
+    counter.counts.copy_(torch.tensor([4, 2, 1], dtype=torch.int64))
+
+    rendered = str(counter)
+
+    assert rendered == "\n".join(
+        (
+            "size: 3",
+            "is_full: False",
+            "counts: [4, 2, 1]",
+        )
+    )

@@ -2,6 +2,7 @@ import math
 import traceback
 from collections import defaultdict
 from functools import cache, partialmethod, wraps
+from pathlib import Path
 from typing import Any, NotRequired, Self, TypedDict
 
 import lightning.pytorch as lit
@@ -141,6 +142,16 @@ class JSON2Vec(lit.LightningModule):
             for address, node in self.nodes.items()
             if hasattr(node, "embedder") and hasattr(node.embedder, "state")
         }
+
+    def plot(
+        self,
+        address: Address | str | None = None,
+        detail: bool = False,
+        out: str | Path | None = None,
+    ) -> str:
+        from json2vec.architecture.plot import plot
+
+        return plot(module=self, address=address, detail=detail, out=out)
 
     @beartype
     def forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:

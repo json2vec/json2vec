@@ -11,12 +11,13 @@ import torch
 from tensordict import TensorDict
 
 from json2vec.architecture.pool import LearnedQueryCrossAttention
-from json2vec.structs.enums import Component, Metric, Strata, TensorKey
+from json2vec.structs.enums import Component, Strata, TensorKey
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address, Leaf, Node
 from json2vec.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
+    from json2vec.architecture.plot import Pane
     from json2vec.architecture.root import JSON2Vec
     from json2vec.structs.experiment import Session
     from json2vec.structs.structure import Structure
@@ -26,6 +27,15 @@ pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
 pm.add_hookspecs(module_or_class=PluginSpec)
 
 RequestBase: TypeAlias = Leaf
+
+
+def default_plot(
+    module: "JSON2Vec",
+    address: Address,
+    branch: "Pane",
+    detail: bool,
+) -> None:
+    pass
 
 
 class EmbedderBase(torch.nn.Module):
@@ -195,16 +205,33 @@ class Plugin:
                         f"Write function must accept the following parameters: {expected_params}, got {func_params}"
                     )
 
+            case Component.plot:
+                if not callable(obj):
+                    raise TypeError("Plot must be a callable function")
+
+                expected_params: list[str] = ["module", "address", "branch", "detail"]
+                func_params: list[str] = list(obj.__annotations__.keys())
+
+                if func_params != expected_params:
+                    raise TypeError(
+                        f"Plot function must accept the following parameters: {expected_params}, got {func_params}"
+                    )
+
         self.components[name] = obj
 
         return obj
 
     @functools.cache
     def __getattr__(self, key: Component) -> Callable | Type:
-        if key not in Component:
+        try:
+            component = Component(key)
+        except ValueError:
             raise ValueError(f"Component '{key}' is not a valid Component enum value")
 
-        if key in self.components:
-            return self.components[key]
+        if component in self.components:
+            return self.components[component]
 
-        raise AttributeError(f"Plugin '{self.name}' has no component '{key}'")
+        if component == Component.plot:
+            return default_plot
+
+        raise AttributeError(f"Plugin '{self.name}' has no component '{component}'")

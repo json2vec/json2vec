@@ -14,6 +14,16 @@ class Counter(torch.nn.Module):
         self.register_buffer("counts", torch.ones(size, dtype=torch.int64))
         self.is_full: bool = False
 
+    def __str__(self) -> str:
+        counts = self.counts.detach().cpu().tolist()
+        return "\n".join(
+            (
+                f"size: {self.size}",
+                f"is_full: {self.is_full}",
+                f"counts: {counts}",
+            )
+        )
+
     @torch.no_grad()
     def forward(self, values: torch.Tensor):
         if self.training and not self.is_full:

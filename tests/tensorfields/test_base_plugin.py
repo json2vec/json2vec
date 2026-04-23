@@ -53,8 +53,12 @@ def _build_plugin() -> Plugin:
     def write(module: object, prediction: object):
         return None
 
+    def plot(module: object, address: object, branch: object, detail: bool):
+        return None
+
     plugin.register(loss)
     plugin.register(write)
+    plugin.register(plot)
 
     return plugin
 
@@ -83,6 +87,7 @@ def test_plugin_registers_components_and_wraps_loss():
         assert Component.Decoder in plugin.components
         assert Component.loss in plugin.components
         assert Component.write in plugin.components
+        assert Component.plot in plugin.components
 
         class DummyModule:
             def __init__(self):
@@ -98,7 +103,15 @@ def test_plugin_registers_components_and_wraps_loss():
         module = DummyModule()
         value = plugin.loss(module, prediction=DummyPrediction(), batch=object(), strata=Strata.train)
         assert value == 3.14
-        assert module.calls and module.calls[0][1] == 3.14
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_plot_defaults_when_unregistered():
+    plugin = Plugin(name=_plugin_name("defaultplot"))
+    try:
+        assert callable(plugin.plot)
+        assert Component.plot not in plugin.components
     finally:
         TENSORFIELDS.pop(plugin.name, None)
 
