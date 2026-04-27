@@ -33,6 +33,7 @@ text: Plugin = Plugin(name="text")
 
 INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
+TEXT_TENSOR_KEYS = (INPUT_IDS, ATTENTION_MASK)
 
 
 class Pooling(enum.StrEnum):
@@ -190,8 +191,6 @@ class TensorField(TensorFieldBase):
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
-        pass
-
         request: Request = session.structure.requests[address]
         context_shape: tuple[int, ...] = session.structure.shapes[address]
         leading_shape: tuple[int, ...] = (len(values), *context_shape)
@@ -203,7 +202,7 @@ class TensorField(TensorFieldBase):
             leaf_depth=len(leading_shape),
         )
 
-        data, flags = pad(
+        data, state = pad(
             nested=coerced,
             shape=leading_shape,
             dtype=object,
@@ -212,9 +211,9 @@ class TensorField(TensorFieldBase):
 
         token_ids = torch.zeros((*leading_shape, request.max_length), dtype=torch.int64)
         attention_mask = torch.zeros_like(token_ids)
-        state_tensor = torch.tensor(flags, dtype=torch.int64)
+        state_tensor = torch.tensor(state, dtype=torch.int64)
 
-        valued = flags == Tokens.valued.value
+        valued = state == Tokens.valued.value
         if valued.any():
             tokenizer = _get_tokenizer(
                 request.model_name,
@@ -234,6 +233,7 @@ class TensorField(TensorFieldBase):
             attention_mask[valued_index] = encoded[ATTENTION_MASK].to(dtype=torch.int64)
 
         return cls(
+            state=state_tensor,
             content=TensorDict(
                 {
                     INPUT_IDS: token_ids,
@@ -241,59 +241,49 @@ class TensorField(TensorFieldBase):
                 },
                 batch_size=leading_shape,
             ),
-            state=state_tensor,
             trainable=torch.zeros(leading_shape, dtype=torch.bool),
             targets=TensorDict({}),
             batch_size=len(values),
         )
 
-    def mask(self, p_mask: float):
-        mask_token = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-        is_masked = torch.rand_like(input=self.state, dtype=torch.float).lt(other=p_mask)
-        expanded = is_masked.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
-
+    def _cache_targets(self):
         if TensorKey.state not in self.targets.keys():
             self.targets[TensorKey.state] = self.state.clone()
 
         if TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
+    def _zero_content(self, selected: torch.Tensor):
+        expanded = selected.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
+
+        for key in TEXT_TENSOR_KEYS:
+            self.content[key] = self.content[key].masked_scatter(
+                expanded,
+                torch.zeros_like(input=self.content[key]),
+            )
+
+    def mask(self, p_mask: float):
+        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
+        is_masked = torch.rand_like(input=self.state, dtype=torch.float).lt(other=p_mask)
+
+        self._cache_targets()
+
         self.state = self.state.masked_scatter(is_masked, mask_token)
-        self.content[INPUT_IDS] = self.content[INPUT_IDS].masked_scatter(
-            expanded,
-            torch.zeros_like(self.content[INPUT_IDS]),
-        )
-        self.content[ATTENTION_MASK] = self.content[ATTENTION_MASK].masked_scatter(
-            expanded,
-            torch.zeros_like(self.content[ATTENTION_MASK]),
-        )
+        self._zero_content(is_masked)
 
         self.trainable |= is_masked
 
     def prune(self, p_prune: float = 1.0):
-        prune_token = torch.full_like(input=self.state, fill_value=Tokens.pruned.value)
+        prune_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.pruned.value)
         is_pruned = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
             .lt(p_prune)
             .expand_as(self.state)
         )
-        expanded = is_pruned.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
-
-        if TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
+        self._cache_targets()
 
         self.state = self.state.masked_scatter(is_pruned, prune_token)
-        self.content[INPUT_IDS] = self.content[INPUT_IDS].masked_scatter(
-            expanded,
-            torch.zeros_like(self.content[INPUT_IDS]),
-        )
-        self.content[ATTENTION_MASK] = self.content[ATTENTION_MASK].masked_scatter(
-            expanded,
-            torch.zeros_like(self.content[ATTENTION_MASK]),
-        )
+        self._zero_content(is_pruned)
 
         self.trainable |= is_pruned
 
@@ -306,17 +296,19 @@ class TensorField(TensorFieldBase):
     ):
         request: Request = structure.requests[address]
         leading_shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
+        token_shape: tuple[int, ...] = (*leading_shape, request.max_length)
+        state = torch.full(leading_shape, Tokens.pruned, dtype=torch.int64)
 
         return cls(
+            state=state,
             content=TensorDict(
                 {
-                    INPUT_IDS: torch.zeros((*leading_shape, request.max_length), dtype=torch.int64),
-                    ATTENTION_MASK: torch.zeros((*leading_shape, request.max_length), dtype=torch.int64),
+                    INPUT_IDS: torch.zeros(token_shape, dtype=torch.int64),
+                    ATTENTION_MASK: torch.zeros(token_shape, dtype=torch.int64),
                 },
                 batch_size=leading_shape,
             ),
-            state=torch.full(leading_shape, Tokens.pruned, dtype=torch.int64),
-            trainable=torch.zeros(leading_shape, dtype=torch.bool),
+            trainable=torch.zeros_like(input=state, dtype=torch.bool),
             targets=TensorDict({}),
             batch_size=batch_size,
         )
@@ -424,6 +416,7 @@ class Embedder(EmbedderBase):
     @beartype
     def target_embeddings(self, inputs: TensorField) -> torch.Tensor:
         if TensorKey.embedding not in inputs.targets.keys():
+            # Targets hold the original tokenized text; masked inputs have these tensors zeroed.
             inputs.targets[TensorKey.embedding] = self.encode(
                 content=inputs.targets[TensorKey.content],
                 state=inputs.targets[TensorKey.state],
@@ -441,8 +434,8 @@ class Embedder(EmbedderBase):
 
         state = inputs.state.reshape(D)
         valued = state.eq(Tokens.valued.value).unsqueeze(-1)
-        bert = self.encode(content=inputs.content, state=inputs.state).reshape(D, self.hidden_size)
-        projected = self.linear(bert) * valued
+        encoded = self.encode(content=inputs.content, state=inputs.state).reshape(D, self.hidden_size)
+        projected = self.linear(encoded) * valued
         embeddings = self.embeddings(state)
 
         return Parcel(
