@@ -16,7 +16,7 @@ RequestTypes: TypeAlias = Annotated[
 class Context(Node):
     name: str
     type: Annotated[Literal["context"], pydantic.Field(default="context")]
-    context_size: Annotated[int, pydantic.Field(gt=0)]
+    context_size: Annotated[int, pydantic.Field(gt=0, default=1)]
     n_outputs: Annotated[int, pydantic.Field(gt=0)]
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)]
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)]
