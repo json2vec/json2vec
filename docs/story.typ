@@ -1,5 +1,11 @@
 #set heading(numbering: "1.")
 
+#let link-color = rgb("#0b5cad")
+#show ref: set text(fill: link-color)
+#show ref: underline
+#show link: set text(fill: link-color)
+#show link: underline
+
 #let sidenote(body) = block(
   width: 100%,
   inset: (left: 8pt, right: 8pt, top: 6pt, bottom: 6pt),
@@ -32,52 +38,63 @@ Nearly four years ago, while I was at Capital One, I had lunch with my organizat
 
 #pullquote[Is there a better way to model complex business data?]
 
-The organization had just spent eighteen months building the data engineering capabilities required to produce a _single_ high-value feature for a tabular gradient-boosted model. That same year, the team had to scale back a different feature for another model because that static, tabular feature would have required approximately \$1 million each year in compute alone.
+The organization had just spent eighteen months building the data engineering capabilities required to produce a _single_ high-value feature for a tabular gradient-boosted fraud model (discussed in more detail in @sec:device-tenure). That same year, the team had to scale back a different feature for another model because that static, tabular feature would have required approximately \$1 million each year in compute alone.
 
 This is a common but under-discussed constraint in applied machine learning: some problems, at scale, are limited less by the learning algorithm than by the modeling paradigm around it.
 
-Business data rarely starts as a clean table. It is usually nested, historical, heterogeneous, and relational: customers have accounts, accounts have transactions, customers have login sessions, sessions have clickstream events, and every level may contain useful signal. Traditional modeling workflows force practitioners to flatten that structure into handcrafted tabular features. The result is expensive, time-consuming, error-prone, and difficult to keep consistent between training and real-time serving.
+Business data rarely starts as a clean table. It is usually nested, historical, heterogeneous, and relational: customers have accounts, accounts have transactions, customers have login sessions, sessions have clickstream events, and every level may contain useful signal in the form of data fields. Traditional modeling workflows force practitioners to flatten that structure into handcrafted tabular features. The result is expensive, time-consuming, error-prone, and difficult to keep consistent between training and real-time serving.
 
-What my VP was really asking was this:
+#figure(
+  image("diagrams/tree.drawio.typst.svg", width: 92%),
+  caption: [
+    Example of a nested business-data structure.
+  ],
+)
 
-#pullquote[Is there a way to model complex business data without changing the shape of our transactional banking data?]
+What my VP was really asking was this: Is there a way to model complex business data without having to resort to tabular reductions of nested relationships?
 
-Several organizations have pursued this problem over the last decade. When I was at Capital One, I implemented several of these approaches while modeling fraud use cases. They can work, and they can outperform traditional tabular solutions. JP Morgan, Capital One, NuBank, IBM, Stripe, and Revolut, among other financial institutions, are all racing to implement these foundation models.
+Several organizations have pursued this problem over the last decade: a branch of applied research that is generally referred to as _sequence modeling_. When I was at Capital One, I attempted several approaches in this space while modeling fraud use cases. Sequence modeling can work, and it can outperform traditional tabular solutions. JP Morgan, Capital One, NuBank, IBM, Stripe, and Revolut, among other financial institutions, are all racing to implement these foundational sequence models.
 
 They are all converging on a similar approach: hierarchical transformer encoder blocks to embed a collection of nested contexts.
 
-However, these implementations are often rigid, proprietary, or inaccessible to developers, and tend to share a six missing core components, all of which are required.
+However, these implementations are often rigid, proprietary, inaccessible to developers, and tend to share six missing core components, all of which are required in practice:
 
 1. *Dynamic Model Architecture*: Model architecture is usually hardcoded, or is otherwise limited to a strict subset of possible topographies, limiting model architecture reusability among domains. See @sec:schema[Dynamic Model Architecture Instantiation]
 2. *Hierarchical context encoding*: Most systems cannot naturally represent multiple nested contexts, such as monthly statements, transactions, login sessions, and clickstream events. See @sec:nested-contexts[Hierarchical Context Encoding].
 3. *Transfer learning*: Business foundation models are hard to reuse if their schemas cannot evolve as teams add or remove features and targets. See @sec:mutability[Transfer Learning with Schema Evolution].
 4. *Extensible datatype support*: Real business data needs type-aware support for categories, numbers, text, entities, embeddings, dates, and support user-defined datatypes. See @sec:datatypes[Extensible Datatype Plugin System].
-5. *Explainability*: Business models often operate on sensitive decisions, so operators need ways to inspect model behavior beyond a single opaque prediction. See @sec:explainability[Explainability].
+5. *Explainability*: Business models often operate on sensitive decisions, so developers need ways to inspect model behavior beyond a single opaque prediction. See @sec:explainability[Explainability].
 6. *Integrated querying and transformation*: Source data arrives in inconsistent shapes and formats, so developers need flexible querying and transformation without maintaining a separate feature pipeline. See @sec:integration[Integrated Querying, Wrangling, and Logging].
 
-`json2vec` is a modeling framework I have been developing for several years to address all of these gaps.
+`json2vec` is a modeling framework I have been developing for several years to address all of these gaps. At a high level, `json2vec` is built around one idea: complex business data should be modeled in the shape it exists in naturally, and model developers need only describe a data schema in order to instantiate a model capable of encoding and decisioning from it.
 
-At a high level, `json2vec` is built around one idea: complex business data should be modeled in the shape it exists in naturally, and one need only describe a data schema in order to instantiate a model capable of encoding and decisioning from it.
+Instead of flattening nested records into handcrafted feature tables or a single, flattened context window with discrete tokens, `json2vec` enables developers to describe the structure of the data directly. The same schema defines what the model sees, what it can predict, how it can be adapted, and where its intermediate representations live.
 
-Instead of flattening nested records into handcrafted feature tables, `json2vec` enables developers to describe the structure of the data directly. The same schema defines what the model sees, what it can predict, how it can be adapted, and where its intermediate representations live.
+The model architecture is constructed dynamically from this schema, complete with all necessary parameters as well as the control flow around data streaming, pretraining, finetuning, and both real-time and batch inference.
 
-The model architecture is constructed dynamically from this schema from this schema, complete with all necessary parameters as well the control flow around data streaming, pretraining, finetuning, and both real-time and batch inference. *The integration of complex, structured data requires integration among each of these processes.*
+Integrating all of these processes with the aforementioned six capabilities results in a generalizable framework that manages the full modeling lifecycle. With this framework, a foundation model can be pretrained on broad business behavior, adapted as the schema changes, finetuned for specific targets, served using the same data contract, and inspected at the same hierarchical levels used to define the problem.
 
-It enables a single framework that manages the full modeling lifecycle. A model can be pretrained on broad business behavior, adapted as the schema changes, finetuned for specific targets, served using the same data contract, and inspected at the same hierarchical levels used to define the problem.
+A pretrained business foundation model will almost always be tied to a particular organization, data contract, risk tolerance, and regulatory environment. A shared framework, however, can be reused without requiring organizations to share private customer data or adopt the same internal feature pipeline.
 
-The framework also provides extensible plugin systems for domain-specific datatypes.
+That creates an opportunity for collaboration across industries.
+Organizations can contribute shared schema patterns, datatype plugins, model components, evaluation harnesses, synthetic datasets, and benchmark tasks. They can compare approaches for nested transactions, event streams, entity relationships, time-aware fields, and real-time inference without each team rebuilding the same proprietary framework behind closed doors.
 
-The rest of this document describes the requirements that make that possible.
+The goal is not that every organization uses the same model.
+The goal is that they can use the same modeling language and benchmark surface. If the architecture, data contracts, and evaluation tools are open-source, the community can make measurable progress on structured business-data modeling instead of fragmenting into incompatible internal systems.
+
+The rest of this document describes how `json2vec` fulfills the aforementioned requirements in order to provide multiple organizations with the ability to instantiate, pretrain, finetune, and deploy universal data structure encoders.
 
 = Requirements
 
-Without *dynamic model architecture*, *hierarchical context window*, and *extensible data type* support, model developers are unable to express all possible model architectures. Developers need to be able to succinctly describe their target data structure, which may be any valid `json`-like document, and be able to utilize pre-built data types or create their own, in order to create generalizable foundation models.
+Limitations around generalizability arise if any one of these following capabilities are not available.
 
-However, this alone is not enough. Without the use of *transfer learning* with a mutable schema, such that they may add and remove data fields for individual use cases, an organization's foundation model will not be practical for many use cases. If their foundation models are _overloaded_, in which I mean to say that they are pretrained every available data field, then they will be slow, overly expensive, and unwieldy, while possibly using inappropriate inputs for sensitive use cases (credit decisioning). On the other hand, if a foundation model is _underloaded_, in which I mean to say that it was trained with data fields, then it will underperform use-cases specific models with handcrafted features designed for the task at hand.
+Without *dynamic model architecture*, *hierarchical context window*, and *extensible data type support*, model developers are unable to express all possible model architectures. Developers need to be able to succinctly describe their target data structure, which may be any valid `json`-like document, and be able to utilize pre-built data types or create their own, in order to create generalizable foundation models.
 
-Schema mutation allows for the best of both worlds - organizations can create and maintain foundation models that utilize an appropriate set of fields. Then, these foundation models can have "children" foundation models or task-specific models that add new, relevant data fields and remove unnecessary data fields. As a side note, operators may explore the impact of removing data fields during inference time using @sec:pruning, which is one of many available techniques for *explanability*, which `json2vec` tries to prioritize.
+However, this alone is not enough. Without the use of *transfer learning* with a mutable schema, such that developers may add and remove data fields for individual use cases, an organization's foundation model will not be practical for many use cases. If their foundation models are _overloaded_, in which I mean to say that they are pretrained every available data field, then they will be slow, overly expensive, and unwieldy, while possibly using inappropriate inputs for sensitive use cases (personal information for credit decisioning). On the other hand, if a foundation model is _underloaded_, in which I mean to say that it was trained with only the universally relevant data fields, then it will underperform use-cases specific models with handcrafted features designed for the task at hand. Without access to use-case specific information, such as device identifiers and biometrics for fraud, a foundation model will only supplement model development, but can not act as a standalone implementation.
 
-Lastly, a powerful, flexible, and mutable model architecture is still not enough to enable foundation models for organizations at scale if operators are still reliant on batch data processes, which is the necessity for @sec:integration. These features capture the necessity of querying streaming user-defined functions to transform raw data during model training time, eliminating the need for (most) batch processing.
+Schema mutation allows for the best of both worlds - organizations can create and maintain foundation models that utilize an appropriate set of fields. Then, these foundation models can have "children" foundation models or task-specific models that add new, relevant data fields and remove unnecessary data fields. As a side note, developers may explore the impact of removing data fields during inference time using @sec:pruning[integrated ablations], which is one of many available techniques for *explanability*, which `json2vec` tries to prioritize.
+
+Lastly, a powerful, flexible, and mutable model architecture is still not enough to enable foundation models for organizations at scale if developers are still reliant on batch data processes still dominating the model development cycle. I realized there are techniques available to enable configuration-based data querying and registerable UDFs (user-defined functions) to transform raw data within the model training loop and model inference, thus eliminating the need for (most) batch processing. These techniques are described in more detail in @sec:integration.
 
 == Dynamic Model Architecture Instantiation <sec:schema>
 
@@ -95,18 +112,18 @@ A schema defines the contexts, fields, and datatype-specific settings that deter
 Transformers are useful because they learn relationships among items within a context window.
 In language models, those items are usually tokens in a sentence. Each token is embedded into a vector, the transformer lets tokens attend to one another, and the resulting representation is used to reconstruct masked tokens, generate text, classify a sentence, or solve another downstream task.
 
-The core mechanism is self-attention. Each item produces a query, key, and value vector. Attention compares queries to keys to decide which items are relevant, then mixes the corresponding values into a new contextual representation. Repeating this across multiple heads, feed-forward layers, and stacked blocks lets the model learn different kinds of relationships at the same time.
+The core mechanism is self-attention. Each item produces a query, key, and value vector. Attention compares queries to keys to decide which items are relevant, then mixes the corresponding values into a new contextual representation. Repeating this across multiple heads, feed-forward layers, and stacked blocks allows the model learn different kinds of relationships at the same time.
 
 `json2vec` applies the same general idea to structured business data.
 Instead of assuming that the only meaningful sequence is a sentence, the schema defines the contexts that should be modeled: transactions in an account, statements in a customer history, login sessions for a user, clickstream events inside a login session, pieces on a chess board, or characters inside a product code.
 
-Each field is first converted into an embedding. A context encoder then allows the child embeddings inside that context exchange information through attention. Finally, a pooling step compresses the context into one or more vectors that can be passed upward to the parent context.
+Each field is first converted into an embedding. A context encoder then allows the child embeddings inside that context to exchange information through attention. Finally, a pooling step compresses the context into one or more vectors that can be passed upward to the parent context.
 
 `json2vec` instantiates a hierarchy of transformer encoders. Leaf fields become vectors, child contexts become summarized vectors, parent contexts consume those summaries, and the root representation is informed by every level below it. The shift is that the model is no longer limited to one flat row or one flat sequence; it can encode nested `json`-like structures directly.
 
 That hierarchy is what makes the architecture different from a standard tabular model. A transaction can be modeled alongside other transactions in the same statement. The statement can then be summarized alongside other statements in the customer history. The model learns at each level before passing information upward, rather than forcing every raw value to compete inside one very wide feature vector.
 
-This is why the schema matters so much. It tells the model which things should attend to each other locally, which contexts should be summarized, and how those summaries should flow upward through the structure. The schema not only instantiates the model architecture, and how all inputs should be embedded, and which should be predicted - but also the hierarchical relationships among all data values and context windows. This why the schema is one of the only explicit inputs of the operator of `json2vec`.
+This is why the schema matters so much. It tells the model which things should attend to each other locally, which contexts should be summarized, and how those summaries should flow upward through the structure. The schema not only instantiates the model architecture, and how all inputs should be embedded, and which should be predicted - but also the hierarchical relationships among all data values and context windows. This is why the schema is one of the only explicit inputs of a `json2vec` model instance.
 
 === Hello World Example
 
@@ -335,9 +352,9 @@ Hierarchical context encoding is not just a party trick. It is surprisingly usef
 - Clickstream events within login sessions
 - Purchased items within purchase orders
 
-Moreover, it can enable vocabulary sharing that would otherwise be awkward or impossible, such as complex string deconstruction, field stacking, and perhaps most importantly, the flushing problem.
+Moreover, it can enable vocabulary sharing that would otherwise be awkward or impossible, such as complex @sec:string-deconstruction[string deconstruction], @sec:field-stacking[field stacking], and a unique vulnerability that that exists within sequence models that I refer to as @sec:flushing[_flushing problem_].
 
-=== Complex String Deconstruction
+=== Complex String Deconstruction <sec:string-deconstruction>
 
 Strings are just a context of characters. Textual data assumes that strings are better represented as wordpieces, but in some business problems they simply are not. For example, some product IDs may contain semantic information that is encoded character-by-character. Creating an entire embedding for each unique combination of characters doesn't capture the semantic information available within the values.
 
@@ -397,7 +414,7 @@ Sample input:
 
 In practice, a processor can derive `fare_basis_code_chars` from the original string before encoding, so source systems do not need to store the data in this exact shape. This can be done with streaming transformation functions, further discussed in @sec:shims.
 
-Naturally, operators can also utilize multiple fare basis codes with three context blocks. This is just to illustrate: nested contexts are far more prevalent than one may expect.
+Naturally, developers can also utilize multiple fare basis codes with three context blocks. This is just to illustrate: nested contexts are far more prevalent than one may expect.
 
 
 === Stacking Field Embeddings <sec:field-stacking>
@@ -606,7 +623,7 @@ This schema may be pretrained on slices of a customer's event history: time-wind
 This can be done at scale by streaming customer data, sampling a time window, and filtering the data down to that window.
 One customer may yield multiple observations, but it is typically prudent to prevent leakage by stratifying training, validation, and testing data by a unique customer identifier.
 
-After pretraining the model on customer behavior, operators can finetune multiple fraud models with different tagging strategies at different levels. For example, one may create the field `customer/transaction/is_account_takeover_fraud` at the transaction level and then `prune` it so the model is focused on imputing whether each transaction is indicative of account takeover fraud. Alternatively, one may create the field `customer/is_first_party_fraud` to predict first party fraud at the customer level.
+After pretraining the model on customer behavior, developers can finetune multiple fraud models with different tagging strategies at different levels. For example, one may create the field `customer/transaction/is_account_takeover_fraud` at the transaction level and then `prune` it so the model is focused on imputing whether each transaction is indicative of account takeover fraud. Alternatively, one may create the field `customer/is_first_party_fraud` to predict first party fraud at the customer level.
 
 Keep in mind, nested contexts require a large amount of GPU resources. Shaping the transformer encoder blocks (input pooling, number of heads, number of layers) becomes paramount for the model to remain performant and avoid running out of memory.
 
@@ -757,7 +774,7 @@ Because this state system is shared, new datatypes get masking, pruning, padding
 Entity fields are for identifiers where the exact value matters only in relation to other values in the same observation.
 Examples include devices inside login sessions, accounts inside a transfer graph, merchants inside a transaction window, or repeated users inside a collaboration event (complex, many-to-many relationships such as multiple accounts per customer, or multiple customers per account).
 
-These values are usually of high-cardinality and unstable. Treating them as ordinary categories can waste vocabulary capacity, and treating them as raw strings can make generalization brittle.
+These values are usually of high-cardinality and unstable. Treating them as ordinary categories can waste vocabulary capacity, while treating them as raw strings can make generalization brittle.
 
 The `entity` datatype instead locally re-indexes hashable scalar values within each encoded observation. If the same `device_id` appears in three login sessions in the same observation, those positions receive the same local entity index. A different device receives a different local entity index. The indices are meaningful inside the observation, but they do not need to be globally stable across the entire corpus.
 
@@ -822,38 +839,43 @@ For a fraud model, this can be used in several ways:
 - Prune `customer/transaction/amount` to understand whether the surrounding context implies an unusual transaction amount.
 - Prune an entire class of fields across experiments and measure degradation in target quality.
 
-The last case is especially useful. Because fields and contexts have stable addresses, an operator can run controlled experiments where a branch is removed and all other training settings remain fixed. If pruning `customer/login_sessions/clickstream_events` significantly harms account-takeover detection, that is a direct signal that clickstream behavior is contributing useful information. If pruning it has no effect, the branch may be low-signal or redundant.
+The last case is especially useful. Because fields and contexts have stable addresses, a developer can run controlled experiments where a branch is removed and all other training settings remain fixed. If pruning `customer/login_sessions/clickstream_events` significantly harms account-takeover detection, that is a direct signal that clickstream behavior is contributing useful information. If pruning it has no effect, the branch may be low-signal or redundant.
 
 This is not meant to claim causal explanation. It is a practical model-behavior diagnostic: remove information, hold the rest of the pipeline constant, and measure how reconstruction, prediction, and embeddings change.
 
-// === Via Embedding Trees
+=== Via Embedding Trees
 
-// Every context in the schema produces an intermediate representation. The model does not only emit a single root vector; it can emit embeddings at selected addresses in the tree.
+Every context in the schema produces an intermediate representation. The model does not only emit a single root vector; it can emit embeddings at selected addresses in the tree.
 
-// This enables multi-resolution inspection.
-// Two customers may look similar at the root level but diverge sharply inside `customer/login_sessions`. Two transactions may look different at the transaction level but still live inside customers whose monthly statement histories are similar. By requesting embeddings from multiple addresses, operators can compare observations at the level where the difference actually occurs.
+This enables multi-resolution inspection.
+Two customers may look similar at the root level but diverge sharply inside `customer/login_sessions`. Two transactions may look different at the transaction level but still live inside customers whose monthly statement histories are similar. By requesting embeddings from multiple addresses, developers can compare observations at the level where the difference actually occurs.
 
 
-// For example:
+For example:
 
-// ```yaml
-// output:
-//   - customer
-//   - customer/transaction
-//   - customer/login_sessions
-//   - customer/login_sessions/clickstream_events
-// ```
+```yaml
+output:
+  - customer
+  - customer/transaction
+  - customer/login_sessions
+  - customer/login_sessions/clickstream_events
+```
 
-// The resulting embeddings form a tree that mirrors the schema. This gives downstream analysis a simple path:
-// 1. Compare root embeddings to find globally similar observations.
-// 2. Compare child context embeddings to localize which branch explains similarity or distance.
-// 3. Compare leaf or lower-level context embeddings to inspect the concrete behavioral pattern.
+The resulting embeddings form a tree that mirrors the schema. This gives downstream analysis a simple path:
+1. Compare root embeddings to find globally similar observations.
+2. Compare child context embeddings to localize which branch explains similarity or distance.
+3. Compare leaf or lower-level context embeddings to inspect the concrete behavioral pattern.
 
-// This is particularly useful for nested business data because the relevant signal is often not located at one level.
-// For example, a model may identify two customers as similar because their login-session trees are similar, not because their transaction amounts are similar. The embedding tree makes that distinction observable.
+This is particularly useful for nested business data because the relevant signal is often not located at one level.
+For example, a model may identify two customers as similar because their login-session trees are similar, not because their transaction amounts are similar. The embedding tree makes that distinction observable.
 
-// The model also exposes a structure plot that follows the same tree. Datatype plugins can attach their own details to this view, so diagnostics can remain local to the datatype that owns the representation.
+The model also exposes a structure plot that follows the same tree. Datatype plugins can attach their own details to this view, so diagnostics can remain local to the datatype that owns the representation.
 
+#sidenote[
+  This capability has yet to be tested.
+  Comparing the differences of embedding distances between unrelated attribute blocks makes some fairly bold assumptions.
+  I have not yet had the time to explore and validate these assumptions.
+]
 
 === Via "What Ifs"
 
@@ -966,7 +988,7 @@ def customer_windows(customer, window_days: int):
         }
 ```
 
-The schema still owns the model-facing contract. The processor only prepares observations into a shape the schema can query. This separation keeps domain wrangling explicit without forcing operators to materialize a separate feature table.
+The schema still owns the model-facing contract. The processor only prepares observations into a shape the schema can query. This separation keeps domain wrangling explicit without forcing developers to materialize a separate feature table.
 
 The same processor path is used during training, batch prediction, and real-time serving. That is the key design point: once a processor and schema are paired, the model sees the same transformation logic in every environment.
 
@@ -983,7 +1005,7 @@ Third, prediction output is written in an analysis-friendly format. Batch predic
 - supervised predictions
 - optional embeddings
 
-This makes offline evaluation straightforward. An operator can train or finetune a model, run prediction over a validation or production sample, and inspect the original inputs alongside the model's reconstructed targets and intermediate embeddings.
+This makes offline evaluation straightforward. A developer can train or finetune a model, run prediction over a validation or production sample, and inspect the original inputs alongside the model's reconstructed targets and intermediate embeddings.
 
 The framework can also attach standard experiment trackers when configured, including local CSV or TensorBoard logging and remote systems such as Weights & Biases, Neptune, Comet, or MLflow.
 
@@ -1065,3 +1087,173 @@ A transaction-level fraud target should not be forced to decode only from a root
 
 This also explains why pruning works cleanly.
 When a field is pruned, its own input parcel is omitted from the upward pass, preventing the model from seeing the answer. The decoder still receives the remaining heritage parcels, so it must reconstruct the hidden field from surrounding context rather than copying the original value.
+
+= Future Improvements
+
+There are several important capabilities that are intentionally not yet included in `json2vec`.
+The current implementation is focused on proving the schema-driven modeling abstraction first. The next layer of work is about making the architecture more configurable, more efficient, and easier to operate at larger scale.
+
+== Model Architecture
+
+=== Field-Specific Masking Policies
+
+Today, masking is mostly controlled at the experiment level.
+That is a reasonable default, but it is too blunt for large heterogeneous schemas.
+
+Different fields should be maskable at different rates.
+For example, a high-cardinality merchant category, a transaction amount, a timestamp, and a customer-level target should not necessarily share the same masking behavior. Some fields may be easy to reconstruct and should be masked aggressively. Others may be rare, sparse, or high-value targets that need a lower masking rate.
+
+The natural configuration model is hierarchical inheritance.
+A context could define a default masking policy, and each child field or child context could override it only when needed. If a field does not define its own policy, it inherits the closest parent policy.
+
+Conceptually:
+
+```yaml
+name: customer
+p_mask: 0.15
+fields:
+
+  - name: transactions
+    p_mask: 0.25
+    fields:
+
+      - name: amount
+        type: number
+        p_mask: 0.05
+
+      - name: merchant_category
+        type: category
+        # inherits p_mask: 0.25 from transactions
+```
+
+This would make masking strategy part of the schema itself, which is where it belongs. It would also make pretraining more controllable: the model could learn broad reconstruction behavior without accidentally over-emphasizing fields whose losses are easy, frequent, or poorly calibrated.
+
+=== Per-Context Encoder Configuration
+
+The current design already allows each context to define its own depth, width, head count, and context size.
+The next step is to make the attention implementation itself configurable per context.
+
+This matters because different contexts have very different computational profiles.
+A root context may contain only a handful of child summaries. A transaction context may contain hundreds of events. A clickstream context may contain thousands of fine-grained actions. Treating all of these contexts with the same multi-head self-attention implementation is unlikely to be optimal.
+
+Useful options include:
+- Standard multi-head self-attention for small or medium contexts.
+- Grouped-query attention (`GQA`) or multi-query attention (`MQA`) where key/value projections can be shared to reduce memory bandwidth.
+- Local, windowed, or sparse attention for long ordered contexts.
+- Flash-attention-backed kernels where tensor shapes and hardware support make that worthwhile.
+- Lightweight feed-forward or pooling-only encoders for contexts that are mostly structural.
+
+This will be straightforward to develop because all encoders share the same `torch.nn.Module` implementation.
+
+The schema should eventually be able to express these choices directly.
+That would let the model spend attention capacity where relationships are complex, while using cheaper encoders for contexts that only need simple summarization.
+
+=== Pooling Strategies Beyond Cross-Attention
+
+`json2vec` currently assumes that learned cross-attention pooling is the right way to summarize a context.
+That assumption is convenient because it is expressive: learned query vectors can attend over child embeddings and extract one or more context summaries.
+
+However, cross-attention is not free.
+For many contexts, especially large child contexts, it may be more expensive than the value it provides. It also introduces another set of learned parameters and another attention operation at every context boundary.
+
+This needs to become an explicit architectural choice rather than a hard assumption.
+Candidate pooling strategies include:
+- Learned cross-attention pooling for contexts where multiple summary vectors are valuable.
+- A `CLS`-style summary token for contexts that behave more like language sequences.
+- Mean, max, or masked statistical pooling for cheap baseline summaries.
+- Attention pooling with a single scoring vector when only one summary is needed.
+- Perceiver-style latent bottlenecks for very large contexts.
+
+The right pooling strategy may differ by context.
+A customer history may benefit from learned pooling, while a small field-stacking context may only need a cheap reduction. Making pooling configurable would make the architecture more efficient without giving up the schema-driven design.
+
+=== Multi-GPU Training and Serving
+
+Multi-GPU support is also not yet implemented.
+This is partly a systems issue, but it has architectural implications because hierarchical models can have uneven memory and compute profiles.
+
+The obvious first step is data parallel training, where each GPU receives a different batch and gradients are synchronized across replicas.
+That is sufficient for many models, but larger schemas may eventually need more careful strategies:
+- Fully sharded data parallelism for large parameter sets.
+- Activation checkpointing for deep or wide context trees.
+- Context-aware batching so similarly shaped observations are grouped together.
+- Separate scaling paths for training and real-time inference.
+
+Serving has its own constraints.
+For real-time inference, the limiting factor may be request serialization, preprocessing, and network latency rather than raw GPU math. In that setting, a smaller GPU, CPU inference for small models, dynamic batching, or multiple lightweight replicas may outperform a large underutilized instance.
+
+The architecture should therefore expose enough information about context sizes, batch shapes, and embedding outputs to support better scheduling later.
+
+=== Pretrained Encoders for Recommendation Systems
+
+There is also a clear opportunity to use `json2vec` as a pretraining layer for recommendation systems.
+The goal is not necessarily to replace the recommender model itself. The goal is to create strong user and item encoders that produce pretrained embeddings, then pass those embeddings into a recommender system in the same pipeline.
+
+This is a natural fit because recommender data is highly structured.
+Users have sessions, sessions have impressions, impressions have items, items have catalog metadata, and outcomes may include clicks, purchases, ratings, dwell time, skips, saves, or churn. Items also have their own structure: text descriptions, images, prices, availability, categories, sellers, brands, reviews, and historical interaction patterns.
+
+`json2vec` could pretrain a user encoder from raw behavioral history and an item encoder from raw catalog and interaction history. Those encoders could then emit embeddings at stable schema addresses, such as `user`, `user/sessions`, `item`, or `item/reviews`. A downstream recommender could consume those embeddings as dense inputs alongside its existing retrieval, ranking, or reranking features.
+
+The workflow would look roughly like this:
+1. Pretrain `json2vec` encoders on structured user and item observations.
+2. Export or stream the resulting user and item embeddings into the recommender pipeline.
+3. Train the recommender model using those embeddings as pretrained representations.
+4. Optionally finetune the `json2vec` encoders and recommender model together for a task-specific objective.
+
+This would require integration points rather than a full recommender-system rewrite:
+- Stable embedding outputs for user, item, session, and catalog contexts.
+- A serving path that can compute or refresh embeddings for users and items.
+- Adapters that pass `json2vec` embeddings into existing retrieval or ranking models.
+- Checkpoint loading that supports freezing, partial finetuning, or end-to-end finetuning.
+- Benchmarks that measure whether pretrained structured embeddings improve recommender quality.
+
+The benefit is that recommendation systems could reuse the same structured representation-learning layer as other business-data models.
+A team could pretrain encoders over user behavior, item metadata, inventory constraints, geography, price, time, and eligibility rules, then let the recommender model decide how to use those embeddings. This also creates a natural benchmark surface for open-source collaboration: public recommendation datasets can be expressed as `json2vec` schemas, making it easier to compare pretrained encoders without each project inventing a new feature pipeline.
+
+== Datatypes and Data Pipeline
+
+=== Media Datatypes
+
+`json2vec` does not currently support image, audio, or video datatypes.
+This is not because they are conceptually incompatible with the framework. A media datatype could follow the same plugin contract as any other datatype: load content, convert it into tensors or embeddings, decode outputs where appropriate, and contribute losses or predictions.
+
+The difficulty is operational.
+Media fields require more deliberate handling of file paths, object stores, streaming reads, caching, decoding libraries, batching, variable shapes, and potentially large intermediate tensors. Images, audio clips, and videos also often rely on pretrained encoders whose compute profile is very different from a categorical or numerical field.
+
+The likely path is to support media through datatype plugins that can wrap existing encoders.
+For example, an image plugin might convert a file reference into a vision-transformer embedding, while an audio plugin might convert an object-store URI into a fixed-width acoustic representation. The core architecture should only see the resulting embedding parcel; the media plugin should own the messy loading and preprocessing details.
+
+=== Data Source and Reader Plugins
+
+The data pipeline also needs a broader plugin system.
+At the moment, support is centered around a small set of source locations and file formats. That is enough for early development, but not enough for production environments where data may come from local files, S3, databases, message queues, lakehouse tables, or internal services.
+
+There are two related plugin boundaries to add:
+- *Source plugins*, which know how to enumerate and open data from a location.
+- *Reader plugins*, which know how to parse a particular format into raw `json`-like observations.
+
+This separation matters because source and format are independent.
+A parquet file might live locally, in S3, or behind an internal data platform. A streaming record might arrive from a queue but still decode into the same observation shape used during batch training.
+
+A more general data pipeline would make it easier to preserve the central promise of `json2vec`: the same schema, processor, tokenizer state, and model path should be used for training, batch inference, and real-time inference.
+
+
+= Appendix
+
+== Case Study: Device Tenure <sec:device-tenure>
+
+In the introduction, I mentioned a tabular feature that took eighteen months to develop.
+That was actually an understatement: the modeling and data engineering work took eighteen months, but only after roughly three years of prior infrastructure improvements.
+
+The feature was "device tenure," used in an account-takeover model.
+At prediction time, it measured how long the customer had been associated with the device they were currently using.
+If the customer was transacting from a device first seen two years earlier, that was very different from a device first seen five minutes earlier.
+
+The idea was simple, but the implementation was not.
+To serve the feature in real time, the system needed a large low-latency store of customer-device pairs, with the earliest observed timestamp for each pair. The scale was enormous: more than a billion unique customer-device combinations. Many of those combinations were created by VPNs and other network conditions that made the same underlying customer behavior appear as many distinct device or access patterns. Every new login or transaction could introduce a new pair, so the store had to be continuously updated while remaining available to the model-serving path.
+
+With `json2vec`, the problem can be expressed differently.
+Instead of materializing one handcrafted tenure feature, the raw observation can include a history of login sessions or transactions with device identifiers and timestamps. The `entity` datatype can show the model which events used the same device, while the timestamp fields preserve when those events occurred.
+
+That gives the model access to a richer pattern than a single number.
+It can learn whether the current device appeared before, how often it appeared, whether it appears across normal sessions, whether it is associated with other unusual behavior, and how that pattern interacts with the rest of the customer history. The expensive tabular feature becomes a simple structured input, and the model receives more context than the original feature could represent.
