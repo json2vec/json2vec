@@ -1,4 +1,9 @@
 #set heading(numbering: "1.")
+#set page(
+  footer: align(center)[
+    #context counter(page).display("1")
+  ],
+)
 
 #let link-color = rgb("#0b5cad")
 #show ref: set text(fill: link-color)
@@ -31,6 +36,14 @@
     #emph(body)
   ]
 ]
+
+#align(center)[
+  #text(weight: "bold")[Grantham Taylor] \
+  #link("mailto:granthamtaylor@icloud.com")[granthamtaylor\@icloud.com] \
+  #link("https://github.com/granthamtaylor/json2vec")[github.com/granthamtaylor/json2vec]
+]
+
+#v(12pt)
 
 = Background
 
