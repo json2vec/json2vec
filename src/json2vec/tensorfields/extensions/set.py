@@ -36,9 +36,9 @@ sets: Plugin = Plugin(name="set")
 
 @sets.register
 class Request(RequestBase):
-    type: Literal["set"]
-    max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)]
-    p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)]
+    type: Literal["set"] = "set"
+    max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10_000
+    p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
 
 
 def _items(value: Any) -> Iterable[Any]:

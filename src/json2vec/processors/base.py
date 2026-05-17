@@ -87,10 +87,6 @@ PROCESSORS: dict[str, Processor] = {}
 
 def _register(func: Callable[..., Any], *, mode: ProcessorMode) -> Callable[..., Any]:
     name = func.__name__
-
-    if name in PROCESSORS:
-        raise ValueError(f"Processor '{name}' is already registered.")
-
     PROCESSORS[name] = Processor(name=name, func=func, mode=mode)
 
     return func

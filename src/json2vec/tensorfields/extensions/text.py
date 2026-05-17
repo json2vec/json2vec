@@ -137,10 +137,10 @@ def coerce_text(value: Any, *, address: Address) -> str:
 
 @text.register
 class Request(RequestBase):
-    type: Literal["text"]
+    type: Literal["text"] = "text"
     model_name: str
-    max_length: Annotated[int, pydantic.Field(gt=0, default=128)]
-    encoder_batch_size: Annotated[int, pydantic.Field(gt=0, default=32)]
+    max_length: Annotated[int, pydantic.Field(gt=0, default=128)] = 128
+    encoder_batch_size: Annotated[int, pydantic.Field(gt=0, default=32)] = 32
     encoder_pooling: Pooling = Pooling.cls
     objective: Objective = Objective.l2
     revision: str | None = None

@@ -5,7 +5,10 @@ from pathlib import Path
 import torch
 
 from json2vec.architecture.root import JSON2Vec
+from json2vec.data.datasets import encode
+from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.tree import Address
 
 
 def _hyperparameters() -> Hyperparameters:
@@ -29,6 +32,53 @@ def _hyperparameters() -> Hyperparameters:
             },
         }
     )
+
+
+def _prediction_hyperparameters() -> Hyperparameters:
+    return Hyperparameters(
+        d_model=8,
+        target=Address("root", "label"),
+        embed=Address("root"),
+        fields={
+            "name": "root",
+            "type": "array",
+            "max_length": 1,
+            "n_outputs": 1,
+            "attention": "none",
+            "fields": [
+                {
+                    "name": "color",
+                    "type": "category",
+                    "query": "[*].color",
+                    "max_vocab_size": 16,
+                },
+                {
+                    "name": "label",
+                    "type": "category",
+                    "query": "[*].label",
+                    "max_vocab_size": 16,
+                    "topk": [2],
+                },
+            ],
+        },
+    )
+
+
+def _primed_prediction_model() -> JSON2Vec:
+    hyperparameters = _prediction_hyperparameters()
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    inputs = encode(
+        batch=[
+            [{"color": "red", "label": "warm"}],
+            [{"color": "blue", "label": "cool"}],
+        ],
+        hyperparameters=hyperparameters,
+        strata=Strata.train,
+        state=model.state,
+    )
+
+    model(inputs)
+    return model
 
 
 def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
@@ -93,3 +143,33 @@ def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> No
 
     assert isinstance(configured["optimizer"], torch.optim.AdamW)
     assert isinstance(configured["lr_scheduler"], torch.optim.lr_scheduler.StepLR)
+
+
+def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
+    model = _primed_prediction_model()
+    model.train()
+
+    supervised = model.predict(
+        batch=[
+            [{"color": "red"}],
+            [{"color": "blue"}],
+        ]
+    )
+
+    assert model.training
+    assert Address("root", "label") in supervised
+    assert supervised[Address("root", "label")]["content"]["value"]
+
+
+def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
+    model = _primed_prediction_model()
+
+    embeddings = model.embed(
+        batch=[
+            [{"color": "red"}],
+            [{"color": "blue"}],
+        ]
+    )
+
+    assert Address("root") in embeddings
+    assert len(embeddings[Address("root")]["embedding"]) == 2

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Hashable
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pydantic
@@ -53,11 +53,15 @@ def _local_reindex(data: np.ndarray, states: np.ndarray) -> np.ndarray:
 
 @entity.register
 class Request(RequestBase):
-    type: Literal["entity"]
-    topk: Annotated[list[int], pydantic.Field(default_factory=list)]
+    type: Literal["entity"] = "entity"
+    topk: list[int] | None = None
 
     @pydantic.model_validator(mode="after")
     def check_topk(self):
+
+        if self.topk is None:
+            self.topk = []
+
         for topk in self.topk:
             if not isinstance(topk, int):
                 raise ValueError("topk values must be integers")

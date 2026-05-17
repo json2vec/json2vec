@@ -1,6 +1,25 @@
+import pydantic
 import pytest
 
-from json2vec.structs.tree import Leaf, Node
+from json2vec.structs.tree import Address, Leaf, Node
+
+
+class AddressPayload(pydantic.BaseModel):
+    address: Address
+
+
+def test_address_can_be_initialized_from_path_parts():
+    address = Address("record", "label")
+
+    assert address == "record/label"
+    assert isinstance(address, str)
+
+
+def test_address_can_be_pydantic_coerced_from_string():
+    payload = AddressPayload.model_validate({"address": "record/label"})
+
+    assert payload.address == Address("record", "label")
+    assert isinstance(payload.address, Address)
 
 
 def test_node_rejects_invalid_name_characters():

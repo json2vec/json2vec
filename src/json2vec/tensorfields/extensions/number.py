@@ -51,11 +51,11 @@ OBJECTIVES: dict[Objective, Any] = {
 
 @number.register
 class Request(RequestBase):
-    type: Literal["number"]
-    jitter: Annotated[float, pydantic.Field(ge=0.0, lt=1.0, default=0.0)]
-    n_bands: Annotated[int, pydantic.Field(gt=0, default=8)]
-    offset: Annotated[int, pydantic.Field(gt=0, default=4)]
-    alpha: Annotated[float|None, pydantic.Field(gt=0.0, lt=1.0, default=None)]
+    type: Literal["number"] = "number"
+    jitter: Annotated[float, pydantic.Field(ge=0.0, lt=1.0, default=0.0)] = 0.0
+    n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
+    offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
+    alpha: Annotated[float|None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
     objective: Objective = Objective.mae
 
 

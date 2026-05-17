@@ -1,5 +1,5 @@
 import functools
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 import pydantic
 from anytree import LevelOrderGroupIter, RenderTree
@@ -14,17 +14,27 @@ class Hyperparameters(Node):
     name: Literal["hyperparameters"] = pydantic.Field(default="hyperparameters", exclude=True)
     type: Literal["hyperparameters"] = pydantic.Field(default="hyperparameters", exclude=True)
     description: Literal[None] = pydantic.Field(default=None, exclude=True)
-    n_heads: Literal[4] = pydantic.Field(default=4, exclude=True)
     d_model: Annotated[int, pydantic.Field(gt=0, default=128)]
     dropout: Dropout | None = None
     fields: Array
 
-    target: list[Address] = pydantic.Field(default_factory=list)
-    reset: list[Address] = pydantic.Field(default_factory=list)
-    embed: list[Address] = pydantic.Field(default_factory=list)
+    target: list[Address]|Address = pydantic.Field(default_factory=list)
+    reset: list[Address]|Address = pydantic.Field(default_factory=list)
+    embed: list[Address]|Address = pydantic.Field(default_factory=list)
 
-    p_target: Annotated[float, pydantic.Field(ge=0.0, lt=1.0, default=0.0)]
-    p_mask: Annotated[float, pydantic.Field(ge=0.0, lt=1.0, default=0.0)]
+    p_target: Annotated[float, pydantic.Field(ge=0.0, lt=1.0)] = 0.0
+    p_mask: Annotated[float, pydantic.Field(ge=0.0, lt=1.0)] = 0.0
+
+    @pydantic.field_validator("target", "reset", "embed", mode="before")
+    @classmethod
+    def normalize_address_list(cls, value: Any):
+        if value is None:
+            return []
+
+        if isinstance(value, str):
+            return [value]
+
+        return value
 
     def model_post_init(self, __context):
         self.fields.parent: Self = self

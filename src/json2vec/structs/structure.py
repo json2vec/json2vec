@@ -11,17 +11,18 @@ RequestTypes: TypeAlias = Annotated[
     pydantic.Field(discriminator="type"),
 ]
 
+
 Dropout: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
 
 
 class Array(Node):
     name: str
-    type: Annotated[Literal["array"], pydantic.Field(default="array")]
+    type: Annotated[Literal["array"], pydantic.Field(default="array")] = "array"
     attention: Literal["mha", "gqa", "mqa", "none"] = "mha"
-    max_length: Annotated[int, pydantic.Field(gt=0, default=1)]
-    n_outputs: Annotated[int, pydantic.Field(gt=0)]
-    n_linear: Annotated[int, pydantic.Field(gt=0, default=1)]
-    n_layers: Annotated[int, pydantic.Field(gt=0, default=1)]
+    max_length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    n_outputs: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     dropout: Dropout | None = None
     fields: list[Self | RequestTypes] = pydantic.Field(default_factory=list)
 

@@ -29,9 +29,9 @@ def test_shim_assigns_processor_mode():
     assert base.PROCESSORS[generator.__name__].mode == base.ProcessorMode.generator
 
 
-def test_shim_rejects_duplicate_processor_names():
+def test_shim_overwrites_duplicate_processor_names():
     def first(observation: dict):
-        return observation
+        return {"first": observation}
 
     first.__name__ = "__duplicate_processor"
     base.shim(yields=False)(first)
@@ -41,8 +41,11 @@ def test_shim_rejects_duplicate_processor_names():
 
     second.__name__ = "__duplicate_processor"
 
-    with pytest.raises(ValueError, match="already registered"):
-        base.shim(yields=False)(second)
+    base.shim(yields=True)(second)
+
+    processor = base.PROCESSORS["__duplicate_processor"]
+    assert processor.func is second
+    assert processor.mode == base.ProcessorMode.generator
 
 
 def test_shim_accepts_yield_keyword_via_kwargs():

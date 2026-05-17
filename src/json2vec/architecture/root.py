@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from functools import cache, partialmethod
 from pathlib import Path
-from typing import Any, NotRequired, Self, TypedDict
+from typing import Any, NotRequired, Self, TypedDict, cast
 from urllib.parse import urlparse
 
 import lightning.pytorch as lit
@@ -14,7 +14,7 @@ from tensordict import TensorDict
 
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
-from json2vec.data.datasets import mock
+from json2vec.data.datasets import EncodedBatch, encode, mock
 from json2vec.structs.enums import Metric, Strata, TensorKey
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Embedding, Parcel, Prediction
@@ -60,8 +60,9 @@ def step(
         address: Address = prediction.address
         request: RequestBase = module.hyperparameters.requests[address]
         extension: Plugin = TENSORFIELDS[request.type]
+        loss_fn = cast(Callable[..., torch.Tensor], getattr(extension, "loss"))
 
-        loss: torch.Tensor = extension.loss(module=module, prediction=prediction, batch=batch[address], strata=strata)
+        loss: torch.Tensor = loss_fn(module=module, prediction=prediction, batch=batch[address], strata=strata)
         losses.append(loss * torch.tensor(request.weight))
 
     if len(losses) == 0:
@@ -211,17 +212,17 @@ class JSON2Vec(lit.LightningModule):
         if self.optimizer is None:
             raise ValueError("optimizer must be passed to JSON2Vec before fitting")
 
-        optimizer = self.optimizer(self) if callable(self.optimizer) else self.optimizer
+        if isinstance(self.optimizer, torch.optim.Optimizer):
+            optimizer = self.optimizer
+        else:
+            optimizer = self.optimizer(self)
+
         scheduler = self.scheduler(self, optimizer) if callable(self.scheduler) else self.scheduler
 
         if scheduler is None:
             return optimizer
 
         return dict(optimizer=optimizer, lr_scheduler=scheduler)
-
-    def on_save_checkpoint(self, checkpoint):
-        logger.bind(component="checkpoint").info("serializing hyperparameters")
-        checkpoint["hyperparameters"] = self.hyperparameters.model_dump()
 
     def on_load_checkpoint(self, checkpoint):
         logger.bind(component="checkpoint").info("loading hyperparameters from checkpoint payload")
@@ -379,8 +380,9 @@ class JSON2Vec(lit.LightningModule):
             request: RequestBase = self.hyperparameters.requests[prediction.address]
 
             extension: Plugin = TENSORFIELDS[request.type]
+            write_fn = cast(Callable[..., dict[TensorKey, Any] | None], getattr(extension, "write"))
 
-            scribed: dict[TensorKey, Any]|None = extension.write(module=self, prediction=prediction)
+            scribed: dict[TensorKey, Any] | None = write_fn(module=self, prediction=prediction)
 
             if scribed is not None:
                 supervised[prediction.address] = Prediction.serialize(scribed)
@@ -388,6 +390,36 @@ class JSON2Vec(lit.LightningModule):
 
 
         return supervised, embeddings
+
+    def evaluate(
+        self,
+        batch: EncodedBatch,
+    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
+        was_training = self.training
+        inputs = encode(
+            batch=batch,
+            hyperparameters=self.hyperparameters,
+            strata=Strata.predict,
+            state=self.state,
+        )
+
+        self.eval()
+        try:
+            with torch.inference_mode():
+                predictions = self(inputs)
+        finally:
+            if was_training:
+                self.train()
+
+        return self.write(predictions)
+
+    def predict(self, batch: EncodedBatch) -> dict[Address, dict[str, Any]]:
+        supervised, _ = self.evaluate(batch=batch)
+        return supervised
+
+    def embed(self, batch: EncodedBatch) -> dict[Address, dict[str, Any]]:
+        _, embeddings = self.evaluate(batch=batch)
+        return embeddings
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

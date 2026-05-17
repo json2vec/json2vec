@@ -15,3 +15,5 @@ wandb/
 .python-version
 
 private/
+
+*.ckpt

@@ -10,7 +10,7 @@ from tensordict import TensorDict
 
 from json2vec.architecture.root import JSON2Vec
 from json2vec.data.datasets import Dataset, encode, process
-from json2vec.structs.enums import Strata, Suffix
+from json2vec.structs.enums import Strata
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
@@ -21,11 +21,7 @@ Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 def default_dataset() -> Dataset:
     return Dataset(
         root=None,
-        file_buffer_size=1,
-        observation_buffer_size=1,
         processor="default",
-        suffix=Suffix.ndjson,
-        patterns={strata: r".*" for strata in Strata},
     )
 
 

@@ -160,7 +160,7 @@ optimizer, scheduler, callbacks, and checkpoint policy.
 import lightning.pytorch as lit
 import torch
 
-from json2vec import Dataset, DefaultDataModule, Hyperparameters, JSON2Vec, Strata, Suffix
+from json2vec import Dataset, Hyperparameters, JSON2Vec, Strata, StreamingDataModule, Suffix
 
 hyperparameters = Hyperparameters.model_validate({
     "d_model": 16,
@@ -188,8 +188,6 @@ hyperparameters = Hyperparameters.model_validate({
 
 dataset = Dataset(
     root="/path/to/data",
-    file_buffer_size=16,
-    observation_buffer_size=16,
     processor="default",
     suffix=Suffix.ndjson,
     patterns={strata: r".*" for strata in Strata},
@@ -200,11 +198,13 @@ model = JSON2Vec(
     batch_size=32,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
 )
-data = DefaultDataModule.from_model(
+data = StreamingDataModule.from_model(
     model,
     dataset=dataset,
     num_workers=4,
     chunk_batch_size=4096,
+    file_buffer_size=16,
+    observation_buffer_size=16,
 )
 
 trainer = lit.Trainer(accelerator="auto")
@@ -283,8 +283,13 @@ The `text` tensorfield requires the optional `transformers` dependency and is no
 
 Training, dataloading, logging, callbacks, and checkpointing are ordinary
 Python/Lightning concerns. Pass dataloader behavior directly to
-`DefaultDataModule` with named arguments such as `num_workers`,
-`persistent_workers`, `pin_memory`, `sharding`, and `chunk_batch_size`.
+`StreamingDataModule` with named arguments such as `num_workers`,
+`persistent_workers`, `pin_memory`, `sharding`, `chunk_batch_size`,
+`file_buffer_size`, `observation_buffer_size`, and `sample_rate`.
+`Dataset.suffix` and `Dataset.patterns` default to `None`; `suffix` is required
+only when `root` is set. Omitting `patterns` lets every stratum read the same
+files and emits a warning. `Dataset.processor` accepts either a registered
+processor name or the registered shim function itself.
 
 The serving entrypoint still supports deployment process settings:
 

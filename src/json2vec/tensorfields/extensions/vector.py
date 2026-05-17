@@ -37,7 +37,7 @@ class Objective(enum.StrEnum):
 
 @vector.register
 class Request(RequestBase):
-    type: Literal["vector"]
+    type: Literal["vector"] = "vector"
     n_dim: Annotated[int, pydantic.Field(gt=0)]
     objective: Objective = Objective.l2
 

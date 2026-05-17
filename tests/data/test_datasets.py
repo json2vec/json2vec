@@ -135,10 +135,24 @@ def test_fetch_without_file_sharding_returns_all_matching_files(tmp_path: Path):
     assert {Path(path).name for path in files} == {"first.ndjson", "second.ndjson"}
 
 
+def test_fetch_without_patterns_returns_all_files(tmp_path: Path):
+    (tmp_path / "first.ndjson").write_text("", encoding="utf-8")
+    (tmp_path / "second.csv").write_text("", encoding="utf-8")
+
+    dataset = SimpleNamespace(root=str(tmp_path), patterns=None)
+    files = list(
+        datasets.fetch.__wrapped__(
+            dataset=dataset,
+            strata=Strata.validate,
+            sharding=ShardingStrategy.chunk,
+        )
+    )
+    assert {Path(path).name for path in files} == {"first.ndjson", "second.csv"}
+
+
 def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPatch):
     dataset = SimpleNamespace(
         root=None,
-        file_buffer_size=4,
         suffix=Suffix.ndjson,
         patterns={strata: r".*" for strata in Strata},
     )
@@ -156,6 +170,7 @@ def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPa
             strata=Strata.train,
             sharding=ShardingStrategy.chunk,
             chunk_batch_size=2,
+            file_buffer_size=4,
         )
     )
     assert output == [{}]
@@ -164,7 +179,6 @@ def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPa
 def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch: pytest.MonkeyPatch):
     dataset = SimpleNamespace(
         root=None,
-        file_buffer_size=4,
         suffix=Suffix.ndjson,
         patterns={strata: r".*" for strata in Strata},
     )
@@ -182,6 +196,7 @@ def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch
             strata=Strata.train,
             sharding=ShardingStrategy.chunk,
             chunk_batch_size=2,
+            file_buffer_size=4,
         )
     )
     assert output == []
@@ -306,6 +321,19 @@ def test_batch_splits_and_preserves_tail():
     assert chunks == [[1, 2], [3, 4], [5]]
 
 
+def test_sample_predict_is_identity():
+    data = list(range(8))
+    output = list(datasets.sample.__wrapped__(data, sample_rate=0.1, strata=Strata.predict))
+    assert output == data
+
+
+def test_sample_filters_non_predict_with_sample_rate():
+    random.seed(3)
+    data = list(range(8))
+    output = list(datasets.sample.__wrapped__(data, sample_rate=0.5, strata=Strata.train))
+    assert output == [0, 2, 5, 6]
+
+
 def test_shuffle_predict_is_identity():
     data = list(range(8))
     output = list(datasets.shuffle.__wrapped__(data, size=3, strata=Strata.predict))
@@ -365,8 +393,8 @@ def test_spotcheck_ignores_empty_result_until_threshold(monkeypatch: pytest.Monk
     datasets.spotcheck([], "root/id", every=3)
 
 
-def test_datamodule_accepts_named_loader_configuration_per_strata():
-    module = datasets.DefaultDataModule(
+def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
+    module = datasets.StreamingDataModule(
         hyperparameters=SimpleNamespace(),
         dataset=SimpleNamespace(),
         state={},
@@ -374,6 +402,9 @@ def test_datamodule_accepts_named_loader_configuration_per_strata():
         num_workers={Strata.train: 0},
         sharding={Strata.train: "record"},
         chunk_batch_size={Strata.train: 7},
+        file_buffer_size={Strata.train: 11},
+        observation_buffer_size={Strata.train: 13},
+        sample_rate={Strata.train: 0.5},
     )
 
     assert module.num_workers[Strata.train] == 0
@@ -382,3 +413,59 @@ def test_datamodule_accepts_named_loader_configuration_per_strata():
     assert module.sharding[Strata.validate] == ShardingStrategy.chunk
     assert module.chunk_batch_size[Strata.train] == 7
     assert module.chunk_batch_size[Strata.validate] == 4096
+    assert module.file_buffer_size[Strata.train] == 11
+    assert module.file_buffer_size[Strata.validate] == 1
+    assert module.observation_buffer_size[Strata.train] == 13
+    assert module.observation_buffer_size[Strata.validate] == 1
+    assert module.sample_rate[Strata.train] == 0.5
+    assert module.sample_rate[Strata.validate] == 1.0
+
+
+def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+
+    def observe(dataset, strata, sharding, chunk_batch_size, file_buffer_size):
+        yield {"id": 1}
+
+    def process(pipe, dataset, strata, state):
+        yield from ([item] for item in pipe)
+
+    def sample(pipe, sample_rate, strata):
+        seen["sample_rate"] = sample_rate
+        yield from pipe
+
+    def batch(pipe, batch_size):
+        yield list(pipe)
+
+    def transform(pipe, hyperparameters, strata, state):
+        yield from pipe
+
+    def mask(pipe, hyperparameters):
+        yield from pipe
+
+    def target(pipe, hyperparameters):
+        yield from pipe
+
+    monkeypatch.setattr(datasets, "observe", observe)
+    monkeypatch.setattr(datasets, "process", process)
+    monkeypatch.setattr(datasets, "sample", sample)
+    monkeypatch.setattr(datasets, "batch", batch)
+    monkeypatch.setattr(datasets, "transform", transform)
+    monkeypatch.setattr(datasets, "mask", mask)
+    monkeypatch.setattr(datasets, "target", target)
+
+    batch_dataset = datasets.BatchDataset(
+        hyperparameters=SimpleNamespace(requests={}),
+        dataset=SimpleNamespace(),
+        state={},
+        batch_size=2,
+        strata=Strata.train,
+        sharding=ShardingStrategy.chunk,
+        chunk_batch_size=1,
+        file_buffer_size=1,
+        observation_buffer_size=1,
+        sample_rate=0.25,
+    )
+
+    assert list(batch_dataset) == [[[{"id": 1}]]]
+    assert seen["sample_rate"] == 0.25

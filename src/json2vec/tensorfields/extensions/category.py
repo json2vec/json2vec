@@ -142,14 +142,17 @@ class OnlineVocabularyModel(torch.nn.Module):
 
 @category.register
 class Request(RequestBase):
-    type: Literal["category"]
-    max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)]
-    n_bands: Annotated[int, pydantic.Field(gt=0, default=8)]
-    p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)]
-    topk: Annotated[list[int], pydantic.Field(default_factory=list)]
+    type: Literal["category"] = "category"
+    max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10000
+    n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
+    p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
+    topk: list[int] | None = None
 
     @pydantic.model_validator(mode="after")
     def check_topk(self):
+
+        if self.topk is None:
+            self.topk = []
 
         # enforce uniqueness
         self.topk = sorted(set(self.topk))

@@ -1,22 +1,42 @@
 import functools
-from typing import Annotated, Literal, NewType
+from typing import Annotated, Any, Literal
 
 import jmespath
 import pydantic
 from anytree import NodeMixin
 from jmespath.exceptions import JMESPathError
 
-Address = NewType("Address", str)
+
+class Address(str):
+    def __new__(cls, *parts: str) -> "Address":
+        if len(parts) == 0:
+            value = ""
+        elif len(parts) == 1:
+            value = parts[0]
+        else:
+            value = "/".join(parts)
+
+        if not isinstance(value, str):
+            raise TypeError("Address parts must be strings")
+
+        return str.__new__(cls, value)
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type: Any, handler: Any):
+        from pydantic_core import core_schema
+
+        return core_schema.no_info_after_validator_function(cls, core_schema.str_schema())
+
 
 class Node(NodeMixin, pydantic.BaseModel):
     name: str
     type: str
     description: str | None = None
-    n_heads: Annotated[int, pydantic.Field(gt=0, default=4)]
+    n_heads: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
 
     @functools.cached_property
     def address(self) -> Address:
-        return "/".join(node.name for node in self.path[1:])
+        return Address(*(node.name for node in self.path[1:]))
 
     @functools.cached_property
     def heritage(self) -> list[Address]:
@@ -65,8 +85,8 @@ class Leaf(Node):
     type: str
     query: str
     pooling: Literal["query", "mean"] = "query"
-    weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)]
-    n_linear: Annotated[int, pydantic.Field(gt=0, default=1)]
+    weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
+    n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
 
 
     @pydantic.model_validator(mode="after")

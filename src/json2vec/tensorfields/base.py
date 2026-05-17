@@ -106,6 +106,16 @@ class TensorFieldBase(ABC):
     ) -> "TensorFieldBase":
         raise NotImplementedError
 
+    @classmethod
+    @abstractmethod
+    def empty(
+        cls,
+        batch_size: int,
+        address: Address,
+        hyperparameters: Hyperparameters,
+    ) -> "TensorFieldBase":
+        raise NotImplementedError
+
     @abstractmethod
     def mask(self, p_mask: float):
         raise NotImplementedError

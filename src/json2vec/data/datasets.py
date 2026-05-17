@@ -4,10 +4,11 @@ import hashlib
 import os
 import random
 import re
+import warnings
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from functools import cache, partial
-from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeAlias, TypeVar, cast
 from urllib.parse import urlparse
 
 import jmespath
@@ -35,23 +36,50 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
-StrataMap = Mapping[Strata | str, T]
+InputT = TypeVar("InputT")
+OutputT = TypeVar("OutputT")
+StrataMap: TypeAlias = Mapping[Strata | str, T]
+RawObservation: TypeAlias = dict[str, Any]
+ProcessedObservation: TypeAlias = list[RawObservation]
+EncodedBatch: TypeAlias = list[ProcessedObservation]
+EncodedInput: TypeAlias = TensorDict[Address, TensorFieldBase]
 
 
 class Dataset(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     root: str | None = None
-    sample_rate: Annotated[float, pydantic.Field(gt=0.0, le=1.0, default=1.0)]
-    file_buffer_size: Annotated[int, pydantic.Field(gt=0)]
-    observation_buffer_size: Annotated[int, pydantic.Field(gt=0)]
     processor: Annotated[str | None, pydantic.Field(default="default")]
     kwargs: dict[str, Any] = pydantic.Field(default_factory=dict)
-    suffix: Suffix
-    patterns: dict[Strata, str]
+    suffix: Suffix | None = None
+    patterns: dict[Strata, str] | None = None
+
+    @pydantic.field_validator("processor", mode="before")
+    @classmethod
+    def normalize_processor(cls, value: Any):
+        if value is None or isinstance(value, str):
+            return value
+
+        if callable(value):
+            return value.__name__
+
+        return value
 
     @pydantic.model_validator(mode="after")
-    def check_processor_registered(self):
+    def check_dataset_configuration(self):
         if self.processor is not None and self.processor not in PROCESSORS:
             raise ValueError(f"you haven't registered processor {self.processor}")
+
+        if self.root is not None and self.suffix is None:
+            raise ValueError("suffix is required when root is specified")
+
+        if self.root is not None and self.patterns is None:
+            warnings.warn(
+                "dataset patterns are not configured; all strata will read the same files, "
+                "so training data may be used for validation",
+                UserWarning,
+                stacklevel=2,
+            )
 
         return self
 
@@ -63,14 +91,21 @@ def _strata_key(value: Strata | str) -> Strata:
     return Strata(value.strip().lower())
 
 
-def _by_strata(value: T | StrataMap[T], *, default: T, coerce: Callable[[T], T]) -> dict[Strata, T]:
+def _by_strata(
+    value: InputT | StrataMap[InputT],
+    *,
+    default: OutputT,
+    coerce: Callable[[InputT], OutputT],
+) -> dict[Strata, OutputT]:
     if isinstance(value, Mapping):
         normalized = {strata: default for strata in Strata}
-        for key, item in value.items():
+        mapped = cast(StrataMap[InputT], value)
+        for key, item in mapped.items():
             normalized[_strata_key(key)] = coerce(item)
         return normalized
 
-    return {strata: coerce(value) for strata in Strata}
+    item = cast(InputT, value)
+    return {strata: coerce(item) for strata in Strata}
 
 
 def _coerce_num_workers(value: int | None) -> int | None:
@@ -108,6 +143,25 @@ def _coerce_chunk_batch_size(value: int) -> int:
     return value
 
 
+def _coerce_buffer_size(name: str) -> Callable[[int], int]:
+    def coerce(value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+        if value < 1:
+            raise ValueError(f"{name} must be >= 1")
+        return value
+
+    return coerce
+
+
+def _coerce_sample_rate(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError("sample_rate must be a number")
+    if value <= 0.0 or value > 1.0:
+        raise ValueError("sample_rate must be > 0 and <= 1")
+    return float(value)
+
+
 @beartype
 def sha256(string: str, bits: int = 64) -> int:
     if not (1 <= bits <= 256):
@@ -141,7 +195,8 @@ def fetch(dataset: Dataset, strata: Strata, sharding: ShardingStrategy) -> Itera
     if dataset.root is None:
         return
 
-    regex: re.Pattern = re.compile(dataset.patterns[strata])
+    pattern = None if dataset.patterns is None else dataset.patterns.get(strata)
+    regex: re.Pattern[str] | None = None if pattern is None else re.compile(pattern)
 
     parsed = urlparse(dataset.root)
 
@@ -183,7 +238,8 @@ def observe(
     strata: Strata,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
-) -> Iterator[dict]:
+    file_buffer_size: int,
+) -> Iterator[RawObservation]:
     if dataset.root is None:
         # Processor-driven mode: seed a single synthetic observation for one worker.
         worker_id, num_workers = _worker_identity()
@@ -198,7 +254,7 @@ def observe(
     paths: Iterator[str] = fetch(dataset=dataset, strata=strata, sharding=sharding)
     shuffled_paths: Iterator[str] = shuffle(
         paths,
-        size=dataset.file_buffer_size,
+        size=file_buffer_size,
         strata=strata,
     )
     yield from read(
@@ -215,7 +271,7 @@ def read(
     dataset: Dataset,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
-) -> Iterator[dict]:
+) -> Iterator[RawObservation]:
     worker_id, num_workers = _worker_identity()
 
     match dataset.suffix:
@@ -289,11 +345,11 @@ def read(
                             ):
                                 continue
 
-                            rows: list[dict] = batch.to_pylist()
+                            rows: list[RawObservation] = batch.to_pylist()
                             yield from rows
                             continue
 
-                        rows: list[dict] = batch.to_pylist()
+                        rows: list[RawObservation] = batch.to_pylist()
 
                         if sharding == ShardingStrategy.record:
                             for row_index, row in enumerate(rows):
@@ -316,11 +372,11 @@ def read(
 
 @beartype
 def process(
-    pipe: Iterable[dict],
+    pipe: Iterable[RawObservation],
     dataset: Dataset,
     strata: Strata,
     state: dict[Address, Any],
-) -> Iterator[Any]:
+) -> Iterator[ProcessedObservation]:
 
     if dataset.processor is None:
         for item in pipe:
@@ -334,9 +390,9 @@ def process(
 
 
 @beartype
-def batch(pipe: Iterable[Any], batch_size: int) -> Iterator[list[Any]]:
+def batch(pipe: Iterable[T], batch_size: int) -> Iterator[list[T]]:
 
-    batch: list[Any] = []
+    batch: list[T] = []
 
     for item in pipe:
         batch.append(item)
@@ -348,16 +404,27 @@ def batch(pipe: Iterable[Any], batch_size: int) -> Iterator[list[Any]]:
         yield batch
 
 
+@beartype
+def sample(pipe: Iterable[T], sample_rate: float, strata: Strata) -> Iterator[T]:
+    if strata == Strata.predict or sample_rate >= 1.0:
+        yield from pipe
+        return
+
+    for item in pipe:
+        if random.random() < sample_rate:
+            yield item
+
+
 
 @beartype
-def shuffle(pipe: Iterable[dict], size: int, strata: Strata) -> Iterator[dict]:
+def shuffle(pipe: Iterable[T], size: int, strata: Strata) -> Iterator[T]:
 
     if strata == Strata.predict:
         yield from pipe
         return
 
     iterable = iter(pipe)
-    buffer: list[Any] = []
+    buffer: list[T] = []
     exhausted: bool = False
 
     for _ in range(size):
@@ -414,16 +481,16 @@ def spotcheck(result, address: Address, every: int = 1000):
 
 
 def encode(
-    batch: dict[str, Any],
+    batch: EncodedBatch,
     hyperparameters: Hyperparameters,
     strata: Strata,
     state: dict[Address, Any],
-) -> TensorDict[Address, TensorFieldBase]:
+) -> EncodedInput:
 
     out: dict[Address, TensorFieldBase] = {}
 
     for address, request in hyperparameters.requests.items():
-        TensorField: type[TensorFieldBase] = TENSORFIELDS[request.type].TensorField
+        TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
         if (strata == Strata.predict) & (address in hyperparameters.target):
             # basically, if we are in inference mode, we should create empty values
@@ -453,22 +520,21 @@ def encode(
         if address in hyperparameters.target:
             out[address].target(p_target=1.0)
 
-    inputs: TensorDict[Address, TensorFieldBase] = TensorDict(source=out)
+    inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
 
     if strata == Strata.predict:
         inputs["metadata"] = batch
 
-    
     return inputs
 
 
 @beartype
 def transform(
-    pipe: Iterable[dict[str, Any]],
+    pipe: Iterable[EncodedBatch],
     hyperparameters: Hyperparameters,
     strata: Strata,
     state: dict[Address, Any],
-) -> Iterator[TensorDict[Address, TensorFieldBase]]:
+) -> Iterator[EncodedInput]:
     for batch in pipe:
 
         yield encode(batch=batch, hyperparameters=hyperparameters, strata=strata, state=state)
@@ -476,9 +542,9 @@ def transform(
 
 @beartype
 def mask(
-    pipe: Iterable[TensorDict[Address, TensorFieldBase]],
+    pipe: Iterable[EncodedInput],
     hyperparameters: Hyperparameters,
-) -> Iterator[TensorDict[Address, TensorFieldBase]]:
+) -> Iterator[EncodedInput]:
     if not hyperparameters.p_mask > 0.0:
         yield from pipe
 
@@ -493,9 +559,9 @@ def mask(
 
 @beartype
 def target(
-    pipe: Iterable[TensorDict[Address, TensorFieldBase]],
+    pipe: Iterable[EncodedInput],
     hyperparameters: Hyperparameters,
-) -> Iterator[TensorDict[Address, TensorFieldBase]]:
+) -> Iterator[EncodedInput]:
     for batch in pipe:
         for address in hyperparameters.requests.keys():
             field: TensorFieldBase = batch[address]
@@ -518,6 +584,9 @@ class BatchDataset(IterableDataset):
         strata: Strata,
         sharding: ShardingStrategy,
         chunk_batch_size: int,
+        file_buffer_size: int,
+        observation_buffer_size: int,
+        sample_rate: float,
     ):
         super().__init__()
 
@@ -528,6 +597,9 @@ class BatchDataset(IterableDataset):
         self.strata: Strata = strata
         self.sharding: ShardingStrategy = sharding
         self.chunk_batch_size: int = chunk_batch_size
+        self.file_buffer_size: int = file_buffer_size
+        self.observation_buffer_size: int = observation_buffer_size
+        self.sample_rate: float = sample_rate
         logger.bind(
             component="data",
             strata=self.strata,
@@ -536,6 +608,9 @@ class BatchDataset(IterableDataset):
             stateful_fields=len(self.state),
             sharding=self.sharding,
             chunk_batch_size=self.chunk_batch_size,
+            file_buffer_size=self.file_buffer_size,
+            observation_buffer_size=self.observation_buffer_size,
+            sample_rate=self.sample_rate,
         ).info("initialized batch dataset")
 
     def __iter__(self):
@@ -547,11 +622,14 @@ class BatchDataset(IterableDataset):
                 state=self.state,
                 sharding=self.sharding,
                 chunk_batch_size=self.chunk_batch_size,
+                file_buffer_size=self.file_buffer_size,
+                sample_rate=self.sample_rate,
                 batch_size=self.batch_size,
             )
             | observe
             | process
-            | partial(shuffle, size=self.dataset.observation_buffer_size)
+            | sample
+            | partial(shuffle, size=self.observation_buffer_size)
             | batch
             | transform
             | mask
@@ -570,6 +648,9 @@ def dataloader(
     pin_memory: bool,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
+    file_buffer_size: int,
+    observation_buffer_size: int,
+    sample_rate: float,
 ) -> DataLoader:
     workers: int = num_workers if num_workers is not None else (os.cpu_count() or 0)
     active_persistent_workers: bool = persistent_workers and workers > 0
@@ -583,6 +664,9 @@ def dataloader(
         pin_memory=active_pin_memory,
         sharding=sharding,
         chunk_batch_size=chunk_batch_size,
+        file_buffer_size=file_buffer_size,
+        observation_buffer_size=observation_buffer_size,
+        sample_rate=sample_rate,
     ).info("building dataloader")
 
     return DataLoader(
@@ -594,6 +678,9 @@ def dataloader(
             strata=strata,
             sharding=sharding,
             chunk_batch_size=chunk_batch_size,
+            file_buffer_size=file_buffer_size,
+            observation_buffer_size=observation_buffer_size,
+            sample_rate=sample_rate,
         ),
         drop_last=False,
         batch_size=None,
@@ -604,7 +691,7 @@ def dataloader(
     )
 
 
-class DefaultDataModule(lit.LightningDataModule):
+class StreamingDataModule(lit.LightningDataModule):
     def __init__(
         self,
         hyperparameters: Hyperparameters,
@@ -616,6 +703,9 @@ class DefaultDataModule(lit.LightningDataModule):
         pin_memory: bool | StrataMap[bool] = True,
         sharding: ShardingStrategy | str | StrataMap[ShardingStrategy | str] = ShardingStrategy.chunk,
         chunk_batch_size: int | StrataMap[int] = 4096,
+        file_buffer_size: int | StrataMap[int] = 1,
+        observation_buffer_size: int | StrataMap[int] = 1,
+        sample_rate: float | StrataMap[float] = 1.0,
     ):
         super().__init__()
         if batch_size <= 0:
@@ -638,6 +728,17 @@ class DefaultDataModule(lit.LightningDataModule):
             default=4096,
             coerce=_coerce_chunk_batch_size,
         )
+        self.file_buffer_size = _by_strata(
+            file_buffer_size,
+            default=1,
+            coerce=_coerce_buffer_size("file_buffer_size"),
+        )
+        self.observation_buffer_size = _by_strata(
+            observation_buffer_size,
+            default=1,
+            coerce=_coerce_buffer_size("observation_buffer_size"),
+        )
+        self.sample_rate = _by_strata(sample_rate, default=1.0, coerce=_coerce_sample_rate)
 
     @classmethod
     def from_model(
@@ -645,7 +746,7 @@ class DefaultDataModule(lit.LightningDataModule):
         model: JSON2Vec,
         dataset: Dataset,
         **kwargs: Any,
-    ) -> "DefaultDataModule":
+    ) -> "StreamingDataModule":
         return cls(
             hyperparameters=model.hyperparameters,
             dataset=dataset,
@@ -666,6 +767,9 @@ class DefaultDataModule(lit.LightningDataModule):
             pin_memory=self.pin_memory[strata],
             sharding=self.sharding[strata],
             chunk_batch_size=self.chunk_batch_size[strata],
+            file_buffer_size=self.file_buffer_size[strata],
+            observation_buffer_size=self.observation_buffer_size[strata],
+            sample_rate=self.sample_rate[strata],
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -681,18 +785,18 @@ class DefaultDataModule(lit.LightningDataModule):
         return self.dataloader(strata=Strata.predict)
 
 
-def mock(hyperparameters: Hyperparameters, batch_size: int) -> TensorDict[Address, TensorFieldBase]:
+def mock(hyperparameters: Hyperparameters, batch_size: int) -> EncodedInput:
 
     out: dict[Address, TensorFieldBase] = {}
 
     for address, request in hyperparameters.requests.items():
 
-        TensorField: TensorFieldBase = TENSORFIELDS[request.type].TensorField
+        TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
         out[address] = TensorField.empty(
             batch_size=batch_size,
-            address=address, 
-            hyperparameters=hyperparameters
+            address=address,
+            hyperparameters=hyperparameters,
         )
 
-    return TensorDict(source=out, batch_size=batch_size)
+    return cast(EncodedInput, TensorDict(source=cast(Any, out), batch_size=batch_size))

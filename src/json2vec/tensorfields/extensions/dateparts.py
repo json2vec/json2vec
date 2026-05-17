@@ -127,9 +127,9 @@ dateparts: Plugin = Plugin(name="dateparts")
 
 @dateparts.register
 class Request(RequestBase):
-    type: Literal["dateparts"]
+    type: Literal["dateparts"] = "dateparts"
     dateparts: list[DatePart]
-    pattern: Annotated[str | None, pydantic.Field(default=None)]
+    pattern: Annotated[str | None, pydantic.Field(default=None)] = None
 
     @pydantic.field_validator("dateparts", check_fields=False)
     @classmethod
