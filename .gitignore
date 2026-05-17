@@ -14,4 +14,4 @@ wandb/
 .vscode/
 .python-version
 
-examples/
+private/
