@@ -158,7 +158,18 @@ def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
 
     assert model.training
     assert Address("root", "label") in supervised
-    assert supervised[Address("root", "label")]["content"]["value"]
+    content = supervised[Address("root", "label")]["content"]
+    state = supervised[Address("root", "label")]["state"]
+
+    assert len(content["value"]) == 2
+    assert all(not isinstance(value, list) for value in content["value"])
+    assert all(not isinstance(probability, list) for probability in content["probability"])
+    assert len(content["topk"]) == 2
+    assert all(row and isinstance(row[0], dict) for row in content["topk"])
+    assert all(
+        len(probabilities) == 2 and all(not isinstance(probability, list) for probability in probabilities)
+        for probabilities in state.values()
+    )
 
 
 def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
@@ -172,4 +183,6 @@ def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
     )
 
     assert Address("root") in embeddings
-    assert len(embeddings[Address("root")]["embedding"]) == 2
+    embedding = embeddings[Address("root")]["embedding"]
+    assert len(embedding) == 2
+    assert all(not isinstance(row[0], list) for row in embedding)

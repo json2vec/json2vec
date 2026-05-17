@@ -7,8 +7,8 @@ from rich.console import Console
 from rich.json import JSON
 
 console = Console(file=sys.stdout)
-LOG_LEVEL: str = os.getenv("JSON2VEC_LOG_LEVEL", "DEBUG").upper()
 
+LOG_LEVEL: str = os.getenv("JSON2VEC_LOG_LEVEL", "DEBUG").upper()
 
 def sink(message):
     record = message.record

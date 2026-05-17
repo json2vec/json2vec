@@ -71,23 +71,52 @@ class Prediction(TensorClass):
         return value
 
     @staticmethod
-    def denest(value: Any) -> Any:
+    def squeeze(value: Any, *, preserve_first_dimension: bool = False) -> Any:
         if isinstance(value, dict):
-            return {key: Prediction.denest(item) for key, item in value.items()}
+            return {
+                key: Prediction.squeeze(item, preserve_first_dimension=preserve_first_dimension)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, torch.Tensor):
+            start = 1 if preserve_first_dimension else 0
+            for dim in reversed(range(start, value.ndim)):
+                if value.shape[dim] == 1:
+                    value = value.squeeze(dim)
+            return value
+
+        if isinstance(value, np.ndarray):
+            axes = tuple(
+                dim
+                for dim, size in enumerate(value.shape)
+                if size == 1 and (dim > 0 or not preserve_first_dimension)
+            )
+            return np.squeeze(value, axis=axes) if axes else value
 
         if isinstance(value, list):
-            items = [Prediction.denest(item) for item in value]
-            if len(items) == 1:
+            if preserve_first_dimension:
+                return [Prediction.squeeze(item) for item in value]
+
+            items = [Prediction.squeeze(item) for item in value]
+            if len(items) == 1 and not isinstance(items[0], dict):
                 return items[0]
             return items
 
         if isinstance(value, tuple):
-            items = [Prediction.denest(item) for item in value]
-            if len(items) == 1:
+            if preserve_first_dimension:
+                return [Prediction.squeeze(item) for item in value]
+
+            items = [Prediction.squeeze(item) for item in value]
+            if len(items) == 1 and not isinstance(items[0], dict):
                 return items[0]
             return items
 
         return value
+
+    @staticmethod
+    def denest(value: Any) -> Any:
+        return Prediction.squeeze(value)
+
 
 class Embedding(Prediction):
 

@@ -373,7 +373,9 @@ class JSON2Vec(lit.LightningModule):
 
             if isinstance(prediction, Embedding):
 
-                embeddings[prediction.address] = Embedding.write(prediction)
+                embeddings[prediction.address] = Prediction.serialize(
+                    Prediction.squeeze(Embedding.write(prediction), preserve_first_dimension=True)
+                )
 
                 continue
 
@@ -385,9 +387,9 @@ class JSON2Vec(lit.LightningModule):
             scribed: dict[TensorKey, Any] | None = write_fn(module=self, prediction=prediction)
 
             if scribed is not None:
-                supervised[prediction.address] = Prediction.serialize(scribed)
-
-
+                supervised[prediction.address] = Prediction.serialize(
+                    Prediction.squeeze(scribed, preserve_first_dimension=True)
+                )
 
         return supervised, embeddings
 

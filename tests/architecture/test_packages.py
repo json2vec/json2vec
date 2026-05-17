@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from tensordict import TensorDict
 
@@ -87,6 +88,42 @@ def test_prediction_denest_collapses_only_singleton_lists():
         {"label": "BETA", "probability": 0.1},
     ]
     assert output["keep_list"] == [1, 2]
+
+
+def test_prediction_denest_preserves_single_candidate_lists():
+    value = {
+        "topk": [[[
+            {"label": "ALPHA", "probability": 0.9},
+        ]]],
+    }
+
+    output = Prediction.denest(value)
+
+    assert output["topk"] == [
+        {"label": "ALPHA", "probability": 0.9},
+    ]
+
+
+def test_prediction_squeeze_preserves_batch_dimension():
+    value = {
+        "content": torch.tensor([[[1.0]], [[2.0]]]),
+        "state": {
+            "valued": np.array([[0.1], [0.2]]),
+        },
+        "topk": [
+            [[{"label": "ALPHA", "probability": 0.9}]],
+            [[{"label": "BETA", "probability": 0.8}]],
+        ],
+    }
+
+    output = Prediction.squeeze(value, preserve_first_dimension=True)
+
+    assert output["content"].shape == (2,)
+    assert output["state"]["valued"].shape == (2,)
+    assert output["topk"] == [
+        [{"label": "ALPHA", "probability": 0.9}],
+        [{"label": "BETA", "probability": 0.8}],
+    ]
 
 
 def test_prediction_unbatch_preserves_prediction_types_and_singleton_batch_dims():
