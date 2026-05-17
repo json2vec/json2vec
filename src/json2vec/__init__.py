@@ -1,4 +1,4 @@
-from json2vec.architecture.root import JSON2Vec
+from json2vec.architecture.root import JSON2Vec as Architecture
 from json2vec.data.datasets import Dataset, StreamingDataModule
 from json2vec.processors import PROCESSORS, Processor, ProcessorMode, shim
 from json2vec.structs.enums import Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
@@ -16,6 +16,7 @@ from json2vec.tensorfields.extensions.vector import Request as Vector
 
 __all__ = [
     "Address",
+    "Architecture",
     "Array",
     "Category",
     "Component",
@@ -25,7 +26,6 @@ __all__ = [
     "EmbedderBase",
     "Entity",
     "Hyperparameters",
-    "JSON2Vec",
     "Metric",
     "Number",
     "PROCESSORS",

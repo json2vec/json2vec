@@ -2,7 +2,7 @@ import json2vec
 
 
 def test_common_resources_are_available_from_package_root():
-    assert json2vec.JSON2Vec.__name__ == "JSON2Vec"
+    assert json2vec.Architecture.__name__ == "JSON2Vec"
     assert json2vec.Dataset.__name__ == "Dataset"
     assert json2vec.StreamingDataModule.__name__ == "StreamingDataModule"
     assert json2vec.Hyperparameters.__name__ == "Hyperparameters"
