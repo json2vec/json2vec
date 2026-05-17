@@ -60,4 +60,4 @@ def test_epoch_lifecycle_logger_binds_expected_payload(
     assert payload["step"] == 101
     assert payload["hook"] == hook
     assert payload["strata"] == str(strata)
-    assert stub.messages[-1][1] == f"{hook}ing {strata} epoch"
+    assert stub.messages[-1][1] == f"{hook}ing {strata} epoch 7"

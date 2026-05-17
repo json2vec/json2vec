@@ -6,8 +6,8 @@ import torch
 from tensordict import TensorDict
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
+from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
-from json2vec.structs.structure import Structure
 from json2vec.tensorfields.extensions.category import (
     UNAVAILABLE_LABEL,
     Decoder,
@@ -31,23 +31,16 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
         field["p_unavailable"] = p_unavailable
 
     return {
-        "name": "demo",
-        "type": "structure",
-        "batch_size": 2,
-        "dropout": 0.1,
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "context",
-            "context_size": 2,
+            "type": "array",
+            "dropout": 0.1,
+            "max_length": 2,
             "n_outputs": 1,
             "fields": [field],
         },
     }
-
-
-def _session(structure: Structure):
-    return SimpleNamespace(structure=structure)
 
 
 class _DummyState:
@@ -87,14 +80,14 @@ def test_category_vocabulary_refreshes_stale_validation_snapshot():
 
 
 def test_category_tensorfield_separates_state_and_content():
-    structure = Structure.model_validate(_structure_payload(p_unavailable=0.0))
-    session = _session(structure)
+    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    hyperparameters = structure
     state = _DummyState()
 
     field = TensorField.new(
         values=[["ALPHA", None], ["BETA"]],
         address="root/category",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=state,
     )
@@ -122,14 +115,14 @@ def test_category_tensorfield_separates_state_and_content():
 
 
 def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
-    structure = Structure.model_validate(_structure_payload(p_unavailable=0.0))
-    session = _session(structure)
+    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    hyperparameters = structure
     state = _DummyState(max_vocab_size=structure.requests["root/category"].max_vocab_size)
 
     TensorField.new(
         values=[["ALPHA"]],
         address="root/category",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=state,
     )
@@ -137,7 +130,7 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     field = TensorField.new(
         values=[["OMEGA"]],
         address="root/category",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.validate,
         state=state,
     )
@@ -153,14 +146,14 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
 
 
 def test_category_tensorfield_can_simulate_unavailable_during_training():
-    structure = Structure.model_validate(_structure_payload(p_unavailable=1.0))
-    session = _session(structure)
+    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=1.0))
+    hyperparameters = structure
     state = _DummyState(max_vocab_size=structure.requests["root/category"].max_vocab_size)
 
     field = TensorField.new(
         values=[["ALPHA", None], ["BETA"]],
         address="root/category",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=state,
     )
@@ -195,21 +188,16 @@ class _DummyNode:
 class _DummyModule:
     def __init__(self):
         self.nodes = {"root/category": _DummyNode()}
-        self.session = SimpleNamespace(
-            structure=SimpleNamespace(
-                requests={"root/category": SimpleNamespace(topk=[2, 3, 5, 10], max_vocab_size=8)}
-            )
+        self.hyperparameters = SimpleNamespace(
+            requests={"root/category": SimpleNamespace(topk=[2, 3, 5, 10], max_vocab_size=8)}
         )
 
 
 def test_category_write_emits_state_and_content_payloads():
     module = _DummyModule()
-    state_logits = torch.tensor(
-        [
-            [[10.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
-            [[0.0, 0.0, 10.0, 0.0, 0.0, 0.0]],
-        ]
-    )
+    state_logits = torch.zeros(2, 1, len(Tokens))
+    state_logits[0, 0, Tokens.valued.value] = 10.0
+    state_logits[1, 0, Tokens.padded.value] = 10.0
     content_logits = torch.tensor(
         [
             [[0.1, 0.9, 0.2, 0.3, 0.4, 0.0, 0.0, 0.0, -1.0]],
@@ -237,13 +225,13 @@ def test_category_write_emits_state_and_content_payloads():
     assert state_payload[Tokens.valued.name][0, 0] > 0.99
     assert state_payload[Tokens.padded.name][1, 0] > 0.99
 
-    assert content_payload["value"].tolist() == [["BETA"], [UNAVAILABLE_LABEL]]
+    assert content_payload["value"].tolist() == [["BETA"], ["GAMMA"]]
     assert content_payload[TensorKey.probability.name].shape == (2, 1)
 
     assert len(topk_payload) == 2
-    assert len(topk_payload[0][0]) == 6
-    assert len(topk_payload[1][0]) == 6
-    assert any(candidate["label"] == UNAVAILABLE_LABEL for candidate in topk_payload[1][0])
+    assert len(topk_payload[0][0]) == 5
+    assert len(topk_payload[1][0]) == 5
+    assert all(candidate["label"] != UNAVAILABLE_LABEL for row in topk_payload for candidate in row[0])
 
     for row in topk_payload:
         assert set(row[0][0].keys()) == {"label", "probability"}
@@ -253,9 +241,35 @@ def test_category_write_emits_state_and_content_payloads():
     assert isinstance(frame.schema["content"], pl.Struct)
 
 
+def test_category_write_excludes_unavailable_when_it_has_highest_logit():
+    module = _DummyModule()
+    state_logits = torch.zeros(1, 1, len(Tokens))
+    content_logits = torch.tensor([[[0.1, 0.2, 0.3, 0.4, 0.5, 0.0, 0.0, 0.0, 100.0]]])
+    prediction = Prediction(
+        address="root/category",
+        payload=TensorDict(
+            {
+                TensorKey.state: state_logits,
+                TensorKey.content: content_logits,
+            },
+            batch_size=[1],
+        ),
+    )
+
+    output = write(module=module, prediction=prediction)
+    content_payload = output[TensorKey.content.name]
+
+    assert content_payload[TensorKey.value.name].tolist() == [["EPS"]]
+    assert all(
+        candidate["label"] != UNAVAILABLE_LABEL
+        for row in content_payload[TensorKey.topk.name]
+        for candidate in row[0]
+    )
+
+
 class _TrackingModule:
-    def __init__(self, structure: Structure, decoder: Decoder):
-        self.session = SimpleNamespace(structure=structure)
+    def __init__(self, hyperparameters: Hyperparameters, decoder: Decoder):
+        self.hyperparameters = hyperparameters
         self.nodes = {"root/category": SimpleNamespace(decoder=decoder)}
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
@@ -263,21 +277,21 @@ class _TrackingModule:
 
 
 def test_category_loss_updates_state_and_content_counters():
-    structure = Structure.model_validate(_structure_payload(p_unavailable=0.0))
-    session = _session(structure)
+    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    hyperparameters = structure
     state = _DummyState()
 
     field = TensorField.new(
         values=[["ALPHA", None], ["BETA"]],
         address="root/category",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=state,
     )
     field.mask(1.0)
 
-    decoder = Decoder(structure=structure, address="root/category")
-    module = _TrackingModule(structure=structure, decoder=decoder)
+    decoder = Decoder(hyperparameters=structure, address="root/category")
+    module = _TrackingModule(hyperparameters=structure, decoder=decoder)
 
     prediction = Prediction(
         address="root/category",

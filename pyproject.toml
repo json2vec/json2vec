@@ -8,7 +8,6 @@ requires-python = ">=3.12"
 dependencies = [
     "beartype>=0.21.0",
     "pluggy>=1.6.0",
-    "faker>=37.4.0", # FIXME this can be removed (use other source for random naming?)
     "rich>=14.0.0",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.10.1",
@@ -23,10 +22,7 @@ dependencies = [
     "litserve>=0.2.13",
     "tensordict>=0.10.0",
     "torch>=2.7.1",
-    "lightning-thunder>=0.2.5", # FIXME this should be an optional dependency
     "ipython>=9.9.0",
-    "jsonpatch>=1.33",
-    "jsonnet>=0.21.0",
 ]
 
 [project.optional-dependencies]
@@ -53,9 +49,6 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["json2vec*"]
-
-[project.scripts]
-train = "json2vec.__main__:train"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

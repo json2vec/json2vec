@@ -24,7 +24,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session, Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 
 entity: Plugin = Plugin(name="entity")
@@ -71,20 +71,12 @@ class Request(RequestBase):
         return self
 
     def post_bind_validate(self):
-        root = self.path[0]
         per_observation_count: int = math.prod(self.shape)
         if per_observation_count <= 1:
             raise ValueError(
                 f"entity field at '{self.address}' requires at least 2 elements per observation, "
                 f"but configured count is {per_observation_count}"
             )
-
-        max_classes = root.batch_size * per_observation_count
-        for topk in self.topk:
-            if topk >= max_classes:
-                raise ValueError(
-                    f"topk values must be less than max local entity classes ({max_classes}) for '{self.address}'"
-                )
 
 
 @entity.register
@@ -100,16 +92,16 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
 
-        context_shape: tuple[int, ...] = session.structure.shapes[address]
+        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
         data, states = pad(
             nested=values,
-            shape=(len(values), *context_shape),
+            shape=(len(values), *array_shape),
             dtype=object,
             pad_value=None,
         )
@@ -145,12 +137,12 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def prune(self, p_prune: float = 1.0):
-        prune_tokens = torch.full_like(input=self.state, fill_value=Tokens.pruned)
+    def target(self, p_target: float = 1.0):
+        mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked)
 
-        is_pruned = (
+        is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
+            .lt(p_target)
             .expand_as(self.state)
         )
 
@@ -160,21 +152,21 @@ class TensorField(TensorFieldBase):
         if TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
-        self.state = self.state.masked_scatter(is_pruned, prune_tokens)
-        self.content = self.content.masked_scatter(is_pruned, torch.zeros_like(input=self.content))
+        self.state = self.state.masked_scatter(is_targeted, mask_tokens)
+        self.content = self.content.masked_scatter(is_targeted, torch.zeros_like(input=self.content))
 
-        self.trainable |= is_pruned
+        self.trainable |= is_targeted
 
     @classmethod
     def empty(
         cls,
         batch_size: int,
         address: Address,
-        structure: Structure,
+        hyperparameters: Hyperparameters,
     ):
-        shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
+        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
 
-        state = torch.full(shape, Tokens.pruned)
+        state = torch.full(shape, Tokens.masked)
         content = torch.zeros(shape, dtype=torch.int64)
 
         return cls(
@@ -188,23 +180,23 @@ class TensorField(TensorFieldBase):
 
 @entity.register
 class Embedder(EmbedderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address, batch_size: int):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        self.max_slots: int = structure.batch_size * math.prod(structure.shapes[address])
+        self.max_slots: int = batch_size * math.prod(hyperparameters.shapes[address])
         self.origin: Address = address
-        self.destination: Address = structure.requests[address].parent.address
+        self.destination: Address = hyperparameters.requests[address].parent.address
         self.n_embeddings: int = self.max_slots + len(Tokens)
 
         self.embeddings = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: torch.nn.Embedding(
                     num_embeddings=len(Tokens),
-                    embedding_dim=structure.d_model,
+                    embedding_dim=hyperparameters.d_model,
                 ),
                 TensorKey.content.name: torch.nn.Embedding(
                     num_embeddings=self.max_slots,
-                    embedding_dim=structure.d_model,
+                    embedding_dim=hyperparameters.d_model,
                 ),
             }
         )
@@ -238,11 +230,11 @@ class Embedder(EmbedderBase):
 
 @entity.register
 class Decoder(DecoderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        self.state_linear = torch.nn.Linear(in_features=structure.d_model, out_features=len(Tokens))
-        self.projection = torch.nn.Linear(in_features=structure.d_model, out_features=structure.d_model)
+        self.state_linear = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=len(Tokens))
+        self.projection = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=hyperparameters.d_model)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -308,7 +300,7 @@ def loss(
         )
     )
 
-    for topk in module.session.structure.requests[prediction.address].topk:
+    for topk in module.hyperparameters.requests[prediction.address].topk:
         if topk >= inputs.shape[1]:
             continue
 

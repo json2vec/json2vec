@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-import importlib
-import pkgutil
+from json2vec.tensorfields import base as base
+from json2vec.tensorfields import extensions as extensions
+from json2vec.tensorfields.base import (
+    TENSORFIELDS,
+    DecoderBase,
+    EmbedderBase,
+    Plugin,
+    RequestBase,
+    TensorFieldBase,
+)
 
-subpkg = importlib.import_module(".extensions", __name__)
-for _, fullname, _ in pkgutil.iter_modules(subpkg.__path__, subpkg.__name__ + "."):
-    importlib.import_module(fullname)
+__all__ = [
+    "TENSORFIELDS",
+    "DecoderBase",
+    "EmbedderBase",
+    "Plugin",
+    "RequestBase",
+    "TensorFieldBase",
+    "base",
+    "extensions",
+]

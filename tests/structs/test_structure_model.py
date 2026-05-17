@@ -1,25 +1,23 @@
-from json2vec.structs.structure import Structure
+from json2vec.structs.experiment import Hyperparameters
 
 
 def _payload() -> dict:
     return {
-        "name": "demo",
-        "type": "structure",
-        "batch_size": 3,
-        "dropout": 0.1,
+        "dropout": 0.2,
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "context",
-            "description": "root context docs",
-            "context_size": 2,
+            "type": "array",
+            "description": "root array docs",
+            "dropout": 0.1,
+            "max_length": 2,
             "n_outputs": 1,
             "fields": [
                 {
                     "name": "branch",
-                    "type": "context",
+                    "type": "array",
                     "description": "branch docs",
-                    "context_size": 4,
+                    "max_length": 4,
                     "n_outputs": 1,
                     "fields": [
                         {
@@ -34,30 +32,47 @@ def _payload() -> dict:
         },
     }
 
-def test_structure_derives_contexts_requests_and_shapes():
-    structure = Structure.model_validate(_payload())
+def test_hyperparameters_derives_arrays_requests_and_shapes():
+    structure = Hyperparameters.model_validate(_payload())
 
-    assert "root" in structure.contexts
-    assert "root/branch" in structure.contexts
+    assert "root" in structure.arrays
+    assert "root/branch" in structure.arrays
     assert "root/branch/category_leaf" in structure.requests
     assert structure.shapes["root/branch/category_leaf"] == (2, 4)
 
 
-def test_structure_depthwise_contains_context_levels():
-    structure = Structure.model_validate(_payload())
+def test_hyperparameters_depthwise_contains_array_levels():
+    structure = Hyperparameters.model_validate(_payload())
     assert structure.depthwise == [["root"], ["root/branch"]]
 
 
-def test_structure_string_representation_contains_tree_nodes():
-    structure = Structure.model_validate(_payload())
+def test_hyperparameters_string_representation_contains_tree_nodes():
+    structure = Hyperparameters.model_validate(_payload())
     rendered = str(structure)
-    assert "demo (structure)" in rendered
-    assert "root (context)" in rendered
+    assert "hyperparameters (hyperparameters)" in rendered
+    assert "root (array)" in rendered
     assert "category_leaf (category)" in rendered
 
 
-def test_structure_preserves_field_and_context_descriptions():
-    structure = Structure.model_validate(_payload())
-    assert structure.contexts["root"].description == "root context docs"
-    assert structure.contexts["root/branch"].description == "branch docs"
+def test_hyperparameters_preserves_field_and_array_descriptions():
+    structure = Hyperparameters.model_validate(_payload())
+    assert structure.arrays["root"].description == "root array docs"
+    assert structure.arrays["root/branch"].description == "branch docs"
     assert structure.requests["root/branch/category_leaf"].description == "category docs"
+
+
+def test_hyperparameters_resolves_array_dropout_from_nearest_parent():
+    structure = Hyperparameters.model_validate(_payload())
+
+    assert structure.resolved_dropout("root") == 0.1
+    assert structure.resolved_dropout("root/branch") == 0.1
+    assert structure.resolved_dropout("root/branch/category_leaf") == 0.1
+
+
+def test_hyperparameters_resolves_missing_dropout_to_zero():
+    payload = _payload()
+    payload.pop("dropout")
+    payload["fields"].pop("dropout")
+    structure = Hyperparameters.model_validate(payload)
+
+    assert structure.resolved_dropout("root/branch") == 0.0

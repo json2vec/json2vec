@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import functools
-import math
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Type, TypeAlias
@@ -10,7 +8,7 @@ import pluggy
 import torch
 from tensordict import TensorDict
 
-from json2vec.architecture.pool import LearnedQueryCrossAttention
+from json2vec.architecture.pool import LearnedQueryCrossAttention, MeanPool
 from json2vec.structs.enums import Component, Strata, TensorKey
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address, Leaf, Node
@@ -19,8 +17,7 @@ from json2vec.tensorfields.spec import PluginSpec
 if TYPE_CHECKING:
     from json2vec.architecture.plot import Pane
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session
-    from json2vec.structs.structure import Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
 
@@ -38,25 +35,39 @@ def default_plot(
     pass
 
 
+def default_write(module: "JSON2Vec", prediction: Prediction) -> None:
+    return None
+
+
 class EmbedderBase(torch.nn.Module):
-    def __init__(self, structure: Structure, address: Address):
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__()
 
 
 class DecoderBase(torch.nn.Module):
-    def __init__(self, structure: Structure, address: Address):
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__()
 
         self.address: Address = address
         self.sigma: torch.Tensor = torch.nn.Parameter(torch.zeros(1))
 
-        self.pool = LearnedQueryCrossAttention(
-            n_context=math.prod(structure.shapes[address]),
-            d_model=structure.d_model,
-            nhead=structure.requests[address].n_heads,
-            dropout=structure.dropout,
-            n_linear=structure.requests[address].n_linear,
-        )
+        request = hyperparameters.requests[address]
+        n_context = 1
+        for dimension in hyperparameters.shapes[address]:
+            n_context *= dimension
+        match request.pooling:
+            case "query":
+                self.pool = LearnedQueryCrossAttention(
+                    n_context=n_context,
+                    d_model=hyperparameters.d_model,
+                    nhead=request.n_heads,
+                    dropout=hyperparameters.resolved_dropout(address),
+                    n_linear=request.n_linear,
+                )
+            case "mean":
+                self.pool = MeanPool(n_context=n_context)
+            case _:
+                raise ValueError(f"unsupported decoder pooling: {request.pooling}")
 
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
         raise NotImplementedError("decoder must implement decode(pooled)")
@@ -89,7 +100,7 @@ class TensorFieldBase(ABC):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Any,
     ) -> "TensorFieldBase":
@@ -100,7 +111,7 @@ class TensorFieldBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def prune(cls, p_prune: float):
+    def target(self, p_target: float):
         raise NotImplementedError
 
 
@@ -117,14 +128,28 @@ class Plugin:
             raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
 
         self.name: str = name
-        self.components: dict[Component, Callable | Type] = {}
+        self.components: dict[Component, Callable | Type | None] = {}
 
         if name in TENSORFIELDS:
             raise ValueError(f"Plugin '{name}' already registered")
 
         TENSORFIELDS[name] = self
 
-    def register(self, obj: Type | Callable) -> Type | Callable:
+    def register(self, obj: Type | Callable | None, component: Component | str | None = None) -> Type | Callable | None:
+        if obj is None:
+            if component is None:
+                raise TypeError("component must be provided when registering None")
+
+            key = Component(component)
+            if key not in {Component.write, Component.plot}:
+                raise TypeError("only write and plot may be registered as None")
+
+            if key in self.components:
+                raise ValueError(f"Component '{key}' already registered in plugin '{self.name}'")
+
+            self.components[key] = None
+            return None
+
         if not hasattr(obj, "__name__"):
             raise NameError(f"Object {obj} does not have a name")
 
@@ -164,10 +189,10 @@ class Plugin:
                 if not issubclass(obj, EmbedderBase):
                     raise TypeError("Embedder must be a subclass of EmbedderBase")
 
-                # confirm the init method is expecting structure and address
+                # confirm the init method is expecting hyperparameters and address
                 init_params = list(obj.__init__.__annotations__.keys())
-                if "structure" not in init_params or "address" not in init_params:
-                    raise TypeError("Embedder __init__ method must accept 'structure' and 'address' parameters")
+                if "hyperparameters" not in init_params or "address" not in init_params:
+                    raise TypeError("Embedder __init__ method must accept 'hyperparameters' and 'address' parameters")
 
             case Component.Decoder:
                 if not isinstance(obj, type):
@@ -177,8 +202,8 @@ class Plugin:
                     raise TypeError("Decoder must be a subclass of DecoderBase")
 
                 init_params = list(obj.__init__.__annotations__.keys())
-                if "structure" not in init_params or "address" not in init_params:
-                    raise TypeError("Decoder __init__ method must accept 'structure' and 'address' parameters")
+                if "hyperparameters" not in init_params or "address" not in init_params:
+                    raise TypeError("Decoder __init__ method must accept 'hyperparameters' and 'address' parameters")
 
             case Component.loss:
                 if not callable(obj):
@@ -193,7 +218,7 @@ class Plugin:
                     )
 
             case Component.write:
-                if not callable(obj):
+                if obj is not None and not callable(obj):
                     raise TypeError("Write must be a callable function")
 
                 # check the signature of the function
@@ -206,7 +231,7 @@ class Plugin:
                     )
 
             case Component.plot:
-                if not callable(obj):
+                if obj is not None and not callable(obj):
                     raise TypeError("Plot must be a callable function")
 
                 expected_params: list[str] = ["module", "address", "branch", "detail"]
@@ -221,7 +246,6 @@ class Plugin:
 
         return obj
 
-    @functools.cache
     def __getattr__(self, key: Component) -> Callable | Type:
         try:
             component = Component(key)
@@ -229,9 +253,14 @@ class Plugin:
             raise ValueError(f"Component '{key}' is not a valid Component enum value")
 
         if component in self.components:
-            return self.components[component]
+            value = self.components[component]
+            if value is not None:
+                return value
 
         if component == Component.plot:
             return default_plot
+
+        if component == Component.write:
+            return default_write
 
         raise AttributeError(f"Plugin '{self.name}' has no component '{component}'")

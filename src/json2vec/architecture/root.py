@@ -1,21 +1,22 @@
-import math
-import traceback
 from collections import defaultdict
-from functools import cache, partialmethod, wraps
+from collections.abc import Callable
+from functools import cache, partialmethod
 from pathlib import Path
 from typing import Any, NotRequired, Self, TypedDict
+from urllib.parse import urlparse
 
 import lightning.pytorch as lit
+import pyarrow.fs as pafs
 import torch
 from beartype import beartype
 from loguru import logger
 from tensordict import TensorDict
 
-from json2vec.architecture.encoder import ContextEncoder
+from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
-from json2vec.data.datasets import dataloader, mock
+from json2vec.data.datasets import mock
 from json2vec.structs.enums import Metric, Strata, TensorKey
-from json2vec.structs.experiment import Session
+from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Embedding, Parcel, Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import (
@@ -31,6 +32,10 @@ from json2vec.tensorfields.base import (
 class Output(TypedDict):
     loss: NotRequired[torch.Tensor]
     predictions: list[Prediction]
+
+
+OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
+SchedulerConfig = Any | Callable[["JSON2Vec", torch.optim.Optimizer], Any]
 
 
 @beartype
@@ -53,7 +58,7 @@ def step(
             continue
 
         address: Address = prediction.address
-        request: RequestBase = module.session.structure.requests[address]
+        request: RequestBase = module.hyperparameters.requests[address]
         extension: Plugin = TENSORFIELDS[request.type]
 
         loss: torch.Tensor = extension.loss(module=module, prediction=prediction, batch=batch[address], strata=strata)
@@ -71,23 +76,6 @@ def step(
     return Output(loss=loss, predictions=predictions)
 
 
-def compile(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        model = fn(*args, **kwargs)
-        try:
-            import thunder
-
-            model = thunder.compile(model)
-            logger.info("successfully compiled module with thunder")
-        except Exception:
-            traceback.print_exc()
-            logger.info("[thunder] Returning uncompiled model instead.")
-        return model
-
-    return wrapper
-
-
 @cache
 def groupname(names: tuple[str, ...]) -> str:
     assert len(names) > 1
@@ -101,26 +89,41 @@ def groupname(names: tuple[str, ...]) -> str:
 
 class JSON2Vec(lit.LightningModule):
     @beartype
-    def __init__(self, session: Session):
+    def __init__(
+        self,
+        hyperparameters: Hyperparameters,
+        *,
+        batch_size: int = 1,
+        optimizer: OptimizerConfig | None = None,
+        scheduler: SchedulerConfig | None = None,
+    ):
 
         super().__init__()
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
 
-        self.session: Session = session
+        self.hyperparameters: Hyperparameters = hyperparameters
+        self.batch_size: int = batch_size
+        self.optimizer: OptimizerConfig | None = optimizer
+        self.scheduler: SchedulerConfig | None = scheduler
 
         self.nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
-        for address in self.session.structure.requests | self.session.structure.contexts:
-            self.nodes[address] = NodeModule(structure=self.session.structure, address=address)
+        for address in self.hyperparameters.requests | self.hyperparameters.arrays:
+            self.nodes[address] = NodeModule(
+                hyperparameters=self.hyperparameters,
+                address=address,
+                batch_size=self.batch_size,
+            )
 
-        self.example_input_array = mock(structure=session.structure)
+        self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
 
         logger.bind(
             component="model",
-            session=self.session.name,
-            structure=self.session.structure.name,
-            requests=len(self.session.structure.requests),
-            contexts=len(self.session.structure.contexts),
-            outputs=len(self.session.output),
+            batch_size=self.batch_size,
+            requests=len(self.hyperparameters.requests),
+            arrays=len(self.hyperparameters.arrays),
+            embeds=len(self.hyperparameters.embed),
         ).info("initialized JSON2Vec module")
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
@@ -130,7 +133,7 @@ class JSON2Vec(lit.LightningModule):
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            batch_size=self.session.structure.batch_size,
+            batch_size=self.batch_size,
         )
 
         return value
@@ -159,8 +162,8 @@ class JSON2Vec(lit.LightningModule):
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
 
-        for address in self.session.structure.requests.keys():
-            if address in self.session.pruned:
+        for address in self.hyperparameters.requests.keys():
+            if address in self.hyperparameters.target:
                 continue
 
             tensorfield: TensorFieldBase = inputs[address]
@@ -169,33 +172,33 @@ class JSON2Vec(lit.LightningModule):
             processed[embedding.destination].append(embedding)
             outgoing[embedding.origin] = embedding
 
-            if address in self.session.output:
+            if address in self.hyperparameters.embed:
                 predictions.append(Embedding.from_parcel(embedding))
 
         # DAG traversal from leaves to root
-        for depth in reversed(self.session.structure.depthwise):
+        for depth in reversed(self.hyperparameters.depthwise):
             # these are order-independent within the same depth
             for address in depth:
 
                 if len(processed[address]) == 0:
                     continue
 
-                encoder: ContextEncoder = self.nodes[address].encoder
+                encoder: ArrayEncoder = self.nodes[address].encoder
                 encoding: Parcel = encoder(processed[address])
                 processed[encoding.destination].append(encoding)
                 outgoing[encoding.origin] = encoding
 
-                if address in self.session.output:
+                if address in self.hyperparameters.embed:
                     predictions.append(Embedding.from_parcel(encoding))
 
-        for address in self.session.structure.requests.keys():
+        for address in self.hyperparameters.requests.keys():
 
-            if (torch.any(inputs[address].trainable)) or (address in self.session.pruned):
+            if (torch.any(inputs[address].trainable)) or (address in self.hyperparameters.target):
 
-                heritage: list[Address] = self.session.structure.requests[address].heritage
+                heritage: list[Address] = self.hyperparameters.requests[address].heritage
                 parcels: list[Parcel] = [
                     outgoing[address] for address in heritage
-                    if address not in self.session.pruned and address in outgoing.keys()
+                    if address not in self.hyperparameters.target and address in outgoing.keys()
                 ]
 
                 decoder: DecoderBase = self.nodes[address].decoder
@@ -205,109 +208,157 @@ class JSON2Vec(lit.LightningModule):
 
     @beartype
     def configure_optimizers(self):
+        if self.optimizer is None:
+            raise ValueError("optimizer must be passed to JSON2Vec before fitting")
 
-        if self.session.learning_rate is None:
-            raise ValueError("learning_rate must be defined for optimizer configuration")
+        optimizer = self.optimizer(self) if callable(self.optimizer) else self.optimizer
+        scheduler = self.scheduler(self, optimizer) if callable(self.scheduler) else self.scheduler
 
-        class GroupedParameter(TypedDict):
-            params: list[torch.nn.Parameter]
-            weight_decay: float
-
-        params: dict[str, GroupedParameter] = dict(
-            with_decay = GroupedParameter(params=[], weight_decay=self.session.weight_decay),
-            no_decay = GroupedParameter(params=[], weight_decay=0.0),
-        )
-
-        for name, parameter in self.named_parameters():
-            if not parameter.requires_grad:
-                continue
-
-            if name.endswith(".bias") or parameter.ndim <= 1 or "norm" in name.lower():
-                params["no_decay"]["params"].append(parameter)
-            else:
-                params["with_decay"]["params"].append(parameter)
-
-
-        optimizer = torch.optim.AdamW(params=list(params.values()), lr=self.session.learning_rate, betas=(0.9, 0.95))
-        trainable_parameters: int = sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad)
-        logger.bind(
-            component="optimizer",
-            session=self.session.name,
-            learning_rate=self.session.learning_rate,
-            weight_decay=self.session.weight_decay,
-            trainable_parameters=trainable_parameters,
-            warmup_ratio=self.session.warmup_ratio,
-            min_lr_ratio=self.session.min_lr_ratio,
-        ).info("configured AdamW optimizer")
-
-        total = int(getattr(self.trainer, "estimated_stepping_batches", 0) or 0)
-
-        if total <= 0:
+        if scheduler is None:
             return optimizer
 
-        warmup = max(1, int(total * self.session.warmup_ratio))
-        min_lr_ratio = self.session.min_lr_ratio
-
-        def schedule(step: int) -> float:
-
-            if step < warmup:
-                return float(step + 1) / float(warmup)
-
-            ratio = float(step - warmup) / float(max(1, total - warmup))
-
-            progress = min(1.0, ratio)
-
-            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
-
-        return dict(
-            optimizer= optimizer,
-            lr_scheduler=dict(
-                scheduler = scheduler,
-                interval = "step",
-                frequency = 1,
-            ),
-        )
+        return dict(optimizer=optimizer, lr_scheduler=scheduler)
 
     def on_save_checkpoint(self, checkpoint):
-        logger.bind(component="checkpoint", session=self.session.name).info("serializing session")
-        checkpoint["session"] = self.session.model_dump()
+        logger.bind(component="checkpoint").info("serializing hyperparameters")
+        checkpoint["hyperparameters"] = self.hyperparameters.model_dump()
 
     def on_load_checkpoint(self, checkpoint):
-        logger.bind(component="checkpoint").info("loading session from checkpoint payload")
-        if "session" in checkpoint and getattr(self, "session", None) is None:
-            self.session = Session.model_validate(checkpoint["session"])
+        logger.bind(component="checkpoint").info("loading hyperparameters from checkpoint payload")
+        if getattr(self, "hyperparameters", None) is None:
+            self.hyperparameters = self._hyperparameters_from_checkpoint(checkpoint)
 
-        if getattr(self, "session", None) is None:
-            raise ValueError("missing session in checkpoint and constructor")
+        if getattr(self, "hyperparameters", None) is None:
+            raise ValueError("missing hyperparameters in checkpoint and constructor")
+
+    @classmethod
+    def _hyperparameters_from_checkpoint(cls, checkpoint: dict[str, Any]) -> Hyperparameters:
+        if "hyperparameters" in checkpoint:
+            return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(checkpoint["hyperparameters"]))
+
+        if "session" in checkpoint:
+            payload = checkpoint["session"]
+            if isinstance(payload, dict) and isinstance(payload.get("structure"), dict):
+                migrated = dict(payload["structure"])
+                migrated.pop("name", None)
+                migrated.pop("type", None)
+                for key in ("target", "reset", "embed", "p_target", "p_mask"):
+                    if key in payload:
+                        migrated[key] = payload[key]
+                if "target" not in migrated and "pruned" in payload:
+                    migrated["target"] = payload["pruned"]
+                if "p_target" not in migrated and "p_prune" in payload:
+                    migrated["p_target"] = payload["p_prune"]
+                return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(migrated))
+
+            return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(payload))
+
+        raise ValueError("missing hyperparameters in checkpoint")
+
+    @staticmethod
+    def _migrate_hyperparameters_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        migrated = dict(payload)
+        if "target" not in migrated and "pruned" in migrated:
+            migrated["target"] = migrated.pop("pruned")
+        if "p_target" not in migrated and "p_prune" in migrated:
+            migrated["p_target"] = migrated.pop("p_prune")
+
+        def migrate_array(node: Any) -> Any:
+            if not isinstance(node, dict):
+                return node
+
+            node = dict(node)
+            if node.get("type") == "context":
+                node["type"] = "array"
+            if "max_length" not in node and "context_size" in node:
+                node["max_length"] = node.pop("context_size")
+            if "fields" in node:
+                node["fields"] = [migrate_array(child) for child in node["fields"]]
+            return node
+
+        if "fields" in migrated:
+            migrated["fields"] = migrate_array(migrated["fields"])
+
+        return migrated
+
+    @classmethod
+    def _load_checkpoint(cls, checkpoint: str) -> dict[str, Any]:
+        parsed = urlparse(checkpoint)
+        if parsed.scheme == "s3":
+            fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
+            path = f"{parsed.netloc}{parsed.path}"
+            with fs.open_input_file(path) as handle:
+                return torch.load(handle, weights_only=False, map_location="cpu")
+
+        return torch.load(checkpoint, weights_only=False, map_location="cpu")
+
+    def _load_compatible_state_dict(self, state_dict: dict[str, Any]) -> None:
+        current = self.state_dict()
+        compatible: dict[str, Any] = {}
+        skipped: list[str] = []
+
+        for key, value in state_dict.items():
+            if key not in current:
+                skipped.append(key)
+                continue
+
+            current_value = current[key]
+            if isinstance(current_value, torch.Tensor) and isinstance(value, torch.Tensor):
+                if current_value.shape != value.shape:
+                    skipped.append(key)
+                    continue
+            elif type(current_value) is not type(value):
+                skipped.append(key)
+                continue
+
+            compatible[key] = value
+
+        self.load_state_dict(state_dict=compatible, strict=False)
+
+        if skipped:
+            logger.bind(
+                component="checkpoint",
+                skipped=len(skipped),
+                keys=skipped,
+            ).warning("skipped checkpoint parameters with incompatible shapes")
 
     @classmethod
     def get_or_create(
         cls,
-        session: Session|None = None,
+        hyperparameters: Hyperparameters | None = None,
         checkpoint: str | None = None,
+        *,
+        batch_size: int = 1,
+        optimizer: OptimizerConfig | None = None,
+        scheduler: SchedulerConfig | None = None,
     ) -> Self:
 
         if checkpoint is None:
             logger.bind(component="model_factory").info("creating new JSON2Vec model")
-            if session is None:
-                raise ValueError("session is required when checkpoint is not provided")
+            if hyperparameters is None:
+                raise ValueError("hyperparameters are required when checkpoint is not provided")
 
-            model: "JSON2Vec" = cls(session=session)
+            model: "JSON2Vec" = cls(
+                hyperparameters=hyperparameters,
+                batch_size=batch_size,
+                optimizer=optimizer,
+                scheduler=scheduler,
+            )
 
             return model
 
         else:
             logger.bind(component="model_factory", checkpoint=checkpoint).info("loading JSON2Vec model from checkpoint")
-            state = torch.load(checkpoint, weights_only=False, map_location="cpu")
+            state = cls._load_checkpoint(checkpoint)
 
             model: "JSON2Vec" = cls(
-                session=session or Session.model_validate(state["session"]),
+                hyperparameters=hyperparameters or cls._hyperparameters_from_checkpoint(state),
+                batch_size=batch_size,
+                optimizer=optimizer,
+                scheduler=scheduler,
             )
 
-            model.load_state_dict(state_dict=state["state_dict"], strict=False)
+            model._load_compatible_state_dict(state_dict=state["state_dict"])
             logger.bind(component="model_factory", checkpoint=checkpoint).info("restored model state from checkpoint")
 
             return model
@@ -325,7 +376,7 @@ class JSON2Vec(lit.LightningModule):
 
                 continue
 
-            request: RequestBase = self.session.structure.requests[prediction.address]
+            request: RequestBase = self.hyperparameters.requests[prediction.address]
 
             extension: Plugin = TENSORFIELDS[request.type]
 
@@ -342,8 +393,3 @@ class JSON2Vec(lit.LightningModule):
     validation_step = partialmethod(step, strata=Strata.validate)
     test_step = partialmethod(step, strata=Strata.test)
     predict_step = partialmethod(step, strata=Strata.predict)
-
-    train_dataloader = partialmethod(dataloader, strata=Strata.train)
-    val_dataloader = partialmethod(dataloader, strata=Strata.validate)
-    test_dataloader = partialmethod(dataloader, strata=Strata.test)
-    predict_dataloader = partialmethod(dataloader, strata=Strata.predict)

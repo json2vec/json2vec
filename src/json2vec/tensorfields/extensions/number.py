@@ -10,8 +10,8 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.plot import Pane
 from json2vec.architecture.counter import Counter
+from json2vec.architecture.plot import Pane
 from json2vec.data.processing import pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
@@ -26,7 +26,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session, Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 
 number: Plugin = Plugin(name="number")
@@ -72,15 +72,15 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
-        context_shape: tuple[int, ...] = session.structure.shapes[address]
+        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
         data, flags = pad(
             nested=values,
-            shape=(len(values), *context_shape),
+            shape=(len(values), *array_shape),
             dtype=np.float64,
             pad_value=np.nan,
         )
@@ -113,39 +113,39 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def prune(self, p_prune: float = 1.0):
-        prune_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.pruned)
+    def target(self, p_target: float = 1.0):
+        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked)
 
-        is_pruned = (
+        is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
+            .lt(p_target)
             .expand_as(self.state)
         )
 
         if TensorKey.state not in self.targets.keys():
             self.targets[TensorKey.state] = self.state.clone()
 
-        self.state: torch.Tensor = self.state.masked_scatter(is_pruned, prune_token)
+        self.state: torch.Tensor = self.state.masked_scatter(is_targeted, mask_token)
 
         if TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
         self.content: torch.Tensor = self.content.masked_scatter(
-            is_pruned, torch.full_like(input=self.content, fill_value=0.0)
+            is_targeted, torch.full_like(input=self.content, fill_value=0.0)
         )
 
-        self.trainable |= is_pruned
+        self.trainable |= is_targeted
 
     @classmethod
     def empty(
         cls,
         batch_size: int,
         address: Address,
-        structure: Structure,
+        hyperparameters: Hyperparameters,
     ):
-        shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
+        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
 
-        state = torch.full(shape, Tokens.pruned)
+        state = torch.full(shape, Tokens.masked)
         content = torch.full(shape, 0.0)
 
         return cls(
@@ -227,20 +227,20 @@ class GlobalOnlineNormalizer(torch.nn.Module):
 
 @number.register
 class Embedder(EmbedderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: Request = structure.requests[address]
+        request: Request = hyperparameters.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
 
-        self.embeddings = torch.nn.Embedding(num_embeddings=len(Tokens), embedding_dim=structure.d_model)
+        self.embeddings = torch.nn.Embedding(num_embeddings=len(Tokens), embedding_dim=hyperparameters.d_model)
 
         n_bands = request.n_bands
         offset = request.offset
 
         weights = torch.logspace(start=-n_bands, end=offset, steps=n_bands + offset + 1, base=2)
-        self.linear = torch.nn.Linear(2 * len(weights), structure.d_model)
+        self.linear = torch.nn.Linear(2 * len(weights), hyperparameters.d_model)
         self.register_buffer("weights", weights.mul(math.pi).unsqueeze(dim=0))
         self.register_buffer("jitter", torch.tensor(request.jitter))
 
@@ -300,11 +300,11 @@ class Embedder(EmbedderBase):
 
 @number.register
 class Decoder(DecoderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        self.classification = torch.nn.Linear(in_features=structure.d_model, out_features=len(Tokens))
-        self.regression = torch.nn.Linear(in_features=structure.d_model, out_features=1)
+        self.classification = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=len(Tokens))
+        self.regression = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=1)
         self.counter = Counter(address=address, size=len(Tokens))
 
     @beartype
@@ -326,7 +326,7 @@ def loss(
 ) -> torch.Tensor:
 
     address: Address = prediction.address
-    request: RequestBase = module.session.structure.requests[prediction.address]
+    request: RequestBase = module.hyperparameters.requests[prediction.address]
 
     normalizer: GlobalOnlineNormalizer = module.nodes[address].embedder.normalizer
     decoder: Decoder = module.nodes[address].decoder

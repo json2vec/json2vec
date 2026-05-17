@@ -26,7 +26,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session, Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 
 text: Plugin = Plugin(name="text")
@@ -141,7 +141,7 @@ class Request(RequestBase):
     model_name: str
     max_length: Annotated[int, pydantic.Field(gt=0, default=128)]
     encoder_batch_size: Annotated[int, pydantic.Field(gt=0, default=32)]
-    pooling: Pooling = Pooling.cls
+    encoder_pooling: Pooling = Pooling.cls
     objective: Objective = Objective.l2
     revision: str | None = None
     local_files_only: bool = False
@@ -187,13 +187,13 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
-        request: Request = session.structure.requests[address]
-        context_shape: tuple[int, ...] = session.structure.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *context_shape)
+        request: Request = hyperparameters.requests[address]
+        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        leading_shape: tuple[int, ...] = (len(values), *array_shape)
 
         coerced = apply(
             values,
@@ -273,31 +273,31 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def prune(self, p_prune: float = 1.0):
-        prune_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.pruned.value)
-        is_pruned = (
+    def target(self, p_target: float = 1.0):
+        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
+        is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
+            .lt(p_target)
             .expand_as(self.state)
         )
         self._cache_targets()
 
-        self.state = self.state.masked_scatter(is_pruned, prune_token)
-        self._zero_content(is_pruned)
+        self.state = self.state.masked_scatter(is_targeted, mask_token)
+        self._zero_content(is_targeted)
 
-        self.trainable |= is_pruned
+        self.trainable |= is_targeted
 
     @classmethod
     def empty(
         cls,
         batch_size: int,
         address: Address,
-        structure: Structure,
+        hyperparameters: Hyperparameters,
     ):
-        request: Request = structure.requests[address]
-        leading_shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
+        request: Request = hyperparameters.requests[address]
+        leading_shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
         token_shape: tuple[int, ...] = (*leading_shape, request.max_length)
-        state = torch.full(leading_shape, Tokens.pruned, dtype=torch.int64)
+        state = torch.full(leading_shape, Tokens.masked, dtype=torch.int64)
 
         return cls(
             state=state,
@@ -316,10 +316,10 @@ class TensorField(TensorFieldBase):
 
 @text.register
 class Embedder(EmbedderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: Request = structure.requests[address]
+        request: Request = hyperparameters.requests[address]
 
         self.origin: Address = address
         self.destination: Address = request.parent.address
@@ -328,10 +328,10 @@ class Embedder(EmbedderBase):
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
-            embedding_dim=structure.d_model,
+            embedding_dim=hyperparameters.d_model,
         )
         self.linear = torch.nn.Sequential(
-            torch.nn.Linear(in_features=self.hidden_size, out_features=structure.d_model),
+            torch.nn.Linear(in_features=self.hidden_size, out_features=hyperparameters.d_model),
             torch.nn.GELU(),
         )
 
@@ -352,7 +352,7 @@ class Embedder(EmbedderBase):
         return self.hf_model
 
     def _pool(self, outputs: Any, attention_mask: torch.Tensor) -> torch.Tensor:
-        if self.request.pooling == Pooling.pooler:
+        if self.request.encoder_pooling == Pooling.pooler:
             pooled = getattr(outputs, "pooler_output", None)
             if pooled is None:
                 raise ValueError(f"text model '{self.request.model_name}' does not expose pooler_output")
@@ -362,7 +362,7 @@ class Embedder(EmbedderBase):
         if hidden is None:
             raise ValueError(f"text model '{self.request.model_name}' does not expose last_hidden_state")
 
-        if self.request.pooling == Pooling.cls:
+        if self.request.encoder_pooling == Pooling.cls:
             return hidden[:, 0]
 
         mask = attention_mask.unsqueeze(-1).to(dtype=hidden.dtype)
@@ -448,17 +448,17 @@ class Embedder(EmbedderBase):
 
 @text.register
 class Decoder(DecoderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: Request = structure.requests[address]
+        request: Request = hyperparameters.requests[address]
         hidden_size = _hidden_size(request.model_name, request.revision, request.local_files_only)
         self.classification = torch.nn.Linear(
-            in_features=structure.d_model,
+            in_features=hyperparameters.d_model,
             out_features=len(Tokens),
         )
         self.linear = torch.nn.Linear(
-            in_features=structure.d_model,
+            in_features=hyperparameters.d_model,
             out_features=hidden_size,
         )
         self.counter = Counter(address=address, size=len(Tokens))
@@ -481,7 +481,7 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     address: Address = prediction.address
-    request: Request = module.session.structure.requests[address]
+    request: Request = module.hyperparameters.requests[address]
     embedder: Embedder = module.nodes[address].embedder
     decoder: Decoder = module.nodes[address].decoder
 

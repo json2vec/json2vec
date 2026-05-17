@@ -26,7 +26,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session, Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 
 class DatePart(enum.StrEnum):
@@ -169,20 +169,20 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
-        context_shape: tuple[int, ...] = session.structure.shapes[address]
+        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
-        request: RequestBase = session.structure.requests[address]
+        request: RequestBase = hyperparameters.requests[address]
 
         if request.pattern is not None:
             values = apply(values, datetime.strptime, request.pattern)
 
         data, state = pad(
             nested=values,
-            shape=(len(values), *context_shape),
+            shape=(len(values), *array_shape),
             dtype="datetime64[m]",
             pad_value=np.nan,
         )
@@ -225,12 +225,12 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def prune(self, p_prune: float):
-        prune_tokens = torch.full_like(input=self.state, fill_value=Tokens.pruned)
+    def target(self, p_target: float):
+        mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked)
 
-        is_pruned = (
+        is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
+            .lt(p_target)
             .expand_as(self.state)
         )
 
@@ -240,26 +240,26 @@ class TensorField(TensorFieldBase):
         if TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
-        self.state: torch.Tensor = self.state.masked_scatter(is_pruned, prune_tokens)
+        self.state: torch.Tensor = self.state.masked_scatter(is_targeted, mask_tokens)
 
         for datepart in self.content.keys():
-            self.content[datepart] = self.content[datepart].masked_scatter(is_pruned, prune_tokens)
+            self.content[datepart] = self.content[datepart].masked_scatter(is_targeted, mask_tokens)
 
-        self.trainable |= is_pruned
+        self.trainable |= is_targeted
 
     @classmethod
     def empty(
         cls,
         batch_size: int,
         address: Address,
-        structure: Structure,
+        hyperparameters: Hyperparameters,
     ):
-        shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
+        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
 
-        state: torch.Tensor = torch.full(shape, Tokens.pruned)
+        state: torch.Tensor = torch.full(shape, Tokens.masked)
 
         dateparts: dict[DatePart, torch.Tensor] = {}
-        for datepart in structure.requests[address].dateparts:
+        for datepart in hyperparameters.requests[address].dateparts:
             dateparts[datepart] = state.clone()
 
         return cls(
@@ -273,16 +273,16 @@ class TensorField(TensorFieldBase):
 
 @dateparts.register
 class Embedder(EmbedderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request = structure.requests[address]
+        request = hyperparameters.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
-            embedding_dim=structure.d_model,
+            embedding_dim=hyperparameters.d_model,
         )
 
         self.dateparts = torch.nn.ModuleDict()
@@ -290,7 +290,7 @@ class Embedder(EmbedderBase):
         for datepart in request.dateparts:
             self.dateparts[datepart] = torch.nn.Embedding(
                 num_embeddings=len(Tokens) + DatePart.depth(datepart) + 1,
-                embedding_dim=structure.d_model,
+                embedding_dim=hyperparameters.d_model,
             )
 
     @beartype
@@ -314,20 +314,20 @@ class Embedder(EmbedderBase):
 
 @dateparts.register
 class Decoder(DecoderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
         self.linear = torch.nn.Linear(
-            in_features=structure.d_model,
+            in_features=hyperparameters.d_model,
             out_features=len(Tokens),
         )
 
         self.dateparts = torch.nn.ModuleDict()
 
-        for datepart in structure.requests[address].dateparts:
+        for datepart in hyperparameters.requests[address].dateparts:
             dim = len(Tokens) + DatePart.depth(datepart) + 1
             self.dateparts[datepart] = torch.nn.Linear(
-                in_features=structure.d_model, out_features=dim
+                in_features=hyperparameters.d_model, out_features=dim
             )
 
     @beartype
@@ -374,7 +374,7 @@ def loss(
         value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(),
     )
 
-    request: RequestBase = module.session.structure.requests[prediction.address]
+    request: RequestBase = module.hyperparameters.requests[prediction.address]
 
     losses: list[torch.Tensor] = []
 

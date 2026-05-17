@@ -96,14 +96,36 @@ def _register(func: Callable[..., Any], *, mode: ProcessorMode) -> Callable[...,
     return func
 
 
-class _RegisterNamespace:
-    __slots__ = ()
+def shim(
+    func: Callable[..., Any] | None = None,
+    *,
+    yields: bool | None = None,
+    **kwargs: Any,
+) -> Callable[..., Any]:
+    if "yield" in kwargs:
+        if yields is not None:
+            raise TypeError("use either 'yields' or 'yield', not both")
+        yields = kwargs.pop("yield")
 
-    def generator(self, func: Callable[..., Any]) -> Callable[..., Any]:
-        return _register(func, mode=ProcessorMode.generator)
+    if kwargs:
+        unexpected = ", ".join(sorted(kwargs))
+        raise TypeError(f"unexpected shim keyword argument(s): {unexpected}")
 
-    def transformation(self, func: Callable[..., Any]) -> Callable[..., Any]:
-        return _register(func, mode=ProcessorMode.transformation)
+    if yields is None:
+        yields = False
 
+    if not isinstance(yields, bool):
+        raise TypeError("yields must be a boolean")
 
-register = _RegisterNamespace()
+    mode = ProcessorMode.generator if yields else ProcessorMode.transformation
+
+    def decorator(inner: Callable[..., Any]) -> Callable[..., Any]:
+        return _register(inner, mode=mode)
+
+    if func is None:
+        return decorator
+
+    if not callable(func):
+        raise TypeError("shim can only decorate callables")
+
+    return decorator(func)

@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-import importlib
-import pkgutil
+from json2vec.processors import base as base
+from json2vec.processors import extensions as extensions
+from json2vec.processors.base import PROCESSORS, Processor, ProcessorMode, shim
 
-subpkg = importlib.import_module(".extensions", __name__)
-for _, fullname, _ in pkgutil.iter_modules(subpkg.__path__, subpkg.__name__ + "."):
-    importlib.import_module(fullname)
+__all__ = [
+    "PROCESSORS",
+    "Processor",
+    "ProcessorMode",
+    "base",
+    "extensions",
+    "shim",
+]

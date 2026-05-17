@@ -5,15 +5,16 @@ import os
 import random
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from functools import cache, partial
-from itertools import batched
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeVar
 from urllib.parse import urlparse
 
 import jmespath
+import lightning.pytorch as lit
 import pyarrow.dataset as ds
 import pyarrow.fs as pafs
+import pydantic
 import torch
 from beartype import beartype
 from loguru import logger
@@ -23,8 +24,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from json2vec.data.processing import Pipeline
 from json2vec.processors.base import PROCESSORS, Processor
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
-from json2vec.structs.environment import DataLoaderEnvironment
-from json2vec.structs.experiment import Session, Structure
+from json2vec.structs.experiment import Hyperparameters
 
 # import pyarrow.fs as fs
 from json2vec.structs.tree import Address
@@ -32,6 +32,80 @@ from json2vec.tensorfields.base import TENSORFIELDS, TensorFieldBase
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
+
+
+T = TypeVar("T")
+StrataMap = Mapping[Strata | str, T]
+
+
+class Dataset(pydantic.BaseModel):
+    root: str | None = None
+    sample_rate: Annotated[float, pydantic.Field(gt=0.0, le=1.0, default=1.0)]
+    file_buffer_size: Annotated[int, pydantic.Field(gt=0)]
+    observation_buffer_size: Annotated[int, pydantic.Field(gt=0)]
+    processor: Annotated[str | None, pydantic.Field(default="default")]
+    kwargs: dict[str, Any] = pydantic.Field(default_factory=dict)
+    suffix: Suffix
+    patterns: dict[Strata, str]
+
+    @pydantic.model_validator(mode="after")
+    def check_processor_registered(self):
+        if self.processor is not None and self.processor not in PROCESSORS:
+            raise ValueError(f"you haven't registered processor {self.processor}")
+
+        return self
+
+
+def _strata_key(value: Strata | str) -> Strata:
+    if isinstance(value, Strata):
+        return value
+
+    return Strata(value.strip().lower())
+
+
+def _by_strata(value: T | StrataMap[T], *, default: T, coerce: Callable[[T], T]) -> dict[Strata, T]:
+    if isinstance(value, Mapping):
+        normalized = {strata: default for strata in Strata}
+        for key, item in value.items():
+            normalized[_strata_key(key)] = coerce(item)
+        return normalized
+
+    return {strata: coerce(value) for strata in Strata}
+
+
+def _coerce_num_workers(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("num_workers must be an integer or None")
+    if value < 0:
+        raise ValueError("num_workers must be >= 0")
+    return value
+
+
+def _coerce_bool(name: str) -> Callable[[bool], bool]:
+    def coerce(value: bool) -> bool:
+        if not isinstance(value, bool):
+            raise TypeError(f"{name} must be a boolean")
+        return value
+
+    return coerce
+
+
+def _coerce_sharding(value: ShardingStrategy | str) -> ShardingStrategy:
+    if isinstance(value, ShardingStrategy):
+        return value
+    if isinstance(value, str):
+        return ShardingStrategy(value.strip().lower())
+    raise TypeError("sharding must be a ShardingStrategy or string")
+
+
+def _coerce_chunk_batch_size(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("chunk_batch_size must be an integer")
+    if value < 1:
+        raise ValueError("chunk_batch_size must be >= 1")
+    return value
 
 
 @beartype
@@ -63,13 +137,13 @@ def _is_assigned_to_worker(shard_key: str, worker_id: int, num_workers: int) -> 
 
 
 @beartype
-def fetch(session: Session, strata: Strata, sharding: ShardingStrategy) -> Iterator[str]:
-    if session.dataset.root is None:
+def fetch(dataset: Dataset, strata: Strata, sharding: ShardingStrategy) -> Iterator[str]:
+    if dataset.root is None:
         return
 
-    regex: re.Pattern = re.compile(session.dataset.patterns[strata])
+    regex: re.Pattern = re.compile(dataset.patterns[strata])
 
-    parsed = urlparse(session.dataset.root)
+    parsed = urlparse(dataset.root)
 
     if parsed.scheme == "s3":
         fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
@@ -105,12 +179,12 @@ def fetch(session: Session, strata: Strata, sharding: ShardingStrategy) -> Itera
 
 @beartype
 def observe(
-    session: Session,
+    dataset: Dataset,
     strata: Strata,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
 ) -> Iterator[dict]:
-    if session.dataset.root is None:
+    if dataset.root is None:
         # Processor-driven mode: seed a single synthetic observation for one worker.
         worker_id, num_workers = _worker_identity()
         if _is_assigned_to_worker(
@@ -121,15 +195,15 @@ def observe(
             yield {}
         return
 
-    paths: Iterator[str] = fetch(session=session, strata=strata, sharding=sharding)
+    paths: Iterator[str] = fetch(dataset=dataset, strata=strata, sharding=sharding)
     shuffled_paths: Iterator[str] = shuffle(
         paths,
-        size=session.dataset.file_buffer_size,
+        size=dataset.file_buffer_size,
         strata=strata,
     )
     yield from read(
         shuffled_paths,
-        session=session,
+        dataset=dataset,
         sharding=sharding,
         chunk_batch_size=chunk_batch_size,
     )
@@ -138,13 +212,13 @@ def observe(
 @beartype
 def read(
     pipe: Iterable[str],
-    session: Session,
+    dataset: Dataset,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
 ) -> Iterator[dict]:
     worker_id, num_workers = _worker_identity()
 
-    match session.dataset.suffix:
+    match dataset.suffix:
         case Suffix.ndjson:
             import json
 
@@ -200,13 +274,13 @@ def read(
                 # Create pyarrow S3 filesystem
 
                 try:
-                    dataset = ds.dataset(
+                    arrow_dataset = ds.dataset(
                         f"{bucket}/{key}",
-                        format=session.dataset.suffix.value,
+                        format=dataset.suffix.value,
                         filesystem=fs,
                     )
 
-                    for chunk_index, batch in enumerate(dataset.to_batches(batch_size=chunk_batch_size)):
+                    for chunk_index, batch in enumerate(arrow_dataset.to_batches(batch_size=chunk_batch_size)):
                         if sharding == ShardingStrategy.chunk:
                             if not _is_assigned_to_worker(
                                 shard_key=f"chunk:{uri_path}:{chunk_index}",
@@ -237,36 +311,36 @@ def read(
                     continue
 
         case _:
-            raise ValueError(f"Unsupported suffix: {session.dataset.suffix}")
+            raise ValueError(f"Unsupported suffix: {dataset.suffix}")
 
 
 @beartype
 def process(
     pipe: Iterable[dict],
-    session: Session,
+    dataset: Dataset,
     strata: Strata,
     state: dict[Address, Any],
 ) -> Iterator[Any]:
 
-    if session.dataset.processor is None:
+    if dataset.processor is None:
         for item in pipe:
             yield [item]
 
     else:
-        processor: Processor = PROCESSORS[session.dataset.processor]
+        processor: Processor = PROCESSORS[dataset.processor]
 
         for item in pipe:
-            yield from processor.outputs(item, **session.dataset.kwargs, strata=strata, state=state)
+            yield from processor.outputs(item, **dataset.kwargs, strata=strata, state=state)
 
 
 @beartype
-def batch(pipe: Iterable[Any], session: Session) -> Iterator[list[Any]]:
+def batch(pipe: Iterable[Any], batch_size: int) -> Iterator[list[Any]]:
 
     batch: list[Any] = []
 
     for item in pipe:
         batch.append(item)
-        if len(batch) == session.structure.batch_size:
+        if len(batch) == batch_size:
             yield batch
             batch = []
 
@@ -341,23 +415,23 @@ def spotcheck(result, address: Address, every: int = 1000):
 
 def encode(
     batch: dict[str, Any],
-    session: Session,
+    hyperparameters: Hyperparameters,
     strata: Strata,
     state: dict[Address, Any],
 ) -> TensorDict[Address, TensorFieldBase]:
 
     out: dict[Address, TensorFieldBase] = {}
 
-    for address, request in session.structure.requests.items():
+    for address, request in hyperparameters.requests.items():
         TensorField: type[TensorFieldBase] = TENSORFIELDS[request.type].TensorField
 
-        if (strata == Strata.predict) & (address in session.pruned):
+        if (strata == Strata.predict) & (address in hyperparameters.target):
             # basically, if we are in inference mode, we should create empty values
 
             out[address] = TensorField.empty(
                 batch_size=len(batch),
                 address=address,
-                structure=session.structure,
+                hyperparameters=hyperparameters,
             )
 
             continue
@@ -369,15 +443,15 @@ def encode(
         out[address] = TensorField.new(
             values=result,
             address=address,
-            session=session,
+            hyperparameters=hyperparameters,
             strata=strata,
             state=state.get(address),
         )
 
-        # otherwise, we should "prune" them entirely during model training
+        # otherwise, we should "target" them entirely during model training
         # but we still need to instantiate them for backpropagation
-        if address in session.pruned:
-            out[address].prune(p_prune=1.0)
+        if address in hyperparameters.target:
+            out[address].target(p_target=1.0)
 
     inputs: TensorDict[Address, TensorFieldBase] = TensorDict(source=out)
 
@@ -391,41 +465,41 @@ def encode(
 @beartype
 def transform(
     pipe: Iterable[dict[str, Any]],
-    session: Session,
+    hyperparameters: Hyperparameters,
     strata: Strata,
     state: dict[Address, Any],
 ) -> Iterator[TensorDict[Address, TensorFieldBase]]:
     for batch in pipe:
 
-        yield encode(batch=batch, session=session, strata=strata, state=state)
+        yield encode(batch=batch, hyperparameters=hyperparameters, strata=strata, state=state)
 
 
 @beartype
 def mask(
     pipe: Iterable[TensorDict[Address, TensorFieldBase]],
-    session: Session,
+    hyperparameters: Hyperparameters,
 ) -> Iterator[TensorDict[Address, TensorFieldBase]]:
-    if not session.p_mask > 0.0:
+    if not hyperparameters.p_mask > 0.0:
         yield from pipe
 
     else:
         for batch in pipe:
-            for address in session.structure.requests.keys():
+            for address in hyperparameters.requests.keys():
                 field: TensorFieldBase = batch[address]
-                field.mask(p_mask=session.p_mask)
+                field.mask(p_mask=hyperparameters.p_mask)
 
             yield batch
 
 
 @beartype
-def prune(
+def target(
     pipe: Iterable[TensorDict[Address, TensorFieldBase]],
-    session: Session,
+    hyperparameters: Hyperparameters,
 ) -> Iterator[TensorDict[Address, TensorFieldBase]]:
     for batch in pipe:
-        for address in session.structure.requests.keys():
+        for address in hyperparameters.requests.keys():
             field: TensorFieldBase = batch[address]
-            field.prune(p_prune=session.p_prune)
+            field.target(p_target=hyperparameters.p_target)
 
         yield batch
 
@@ -435,84 +509,190 @@ def identity(data: Any) -> Any:
 
 
 class BatchDataset(IterableDataset):
-    def __init__(self, model: JSON2Vec, strata: Strata, environment: DataLoaderEnvironment):
+    def __init__(
+        self,
+        hyperparameters: Hyperparameters,
+        dataset: Dataset,
+        state: dict[Address, Any],
+        batch_size: int,
+        strata: Strata,
+        sharding: ShardingStrategy,
+        chunk_batch_size: int,
+    ):
         super().__init__()
 
-        self.session: Session = model.session
-        self.environment: DataLoaderEnvironment = environment
-
-        self.state: dict[Address, Any] = model.state
-
+        self.hyperparameters: Hyperparameters = hyperparameters
+        self.dataset: Dataset = dataset
+        self.state: dict[Address, Any] = state
+        self.batch_size: int = batch_size
         self.strata: Strata = strata
+        self.sharding: ShardingStrategy = sharding
+        self.chunk_batch_size: int = chunk_batch_size
         logger.bind(
             component="data",
-            session=self.session.name,
             strata=self.strata,
-            request_fields=len(self.session.structure.requests),
+            batch_size=self.batch_size,
+            request_fields=len(self.hyperparameters.requests),
             stateful_fields=len(self.state),
-            sharding=self.environment.sharding,
-            chunk_batch_size=self.environment.chunk_batch_size,
+            sharding=self.sharding,
+            chunk_batch_size=self.chunk_batch_size,
         ).info("initialized batch dataset")
 
     def __iter__(self):
         yield from (
             Pipeline(
-                session=self.session,
+                hyperparameters=self.hyperparameters,
+                dataset=self.dataset,
                 strata=self.strata,
                 state=self.state,
-                sharding=self.environment.sharding,
-                chunk_batch_size=self.environment.chunk_batch_size,
+                sharding=self.sharding,
+                chunk_batch_size=self.chunk_batch_size,
+                batch_size=self.batch_size,
             )
             | observe
             | process
-            | partial(shuffle, size=self.session.dataset.observation_buffer_size)
+            | partial(shuffle, size=self.dataset.observation_buffer_size)
             | batch
             | transform
             | mask
-            | prune
+            | target
         )
 
 
-def dataloader(module: JSON2Vec, strata: Strata) -> DataLoader:
-    environment: DataLoaderEnvironment = DataLoaderEnvironment.from_env()
-    workers: int = environment.num_workers if environment.num_workers is not None else (os.cpu_count() or 0)
-    persistent_workers: bool = environment.persistent_workers and workers > 0
-    pin_memory: bool = environment.pin_memory and strata != Strata.predict and torch.cuda.is_available()
+def dataloader(
+    hyperparameters: Hyperparameters,
+    dataset: Dataset,
+    state: dict[Address, Any],
+    batch_size: int,
+    strata: Strata,
+    num_workers: int | None,
+    persistent_workers: bool,
+    pin_memory: bool,
+    sharding: ShardingStrategy,
+    chunk_batch_size: int,
+) -> DataLoader:
+    workers: int = num_workers if num_workers is not None else (os.cpu_count() or 0)
+    active_persistent_workers: bool = persistent_workers and workers > 0
+    active_pin_memory: bool = pin_memory and strata != Strata.predict and torch.cuda.is_available()
     logger.bind(
         component="data",
-        session=module.session.name,
         strata=strata,
-        batch_size=module.session.structure.batch_size,
+        batch_size=batch_size,
         workers=workers,
-        persistent_workers=persistent_workers,
-        pin_memory=pin_memory,
-        sharding=environment.sharding,
-        chunk_batch_size=environment.chunk_batch_size,
+        persistent_workers=active_persistent_workers,
+        pin_memory=active_pin_memory,
+        sharding=sharding,
+        chunk_batch_size=chunk_batch_size,
     ).info("building dataloader")
 
     return DataLoader(
-        dataset=BatchDataset(model=module, strata=strata, environment=environment),
+        dataset=BatchDataset(
+            hyperparameters=hyperparameters,
+            dataset=dataset,
+            state=state,
+            batch_size=batch_size,
+            strata=strata,
+            sharding=sharding,
+            chunk_batch_size=chunk_batch_size,
+        ),
         drop_last=False,
         batch_size=None,
         collate_fn=identity,
         num_workers=workers,
-        persistent_workers=persistent_workers,
-        pin_memory=pin_memory,
+        persistent_workers=active_persistent_workers,
+        pin_memory=active_pin_memory,
     )
 
 
-def mock(structure: Structure) -> TensorDict[Address, TensorFieldBase]:
+class DefaultDataModule(lit.LightningDataModule):
+    def __init__(
+        self,
+        hyperparameters: Hyperparameters,
+        dataset: Dataset,
+        state: dict[Address, Any],
+        batch_size: int,
+        num_workers: int | None | StrataMap[int | None] = None,
+        persistent_workers: bool | StrataMap[bool] = True,
+        pin_memory: bool | StrataMap[bool] = True,
+        sharding: ShardingStrategy | str | StrataMap[ShardingStrategy | str] = ShardingStrategy.chunk,
+        chunk_batch_size: int | StrataMap[int] = 4096,
+    ):
+        super().__init__()
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+
+        self.hyperparameters = hyperparameters
+        self.dataset = dataset
+        self.state = state
+        self.batch_size = batch_size
+        self.num_workers = _by_strata(num_workers, default=None, coerce=_coerce_num_workers)
+        self.persistent_workers = _by_strata(
+            persistent_workers,
+            default=True,
+            coerce=_coerce_bool("persistent_workers"),
+        )
+        self.pin_memory = _by_strata(pin_memory, default=True, coerce=_coerce_bool("pin_memory"))
+        self.sharding = _by_strata(sharding, default=ShardingStrategy.chunk, coerce=_coerce_sharding)
+        self.chunk_batch_size = _by_strata(
+            chunk_batch_size,
+            default=4096,
+            coerce=_coerce_chunk_batch_size,
+        )
+
+    @classmethod
+    def from_model(
+        cls,
+        model: JSON2Vec,
+        dataset: Dataset,
+        **kwargs: Any,
+    ) -> "DefaultDataModule":
+        return cls(
+            hyperparameters=model.hyperparameters,
+            dataset=dataset,
+            state=model.state,
+            batch_size=model.batch_size,
+            **kwargs,
+        )
+
+    def dataloader(self, strata: Strata) -> DataLoader:
+        return dataloader(
+            hyperparameters=self.hyperparameters,
+            dataset=self.dataset,
+            state=self.state,
+            batch_size=self.batch_size,
+            strata=strata,
+            num_workers=self.num_workers[strata],
+            persistent_workers=self.persistent_workers[strata],
+            pin_memory=self.pin_memory[strata],
+            sharding=self.sharding[strata],
+            chunk_batch_size=self.chunk_batch_size[strata],
+        )
+
+    def train_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.train)
+
+    def val_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.validate)
+
+    def test_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.test)
+
+    def predict_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.predict)
+
+
+def mock(hyperparameters: Hyperparameters, batch_size: int) -> TensorDict[Address, TensorFieldBase]:
 
     out: dict[Address, TensorFieldBase] = {}
 
-    for address, request in structure.requests.items():
+    for address, request in hyperparameters.requests.items():
 
         TensorField: TensorFieldBase = TENSORFIELDS[request.type].TensorField
 
         out[address] = TensorField.empty(
-            batch_size=structure.batch_size, 
+            batch_size=batch_size,
             address=address, 
-            structure=structure
+            hyperparameters=hyperparameters
         )
 
-    return TensorDict(source=out, batch_size=structure.batch_size)
+    return TensorDict(source=out, batch_size=batch_size)

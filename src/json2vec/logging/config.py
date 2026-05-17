@@ -13,12 +13,7 @@ LOG_LEVEL: str = os.getenv("JSON2VEC_LOG_LEVEL", "DEBUG").upper()
 def sink(message):
     record = message.record
     extras = {k: str(v) for k, v in record["extra"].items()}
-    payload = {
-        "timestamp": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
-        "level": record["level"].name,
-        **extras,
-        "message": record["message"],
-    }
+    payload = {"level": record["level"].name, **extras, "message": record["message"]}
     console.print(JSON(json.dumps(payload), indent=None))
 
 

@@ -29,7 +29,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session, Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 category: Plugin = Plugin(name="category")
 # This is a content-level fallback for OOV categories. The field is still present,
@@ -184,21 +184,21 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Vocabulary,
     ) -> TensorFieldBase:
 
-        context_shape: tuple[int, ...] = session.structure.shapes[address]
+        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
         tokens = apply(values, partial(state, update=(strata == Strata.train)))
 
-        if len(state) > (max_vocab_size := session.structure.requests[address].max_vocab_size):
+        if len(state) > (max_vocab_size := hyperparameters.requests[address].max_vocab_size):
             print(f"Vocab in address {address} exceeds max vocab size of {max_vocab_size}")
 
         data, states = pad(
             nested=tokens,
-            shape=(len(values), *context_shape),
+            shape=(len(values), *array_shape),
             dtype=np.int64,
             pad_value=0,
         )
@@ -206,8 +206,8 @@ class TensorField(TensorFieldBase):
         state_tensor = torch.tensor(states, dtype=torch.int64)
         content = torch.tensor(data=data, dtype=torch.int64)
         if strata == Strata.train:
-            p_unavailable: float = session.structure.requests[address].p_unavailable
-            unavailable_index: int = session.structure.requests[address].max_vocab_size
+            p_unavailable: float = hyperparameters.requests[address].p_unavailable
+            unavailable_index: int = hyperparameters.requests[address].max_vocab_size
 
             if p_unavailable > 0.0:
                 # Unavailable content never appears naturally during training, because the
@@ -244,12 +244,12 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def prune(self, p_prune: float = 1.0):
-        prune_tokens = torch.full_like(input=self.state, fill_value=Tokens.pruned.value)
+    def target(self, p_target: float = 1.0):
+        mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
 
-        is_pruned = (
+        is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
+            .lt(p_target)
             .expand_as(self.state)
         )
 
@@ -259,21 +259,21 @@ class TensorField(TensorFieldBase):
         if TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
-        self.state = self.state.masked_scatter(is_pruned, prune_tokens)
-        self.content = self.content.masked_scatter(is_pruned, torch.zeros_like(input=self.content))
+        self.state = self.state.masked_scatter(is_targeted, mask_tokens)
+        self.content = self.content.masked_scatter(is_targeted, torch.zeros_like(input=self.content))
 
-        self.trainable |= is_pruned
+        self.trainable |= is_targeted
 
     @classmethod
     def empty(
         cls,
         batch_size: int,
         address: Address,
-        structure: Structure,
+        hyperparameters: Hyperparameters,
     ):
-        shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
+        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
 
-        state = torch.full(shape, Tokens.pruned)
+        state = torch.full(shape, Tokens.masked)
         content = torch.zeros(shape, dtype=torch.int64)
 
         return cls(
@@ -287,10 +287,10 @@ class TensorField(TensorFieldBase):
 
 @category.register
 class Embedder(EmbedderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: Request = structure.requests[address]
+        request: Request = hyperparameters.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
         self.max_vocab_size: int = request.max_vocab_size
@@ -303,11 +303,11 @@ class Embedder(EmbedderBase):
             {
                 TensorKey.state.name: torch.nn.Embedding(
                     num_embeddings=len(Tokens),
-                    embedding_dim=structure.d_model,
+                    embedding_dim=hyperparameters.d_model,
                 ),
                 TensorKey.content.name: torch.nn.Embedding(
                     num_embeddings=self.n_content_tokens,
-                    embedding_dim=structure.d_model,
+                    embedding_dim=hyperparameters.d_model,
                 ),
             }
         )
@@ -348,19 +348,19 @@ class Embedder(EmbedderBase):
 
 @category.register
 class Decoder(DecoderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: RequestBase = structure.requests[address]
+        request: RequestBase = hyperparameters.requests[address]
 
         self.linears = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: torch.nn.Linear(
-                    in_features=structure.d_model,
+                    in_features=hyperparameters.d_model,
                     out_features=len(Tokens),
                 ),
                 TensorKey.content.name: torch.nn.Linear(
-                    in_features=structure.d_model,
+                    in_features=hyperparameters.d_model,
                     out_features=request.max_vocab_size + 1,
                 ),
             }
@@ -441,7 +441,7 @@ def loss(
         )
     )
 
-    for topk in module.session.structure.requests[prediction.address].topk:
+    for topk in module.hyperparameters.requests[prediction.address].topk:
         module.track(
             (prediction.address, strata, Metric.accuracy, f"top{topk}"),
             value=(
@@ -467,7 +467,6 @@ def write(module: JSON2Vec, prediction: Prediction):
     node = module.nodes[prediction.address]
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     content_logits: torch.Tensor = prediction.payload[TensorKey.content]
-    unavailable_index: int = module.session.structure.requests[prediction.address].max_vocab_size
 
     tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
     state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
@@ -478,14 +477,12 @@ def write(module: JSON2Vec, prediction: Prediction):
     }
 
     vocab = np.array(node.embedder.vocab.snapshot(), dtype=object)
-    # Reporting only exposes realized vocab entries plus the reserved unavailable label;
-    # unused capacity between len(vocab) and max_vocab_size is intentionally hidden.
-    labels = np.concatenate([vocab, np.array([UNAVAILABLE_LABEL], dtype=object)])
+    labels = vocab
     content_shape = tuple(state_distribution.shape[:-1])
     content_labels = np.full(content_shape, None, dtype=object)
     content_probabilities = np.zeros(content_shape, dtype=np.float32)
 
-    requested_ks: list[int] = module.session.structure.requests[prediction.address].topk
+    requested_ks: list[int] = module.hyperparameters.requests[prediction.address].topk
     max_requested_k: int = max(requested_ks, default=0)
 
     def _pack_candidates(labels: np.ndarray, probabilities: np.ndarray) -> list[dict[str, float]] | list:
@@ -504,31 +501,28 @@ def write(module: JSON2Vec, prediction: Prediction):
         return [_empty_candidates(shape[1:]) for _ in range(shape[0])]
 
     topk_payload: list | None = _empty_candidates(content_shape)
-    candidate_indices = torch.tensor(
-        [*range(len(vocab)), unavailable_index],
-        device=content_logits.device,
-        dtype=torch.int64,
-    )
-    candidate_logits = content_logits.index_select(dim=-1, index=candidate_indices)
-    log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
-    max_logits, max_indices = candidate_logits.max(dim=-1)
-    content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
+    if len(vocab) > 0:
+        candidate_indices = torch.arange(len(vocab), device=content_logits.device, dtype=torch.int64)
+        candidate_logits = content_logits.index_select(dim=-1, index=candidate_indices)
+        log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
+        max_logits, max_indices = candidate_logits.max(dim=-1)
+        content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
 
-    max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
-    content_labels = labels[max_indices_np]
+        max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
+        content_labels = labels[max_indices_np]
 
-    if max_requested_k > 0:
-        topk: int = min(max_requested_k, candidate_logits.shape[-1])
-        topk_logits, topk_indices = candidate_logits.topk(k=topk, dim=-1)
-        topk_probabilities = (topk_logits - log_norm).exp()
+        if max_requested_k > 0:
+            topk: int = min(max_requested_k, candidate_logits.shape[-1])
+            topk_logits, topk_indices = candidate_logits.topk(k=topk, dim=-1)
+            topk_probabilities = (topk_logits - log_norm).exp()
 
-        topk_indices_np: np.ndarray = topk_indices.detach().cpu().numpy().astype(np.int32)
-        topk_labels_np: np.ndarray = labels[topk_indices_np]
-        topk_probabilities_np: np.ndarray = topk_probabilities.detach().float().cpu().numpy()
-        topk_payload = _pack_candidates(
-            labels=topk_labels_np,
-            probabilities=topk_probabilities_np,
-        )
+            topk_indices_np: np.ndarray = topk_indices.detach().cpu().numpy().astype(np.int32)
+            topk_labels_np: np.ndarray = labels[topk_indices_np]
+            topk_probabilities_np: np.ndarray = topk_probabilities.detach().float().cpu().numpy()
+            topk_payload = _pack_candidates(
+                labels=topk_labels_np,
+                probabilities=topk_probabilities_np,
+            )
 
     return {
         TensorKey.state.name: state_payload,

@@ -12,16 +12,14 @@ from json2vec.processors.base import Processor, ProcessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 
 
-def _session_for_suffix(suffix: Suffix):
-    return SimpleNamespace(dataset=SimpleNamespace(suffix=suffix))
+def _dataset_for_suffix(suffix: Suffix):
+    return SimpleNamespace(suffix=suffix)
 
 
-def _session_for_fetch(root: Path):
+def _dataset_for_fetch(root: Path):
     return SimpleNamespace(
-        dataset=SimpleNamespace(
-            root=str(root),
-            patterns={strata: r".*\.ndjson$" for strata in Strata},
-        )
+        root=str(root),
+        patterns={strata: r".*\.ndjson$" for strata in Strata},
     )
 
 
@@ -63,11 +61,11 @@ def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(datasets, "_is_assigned_to_worker", assign_first_chunk_only)
 
-    session = _session_for_suffix(Suffix.ndjson)
+    dataset = _dataset_for_suffix(Suffix.ndjson)
     output = list(
         datasets.read.__wrapped__(
             [str(path)],
-            session=session,
+            dataset=dataset,
             sharding=ShardingStrategy.chunk,
             chunk_batch_size=2,
         )
@@ -87,11 +85,11 @@ def test_read_ndjson_record_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(datasets, "_is_assigned_to_worker", assign_even_records)
 
-    session = _session_for_suffix(Suffix.ndjson)
+    dataset = _dataset_for_suffix(Suffix.ndjson)
     output = list(
         datasets.read.__wrapped__(
             [str(path)],
-            session=session,
+            dataset=dataset,
             sharding=ShardingStrategy.record,
             chunk_batch_size=3,
         )
@@ -110,10 +108,10 @@ def test_fetch_file_sharding_filters_files(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(datasets, "_is_assigned_to_worker", assign_keep_only)
 
-    session = _session_for_fetch(tmp_path)
+    dataset = _dataset_for_fetch(tmp_path)
     files = list(
         datasets.fetch.__wrapped__(
-            session=session,
+            dataset=dataset,
             strata=Strata.predict,
             sharding=ShardingStrategy.file,
         )
@@ -126,10 +124,10 @@ def test_fetch_without_file_sharding_returns_all_matching_files(tmp_path: Path):
     (tmp_path / "second.ndjson").write_text("", encoding="utf-8")
     (tmp_path / "ignore.csv").write_text("", encoding="utf-8")
 
-    session = _session_for_fetch(tmp_path)
+    dataset = _dataset_for_fetch(tmp_path)
     files = list(
         datasets.fetch.__wrapped__(
-            session=session,
+            dataset=dataset,
             strata=Strata.predict,
             sharding=ShardingStrategy.chunk,
         )
@@ -138,13 +136,11 @@ def test_fetch_without_file_sharding_returns_all_matching_files(tmp_path: Path):
 
 
 def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(
-        dataset=SimpleNamespace(
-            root=None,
-            file_buffer_size=4,
-            suffix=Suffix.ndjson,
-            patterns={strata: r".*" for strata in Strata},
-        )
+    dataset = SimpleNamespace(
+        root=None,
+        file_buffer_size=4,
+        suffix=Suffix.ndjson,
+        patterns={strata: r".*" for strata in Strata},
     )
 
     monkeypatch.setattr(datasets, "_worker_identity", lambda: (0, 2))
@@ -156,7 +152,7 @@ def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPa
 
     output = list(
         datasets.observe.__wrapped__(
-            session=session,
+            dataset=dataset,
             strata=Strata.train,
             sharding=ShardingStrategy.chunk,
             chunk_batch_size=2,
@@ -166,13 +162,11 @@ def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPa
 
 
 def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(
-        dataset=SimpleNamespace(
-            root=None,
-            file_buffer_size=4,
-            suffix=Suffix.ndjson,
-            patterns={strata: r".*" for strata in Strata},
-        )
+    dataset = SimpleNamespace(
+        root=None,
+        file_buffer_size=4,
+        suffix=Suffix.ndjson,
+        patterns={strata: r".*" for strata in Strata},
     )
 
     monkeypatch.setattr(datasets, "_worker_identity", lambda: (1, 2))
@@ -184,7 +178,7 @@ def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch
 
     output = list(
         datasets.observe.__wrapped__(
-            session=session,
+            dataset=dataset,
             strata=Strata.train,
             sharding=ShardingStrategy.chunk,
             chunk_batch_size=2,
@@ -197,12 +191,12 @@ def test_read_unsupported_suffix_raises_value_error():
     class UnknownSuffix(enum.StrEnum):
         bad = "bad"
 
-    session = _session_for_suffix(UnknownSuffix.bad)
+    dataset = _dataset_for_suffix(UnknownSuffix.bad)
     with pytest.raises(ValueError, match="Unsupported suffix: bad"):
         list(
             datasets.read.__wrapped__(
                 [],
-                session=session,
+                dataset=dataset,
                 sharding=ShardingStrategy.chunk,
                 chunk_batch_size=2,
             )
@@ -210,7 +204,7 @@ def test_read_unsupported_suffix_raises_value_error():
 
 
 def test_process_transformation_processor_wraps_dict_output(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_transformation", kwargs={}))
+    dataset = SimpleNamespace(processor="__test_transformation", kwargs={})
 
     def transformation(observation: dict):
         return {"id": observation["id"]}
@@ -221,7 +215,7 @@ def test_process_transformation_processor_wraps_dict_output(monkeypatch: pytest.
     output = list(
         datasets.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
-            session=session,
+            dataset=dataset,
             strata=Strata.train,
             state={},
         )
@@ -230,7 +224,7 @@ def test_process_transformation_processor_wraps_dict_output(monkeypatch: pytest.
 
 
 def test_process_generator_processor_wraps_list_outputs(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_generator", kwargs={}))
+    dataset = SimpleNamespace(processor="__test_generator", kwargs={})
 
     def generator(observation: dict):
         return [{"id": observation["id"]}, {"id": observation["id"] + 100}]
@@ -241,7 +235,7 @@ def test_process_generator_processor_wraps_list_outputs(monkeypatch: pytest.Monk
     output = list(
         datasets.process.__wrapped__(
             [{"id": 1}],
-            session=session,
+            dataset=dataset,
             strata=Strata.train,
             state={},
         )
@@ -250,7 +244,7 @@ def test_process_generator_processor_wraps_list_outputs(monkeypatch: pytest.Monk
 
 
 def test_process_generator_processor_receives_strata_and_state(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_generator_context", kwargs={}))
+    dataset = SimpleNamespace(processor="__test_generator_context", kwargs={})
 
     def generator(observation: dict, strata, state):
         yield {"id": observation["id"], "strata": strata, "marker": state["marker"]}
@@ -261,7 +255,7 @@ def test_process_generator_processor_receives_strata_and_state(monkeypatch: pyte
     output = list(
         datasets.process.__wrapped__(
             [{"id": 1}],
-            session=session,
+            dataset=dataset,
             strata=Strata.validate,
             state={"marker": "seen"},
         )
@@ -270,7 +264,7 @@ def test_process_generator_processor_receives_strata_and_state(monkeypatch: pyte
 
 
 def test_process_transformation_processor_rejects_non_dict(monkeypatch: pytest.MonkeyPatch):
-    session = SimpleNamespace(dataset=SimpleNamespace(processor="__test_invalid_transformation", kwargs={}))
+    dataset = SimpleNamespace(processor="__test_invalid_transformation", kwargs={})
 
     def transformation(observation: dict):
         return observation["id"]
@@ -286,20 +280,20 @@ def test_process_transformation_processor_rejects_non_dict(monkeypatch: pytest.M
         list(
             datasets.process.__wrapped__(
                 [{"id": 1}],
-                session=session,
+                dataset=dataset,
                 strata=Strata.train,
                 state={},
             )
         )
 
 
-def test_process_without_processor_still_wraps_root_context():
-    session = SimpleNamespace(dataset=SimpleNamespace(processor=None, kwargs={}))
+def test_process_without_processor_still_wraps_root_array():
+    dataset = SimpleNamespace(processor=None, kwargs={})
 
     output = list(
         datasets.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
-            session=session,
+            dataset=dataset,
             strata=Strata.train,
             state={},
         )
@@ -308,8 +302,7 @@ def test_process_without_processor_still_wraps_root_context():
 
 
 def test_batch_splits_and_preserves_tail():
-    session = SimpleNamespace(structure=SimpleNamespace(batch_size=2))
-    chunks = list(datasets.batch.__wrapped__([1, 2, 3, 4, 5], session=session))
+    chunks = list(datasets.batch.__wrapped__([1, 2, 3, 4, 5], batch_size=2))
     assert chunks == [[1, 2], [3, 4], [5]]
 
 
@@ -370,3 +363,22 @@ def test_spotcheck_ignores_empty_result_until_threshold(monkeypatch: pytest.Monk
     monkeypatch.setattr(datasets, "_jmespath_counter", Counter())
     datasets.spotcheck([], "root/id", every=3)
     datasets.spotcheck([], "root/id", every=3)
+
+
+def test_datamodule_accepts_named_loader_configuration_per_strata():
+    module = datasets.DefaultDataModule(
+        hyperparameters=SimpleNamespace(),
+        dataset=SimpleNamespace(),
+        state={},
+        batch_size=2,
+        num_workers={Strata.train: 0},
+        sharding={Strata.train: "record"},
+        chunk_batch_size={Strata.train: 7},
+    )
+
+    assert module.num_workers[Strata.train] == 0
+    assert module.num_workers[Strata.validate] is None
+    assert module.sharding[Strata.train] == ShardingStrategy.record
+    assert module.sharding[Strata.validate] == ShardingStrategy.chunk
+    assert module.chunk_batch_size[Strata.train] == 7
+    assert module.chunk_batch_size[Strata.validate] == 4096

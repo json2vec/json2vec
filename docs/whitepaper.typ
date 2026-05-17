@@ -870,7 +870,7 @@ Two customers may look similar at the root level but diverge sharply inside `cus
 For example:
 
 ```yaml
-output:
+embed:
   - customer
   - customer/transaction
   - customer/login_sessions

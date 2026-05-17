@@ -10,17 +10,41 @@ from json2vec.structs.packages import Parcel
 from json2vec.structs.tree import Address
 
 if TYPE_CHECKING:
-    from json2vec.structs.structure import Structure
+    from json2vec.structs.experiment import Hyperparameters
+
+
+def n_kv_heads(attention: str, n_heads: int) -> int:
+    match attention:
+        case "mha":
+            return n_heads
+        case "gqa":
+            return max(1, n_heads // 2)
+        case "mqa":
+            return 1
+        case _:
+            raise ValueError(f"unsupported attention mode: {attention}")
 
 
 class RotaryTransformerEncoderLayer(torch.nn.Module):
-    def __init__(self, d_model: int, nhead: int, dropout: float, ffn_multiplier: int = 4):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        n_kv_heads: int,
+        dropout: float,
+        ffn_multiplier: int = 4,
+    ):
         super().__init__()
 
         self.attention_norm = torch.nn.LayerNorm(normalized_shape=d_model)
         self.ffn_norm = torch.nn.LayerNorm(normalized_shape=d_model)
 
-        self.attention = RotaryMultiheadAttention(d_model=d_model, nhead=nhead, dropout=dropout)
+        self.attention = RotaryMultiheadAttention(
+            d_model=d_model,
+            nhead=nhead,
+            n_kv_heads=n_kv_heads,
+            dropout=dropout,
+        )
 
         hidden = d_model * ffn_multiplier
         self.ffn = torch.nn.Sequential(
@@ -37,33 +61,36 @@ class RotaryTransformerEncoderLayer(torch.nn.Module):
         return inputs + self.ffn(self.ffn_norm(inputs))
 
 
-class ContextEncoder(torch.nn.Module):
-    def __init__(self, structure: Structure, address: Address):
+class ArrayEncoder(torch.nn.Module):
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__()
 
-        context = structure.contexts[address]
+        array = hyperparameters.arrays[address]
+        dropout = hyperparameters.resolved_dropout(address)
 
         self.origin: Address = address
-        self.destination: Address = context.parent.address
+        self.destination: Address = array.parent.address
 
         layers: list[RotaryTransformerEncoderLayer] = []
-        for _ in range(context.n_layers):
-            layers.append(
-                RotaryTransformerEncoderLayer(
-                    d_model=structure.d_model,
-                    nhead=context.n_heads,
-                    dropout=structure.dropout,
+        if array.attention != "none":
+            for _ in range(array.n_layers):
+                layers.append(
+                    RotaryTransformerEncoderLayer(
+                        d_model=hyperparameters.d_model,
+                        nhead=array.n_heads,
+                        n_kv_heads=n_kv_heads(array.attention, array.n_heads),
+                        dropout=dropout,
+                    )
                 )
-            )
 
         self.encoder = torch.nn.ModuleList(layers)
 
         self.pool = LearnedQueryCrossAttention(
-            n_context=context.n_outputs,
-            d_model=structure.d_model,
-            nhead=context.n_heads,
-            dropout=structure.dropout,
-            n_linear=context.n_linear,
+            n_context=array.n_outputs,
+            d_model=hyperparameters.d_model,
+            nhead=array.n_heads,
+            dropout=dropout,
+            n_linear=array.n_linear,
         )
 
     def forward(self, parcels: list[Parcel]) -> Parcel:

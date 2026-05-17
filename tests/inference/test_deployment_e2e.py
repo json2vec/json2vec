@@ -16,10 +16,8 @@ import torch
 
 from json2vec.architecture.root import JSON2Vec
 from json2vec.data.datasets import encode
-from json2vec.structs.enums import Stage, Strata, Suffix
-from json2vec.structs.experiment import Dataset, Session
-from json2vec.structs.structure import Structure
-
+from json2vec.structs.enums import Strata
+from json2vec.structs.experiment import Hyperparameters
 
 SERVER_SCRIPT = """
 import sys
@@ -140,18 +138,15 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float = 30.0) -> tupl
         raise AssertionError(f"deployment returned HTTP {exc.code}: {body}") from exc
 
 
-def _structure() -> Structure:
-    return Structure.model_validate(
+def _hyperparameters() -> Hyperparameters:
+    return Hyperparameters.model_validate(
         {
-            "name": "deployment-e2e",
-            "type": "structure",
-            "batch_size": 2,
-            "dropout": 0.1,
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "context",
-                "context_size": 1,
+                "type": "array",
+                "dropout": 0.1,
+                "max_length": 1,
                 "n_outputs": 1,
                 "fields": [
                     {
@@ -162,31 +157,7 @@ def _structure() -> Structure:
                     }
                 ],
             },
-        }
-    )
-
-
-def _session(dataset_root: Path) -> Session:
-    dataset = Dataset.model_validate(
-        {
-            "root": str(dataset_root),
-            "sample_rate": 1.0,
-            "file_buffer_size": 4,
-            "observation_buffer_size": 4,
-            "processor": "default",
-            "kwargs": {},
-            "suffix": Suffix.ndjson,
-            "patterns": {strata: r".*\.ndjson$" for strata in Strata},
-        }
-    )
-
-    return Session.model_validate(
-        {
-            "name": "deployment-e2e",
-            "dataset": dataset,
-            "structure": _structure(),
-            "task": Stage.predict,
-            "output": ["root/label"],
+            "embed": ["root/label"],
         }
     )
 
@@ -197,15 +168,15 @@ def _write_fake_records(path: Path) -> list[dict[str, str]]:
     return records
 
 
-def _build_checkpoint(tmp_path: Path) -> tuple[Path, Session]:
+def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
     dataset_path = tmp_path / "fake_records.ndjson"
     records = _write_fake_records(dataset_path)
-    session = _session(dataset_root=dataset_path)
-    model = JSON2Vec.get_or_create(session=session)
+    hyperparameters = _hyperparameters()
+    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
 
     inputs = encode(
         batch=[[record] for record in records],
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=model.state,
     )
@@ -215,11 +186,11 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Session]:
     torch.save(
         {
             "state_dict": model.state_dict(),
-            "session": session.model_dump(mode="python"),
+            "hyperparameters": hyperparameters.model_dump(mode="python"),
         },
         checkpoint_path,
     )
-    return checkpoint_path, session
+    return checkpoint_path, hyperparameters
 
 
 def _launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subprocess.Popen[str]:
@@ -237,7 +208,7 @@ def _launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subproces
 
 
 def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path, session = _build_checkpoint(tmp_path)
+    checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "deployment.log"
@@ -255,7 +226,7 @@ def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) 
     assert "root/label" in payload["embeddings"]
 
     embedding = payload["embeddings"]["root/label"]["embedding"]
-    assert len(embedding) == session.structure.d_model
+    assert len(embedding) == hyperparameters.d_model
     assert all(isinstance(value, float) for value in embedding)
 
 

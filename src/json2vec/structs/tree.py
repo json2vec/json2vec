@@ -1,5 +1,5 @@
 import functools
-from typing import Annotated, NewType
+from typing import Annotated, Literal, NewType
 
 import jmespath
 import pydantic
@@ -64,6 +64,7 @@ class Leaf(Node):
     name: str
     type: str
     query: str
+    pooling: Literal["query", "mean"] = "query"
     weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)]
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)]
 
@@ -86,7 +87,7 @@ class Leaf(Node):
         out: list[int] = []
 
         for node in self.path:
-            if node.type == "context":
-                out.append(node.context_size)
+            if node.type == "array":
+                out.append(node.max_length)
 
         return tuple(out)

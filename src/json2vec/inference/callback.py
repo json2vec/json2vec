@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 from lightning.pytorch import callbacks
 from tensordict import TensorDict
 
+from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase

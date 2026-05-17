@@ -1,28 +1,22 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import torch
 
 from json2vec.architecture.root import JSON2Vec
-from json2vec.structs.enums import Stage, Strata, Suffix
-from json2vec.structs.experiment import Dataset, Session
-from json2vec.structs.structure import Structure
+from json2vec.structs.experiment import Hyperparameters
 
 
-def _structure() -> Structure:
-    return Structure.model_validate(
+def _hyperparameters() -> Hyperparameters:
+    return Hyperparameters.model_validate(
         {
-            "name": "checkpoint-root",
-            "type": "structure",
-            "batch_size": 2,
-            "dropout": 0.1,
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "context",
-                "context_size": 1,
+                "type": "array",
+                "dropout": 0.1,
+                "max_length": 1,
                 "n_outputs": 1,
                 "fields": [
                     {
@@ -37,47 +31,20 @@ def _structure() -> Structure:
     )
 
 
-def _session(dataset_root: Path) -> Session:
-    dataset = Dataset.model_validate(
-        {
-            "root": str(dataset_root),
-            "sample_rate": 1.0,
-            "file_buffer_size": 4,
-            "observation_buffer_size": 4,
-            "processor": "default",
-            "kwargs": {},
-            "suffix": Suffix.ndjson,
-            "patterns": {strata: r".*\.ndjson$" for strata in Strata},
-        }
-    )
-
-    return Session.model_validate(
-        {
-            "name": "checkpoint-root",
-            "dataset": dataset,
-            "structure": _structure(),
-            "task": Stage.predict,
-            "output": ["root/label"],
-        }
-    )
-
-
-def _build_checkpoint(tmp_path: Path) -> tuple[Path, Session]:
-    dataset_path = tmp_path / "fake_records.ndjson"
-    dataset_path.write_text(json.dumps({"label": "alpha"}), encoding="utf-8")
-    session = _session(dataset_root=dataset_path)
-    model = JSON2Vec.get_or_create(session=session)
+def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
+    hyperparameters = _hyperparameters()
+    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
     checkpoint_path = tmp_path / "model.ckpt"
 
     torch.save(
         {
             "state_dict": model.state_dict(),
-            "session": session.model_dump(mode="python"),
+            "hyperparameters": hyperparameters.model_dump(mode="python"),
         },
         checkpoint_path,
     )
 
-    return checkpoint_path, session
+    return checkpoint_path, hyperparameters
 
 
 class FakeS3FileSystem:
@@ -91,11 +58,38 @@ class FakeS3FileSystem:
 
 
 def test_get_or_create_loads_checkpoint_from_s3_uri(monkeypatch, tmp_path: Path) -> None:
-    checkpoint_path, session = _build_checkpoint(tmp_path)
+    checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
     filesystem = FakeS3FileSystem(checkpoint_path=checkpoint_path)
     monkeypatch.setattr("json2vec.architecture.root.pafs.S3FileSystem", lambda: filesystem)
 
     model = JSON2Vec.get_or_create(checkpoint="s3://bucket/models/model.ckpt")
 
     assert filesystem.opened_paths == ["bucket/models/model.ckpt"]
-    assert model.session.name == session.name
+    assert model.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+
+
+def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> None:
+    _, hyperparameters = _build_checkpoint(tmp_path)
+    model = JSON2Vec.get_or_create(
+        hyperparameters=hyperparameters,
+        batch_size=2,
+        optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
+    )
+    optimizer = model.configure_optimizers()
+
+    assert isinstance(optimizer, torch.optim.AdamW)
+
+
+def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> None:
+    _, hyperparameters = _build_checkpoint(tmp_path)
+    model = JSON2Vec.get_or_create(
+        hyperparameters=hyperparameters,
+        batch_size=2,
+        optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
+        scheduler=lambda _module, optimizer: torch.optim.lr_scheduler.StepLR(optimizer, step_size=1),
+    )
+
+    configured = model.configure_optimizers()
+
+    assert isinstance(configured["optimizer"], torch.optim.AdamW)
+    assert isinstance(configured["lr_scheduler"], torch.optim.lr_scheduler.StepLR)

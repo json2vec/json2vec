@@ -11,7 +11,7 @@ def restore_processors():
     base.PROCESSORS.update(snapshot)
 
 
-def test_register_assigns_processor_mode():
+def test_shim_assigns_processor_mode():
     def transformation(observation: dict):
         return observation
 
@@ -22,19 +22,19 @@ def test_register_assigns_processor_mode():
 
     generator.__name__ = "__test_generator_processor"
 
-    base.register.transformation(transformation)
-    base.register.generator(generator)
+    base.shim(yields=False)(transformation)
+    base.shim(yields=True)(generator)
 
     assert base.PROCESSORS[transformation.__name__].mode == base.ProcessorMode.transformation
     assert base.PROCESSORS[generator.__name__].mode == base.ProcessorMode.generator
 
 
-def test_register_rejects_duplicate_processor_names():
+def test_shim_rejects_duplicate_processor_names():
     def first(observation: dict):
         return observation
 
     first.__name__ = "__duplicate_processor"
-    base.register.transformation(first)
+    base.shim(yields=False)(first)
 
     def second(observation: dict):
         return observation
@@ -42,7 +42,22 @@ def test_register_rejects_duplicate_processor_names():
     second.__name__ = "__duplicate_processor"
 
     with pytest.raises(ValueError, match="already registered"):
-        base.register.transformation(second)
+        base.shim(yields=False)(second)
+
+
+def test_shim_accepts_yield_keyword_via_kwargs():
+    def generator(observation: dict):
+        yield observation
+
+    generator.__name__ = "__yield_keyword_processor"
+    base.shim(**{"yield": True})(generator)
+
+    assert base.PROCESSORS[generator.__name__].mode == base.ProcessorMode.generator
+
+
+def test_shim_rejects_non_boolean_mode():
+    with pytest.raises(TypeError, match="yields must be a boolean"):
+        base.shim(yields="yes")
 
 
 def test_processor_call_filters_unknown_kwargs():

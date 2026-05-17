@@ -13,3 +13,5 @@ wheels/
 wandb/
 .vscode/
 .python-version
+
+examples/

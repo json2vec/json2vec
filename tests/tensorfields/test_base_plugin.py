@@ -25,22 +25,22 @@ def _build_plugin() -> Plugin:
 
     class TensorField(TensorFieldBase):
         @classmethod
-        def new(cls, values, address, session, strata, state):
+        def new(cls, values, address, hyperparameters, strata, state):
             return object()
 
         def mask(self, p_mask: float):
             return None
 
-        def prune(self, p_prune: float):
+        def target(self, p_target: float):
             return None
 
     class Embedder(EmbedderBase):
-        def __init__(self, structure: object, address: object):
-            super().__init__(structure=structure, address=address)
+        def __init__(self, hyperparameters: object, address: object):
+            super().__init__(hyperparameters=hyperparameters, address=address)
 
     class Decoder(DecoderBase):
-        def __init__(self, structure: object, address: object):
-            super().__init__(structure=structure, address=address)
+        def __init__(self, hyperparameters: object, address: object):
+            super().__init__(hyperparameters=hyperparameters, address=address)
 
     plugin.register(Request)
     plugin.register(TensorField)
@@ -116,14 +116,35 @@ def test_plugin_plot_defaults_when_unregistered():
         TENSORFIELDS.pop(plugin.name, None)
 
 
+def test_plugin_write_defaults_to_no_output_when_unregistered():
+    plugin = Plugin(name=_plugin_name("defaultwrite"))
+    try:
+        assert plugin.write(module=object(), prediction=object()) is None
+        assert Component.write not in plugin.components
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_accepts_explicit_none_write_and_plot():
+    plugin = Plugin(name=_plugin_name("nonehooks"))
+    try:
+        plugin.register(None, component=Component.write)
+        plugin.register(None, component=Component.plot)
+
+        assert plugin.write(module=object(), prediction=object()) is None
+        assert callable(plugin.plot)
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
 def test_plugin_rejects_embedder_with_missing_address_param():
     class Embedder(EmbedderBase):
-        def __init__(self, structure: object):
-            super().__init__(structure=structure, address=None)
+        def __init__(self, hyperparameters: object):
+            super().__init__(hyperparameters=hyperparameters, address=None)
 
     plugin = Plugin(name=_plugin_name("badembedder"))
     try:
-        with pytest.raises(TypeError, match="must accept 'structure' and 'address'"):
+        with pytest.raises(TypeError, match="must accept 'hyperparameters' and 'address'"):
             plugin.register(Embedder)
     finally:
         TENSORFIELDS.pop(plugin.name, None)

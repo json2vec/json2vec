@@ -1,20 +1,75 @@
-from typing import Any, Type, TypeAlias
+from typing import Any, Literal, Type, TypeAlias
 
 import litserve as ls
 import pydantic
 import torch
 from beartype import beartype
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
 from json2vec.architecture.root import JSON2Vec
-from json2vec.data.datasets import encode, process
-from json2vec.structs.enums import Strata
-from json2vec.structs.environment import DeploymentEnvironment
+from json2vec.data.datasets import Dataset, encode, process
+from json2vec.structs.enums import Strata, Suffix
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
+
+
+def default_dataset() -> Dataset:
+    return Dataset(
+        root=None,
+        file_buffer_size=1,
+        observation_buffer_size=1,
+        processor="default",
+        suffix=Suffix.ndjson,
+        patterns={strata: r".*" for strata in Strata},
+    )
+
+
+class DeploymentEnvironment(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+
+    checkpoint: str = Field(
+        default="model.ckpt",
+        validation_alias=AliasChoices("JSON2VEC_CHECKPOINT", "CHECKPOINT"),
+    )
+    max_batch_size: int = Field(
+        default=128,
+        ge=1,
+        validation_alias=AliasChoices("JSON2VEC_MAX_BATCH_SIZE", "MAX_BATCH_SIZE"),
+    )
+    batch_timeout: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("JSON2VEC_BATCH_TIMEOUT", "BATCH_TIMEOUT"),
+    )
+    workers_per_device: int = Field(
+        default=1,
+        ge=1,
+        validation_alias=AliasChoices("JSON2VEC_WORKERS_PER_DEVICE", "JSON2VEC_N_WORKERS", "N_WORKERS"),
+    )
+    accelerator: Literal["auto", "cpu", "cuda", "mps"] = Field(
+        default="auto",
+        validation_alias=AliasChoices("JSON2VEC_ACCELERATOR", "ACCELERATOR"),
+    )
+    track_requests: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("JSON2VEC_TRACK_REQUESTS", "TRACK_REQUESTS"),
+    )
+
+    @field_validator("checkpoint", "accelerator", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped == "":
+                raise ValueError(f"{info.field_name} must not be blank")
+            return stripped
+
+        return value
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -31,9 +86,10 @@ class BatchItem(pydantic.BaseModel):
 
 
 class Deployment(ls.LitAPI):
-    def __init__(self, checkpoint: str, *args, **kwargs) -> None:
+    def __init__(self, checkpoint: str, dataset: Dataset | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.checkpoint = checkpoint
+        self.dataset = default_dataset() if dataset is None else dataset
 
     def setup(self, device: str) -> None:
         self.model: JSON2Vec = JSON2Vec.get_or_create(checkpoint=self.checkpoint).to(device)
@@ -50,7 +106,7 @@ class Deployment(ls.LitAPI):
             observations: list[Any] = list(
                 process(
                     pipe=[request],
-                    session=self.model.session,
+                    dataset=self.dataset,
                     strata=Strata.predict,
                     state=self.state,
                 )
@@ -66,7 +122,7 @@ class Deployment(ls.LitAPI):
 
         encoded = encode(
             batch=observations,
-            session=self.model.session,
+            hyperparameters=self.model.hyperparameters,
             strata=Strata.predict,
             state=self.state,
         )

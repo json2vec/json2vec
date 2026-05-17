@@ -53,9 +53,25 @@ class LearnedQueryCrossAttention(torch.nn.Module):
 
     def forward(self, memory: torch.Tensor) -> torch.Tensor:
         N, _, _ = memory.shape
-        queries = self.queries.unsqueeze(0).expand(N, -1, -1)
+        queries = self.queries
+
+        if not torch.is_grad_enabled():
+            queries = queries.detach()
+            memory = memory.detach()
+
+        queries = queries.unsqueeze(0).expand(N, -1, -1)
 
         for block in self.blocks:
             queries = block(queries=queries, memory=memory)
 
         return self.norm(queries)
+
+
+class MeanPool(torch.nn.Module):
+    def __init__(self, n_context: int):
+        super().__init__()
+        self.n_context = n_context
+
+    def forward(self, memory: torch.Tensor) -> torch.Tensor:
+        pooled = memory.mean(dim=1, keepdim=True)
+        return pooled.expand(-1, self.n_context, -1)

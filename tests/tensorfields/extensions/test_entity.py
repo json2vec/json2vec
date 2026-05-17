@@ -1,14 +1,12 @@
-from types import SimpleNamespace
-
 import pytest
 import torch
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.structure import Structure
+from json2vec.structs.experiment import Hyperparameters
 from json2vec.tensorfields.extensions.entity import TensorField
 
 
-def _structure_payload(*, context_size: int = 2, topk: list[int] | None = None) -> dict:
+def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) -> dict:
     field: dict = {
         "name": "identifier",
         "type": "entity",
@@ -18,15 +16,12 @@ def _structure_payload(*, context_size: int = 2, topk: list[int] | None = None) 
         field["topk"] = topk
 
     return {
-        "name": "demo",
-        "type": "structure",
-        "batch_size": 2,
-        "dropout": 0.1,
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "context",
-            "context_size": context_size,
+            "type": "array",
+            "dropout": 0.1,
+            "max_length": max_length,
             "n_outputs": 1,
             "fields": [field],
         },
@@ -34,26 +29,24 @@ def _structure_payload(*, context_size: int = 2, topk: list[int] | None = None) 
 
 
 def test_entity_shape_validation_happens_during_pydantic_loading():
-    Structure.model_validate(_structure_payload())
+    Hyperparameters.model_validate(_structure_payload())
 
     with pytest.raises(ValueError, match="requires at least 2 elements per observation"):
-        Structure.model_validate(_structure_payload(context_size=1))
+        Hyperparameters.model_validate(_structure_payload(max_length=1))
 
 
 def test_entity_topk_validation_rejects_one():
     with pytest.raises(ValueError, match="must not be 1"):
-        Structure.model_validate(_structure_payload(topk=[1]))
+        Hyperparameters.model_validate(_structure_payload(topk=[1]))
 
 
-def test_entity_topk_validation_rejects_values_above_max_local_classes():
-    # For shape (batch=2, context_size=2), max local classes are 2*2=4.
-    with pytest.raises(ValueError, match="max local entity classes"):
-        Structure.model_validate(_structure_payload(topk=[4]))
+def test_entity_topk_validation_allows_batch_size_dependent_values():
+    Hyperparameters.model_validate(_structure_payload(topk=[4]))
 
 
 def test_entity_tensorfield_uses_batch_local_unique_ids():
-    structure = Structure.model_validate(_structure_payload())
-    session = SimpleNamespace(structure=structure)
+    structure = Hyperparameters.model_validate(_structure_payload())
+    hyperparameters = structure
 
     values = [
         ["alice", "bob"],
@@ -63,7 +56,7 @@ def test_entity_tensorfield_uses_batch_local_unique_ids():
     field = TensorField.new(
         values=values,
         address="root/identifier",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=None,
     )
@@ -76,13 +69,13 @@ def test_entity_tensorfield_uses_batch_local_unique_ids():
 
 
 def test_entity_tensorfield_separates_state_and_content():
-    structure = Structure.model_validate(_structure_payload())
-    session = SimpleNamespace(structure=structure)
+    structure = Hyperparameters.model_validate(_structure_payload())
+    hyperparameters = structure
 
     field = TensorField.new(
         values=[["alice", None], ["alice"]],
         address="root/identifier",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=None,
     )
@@ -110,8 +103,8 @@ def test_entity_tensorfield_separates_state_and_content():
 
 
 def test_entity_tensorfield_rejects_unhashable_values():
-    structure = Structure.model_validate(_structure_payload())
-    session = SimpleNamespace(structure=structure)
+    structure = Hyperparameters.model_validate(_structure_payload())
+    hyperparameters = structure
 
     values = [
         [[1, 2], "ok"],
@@ -122,15 +115,15 @@ def test_entity_tensorfield_rejects_unhashable_values():
         TensorField.new(
             values=values,
             address="root/identifier",
-            session=session,
+            hyperparameters=hyperparameters,
             strata=Strata.train,
             state=None,
         )
 
 
 def test_entity_mask_preserves_targets_before_replacement():
-    structure = Structure.model_validate(_structure_payload())
-    session = SimpleNamespace(structure=structure)
+    structure = Hyperparameters.model_validate(_structure_payload())
+    hyperparameters = structure
     values = [
         ["a", "b"],
         ["c", "d"],
@@ -139,7 +132,7 @@ def test_entity_mask_preserves_targets_before_replacement():
     field = TensorField.new(
         values=values,
         address="root/identifier",
-        session=session,
+        hyperparameters=hyperparameters,
         strata=Strata.train,
         state=None,
     )

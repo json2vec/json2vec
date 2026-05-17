@@ -6,15 +6,7 @@ class Tokens(enum.IntEnum):
     null = 1
     padded = 2
     masked = 3
-    pruned = 4
-    other = 5
-
-
-class Stage(enum.StrEnum):
-    fit = "fit"
-    validate = "validate"
-    test = "test"
-    predict = "predict"
+    other = 4
 
 
 class Strata(enum.StrEnum):
@@ -22,20 +14,6 @@ class Strata(enum.StrEnum):
     validate = "validate"
     test = "test"
     predict = "predict"
-
-    @classmethod
-    def from_stage(cls, stage: Stage | str) -> list["Strata"]:
-        match stage:
-            case Stage.fit:
-                return [cls.train, cls.validate]
-            case Stage.validate:
-                return [cls.validate]
-            case Stage.test:
-                return [cls.test]
-            case Stage.predict:
-                return [cls.predict]
-            case _:
-                raise ValueError(f"Unknown stage: {stage}")
 
 
 class Suffix(enum.StrEnum):

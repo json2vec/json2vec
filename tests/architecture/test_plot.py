@@ -1,28 +1,22 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import torch
 
 from json2vec.architecture.root import JSON2Vec
-from json2vec.structs.enums import Stage, Strata, Suffix
-from json2vec.structs.experiment import Dataset, Session
-from json2vec.structs.structure import Structure
+from json2vec.structs.experiment import Hyperparameters
 
 
-def _structure() -> Structure:
-    return Structure.model_validate(
+def _hyperparameters() -> Hyperparameters:
+    return Hyperparameters.model_validate(
         {
-            "name": "plot-demo",
-            "type": "structure",
-            "batch_size": 2,
-            "dropout": 0.1,
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "context",
-                "context_size": 1,
+                "type": "array",
+                "dropout": 0.1,
+                "max_length": 1,
                 "n_outputs": 1,
                 "fields": [
                     {
@@ -32,8 +26,8 @@ def _structure() -> Structure:
                     },
                     {
                         "name": "items",
-                        "type": "context",
-                        "context_size": 2,
+                        "type": "array",
+                        "max_length": 2,
                         "n_outputs": 1,
                         "fields": [
                             {
@@ -52,51 +46,25 @@ def _structure() -> Structure:
                     },
                 ],
             },
-        }
-    )
-
-
-def _session(dataset_root: Path) -> Session:
-    dataset = Dataset.model_validate(
-        {
-            "root": str(dataset_root),
-            "sample_rate": 1.0,
-            "file_buffer_size": 4,
-            "observation_buffer_size": 4,
-            "processor": "default",
-            "kwargs": {},
-            "suffix": Suffix.ndjson,
-            "patterns": {strata: r".*\.ndjson$" for strata in Strata},
-        }
-    )
-
-    return Session.model_validate(
-        {
-            "name": "plot-session",
-            "dataset": dataset,
-            "structure": _structure(),
-            "task": Stage.predict,
-            "output": ["root/items/label"],
+            "embed": ["root/items/label"],
         }
     )
 
 
 def _model(tmp_path: Path) -> JSON2Vec:
-    dataset_path = tmp_path / "plot_records.ndjson"
-    dataset_path.write_text(json.dumps({"label": "alpha"}), encoding="utf-8")
-    model = JSON2Vec.get_or_create(session=_session(dataset_root=dataset_path))
+    model = JSON2Vec.get_or_create(hyperparameters=_hyperparameters(), batch_size=2)
 
     label = model.nodes["root/items/label"]
     label.embedder.vocab.master.append("alpha")
     label.embedder.vocab.master.append("beta")
-    label.decoder.counters["state"].counts.copy_(torch.tensor([3, 2, 1, 1, 1, 1], dtype=torch.int64))
+    label.decoder.counters["state"].counts.copy_(torch.tensor([3, 2, 1, 1, 1], dtype=torch.int64))
     label.decoder.counters["content"].counts.copy_(torch.tensor([4, 2, 1, 1, 1], dtype=torch.int64))
 
     amount = model.nodes["root/amount"]
     amount.embedder.normalizer.mean.fill_(12.0)
     amount.embedder.normalizer.var.fill_(9.0)
     amount.embedder.normalizer.count.fill_(5.0)
-    amount.decoder.counter.counts.copy_(torch.tensor([6, 2, 1, 1, 1, 1], dtype=torch.int64))
+    amount.decoder.counter.counts.copy_(torch.tensor([6, 2, 1, 1, 1], dtype=torch.int64))
 
     return model
 
@@ -114,11 +82,11 @@ def test_plot_renders_full_model_and_writes_output(tmp_path: Path) -> None:
     assert "background-color: #800000" in rendered
     assert "background-color: #008000" in rendered
     assert '<span class="r' in rendered
-    assert "JSON2Vec (plot-demo)" in rendered
-    assert "root (context)" in rendered
+    assert "JSON2Vec" in rendered
+    assert "root (array)" in rendered
     assert "amount (number)" in rendered
     assert "address: root/amount" in rendered
-    assert "items (context)" in rendered
+    assert "items (array)" in rendered
     assert "address: root/items" in rendered
     assert "label (category)" in rendered
     assert "address: root/items/label" in rendered
@@ -143,14 +111,14 @@ def test_plot_address_limits_output_to_selected_branch(tmp_path: Path) -> None:
     assert "background-color: #ffffff;" in rendered
     assert "background-color: #000000" in rendered
     assert "background-color: #800000" in rendered
-    assert "items (context)" in rendered
+    assert "items (array)" in rendered
     assert "address: root/items" in rendered
     assert "label (category)" in rendered
     assert "address: root/items/label" in rendered
     assert "identifier (entity)" in rendered
     assert "address: root/items/identifier" in rendered
     assert "address: root/amount" not in rendered
-    assert "JSON2Vec (plot-demo)" not in rendered
+    assert "JSON2Vec" not in rendered
 
 
 def test_plot_leaf_uses_default_extension_renderer(tmp_path: Path) -> None:

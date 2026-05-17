@@ -24,7 +24,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.experiment import Session, Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 
 vector: Plugin = Plugin(name="vector")
@@ -80,14 +80,14 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        session: Session,
+        hyperparameters: Hyperparameters,
         strata: Strata,
         state: Any,
     ) -> TensorFieldBase:
-        context_shape: tuple[int, ...] = session.structure.shapes[address]
-        request: Request = session.structure.requests[address]
+        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        request: Request = hyperparameters.requests[address]
 
-        leading_shape: tuple[int, ...] = (len(values), *context_shape)
+        leading_shape: tuple[int, ...] = (len(values), *array_shape)
 
         coerced = apply(
             values,
@@ -134,35 +134,35 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def prune(self, p_prune: float = 1.0):
-        prune_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.pruned)
-        is_pruned = (
+    def target(self, p_target: float = 1.0):
+        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked)
+        is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
+            .lt(p_target)
             .expand_as(self.state)
         )
-        expanded = is_pruned.unsqueeze(-1).expand_as(self.content)
+        expanded = is_targeted.unsqueeze(-1).expand_as(self.content)
 
         if TensorKey.state not in self.targets.keys():
             self.targets[TensorKey.state] = self.state.clone()
-        self.state = self.state.masked_scatter(is_pruned, prune_token)
+        self.state = self.state.masked_scatter(is_targeted, mask_token)
 
         if TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
         self.content = self.content.masked_scatter(expanded, torch.zeros_like(input=self.content))
 
-        self.trainable |= is_pruned
+        self.trainable |= is_targeted
 
     @classmethod
     def empty(
         cls,
         batch_size: int,
         address: Address,
-        structure: Structure,
+        hyperparameters: Hyperparameters,
     ):
-        request: Request = structure.requests[address]
-        leading_shape: tuple[int, ...] = (batch_size, *structure.shapes[address])
-        state = torch.full(leading_shape, Tokens.pruned)
+        request: Request = hyperparameters.requests[address]
+        leading_shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
+        state = torch.full(leading_shape, Tokens.masked)
         content = torch.zeros((*leading_shape, request.n_dim), dtype=torch.float32)
 
         return cls(
@@ -176,19 +176,19 @@ class TensorField(TensorFieldBase):
 
 @vector.register
 class Embedder(EmbedderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: Request = structure.requests[address]
+        request: Request = hyperparameters.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
-            embedding_dim=structure.d_model,
+            embedding_dim=hyperparameters.d_model,
         )
         self.linear = torch.nn.Sequential(
-            torch.nn.Linear(in_features=request.n_dim, out_features=structure.d_model),
+            torch.nn.Linear(in_features=request.n_dim, out_features=hyperparameters.d_model),
             torch.nn.GELU(),
         )
 
@@ -213,13 +213,13 @@ class Embedder(EmbedderBase):
 
 @vector.register
 class Decoder(DecoderBase):
-    def __init__(self, structure: Structure, address: Address):
-        super().__init__(structure=structure, address=address)
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+        super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: Request = structure.requests[address]
+        request: Request = hyperparameters.requests[address]
 
         self.linear = torch.nn.Linear(
-            in_features=structure.d_model,
+            in_features=hyperparameters.d_model,
             out_features=request.n_dim,
         )
 
@@ -247,7 +247,7 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     address: Address = prediction.address
-    request: Request = module.session.structure.requests[address]
+    request: Request = module.hyperparameters.requests[address]
 
     trainable = batch.trainable.reshape(-1)
     inputs = prediction.payload[TensorKey.content].reshape(-1, request.n_dim)

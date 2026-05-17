@@ -22,7 +22,7 @@ from json2vec.tensorfields.base import TENSORFIELDS
 if TYPE_CHECKING:
     from json2vec.architecture.counter import Counter
     from json2vec.architecture.root import JSON2Vec
-    from json2vec.structs.structure import Structure
+    from json2vec.structs.experiment import Hyperparameters
 
 PLOT_WIDTH = 220
 PLOT_TITLE_STYLE = "bold"
@@ -51,7 +51,7 @@ def plot(
     detail: bool = False,
     out: str | Path | None = None,
 ) -> str:
-    structure = module.session.structure
+    hyperparameters = module.hyperparameters
 
     def build(node: Node) -> Pane:
         values: dict[str, Any] = {}
@@ -74,12 +74,12 @@ def plot(
 
     if address is None:
         pane = Pane(
-            title=f"JSON2Vec ({structure.name})",
-            values=structure.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True),
+            title="JSON2Vec",
+            values=hyperparameters.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True),
         )
-        pane.add_child(build(structure.fields))
+        pane.add_child(build(hyperparameters.fields))
     else:
-        pane = build(resolve_node(structure=structure, address=address))
+        pane = build(resolve_node(hyperparameters=hyperparameters, address=address))
 
     renderable = render_pane(pane, expand=True, depth=0)
     Console(width=PLOT_WIDTH).print(renderable)
@@ -95,12 +95,12 @@ def plot(
     return rendered
 
 
-def resolve_node(structure: "Structure", address: Address | str) -> Node:
+def resolve_node(hyperparameters: "Hyperparameters", address: Address | str) -> Node:
     key = Address(str(address))
-    nodes: dict[Address, Node] = structure.contexts | structure.requests
+    nodes: dict[Address, Node] = hyperparameters.arrays | hyperparameters.requests
 
     if key not in nodes:
-        raise ValueError(f"address '{address}' was not found in the structure")
+        raise ValueError(f"address '{address}' was not found in the hyperparameters")
 
     return nodes[key]
 

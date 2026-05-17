@@ -1,19 +1,16 @@
 import pytest
 
-from json2vec.structs.structure import Structure
+from json2vec.structs.experiment import Hyperparameters
 
 
 def _structure_with_field(field: dict) -> dict:
     return {
-        "name": "demo",
-        "type": "structure",
-        "batch_size": 2,
-        "dropout": 0.1,
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "context",
-            "context_size": 2,
+            "type": "array",
+            "dropout": 0.1,
+            "max_length": 2,
             "n_outputs": 1,
             "fields": [field],
         },
@@ -31,7 +28,7 @@ def test_category_topk_rejects_non_positive():
         }
     )
     with pytest.raises(ValueError, match="topk values must be positive"):
-        Structure.model_validate(payload)
+        Hyperparameters.model_validate(payload)
 
 
 def test_category_topk_rejects_values_at_or_above_vocab():
@@ -45,7 +42,7 @@ def test_category_topk_rejects_values_at_or_above_vocab():
         }
     )
     with pytest.raises(ValueError, match="topk values must be less than max_vocab_size"):
-        Structure.model_validate(payload)
+        Hyperparameters.model_validate(payload)
 
 
 def test_dateparts_dateparts_reject_duplicates():
@@ -58,7 +55,7 @@ def test_dateparts_dateparts_reject_duplicates():
         }
     )
     with pytest.raises(ValueError, match="dateparts must be unique"):
-        Structure.model_validate(payload)
+        Hyperparameters.model_validate(payload)
 
 
 def test_dateparts_pattern_rejects_invalid_tokens():
@@ -72,7 +69,7 @@ def test_dateparts_pattern_rejects_invalid_tokens():
         }
     )
     with pytest.raises(ValueError, match="is not a valid format pattern"):
-        Structure.model_validate(payload)
+        Hyperparameters.model_validate(payload)
 
 
 def test_dateparts_pattern_accepts_valid_format():
@@ -85,5 +82,5 @@ def test_dateparts_pattern_accepts_valid_format():
             "pattern": "%Y-%m-%d",
         }
     )
-    structure = Structure.model_validate(payload)
+    structure = Hyperparameters.model_validate(payload)
     assert "root/ts" in structure.requests
