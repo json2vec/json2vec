@@ -26,7 +26,12 @@ def default_dataset() -> Dataset:
 
 
 class DeploymentEnvironment(BaseSettings):
-    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        extra="ignore",
+        case_sensitive=False,
+        validate_by_name=True,
+        validate_by_alias=True,
+    )
 
     checkpoint: str = Field(
         default="model.ckpt",
@@ -208,12 +213,13 @@ class Deployment(ls.LitAPI):
         return cls
 
     @classmethod
-    def serve(cls):
+    def serve(cls, environment: DeploymentEnvironment | None = None):
 
-        environment = DeploymentEnvironment()
+        if environment is None:
+            environment = DeploymentEnvironment()
 
         server: ls.LitServer = ls.LitServer(
-            lit_api=Deployment(
+            lit_api=cls(
                 checkpoint=environment.checkpoint,
                 max_batch_size=environment.max_batch_size,
                 batch_timeout=environment.batch_timeout,

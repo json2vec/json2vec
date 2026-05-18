@@ -65,6 +65,31 @@ def test_checkpoint_migration_moves_root_rates_to_root_field_array() -> None:
     assert hyperparameters.fields.p_target == 0.3
 
 
+def test_on_save_checkpoint_serializes_hyperparameters() -> None:
+    hyperparameters = _hyperparameters()
+    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
+    checkpoint = {}
+
+    model.on_save_checkpoint(checkpoint)
+
+    restored = JSON2Vec._hyperparameters_from_checkpoint(checkpoint)
+    assert restored.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+
+
+def test_hyperparameters_from_checkpoint_accepts_lightning_hyper_parameters() -> None:
+    hyperparameters = _hyperparameters()
+
+    restored = JSON2Vec._hyperparameters_from_checkpoint(
+        {
+            "hyper_parameters": {
+                "hyperparameters": hyperparameters.model_dump(mode="python"),
+            },
+        }
+    )
+
+    assert restored.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+
+
 def _prediction_hyperparameters() -> Hyperparameters:
     return Hyperparameters(
         d_model=8,

@@ -232,10 +232,20 @@ class JSON2Vec(lit.LightningModule):
         if getattr(self, "hyperparameters", None) is None:
             raise ValueError("missing hyperparameters in checkpoint and constructor")
 
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["hyperparameters"] = self.hyperparameters.model_dump(mode="python")
+
     @classmethod
     def _hyperparameters_from_checkpoint(cls, checkpoint: dict[str, Any]) -> Hyperparameters:
         if "hyperparameters" in checkpoint:
             return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(checkpoint["hyperparameters"]))
+
+        if "hyper_parameters" in checkpoint:
+            payload = checkpoint["hyper_parameters"]
+            if isinstance(payload, dict) and "hyperparameters" in payload:
+                return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(payload["hyperparameters"]))
+
+            return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(payload))
 
         if "session" in checkpoint:
             payload = checkpoint["session"]
