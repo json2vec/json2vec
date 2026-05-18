@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from beartype.roar import BeartypeCallHintParamViolation
 
 from json2vec.data import datasets
 from json2vec.processors.base import Processor, ProcessorMode
@@ -21,6 +22,24 @@ def _dataset_for_fetch(root: Path):
         root=str(root),
         patterns={strata: r".*\.ndjson$" for strata in Strata},
     )
+
+
+def _datamodule_hyperparameters():
+    return datasets.Hyperparameters.model_validate(
+        {
+            "d_model": 8,
+            "fields": {
+                "name": "record",
+                "type": "array",
+                "max_length": 1,
+                "fields": [],
+            },
+        }
+    )
+
+
+def _datamodule_dataset():
+    return datasets.Dataset(root=None, processor=None)
 
 
 def test_sha256():
@@ -401,8 +420,8 @@ def test_spotcheck_ignores_empty_result_until_threshold(monkeypatch: pytest.Monk
 
 def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     module = datasets.StreamingDataModule(
-        hyperparameters=SimpleNamespace(),
-        dataset=SimpleNamespace(),
+        hyperparameters=_datamodule_hyperparameters(),
+        dataset=_datamodule_dataset(),
         state={},
         batch_size=2,
         num_workers={Strata.train: 0},
@@ -425,6 +444,23 @@ def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     assert module.observation_buffer_size[Strata.validate] == 1
     assert module.sample_rate[Strata.train] == 0.5
     assert module.sample_rate[Strata.validate] == 1.0
+
+
+def test_streaming_datamodule_rejects_invalid_loader_configuration():
+    kwargs = {
+        "hyperparameters": _datamodule_hyperparameters(),
+        "dataset": _datamodule_dataset(),
+        "state": {},
+    }
+
+    with pytest.raises(BeartypeCallHintParamViolation):
+        datasets.StreamingDataModule(**kwargs, batch_size=0)
+
+    with pytest.raises(BeartypeCallHintParamViolation):
+        datasets.StreamingDataModule(**kwargs, batch_size=2, num_workers={Strata.train: True})
+
+    with pytest.raises(BeartypeCallHintParamViolation):
+        datasets.StreamingDataModule(**kwargs, batch_size=2, sample_rate={Strata.train: 0.0})
 
 
 def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.MonkeyPatch):

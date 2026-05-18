@@ -8,7 +8,7 @@ import warnings
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from functools import cache, partial
-from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, Any, TypeAlias, TypeVar, cast
 from urllib.parse import urlparse
 
 import jmespath
@@ -18,7 +18,7 @@ import pyarrow.fs as pafs
 import pydantic
 import torch
 from beartype import beartype
-from loguru import logger
+from beartype.vale import Is
 from tensordict import TensorDict
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
@@ -38,9 +38,10 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
-InputT = TypeVar("InputT")
-OutputT = TypeVar("OutputT")
 StrataMap: TypeAlias = Mapping[Strata | str, T]
+NonNegativeInt: TypeAlias = Annotated[int, Is[lambda value: not isinstance(value, bool) and value >= 0]]
+PositiveInt: TypeAlias = Annotated[int, Is[lambda value: not isinstance(value, bool) and value >= 1]]
+SampleRate: TypeAlias = Annotated[int | float, Is[lambda value: not isinstance(value, bool) and 0.0 < value <= 1.0]]
 RawObservation: TypeAlias = dict[str, Any]
 ProcessedObservation: TypeAlias = list[RawObservation]
 EncodedBatch: TypeAlias = list[ProcessedObservation]
@@ -86,82 +87,17 @@ class Dataset(pydantic.BaseModel):
         return self
 
 
-def _strata_key(value: Strata | str) -> Strata:
-    if isinstance(value, Strata):
-        return value
-
-    return Strata(value.strip().lower())
-
-
-def _by_strata(
-    value: InputT | StrataMap[InputT],
-    *,
-    default: OutputT,
-    coerce: Callable[[InputT], OutputT],
-) -> dict[Strata, OutputT]:
+@beartype
+def _by_strata(value: T | StrataMap[T], *, default: T) -> dict[Strata, T]:
     if isinstance(value, Mapping):
         normalized = {strata: default for strata in Strata}
-        mapped = cast(StrataMap[InputT], value)
+        mapped = cast(StrataMap[T], value)
         for key, item in mapped.items():
-            normalized[_strata_key(key)] = coerce(item)
+            normalized[Strata(str(key).lower())] = item
         return normalized
 
-    item = cast(InputT, value)
-    return {strata: coerce(item) for strata in Strata}
-
-
-def _coerce_num_workers(value: int | None) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError("num_workers must be an integer or None")
-    if value < 0:
-        raise ValueError("num_workers must be >= 0")
-    return value
-
-
-def _coerce_bool(name: str) -> Callable[[bool], bool]:
-    def coerce(value: bool) -> bool:
-        if not isinstance(value, bool):
-            raise TypeError(f"{name} must be a boolean")
-        return value
-
-    return coerce
-
-
-def _coerce_sharding(value: ShardingStrategy | str) -> ShardingStrategy:
-    if isinstance(value, ShardingStrategy):
-        return value
-    if isinstance(value, str):
-        return ShardingStrategy(value.strip().lower())
-    raise TypeError("sharding must be a ShardingStrategy or string")
-
-
-def _coerce_chunk_batch_size(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError("chunk_batch_size must be an integer")
-    if value < 1:
-        raise ValueError("chunk_batch_size must be >= 1")
-    return value
-
-
-def _coerce_buffer_size(name: str) -> Callable[[int], int]:
-    def coerce(value: int) -> int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError(f"{name} must be an integer")
-        if value < 1:
-            raise ValueError(f"{name} must be >= 1")
-        return value
-
-    return coerce
-
-
-def _coerce_sample_rate(value: float) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TypeError("sample_rate must be a number")
-    if value <= 0.0 or value > 1.0:
-        raise ValueError("sample_rate must be > 0 and <= 1")
-    return float(value)
+    item = cast(T, value)
+    return {strata: item for strata in Strata}
 
 
 @beartype
@@ -634,20 +570,6 @@ class BatchDataset(IterableDataset):
         self.file_buffer_size: int = file_buffer_size
         self.observation_buffer_size: int = observation_buffer_size
         self.sample_rate: float = sample_rate
-        logger.bind(
-            component="data",
-            strata=self.strata,
-            batch_size=self.batch_size,
-            request_fields=len(self.hyperparameters.requests),
-            stateful_fields=len(self.state),
-            sharding=self.sharding,
-            chunk_batch_size=self.chunk_batch_size,
-            file_buffer_size=self.file_buffer_size,
-            observation_buffer_size=self.observation_buffer_size,
-            sample_rate=self.sample_rate,
-            global_rank=self.global_rank,
-            world_size=self.world_size,
-        ).info("initialized batch dataset")
 
     def __iter__(self):
         for field_state in self.state.values():
@@ -701,21 +623,6 @@ def dataloader(
     active_pin_memory: bool = pin_memory and strata != Strata.predict and torch.cuda.is_available()
     global_rank = distributed_rank() if global_rank is None else global_rank
     world_size = distributed_world_size() if world_size is None else world_size
-    logger.bind(
-        component="data",
-        strata=strata,
-        batch_size=batch_size,
-        workers=workers,
-        persistent_workers=active_persistent_workers,
-        pin_memory=active_pin_memory,
-        sharding=sharding,
-        chunk_batch_size=chunk_batch_size,
-        file_buffer_size=file_buffer_size,
-        observation_buffer_size=observation_buffer_size,
-        sample_rate=sample_rate,
-        global_rank=global_rank,
-        world_size=world_size,
-    ).info("building dataloader")
 
     return DataLoader(
         dataset=BatchDataset(
@@ -742,53 +649,43 @@ def dataloader(
 
 
 class StreamingDataModule(lit.LightningDataModule):
+    @beartype
     def __init__(
         self,
         hyperparameters: Hyperparameters,
         dataset: Dataset,
         state: dict[Address, Any],
-        batch_size: int,
-        num_workers: int | None | StrataMap[int | None] = None,
+        batch_size: PositiveInt,
+        num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
         pin_memory: bool | StrataMap[bool] = True,
         sharding: ShardingStrategy | str | StrataMap[ShardingStrategy | str] = ShardingStrategy.chunk,
-        chunk_batch_size: int | StrataMap[int] = 4096,
-        file_buffer_size: int | StrataMap[int] = 1,
-        observation_buffer_size: int | StrataMap[int] = 1,
-        sample_rate: float | StrataMap[float] = 1.0,
+        chunk_batch_size: PositiveInt | StrataMap[PositiveInt] = 4096,
+        file_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
+        observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
+        sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
     ):
         super().__init__()
-        if batch_size <= 0:
-            raise ValueError("batch_size must be > 0")
 
         self.hyperparameters = hyperparameters
         self.dataset = dataset
         self.state = state
         self.batch_size = batch_size
-        self.num_workers = _by_strata(num_workers, default=None, coerce=_coerce_num_workers)
-        self.persistent_workers = _by_strata(
-            persistent_workers,
-            default=True,
-            coerce=_coerce_bool("persistent_workers"),
-        )
-        self.pin_memory = _by_strata(pin_memory, default=True, coerce=_coerce_bool("pin_memory"))
-        self.sharding = _by_strata(sharding, default=ShardingStrategy.chunk, coerce=_coerce_sharding)
-        self.chunk_batch_size = _by_strata(
-            chunk_batch_size,
-            default=4096,
-            coerce=_coerce_chunk_batch_size,
-        )
-        self.file_buffer_size = _by_strata(
-            file_buffer_size,
-            default=1,
-            coerce=_coerce_buffer_size("file_buffer_size"),
-        )
-        self.observation_buffer_size = _by_strata(
-            observation_buffer_size,
-            default=1,
-            coerce=_coerce_buffer_size("observation_buffer_size"),
-        )
-        self.sample_rate = _by_strata(sample_rate, default=1.0, coerce=_coerce_sample_rate)
+        self.num_workers = _by_strata(num_workers, default=None)
+        self.persistent_workers = _by_strata(persistent_workers, default=True)
+        self.pin_memory = _by_strata(pin_memory, default=True)
+        _sharding = lambda value: value if isinstance(value, ShardingStrategy) else ShardingStrategy(value.strip().lower())  # noqa: E731
+        self.sharding = {
+            strata: _sharding(strategy)
+            for strata, strategy in _by_strata(sharding, default=ShardingStrategy.chunk).items()
+        }
+        self.chunk_batch_size = _by_strata(chunk_batch_size, default=4096)
+        self.file_buffer_size = _by_strata(file_buffer_size, default=1)
+        self.observation_buffer_size = _by_strata(observation_buffer_size, default=1)
+        self.sample_rate = {
+            strata: float(rate)
+            for strata, rate in _by_strata(sample_rate, default=1.0).items()
+        }
 
     @classmethod
     def from_model(

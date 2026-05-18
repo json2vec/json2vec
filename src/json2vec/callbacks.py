@@ -12,6 +12,9 @@ if TYPE_CHECKING:
     from json2vec.structs.tree import Address
 
 
+# FIXME AI slop code here... This should be moved to the category extension, and/or support abilities to add callbacks to the root module
+# FIXME this should really be cleaned up though ...
+
 class VocabularySyncCallback(Callback):
     """Synchronize online categorical vocabularies across distributed ranks.
 
