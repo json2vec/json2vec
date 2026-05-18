@@ -1,4 +1,16 @@
-# JSON2Vec
+<p align="center">
+  <img src="docs/diagrams/json2vec.png" alt="JSON2Vec logo" width="180">
+</p>
+
+<h1 align="center">JSON2Vec</h1>
+
+<p align="center">
+  <img alt="Python >= 3.12" src="https://img.shields.io/badge/python-%3E%3D3.12-3776AB?logo=python&logoColor=white">
+  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2E8B57"></a>
+  <!-- discord-invite:start -->
+  <a href="https://discord.gg/DVyZUkvTFA"><img alt="Discord channel invite" src="https://img.shields.io/badge/discord-join%20the%20channel-5865F2?logo=discord&logoColor=white"></a>
+  <!-- discord-invite:end -->
+</p>
 
 `json2vec` is a schema-driven framework for learning embeddings and task
 heads directly from nested, semi-structured records without flattening them
@@ -75,7 +87,7 @@ controls remain separate concerns.
 
 It also does not require users to publish data, schemas, checkpoints, or model
 parameters. The open-source layer is the reusable encoder and runtime
-infrastructure. Your data stays yours, as does your parameters.
+infrastructure. Your data stays yours, and so do your parameters.
 The framework works under the assumption that model parameters will not be shared.
 
 ## What Is In This Repository
@@ -86,7 +98,7 @@ This repository currently contains:
 - tensorfield plugins for `number`, `category`, `set`, `dateparts`, `entity`, `vector`, and `text`
 - a processor registry for dataset-specific preprocessing
 - a LitServe deployment entrypoint for serving from checkpoints
-- a programmatic WandB/Lightning lifecycle example under `examples/`
+- a hello-world Lightning notebook under `examples/hello_world.ipynb`
 - tests covering structure loading, data processing, tensorfields, training helpers, logging, and inference
 - diagrams plus longer design docs in `docs/`
 
@@ -106,6 +118,86 @@ pip install -e .
 
 The package requires Python `>=3.12`.
 
+## Hello World Notebook
+
+`examples/hello_world.ipynb` trains a tiny model from an in-memory synthetic
+dataset. It demonstrates the full loop: register a streaming processor, declare
+a schema, train a supervised category target, then call `predict` and `embed`.
+
+```python
+import lightning.pytorch as lit
+import torch
+from rich.pretty import pprint
+
+import json2vec as j2v
+
+
+@j2v.shim(yields=True)
+def hello_world_records(observation: dict, strata: j2v.Strata):
+    records = [
+        {"color": "red", "label": "warm"},
+        {"color": "orange", "label": "warm"},
+        {"color": "yellow", "label": "warm"},
+        {"color": "blue", "label": "cool"},
+        {"color": "green", "label": "cool"},
+        {"color": "purple", "label": "cool"},
+    ]
+
+    yield from records
+
+
+params = j2v.Hyperparameters(
+    d_model=16,
+    fields=j2v.Array(
+        name="record",
+        fields=[
+            j2v.Category(name="color", query="[*].color", max_vocab_size=16),
+            j2v.Category(name="label", query="[*].label", max_vocab_size=8, topk=[2]),
+        ],
+    ),
+    target=j2v.Address("record", "label"),
+    embed=j2v.Address("record"),
+)
+
+model = j2v.Architecture(
+    hyperparameters=params,
+    batch_size=4,
+    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
+)
+
+datamodule = j2v.StreamingDataModule.from_model(
+    model,
+    dataset=j2v.Dataset(processor=hello_world_records),
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+    file_buffer_size=1,
+    observation_buffer_size=32,
+    sample_rate=1.0,
+)
+
+trainer = lit.Trainer(
+    accelerator="cpu",
+    max_epochs=20,
+    logger=False,
+    enable_progress_bar=False,
+    enable_model_summary=False,
+    enable_checkpointing=False,
+)
+
+trainer.fit(model=model, datamodule=datamodule)
+
+batch = [[{"color": "red"}], [{"color": "blue"}]]
+
+pprint(model.predict(batch))
+pprint(model.embed(batch))
+```
+
+The prediction call returns a typed result for `record/label`; after training on
+the toy data, red-like records should classify as `warm` and blue-like records
+as `cool`. The embedding call returns the configured `record` embedding for each
+input observation.
+
 ## Core Concepts
 
 - `Hyperparameters` defines the model tree plus masking, targeting, and embedding controls.
@@ -119,6 +211,7 @@ The package requires Python `>=3.12`.
   the tree.
 - `heritage` is the path from a leaf to the root; decoders use that path when
   reconstructing masked, targeted, or supervised targets.
+
 Supported dataset suffixes are:
 
 - `ndjson`
@@ -151,106 +244,6 @@ field instances across an observation. Hyperparameter-level `target` fields are 
 withheld and become supervised targets; `embed` addresses are
 serialized as embeddings during prediction.
 
-## Minimal Training Workflow
-
-Hyperparameters and datasets are defined programmatically. Users own the Lightning `Trainer`,
-optimizer, scheduler, callbacks, and checkpoint policy.
-
-```python
-import lightning.pytorch as lit
-import torch
-
-from json2vec import Dataset, Hyperparameters, JSON2Vec, Strata, StreamingDataModule, Suffix
-
-hyperparameters = Hyperparameters.model_validate({
-    "d_model": 16,
-    "p_mask": 0.15,
-    "p_target": 0.05,
-    "embed": ["root"],
-    "fields": {
-        "name": "root",
-        "type": "array",
-        "attention": "mha",
-        "dropout": 0.1,
-        "max_length": 1,
-        "n_outputs": 1,
-        "fields": [
-            {
-                "name": "identifier",
-                "type": "category",
-                "query": "[*].id",
-                "pooling": "query",
-                "max_vocab_size": 1024,
-            }
-        ],
-    },
-})
-
-dataset = Dataset(
-    root="/path/to/data",
-    processor="default",
-    suffix=Suffix.ndjson,
-    patterns={strata: r".*" for strata in Strata},
-)
-
-model = JSON2Vec(
-    hyperparameters=hyperparameters,
-    batch_size=32,
-    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
-)
-data = StreamingDataModule.from_model(
-    model,
-    dataset=dataset,
-    num_workers=4,
-    chunk_batch_size=4096,
-    file_buffer_size=16,
-    observation_buffer_size=16,
-)
-
-trainer = lit.Trainer(accelerator="auto")
-trainer.fit(model=model, datamodule=data)
-```
-
-Array `attention` can be `mha`, `gqa`, `mqa`, or `none`. Leaf decoder
-`pooling` can be `query` or `mean`.
-
-For a fuller lifecycle with separate pretraining, finetuning, validation, and
-testing datasets plus a shared `WandbLogger`, see
-`examples/wandb_lifecycle.py`.
-
-To turn a field into a supervised target, include its address in
-`hyperparameters.target`. The model will
-withhold that field from the encoder and use the same datatype-specific decoder
-that is used for masked/targeted reconstruction. To export embeddings, include
-field or array addresses in `hyperparameters.embed`.
-
-## Inference And Serving
-
-Batch prediction uses the same model and data module path as training. Prediction outputs are written to `tmp/predictions/`.
-
-Checkpoints carry the Lightning weights, serialized hyperparameters, and
-stateful tensorfield state such as online category vocabularies, numeric
-normalization buffers, and class-frequency counters. This tight coupling is
-intentional: the deployed model should not depend on a separate, manually
-synchronized tokenizer or normalizer artifact.
-
-For online serving, the repository exposes `json2vec.inference.deployment.Deployment`, which wraps a checkpoint-backed model in LitServe. Runtime configuration is environment-driven:
-
-- `JSON2VEC_CHECKPOINT` or `CHECKPOINT`
-- `JSON2VEC_MAX_BATCH_SIZE`
-- `JSON2VEC_BATCH_TIMEOUT`
-- `JSON2VEC_WORKERS_PER_DEVICE`
-- `JSON2VEC_ACCELERATOR`
-- `JSON2VEC_TRACK_REQUESTS`
-
-A minimal serve entrypoint is:
-
-```python
-from json2vec.inference.deployment import Deployment
-
-Deployment.serve()
-```
-
 ## Processor Model
 
 Processors are registered Python callables. The built-in `default` processor is a no-op and returns each observation unchanged.
@@ -265,42 +258,33 @@ Configured `dataset.kwargs` are passed into the processor, with unsupported keyw
 
 ## Tensorfield Plugins
 
-The current built-in tensorfield types are:
+Each tensorfield plugin provides a request schema plus the model components
+needed to encode values, decode predictions, compute losses, and optionally
+serialize outputs. Built-in tensorfields share the base leaf options `name`,
+`query`, `pooling`, `weight`, `n_heads`, `n_linear`, `dropout`, `p_mask`, and
+`p_target`.
 
-- `number`
-- `category`
-- `set`
-- `dateparts`
-- `entity`
-- `vector`
-- `text`
+| Type | Use It For | Key Options |
+| --- | --- | --- |
+| `number` | Scalar numeric values. Values are padded with explicit state tokens, normalized online during training, embedded with learned Fourier features, and decoded as regression targets. | `jitter`, `n_bands`, `offset`, `alpha`, `objective` (`mae`, `mse`, `huber`) |
+| `category` | Single-label categorical values with an online vocabulary stored in the checkpoint. Unknown or overflow labels route to a reserved unavailable bucket instead of becoming `null`. Prediction output includes label probabilities and optional top-k candidates. | `max_vocab_size`, `n_bands`, `p_unavailable`, `topk` |
+| `set` | Unordered collections of categorical labels, encoded as a multi-hot vector over an online vocabulary. Strings are treated as one-item sets, iterables as many-item sets, and unknown labels use the reserved unavailable bucket. | `max_vocab_size`, `p_unavailable` |
+| `dateparts` | Datetime values represented through selected calendar/time components. Inputs may be native datetimes or strings parsed with a configured pattern. | `dateparts` (`day_of_year`, `week_of_year`, `month_of_year`, `day_of_month`, `week_of_month`, `day_of_week`, `hour_of_day`, `minute_of_hour`), `pattern` |
+| `entity` | Hashable identifiers where the useful signal is equality or co-occurrence within the current observation rather than a global vocabulary. Values are re-indexed locally per observation and require at least two slots per observation. | `topk` |
+| `vector` | Fixed-width numeric embeddings or dense feature vectors supplied by another model or system. Inputs may be lists, tuples, 1D NumPy arrays, or 1D Torch tensors and are projected into `d_model`. | `n_dim`, `objective` (`l1`, `l2`) |
+| `text` | String values encoded by a frozen Hugging Face `AutoModel`, pooled, and projected into `d_model`. Masked or targeted text is trained by reconstructing the encoder representation rather than generating text. | `model_name`, `max_length`, `encoder_batch_size`, `encoder_pooling` (`cls`, `mean`, `pooler`), `objective` (`l1`, `l2`), `revision`, `local_files_only` |
 
-Each tensorfield plugin provides a request schema plus the model components needed to encode values, decode predictions, compute losses, and optionally serialize outputs.
+The `text` tensorfield requires the optional `transformers` dependency and is
+not installed by default:
 
-The `text` tensorfield requires the optional `transformers` dependency and is not installed by default.
+```bash
+uv sync --extra text
+```
 
-## Runtime Environment
+## Community
 
-Training, dataloading, logging, callbacks, and checkpointing are ordinary
-Python/Lightning concerns. Pass dataloader behavior directly to
-`StreamingDataModule` with named arguments such as `num_workers`,
-`persistent_workers`, `pin_memory`, `sharding`, `chunk_batch_size`,
-`file_buffer_size`, `observation_buffer_size`, and `sample_rate`.
-`Dataset.suffix` and `Dataset.patterns` default to `None`; `suffix` is required
-only when `root` is set. Omitting `patterns` lets every stratum read the same
-files and emits a warning. `Dataset.processor` accepts either a registered
-processor name or the registered shim function itself.
-
-The serving entrypoint still supports deployment process settings:
-
-- `JSON2VEC_CHECKPOINT`
-- `JSON2VEC_MAX_BATCH_SIZE`
-- `JSON2VEC_BATCH_TIMEOUT`
-- `JSON2VEC_WORKERS_PER_DEVICE`
-- `JSON2VEC_ACCELERATOR`
-- `JSON2VEC_TRACK_REQUESTS`
-
-Supported sharding strategies are `file`, `chunk`, and `record`.
+Join the Discord channel for questions, design discussion, and release notes:
+<https://discord.gg/DVyZUkvTFA>
 
 ## Repository Layout
 
@@ -311,21 +295,9 @@ Supported sharding strategies are `file`, `chunk`, and `record`.
 - `src/json2vec/processors`: processor registry and built-in extensions
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in field types
-- `examples/`: programmatic training and evaluation examples
+- `examples/`: hello-world training and inference notebook
 - `tests/`: package test suite
-- `docs/summary.typ` and `docs/whitepaper.typ`: longer written documentation
-
-## Diagrams
-
-The repository includes architecture and pipeline diagrams:
-
-![Tree of encoding modules](docs/diagrams/tree.drawio.svg)
-
-![Single array node](docs/diagrams/node.drawio.svg)
-
-![Pipeline stages](docs/diagrams/pipeline.drawio.svg)
-
-![Example configured module tree](docs/diagrams/modules.drawio.svg)
+- `docs/whitepaper.typ`: longer written documentation
 
 ## Development
 
