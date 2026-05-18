@@ -4,6 +4,7 @@ import litserve as ls
 import pydantic
 import torch
 from beartype import beartype
+from loguru import logger
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
@@ -23,6 +24,35 @@ def default_dataset() -> Dataset:
         root=None,
         processor="default",
     )
+
+
+def _mps_available() -> bool:
+    return bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
+def resolve_accelerator(accelerator: Literal["auto", "cpu", "cuda", "mps"]) -> Literal["cpu", "cuda", "mps"]:
+    if accelerator == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+
+        if _mps_available():
+            return "mps"
+
+        return "cpu"
+
+    if accelerator == "cuda" and not torch.cuda.is_available():
+        logger.bind(component="deployment", accelerator=accelerator, fallback="cpu").warning(
+            "requested accelerator is unavailable; falling back to CPU"
+        )
+        return "cpu"
+
+    if accelerator == "mps" and not _mps_available():
+        logger.bind(component="deployment", accelerator=accelerator, fallback="cpu").warning(
+            "requested accelerator is unavailable; falling back to CPU"
+        )
+        return "cpu"
+
+    return accelerator
 
 
 class DeploymentEnvironment(BaseSettings):
@@ -218,7 +248,7 @@ class Deployment(ls.LitAPI):
                 max_batch_size=environment.max_batch_size,
                 batch_timeout=environment.batch_timeout,
             ),
-            accelerator=environment.accelerator,
+            accelerator=resolve_accelerator(environment.accelerator),
             track_requests=environment.track_requests,
             workers_per_device=environment.workers_per_device,
         )

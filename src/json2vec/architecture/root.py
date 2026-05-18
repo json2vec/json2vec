@@ -63,7 +63,7 @@ def step(
         loss_fn = cast(Callable[..., torch.Tensor], getattr(extension, "loss"))
 
         loss: torch.Tensor = loss_fn(module=module, prediction=prediction, batch=batch[address], strata=strata)
-        losses.append(loss * torch.tensor(request.weight))
+        losses.append(loss * loss.new_tensor(request.weight))
 
     if len(losses) == 0:
         # under idealistic circumstances this would never happen.
@@ -146,6 +146,15 @@ class JSON2Vec(lit.LightningModule):
             for address, node in self.nodes.items()
             if hasattr(node, "embedder") and hasattr(node.embedder, "state")
         }
+
+    def _module_device(self) -> torch.device:
+        for parameter in self.parameters():
+            return parameter.device
+
+        for buffer in self.buffers():
+            return buffer.device
+
+        return torch.device("cpu")
 
     def plot(
         self,
@@ -415,7 +424,7 @@ class JSON2Vec(lit.LightningModule):
             hyperparameters=self.hyperparameters,
             strata=Strata.predict,
             state=self.state,
-        )
+        ).to(self._module_device())
 
         self.eval()
         try:

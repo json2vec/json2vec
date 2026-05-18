@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
+import pytest
 import torch
 
 from json2vec.architecture.root import JSON2Vec
@@ -217,3 +219,53 @@ def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
     embedding = embeddings[Address("root")]["embedding"]
     assert len(embedding) == 2
     assert all(not isinstance(row[0], list) for row in embedding)
+
+
+def _assert_inference_inputs_move_to_model_device(device: torch.device, monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _primed_prediction_model().to(device)
+    original_forward: Callable = model.forward
+    expected_type = device.type
+
+    def checked_forward(inputs):
+        for address in model.hyperparameters.requests:
+            field = inputs[address]
+            assert field.state.device.type == expected_type
+            assert field.content.device.type == expected_type
+            assert field.trainable.device.type == expected_type
+
+        return original_forward(inputs)
+
+    monkeypatch.setattr(model, "forward", checked_forward)
+
+    supervised = model.predict(
+        batch=[
+            [{"color": "red"}],
+            [{"color": "blue"}],
+        ]
+    )
+    embeddings = model.embed(
+        batch=[
+            [{"color": "red"}],
+            [{"color": "blue"}],
+        ]
+    )
+
+    assert Address("root", "label") in supervised
+    assert Address("root") in embeddings
+
+
+def test_predict_and_embed_move_encoded_inputs_to_cpu_model_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    _assert_inference_inputs_move_to_model_device(torch.device("cpu"), monkeypatch)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_predict_and_embed_move_encoded_inputs_to_cuda_model_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    _assert_inference_inputs_move_to_model_device(torch.device("cuda"), monkeypatch)
+
+
+@pytest.mark.skipif(
+    not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()),
+    reason="MPS is not available",
+)
+def test_predict_and_embed_move_encoded_inputs_to_mps_model_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    _assert_inference_inputs_move_to_model_device(torch.device("mps"), monkeypatch)
