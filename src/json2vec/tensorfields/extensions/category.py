@@ -1,19 +1,14 @@
 from __future__ import annotations
 
 from functools import partial
-from multiprocessing import Manager
-from multiprocessing.managers import ListProxy, SyncManager
-from multiprocessing.synchronize import Lock
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
 import pydantic
 import torch
 from beartype import beartype
-from ordered_set import OrderedSet
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.counter import Counter
 from json2vec.architecture.plot import Pane
 from json2vec.data.processing import apply, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
@@ -26,6 +21,8 @@ from json2vec.tensorfields.base import (
     RequestBase,
     TensorFieldBase,
 )
+from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
@@ -37,184 +34,7 @@ category: Plugin = Plugin(name="category")
 # collapsing it into state=`null`.
 UNAVAILABLE_LABEL = "<unavailable>"
 
-class Vocabulary:
-    def __init__(
-        self,
-        master: ListProxy,
-        lock: Lock,
-        proposals: ListProxy,
-        proposal_lock: Lock,
-        max_vocab_size: int,
-    ):
-
-        self.master: ListProxy[str] = master
-        self.lock: Lock = lock
-        self.proposals: ListProxy[str] = proposals
-        self.proposal_lock: Lock = proposal_lock
-        self.max_vocab_size: int = max_vocab_size
-        self.vocab: OrderedSet[str] = OrderedSet(list(master))
-        self.global_rank: int = 0
-        self.world_size: int = 1
-
-    def configure_distributed(self, global_rank: int = 0, world_size: int = 1) -> None:
-        self.global_rank = global_rank
-        self.world_size = world_size
-
-    @property
-    def can_update(self) -> bool:
-        return self.global_rank == 0
-
-    def refresh(self, force: bool = False) -> None:
-        if not force and len(self.master) == len(self.vocab):
-            return
-
-        self.vocab = OrderedSet(list(self.master))
-
-    @property
-    def unavailable_index(self) -> int:
-        return self.max_vocab_size
-
-    def __call__(self, word: str, update: bool) -> int | None:
-
-        if word is None:
-            return None
-
-        if word in self.vocab:
-            return self.vocab.index(word)
-
-        if not update:
-            self.refresh()
-            if word in self.vocab:
-                return self.vocab.index(word)
-
-            # Validation/test/inference should preserve "field exists" semantics even when
-            # the label was never seen during training.
-            return self.unavailable_index
-
-        if not self.can_update:
-            with self.proposal_lock:
-                if word not in self.proposals:
-                    self.proposals.append(word)
-
-            return self.unavailable_index
-
-        # OK, it is not known locally... We will lock the global state and update the local vocab
-        with self.lock:
-            self.refresh(force=True)
-
-            if word in self.vocab:
-                return self.vocab.index(word)
-
-            if len(self.vocab) >= self.max_vocab_size:
-                # Once the learned vocabulary is full, new labels also fall back to the
-                # reserved unavailable bucket instead of evicting existing ids.
-                return self.unavailable_index
-
-            if word not in self.vocab:
-                self.vocab.add(word)
-                self.master.append(word)
-
-        return self.vocab.index(word)
-
-    def __len__(self) -> int:
-        self.refresh()
-
-        return len(self.vocab)
-
-class OnlineVocabularyModel(torch.nn.Module):
-    def __init__(self, max_vocab_size: int):
-        super().__init__()
-
-        self.max_vocab_size: int = max_vocab_size
-        self.manager: SyncManager = Manager()
-        self.master: ListProxy[str] = self.manager.list()
-        self.lock: Lock = self.manager.Lock()
-        self.proposals: ListProxy[str] = self.manager.list()
-        self.proposal_lock: Lock = self.manager.Lock()
-        self._snapshot_cache: list[str] | None = None
-        self._snapshot_size: int = -1
-
-    def _save_to_state_dict(self, state_dict, prefix, keep_vars):
-        super()._save_to_state_dict(state_dict, prefix, keep_vars)
-
-        state_dict[prefix + "vocabulary"] = list(self.master)
-
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata,
-        strict, missing_keys, unexpected_keys, error_msgs
-    ):
-
-        vocab: list[str] = state_dict.pop(prefix + "vocabulary")
-        self.master: ListProxy[str] = self.manager.list(vocab)
-        self.proposals: ListProxy[str] = self.manager.list()
-        self._snapshot_cache = None
-        self._snapshot_size = -1
-
-        super()._load_from_state_dict(
-            state_dict, prefix, local_metadata,
-            strict, missing_keys, unexpected_keys, error_msgs
-        )
-    
-    @property
-    def state(self) -> Vocabulary:
-
-        return Vocabulary(
-            master=self.master,
-            lock=self.lock,
-            proposals=self.proposals,
-            proposal_lock=self.proposal_lock,
-            max_vocab_size=self.max_vocab_size,
-        )
-
-    def snapshot(self) -> list[str]:
-        size = len(self.master)
-        if self._snapshot_cache is None or self._snapshot_size != size:
-            self._snapshot_cache = list(self.master)
-            self._snapshot_size = size
-
-        return self._snapshot_cache
-
-    def drain_proposals(self) -> list[str]:
-        with self.proposal_lock:
-            proposals = list(self.proposals)
-            self.proposals[:] = []
-
-        return proposals
-
-    def extend(self, proposals: list[str]) -> tuple[int, int]:
-        accepted = 0
-        rejected = 0
-
-        with self.lock:
-            vocab = OrderedSet(list(self.master))
-            for word in proposals:
-                if word in vocab:
-                    continue
-
-                if len(vocab) >= self.max_vocab_size:
-                    rejected += 1
-                    continue
-
-                vocab.add(word)
-                self.master.append(word)
-                accepted += 1
-
-        if accepted:
-            self._snapshot_cache = None
-            self._snapshot_size = -1
-
-        return accepted, rejected
-
-    def load_snapshot(self, vocabulary: list[str]) -> None:
-        with self.lock:
-            self.master[:] = vocabulary[:self.max_vocab_size]
-
-        with self.proposal_lock:
-            self.proposals[:] = []
-
-        self._snapshot_cache = None
-        self._snapshot_size = -1
-
+category.callback(VocabularySyncCallback)
 
 @category.register
 class Request(RequestBase):

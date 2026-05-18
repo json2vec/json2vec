@@ -9,7 +9,6 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.counter import Counter
 from json2vec.architecture.plot import Pane
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
@@ -23,15 +22,16 @@ from json2vec.tensorfields.base import (
 )
 from json2vec.tensorfields.extensions.category import (
     UNAVAILABLE_LABEL,
-    OnlineVocabularyModel,
-    Vocabulary,
 )
+from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
     from json2vec.structs.experiment import Hyperparameters
 
 sets: Plugin = Plugin(name="set")
+sets.callback(VocabularySyncCallback)
 
 
 @sets.register

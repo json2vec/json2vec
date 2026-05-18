@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 
 from json2vec.distributed import all_reduce_sum
@@ -49,3 +51,6 @@ class Counter(torch.nn.Module):
         counts = self.counts.to(dtype=torch.float32)
         weights = counts.rsqrt()
         return weights * (counts.sum() / (weights * counts).sum())
+
+
+__all__ = ["Counter"]

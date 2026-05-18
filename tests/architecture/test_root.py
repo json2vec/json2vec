@@ -6,9 +6,10 @@ import torch
 
 from json2vec.architecture.root import JSON2Vec
 from json2vec.data.datasets import encode
-from json2vec.structs.enums import Strata
+from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
 
 
 def _hyperparameters() -> Hyperparameters:
@@ -199,6 +200,60 @@ def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> No
 
     assert isinstance(configured["optimizer"], torch.optim.AdamW)
     assert isinstance(configured["lr_scheduler"], torch.optim.lr_scheduler.StepLR)
+
+
+def test_configure_callbacks_collects_active_extension_callbacks() -> None:
+    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+
+    callbacks = model.configure_callbacks()
+
+    assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
+
+
+def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
+    hyperparameters = Hyperparameters.model_validate(
+        {
+            "d_model": 8,
+            "fields": {
+                "name": "root",
+                "type": "array",
+                "max_length": 1,
+                "n_outputs": 1,
+                "fields": [
+                    {
+                        "name": "label",
+                        "type": "category",
+                        "query": "[*].label",
+                        "max_vocab_size": 16,
+                    },
+                    {
+                        "name": "tags",
+                        "type": "set",
+                        "query": "[*].tags",
+                        "max_vocab_size": 16,
+                    },
+                ],
+            },
+        }
+    )
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+
+    callbacks = [
+        callback
+        for callback in model.configure_callbacks()
+        if isinstance(callback, VocabularySyncCallback)
+    ]
+
+    assert len(callbacks) == 1
+
+
+def test_builtin_resources_are_attached_to_extension_modules() -> None:
+    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+    address = Address("root", "label")
+
+    assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
+    assert TensorKey.state.name in model.nodes[address].decoder.counters
+    assert TensorKey.content.name in model.nodes[address].decoder.counters
 
 
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:

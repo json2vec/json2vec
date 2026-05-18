@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from json2vec.callbacks import VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import VocabularySyncCallback
 
 
 class _Vocab:
@@ -37,17 +37,17 @@ def test_vocabulary_sync_callback_gathers_rank_proposals(monkeypatch):
         nodes={
             "root/category": SimpleNamespace(
                 embedder=SimpleNamespace(vocab=vocab),
-            )
-        }
+            ),
+        },
     )
 
-    monkeypatch.setattr("json2vec.callbacks.is_distributed", lambda: True)
-    monkeypatch.setattr("json2vec.callbacks.is_rank_zero", lambda: True)
+    monkeypatch.setattr("json2vec.tensorfields.shared.vocabulary.is_distributed", lambda: True)
+    monkeypatch.setattr("json2vec.tensorfields.shared.vocabulary.is_rank_zero", lambda: True)
     monkeypatch.setattr(
-        "json2vec.callbacks.all_gather_object",
+        "json2vec.tensorfields.shared.vocabulary.all_gather_object",
         lambda local: [local, {"root/category": ["GAMMA"]}],
     )
-    monkeypatch.setattr("json2vec.callbacks.broadcast_object", lambda payload, src: payload)
+    monkeypatch.setattr("json2vec.tensorfields.shared.vocabulary.broadcast_object", lambda payload, src: payload)
 
     VocabularySyncCallback().on_train_epoch_end(trainer=trainer, pl_module=module)
 

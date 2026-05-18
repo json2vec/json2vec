@@ -1,5 +1,4 @@
 from json2vec.architecture.root import JSON2Vec as Architecture
-from json2vec.callbacks import VocabularySyncCallback
 from json2vec.data.datasets import Dataset, StreamingDataModule
 from json2vec.processors import PROCESSORS, Processor, ProcessorMode, shim
 from json2vec.structs.enums import Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
@@ -14,6 +13,7 @@ from json2vec.tensorfields.extensions.number import Request as Number
 from json2vec.tensorfields.extensions.set import Request as Set
 from json2vec.tensorfields.extensions.text import Request as Text
 from json2vec.tensorfields.extensions.vector import Request as Vector
+from json2vec.tensorfields.shared.vocabulary import VocabularySyncCallback
 
 __all__ = [
     "Address",

@@ -20,9 +20,9 @@ from json2vec.structs.tree import Address, Leaf, Node
 from json2vec.tensorfields.base import TENSORFIELDS
 
 if TYPE_CHECKING:
-    from json2vec.architecture.counter import Counter
     from json2vec.architecture.root import JSON2Vec
     from json2vec.structs.experiment import Hyperparameters
+    from json2vec.tensorfields.shared.counter import Counter
 
 PLOT_WIDTH = 220
 PLOT_TITLE_STYLE = "bold"

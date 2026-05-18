@@ -9,6 +9,7 @@ import lightning.pytorch as lit
 import pyarrow.fs as pafs
 import torch
 from beartype import beartype
+from lightning.pytorch import Callback
 from loguru import logger
 from tensordict import TensorDict
 
@@ -126,6 +127,21 @@ class JSON2Vec(lit.LightningModule):
             arrays=len(self.hyperparameters.arrays),
             embeds=len(self.hyperparameters.embed),
         ).info("initialized JSON2Vec module")
+
+    def configure_callbacks(self) -> list[Callback]:
+        callbacks: list[Callback] = []
+        factories: set[Any] = set()
+
+        for request in self.hyperparameters.requests.values():
+            plugin: Plugin = TENSORFIELDS[request.type]
+            for factory in plugin.callback_factories:
+                if factory in factories:
+                    continue
+
+                factories.add(factory)
+                callbacks.append(factory())
+
+        return callbacks
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
         self.log(

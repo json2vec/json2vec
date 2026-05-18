@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Type, TypeAlias
 
 import pluggy
 import torch
+from lightning.pytorch import Callback
 from tensordict import TensorDict
 
 from json2vec.architecture.pool import LearnedQueryCrossAttention, MeanPool
@@ -24,6 +25,7 @@ pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
 pm.add_hookspecs(module_or_class=PluginSpec)
 
 RequestBase: TypeAlias = Leaf
+CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 
 
 def default_plot(
@@ -139,6 +141,7 @@ class Plugin:
 
         self.name: str = name
         self.components: dict[Component, Callable | Type | None] = {}
+        self.callback_factories: list[CallbackFactory] = []
 
         if name in TENSORFIELDS:
             raise ValueError(f"Plugin '{name}' already registered")
@@ -255,6 +258,17 @@ class Plugin:
         self.components[name] = obj
 
         return obj
+
+    def callback(self, factory: CallbackFactory) -> CallbackFactory:
+        callback = factory()
+        if not isinstance(callback, Callback):
+            raise TypeError(f"Plugin callback factory for '{self.name}' must produce a Lightning Callback")
+
+        self.callback_factories.append(factory)
+        return factory
+
+    def callbacks(self) -> list[Callback]:
+        return [factory() for factory in self.callback_factories]
 
     def __getattr__(self, key: Component) -> Callable | Type:
         try:

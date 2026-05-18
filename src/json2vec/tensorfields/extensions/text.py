@@ -11,7 +11,6 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.counter import Counter
 from json2vec.data.processing import apply, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
@@ -23,6 +22,7 @@ from json2vec.tensorfields.base import (
     RequestBase,
     TensorFieldBase,
 )
+from json2vec.tensorfields.shared.counter import Counter
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec

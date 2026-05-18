@@ -1,7 +1,7 @@
 import torch
 
-from json2vec.architecture.counter import Counter
 from json2vec.structs.tree import Address
+from json2vec.tensorfields.shared.counter import Counter
 
 
 def test_counter():
