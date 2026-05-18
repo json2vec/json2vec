@@ -1033,8 +1033,9 @@ Unifying self-supervised learning with supervised learning simplifies control fl
 
 The idea is simple: the same datatype-specific losses are used for self-supervised learning and supervised learning.
 
-During pretraining, all masked values are imputed regardless of their dimensionality. During supervised learning, all "pruned" values are predicted regardless of their dimensionality.
-The difference is that masking happens value-by-value according to the masking rate. Pruning removes a field from the input and turns it into a target.
+During pretraining, all masked values are imputed regardless of their dimensionality. During supervised learning, all targeted values are predicted regardless of their dimensionality.
+The difference is that masking happens value-by-value according to the masking rate. Targeting removes a field from the input and trains the model to reconstruct it.
+`dropout`, `p_mask`, and `p_target` can be configured on the root field array, nested arrays, or fields; child nodes inherit the closest parent value unless they override it.
 
 This means that the control flow is the same for pretraining and finetuning. The difference between pretraining and finetuning is configuration, not a separate model architecture.
 
@@ -1042,9 +1043,10 @@ This means that the control flow is the same for pretraining and finetuning. The
 - name: "my-pretrain-job"
   task: "fit"
   dataset: ...
-  structure: ...
-  p_mask: 0.15 # mask 15% of all values
-  p_prune: 0.05 # prune 5% of each field's observations
+  structure:
+    ...
+    p_mask: 0.15 # mask 15% of values by default
+    p_target: 0.05 # target 5% of each field's observations by default
   ...
 ```
 
@@ -1053,7 +1055,7 @@ This means that the control flow is the same for pretraining and finetuning. The
   task: "fit"
   dataset: ...
   structure: ...
-  pruned: ["customer/transaction/is_fraud"] # always hide this field and train the model to reconstruct it
+  target: ["customer/transaction/is_fraud"] # always hide this field and train the model to reconstruct it
   ...
 ```
 
@@ -1110,95 +1112,6 @@ There are several important capabilities that are intentionally not yet included
 The current implementation is focused on proving the schema-driven modeling abstraction first. The next layer of work is about making the architecture more configurable, more efficient, and easier to operate at larger scale.
 
 == Model Architecture
-
-=== Field-Specific Masking Policies
-
-Today, masking is mostly controlled at the experiment level.
-That is a reasonable default, but it is too blunt for large heterogeneous schemas.
-
-Different fields should be maskable at different rates.
-For example, a high-cardinality merchant category, a transaction amount, a timestamp, and a customer-level target should not necessarily share the same masking behavior. Some fields may be easy to reconstruct and should be masked aggressively. Others may be rare, sparse, or high-value targets that need a lower masking rate.
-
-The natural configuration model is hierarchical inheritance.
-A context could define a default masking policy, and each child field or child context could override it only when needed. If a field does not define its own policy, it inherits the closest parent policy.
-
-Conceptually:
-
-```yaml
-name: customer
-p_mask: 0.15
-fields:
-
-  - name: transactions
-    p_mask: 0.25
-    fields:
-
-      - name: amount
-        type: number
-        p_mask: 0.05
-
-      - name: merchant_category
-        type: category
-        # inherits p_mask: 0.25 from transactions
-```
-
-This would make masking strategy part of the schema itself, which is where it belongs. It would also make pretraining more controllable: the model could learn broad reconstruction behavior without accidentally over-emphasizing fields whose losses are easy, frequent, or poorly calibrated.
-
-=== Per-Context Encoder Configuration
-
-The current design already allows each context to define its own depth, width, head count, and context size.
-The next step is to make the attention implementation itself configurable per context.
-
-This matters because different contexts have very different computational profiles.
-A root context may contain only a handful of child summaries. A transaction context may contain hundreds of events. A clickstream context may contain thousands of fine-grained actions. Treating all of these contexts with the same multi-head self-attention implementation is unlikely to be optimal.
-
-Useful options include:
-- Standard multi-head self-attention for small or medium contexts.
-- Grouped-query attention (`GQA`) or multi-query attention (`MQA`) where key/value projections can be shared to reduce memory bandwidth.
-- Local, windowed, or sparse attention for long ordered contexts.
-- Flash-attention-backed kernels where tensor shapes and hardware support make that worthwhile.
-- Lightweight feed-forward or pooling-only encoders for contexts that are mostly structural.
-
-This will be straightforward to develop because all encoders share the same `torch.nn.Module` implementation.
-
-The schema should eventually be able to express these choices directly.
-That would let the model spend attention capacity where relationships are complex, while using cheaper encoders for contexts that only need simple summarization.
-
-=== Pooling Strategies Beyond Cross-Attention
-
-`json2vec` currently assumes that learned cross-attention pooling is the right way to summarize a context.
-That assumption is convenient because it is expressive: learned query vectors can attend over child embeddings and extract one or more context summaries.
-
-However, cross-attention is not free.
-For many contexts, especially large child contexts, it may be more expensive than the value it provides. It also introduces another set of learned parameters and another attention operation at every context boundary.
-
-This needs to become an explicit architectural choice rather than a hard assumption.
-Candidate pooling strategies include:
-- Learned cross-attention pooling for contexts where multiple summary vectors are valuable.
-- A `CLS`-style summary token for contexts that behave more like language sequences.
-- Mean, max, or masked statistical pooling for cheap baseline summaries.
-- Attention pooling with a single scoring vector when only one summary is needed.
-- Perceiver-style latent bottlenecks for very large contexts.
-
-The right pooling strategy may differ by context.
-A customer history may benefit from learned pooling, while a small field-stacking context may only need a cheap reduction. Making pooling configurable would make the architecture more efficient without giving up the schema-driven design.
-
-=== Multi-GPU Training and Serving
-
-Multi-GPU support is also not yet implemented.
-This is partly a systems issue, but it has architectural implications because hierarchical models can have uneven memory and compute profiles.
-
-The obvious first step is data parallel training, where each GPU receives a different batch and gradients are synchronized across replicas.
-That is sufficient for many models, but larger schemas may eventually need more careful strategies:
-- Fully sharded data parallelism for large parameter sets.
-- Activation checkpointing for deep or wide context trees.
-- Context-aware batching so similarly shaped observations are grouped together.
-- Separate scaling paths for training and real-time inference.
-
-Serving has its own constraints.
-For real-time inference, the limiting factor may be request serialization, preprocessing, and network latency rather than raw GPU math. In that setting, a smaller GPU, CPU inference for small models, dynamic batching, or multiple lightweight replicas may outperform a large underutilized instance.
-
-The architecture should therefore expose enough information about context sizes, batch shapes, and embedding outputs to support better scheduling later.
 
 === Pretrained Encoders for Recommendation Systems
 

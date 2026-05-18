@@ -263,6 +263,18 @@ class JSON2Vec(lit.LightningModule):
             migrated["target"] = migrated.pop("pruned")
         if "p_target" not in migrated and "p_prune" in migrated:
             migrated["p_target"] = migrated.pop("p_prune")
+        else:
+            migrated.pop("p_prune", None)
+
+        fields = migrated.get("fields")
+        if isinstance(fields, dict):
+            fields = dict(fields)
+            for key in ("dropout", "p_mask", "p_target"):
+                if key in migrated:
+                    value = migrated.pop(key)
+                    if fields.get(key) is None:
+                        fields[key] = value
+            migrated["fields"] = fields
 
         def migrate_array(node: Any) -> Any:
             if not isinstance(node, dict):

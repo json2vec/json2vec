@@ -38,12 +38,31 @@ category: Plugin = Plugin(name="category")
 UNAVAILABLE_LABEL = "<unavailable>"
 
 class Vocabulary:
-    def __init__(self, master: ListProxy, lock: Lock, max_vocab_size: int):
+    def __init__(
+        self,
+        master: ListProxy,
+        lock: Lock,
+        proposals: ListProxy,
+        proposal_lock: Lock,
+        max_vocab_size: int,
+    ):
 
         self.master: ListProxy[str] = master
         self.lock: Lock = lock
+        self.proposals: ListProxy[str] = proposals
+        self.proposal_lock: Lock = proposal_lock
         self.max_vocab_size: int = max_vocab_size
         self.vocab: OrderedSet[str] = OrderedSet(list(master))
+        self.global_rank: int = 0
+        self.world_size: int = 1
+
+    def configure_distributed(self, global_rank: int = 0, world_size: int = 1) -> None:
+        self.global_rank = global_rank
+        self.world_size = world_size
+
+    @property
+    def can_update(self) -> bool:
+        return self.global_rank == 0
 
     def refresh(self, force: bool = False) -> None:
         if not force and len(self.master) == len(self.vocab):
@@ -70,6 +89,13 @@ class Vocabulary:
 
             # Validation/test/inference should preserve "field exists" semantics even when
             # the label was never seen during training.
+            return self.unavailable_index
+
+        if not self.can_update:
+            with self.proposal_lock:
+                if word not in self.proposals:
+                    self.proposals.append(word)
+
             return self.unavailable_index
 
         # OK, it is not known locally... We will lock the global state and update the local vocab
@@ -103,6 +129,8 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.manager: SyncManager = Manager()
         self.master: ListProxy[str] = self.manager.list()
         self.lock: Lock = self.manager.Lock()
+        self.proposals: ListProxy[str] = self.manager.list()
+        self.proposal_lock: Lock = self.manager.Lock()
         self._snapshot_cache: list[str] | None = None
         self._snapshot_size: int = -1
 
@@ -118,6 +146,7 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         vocab: list[str] = state_dict.pop(prefix + "vocabulary")
         self.master: ListProxy[str] = self.manager.list(vocab)
+        self.proposals: ListProxy[str] = self.manager.list()
         self._snapshot_cache = None
         self._snapshot_size = -1
 
@@ -129,7 +158,13 @@ class OnlineVocabularyModel(torch.nn.Module):
     @property
     def state(self) -> Vocabulary:
 
-        return Vocabulary(master=self.master, lock=self.lock, max_vocab_size=self.max_vocab_size)
+        return Vocabulary(
+            master=self.master,
+            lock=self.lock,
+            proposals=self.proposals,
+            proposal_lock=self.proposal_lock,
+            max_vocab_size=self.max_vocab_size,
+        )
 
     def snapshot(self) -> list[str]:
         size = len(self.master)
@@ -138,6 +173,47 @@ class OnlineVocabularyModel(torch.nn.Module):
             self._snapshot_size = size
 
         return self._snapshot_cache
+
+    def drain_proposals(self) -> list[str]:
+        with self.proposal_lock:
+            proposals = list(self.proposals)
+            self.proposals[:] = []
+
+        return proposals
+
+    def extend(self, proposals: list[str]) -> tuple[int, int]:
+        accepted = 0
+        rejected = 0
+
+        with self.lock:
+            vocab = OrderedSet(list(self.master))
+            for word in proposals:
+                if word in vocab:
+                    continue
+
+                if len(vocab) >= self.max_vocab_size:
+                    rejected += 1
+                    continue
+
+                vocab.add(word)
+                self.master.append(word)
+                accepted += 1
+
+        if accepted:
+            self._snapshot_cache = None
+            self._snapshot_size = -1
+
+        return accepted, rejected
+
+    def load_snapshot(self, vocabulary: list[str]) -> None:
+        with self.lock:
+            self.master[:] = vocabulary[:self.max_vocab_size]
+
+        with self.proposal_lock:
+            self.proposals[:] = []
+
+        self._snapshot_cache = None
+        self._snapshot_size = -1
 
 
 @category.register

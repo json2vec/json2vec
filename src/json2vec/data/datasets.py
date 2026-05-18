@@ -23,6 +23,8 @@ from tensordict import TensorDict
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from json2vec.data.processing import Pipeline
+from json2vec.distributed import rank as distributed_rank
+from json2vec.distributed import world_size as distributed_world_size
 from json2vec.processors.base import PROCESSORS, Processor
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Hyperparameters
@@ -174,12 +176,18 @@ def sha256(string: str, bits: int = 64) -> int:
     return int.from_bytes(h, "big") >> (256 - bits)
 
 
-def _worker_identity() -> tuple[int, int]:
+def _worker_identity(global_rank: int | None = None, world_size: int | None = None) -> tuple[int, int]:
+    if global_rank is None:
+        global_rank = distributed_rank()
+    if world_size is None:
+        world_size = distributed_world_size()
+
     worker_info = get_worker_info()
     if worker_info is None:
-        return 0, 1
+        return global_rank, max(1, world_size)
 
-    return worker_info.id, worker_info.num_workers
+    worker_count = max(1, worker_info.num_workers)
+    return (global_rank * worker_count) + worker_info.id, max(1, world_size) * worker_count
 
 
 def _is_assigned_to_worker(shard_key: str, worker_id: int, num_workers: int) -> bool:
@@ -191,7 +199,13 @@ def _is_assigned_to_worker(shard_key: str, worker_id: int, num_workers: int) -> 
 
 
 @beartype
-def fetch(dataset: Dataset, strata: Strata, sharding: ShardingStrategy) -> Iterator[str]:
+def fetch(
+    dataset: Dataset,
+    strata: Strata,
+    sharding: ShardingStrategy,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> Iterator[str]:
     if dataset.root is None:
         return
 
@@ -215,7 +229,7 @@ def fetch(dataset: Dataset, strata: Strata, sharding: ShardingStrategy) -> Itera
 
     selector = pafs.FileSelector(path, recursive=True)
 
-    worker_id, num_workers = _worker_identity()
+    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
 
     for info in fs.get_file_info(selector):
         if info.is_file:
@@ -239,10 +253,12 @@ def observe(
     sharding: ShardingStrategy,
     chunk_batch_size: int,
     file_buffer_size: int,
+    global_rank: int | None = None,
+    world_size: int | None = None,
 ) -> Iterator[RawObservation]:
     if dataset.root is None:
         # Processor-driven mode: seed a single synthetic observation for one worker.
-        worker_id, num_workers = _worker_identity()
+        worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
         if _is_assigned_to_worker(
             shard_key="synthetic:seed",
             worker_id=worker_id,
@@ -251,7 +267,13 @@ def observe(
             yield {}
         return
 
-    paths: Iterator[str] = fetch(dataset=dataset, strata=strata, sharding=sharding)
+    paths: Iterator[str] = fetch(
+        dataset=dataset,
+        strata=strata,
+        sharding=sharding,
+        global_rank=global_rank,
+        world_size=world_size,
+    )
     shuffled_paths: Iterator[str] = shuffle(
         paths,
         size=file_buffer_size,
@@ -262,6 +284,8 @@ def observe(
         dataset=dataset,
         sharding=sharding,
         chunk_batch_size=chunk_batch_size,
+        global_rank=global_rank,
+        world_size=world_size,
     )
 
 
@@ -271,8 +295,10 @@ def read(
     dataset: Dataset,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
+    global_rank: int | None = None,
+    world_size: int | None = None,
 ) -> Iterator[RawObservation]:
-    worker_id, num_workers = _worker_identity()
+    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
 
     match dataset.suffix:
         case Suffix.ndjson:
@@ -545,16 +571,16 @@ def mask(
     pipe: Iterable[EncodedInput],
     hyperparameters: Hyperparameters,
 ) -> Iterator[EncodedInput]:
-    if not hyperparameters.p_mask > 0.0:
-        yield from pipe
+    for batch in pipe:
+        for address in hyperparameters.requests.keys():
+            p_mask = hyperparameters.resolved_p_mask(address)
+            if p_mask <= 0.0:
+                continue
 
-    else:
-        for batch in pipe:
-            for address in hyperparameters.requests.keys():
-                field: TensorFieldBase = batch[address]
-                field.mask(p_mask=hyperparameters.p_mask)
+            field: TensorFieldBase = batch[address]
+            field.mask(p_mask=p_mask)
 
-            yield batch
+        yield batch
 
 
 @beartype
@@ -564,8 +590,12 @@ def target(
 ) -> Iterator[EncodedInput]:
     for batch in pipe:
         for address in hyperparameters.requests.keys():
+            p_target = hyperparameters.resolved_p_target(address)
+            if p_target <= 0.0:
+                continue
+
             field: TensorFieldBase = batch[address]
-            field.target(p_target=hyperparameters.p_target)
+            field.target(p_target=p_target)
 
         yield batch
 
@@ -587,12 +617,16 @@ class BatchDataset(IterableDataset):
         file_buffer_size: int,
         observation_buffer_size: int,
         sample_rate: float,
+        global_rank: int | None = None,
+        world_size: int | None = None,
     ):
         super().__init__()
 
         self.hyperparameters: Hyperparameters = hyperparameters
         self.dataset: Dataset = dataset
         self.state: dict[Address, Any] = state
+        self.global_rank: int = distributed_rank() if global_rank is None else global_rank
+        self.world_size: int = distributed_world_size() if world_size is None else world_size
         self.batch_size: int = batch_size
         self.strata: Strata = strata
         self.sharding: ShardingStrategy = sharding
@@ -611,9 +645,15 @@ class BatchDataset(IterableDataset):
             file_buffer_size=self.file_buffer_size,
             observation_buffer_size=self.observation_buffer_size,
             sample_rate=self.sample_rate,
+            global_rank=self.global_rank,
+            world_size=self.world_size,
         ).info("initialized batch dataset")
 
     def __iter__(self):
+        for field_state in self.state.values():
+            if hasattr(field_state, "configure_distributed"):
+                field_state.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
+
         yield from (
             Pipeline(
                 hyperparameters=self.hyperparameters,
@@ -625,6 +665,8 @@ class BatchDataset(IterableDataset):
                 file_buffer_size=self.file_buffer_size,
                 sample_rate=self.sample_rate,
                 batch_size=self.batch_size,
+                global_rank=self.global_rank,
+                world_size=self.world_size,
             )
             | observe
             | process
@@ -651,10 +693,14 @@ def dataloader(
     file_buffer_size: int,
     observation_buffer_size: int,
     sample_rate: float,
+    global_rank: int | None = None,
+    world_size: int | None = None,
 ) -> DataLoader:
     workers: int = num_workers if num_workers is not None else (os.cpu_count() or 0)
     active_persistent_workers: bool = persistent_workers and workers > 0
     active_pin_memory: bool = pin_memory and strata != Strata.predict and torch.cuda.is_available()
+    global_rank = distributed_rank() if global_rank is None else global_rank
+    world_size = distributed_world_size() if world_size is None else world_size
     logger.bind(
         component="data",
         strata=strata,
@@ -667,6 +713,8 @@ def dataloader(
         file_buffer_size=file_buffer_size,
         observation_buffer_size=observation_buffer_size,
         sample_rate=sample_rate,
+        global_rank=global_rank,
+        world_size=world_size,
     ).info("building dataloader")
 
     return DataLoader(
@@ -681,6 +729,8 @@ def dataloader(
             file_buffer_size=file_buffer_size,
             observation_buffer_size=observation_buffer_size,
             sample_rate=sample_rate,
+            global_rank=global_rank,
+            world_size=world_size,
         ),
         drop_last=False,
         batch_size=None,
@@ -756,6 +806,10 @@ class StreamingDataModule(lit.LightningDataModule):
         )
 
     def dataloader(self, strata: Strata) -> DataLoader:
+        trainer = getattr(self, "trainer", None)
+        global_rank = getattr(trainer, "global_rank", None)
+        world_size = getattr(trainer, "world_size", None)
+
         return dataloader(
             hyperparameters=self.hyperparameters,
             dataset=self.dataset,
@@ -770,6 +824,8 @@ class StreamingDataModule(lit.LightningDataModule):
             file_buffer_size=self.file_buffer_size[strata],
             observation_buffer_size=self.observation_buffer_size[strata],
             sample_rate=self.sample_rate[strata],
+            global_rank=global_rank,
+            world_size=world_size,
         )
 
     def train_dataloader(self) -> DataLoader:

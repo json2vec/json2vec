@@ -1,10 +1,12 @@
 import functools
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 
 import jmespath
 import pydantic
 from anytree import NodeMixin
 from jmespath.exceptions import JMESPathError
+
+Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
 
 
 class Address(str):
@@ -33,6 +35,9 @@ class Node(NodeMixin, pydantic.BaseModel):
     type: str
     description: str | None = None
     n_heads: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
+    dropout: Rate | None = None
+    p_mask: Rate | None = None
+    p_target: Rate | None = None
 
     @functools.cached_property
     def address(self) -> Address:

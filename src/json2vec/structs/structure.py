@@ -2,7 +2,7 @@ from typing import Annotated, Literal, Self, TypeAlias, Union
 
 import pydantic
 
-from json2vec.structs.tree import Node
+from json2vec.structs.tree import Node, Rate
 from json2vec.tensorfields import extensions as _extensions  # noqa: F401
 from json2vec.tensorfields.base import TENSORFIELDS
 
@@ -12,7 +12,7 @@ RequestTypes: TypeAlias = Annotated[
 ]
 
 
-Dropout: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
+Dropout: TypeAlias = Rate
 
 
 class Array(Node):
@@ -23,7 +23,6 @@ class Array(Node):
     n_outputs: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
-    dropout: Dropout | None = None
     fields: list[Self | RequestTypes] = pydantic.Field(default_factory=list)
 
     def model_post_init(self, __context):

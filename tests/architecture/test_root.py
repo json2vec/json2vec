@@ -34,6 +34,37 @@ def _hyperparameters() -> Hyperparameters:
     )
 
 
+def test_checkpoint_migration_moves_root_rates_to_root_field_array() -> None:
+    hyperparameters = JSON2Vec._hyperparameters_from_checkpoint(
+        {
+            "hyperparameters": {
+                "d_model": 8,
+                "dropout": 0.1,
+                "p_mask": 0.2,
+                "p_target": 0.3,
+                "fields": {
+                    "name": "root",
+                    "type": "array",
+                    "max_length": 1,
+                    "n_outputs": 1,
+                    "fields": [
+                        {
+                            "name": "label",
+                            "type": "category",
+                            "query": "[*].label",
+                            "max_vocab_size": 32,
+                        }
+                    ],
+                },
+            }
+        }
+    )
+
+    assert hyperparameters.fields.dropout == 0.1
+    assert hyperparameters.fields.p_mask == 0.2
+    assert hyperparameters.fields.p_target == 0.3
+
+
 def _prediction_hyperparameters() -> Hyperparameters:
     return Hyperparameters(
         d_model=8,

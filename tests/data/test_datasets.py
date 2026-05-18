@@ -43,6 +43,12 @@ def test_is_assigned_to_worker_single_worker():
     assert datasets._is_assigned_to_worker("record:file:42", worker_id=0, num_workers=1)
 
 
+def test_worker_identity_combines_rank_and_dataloader_worker(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(datasets, "get_worker_info", lambda: SimpleNamespace(id=2, num_workers=4))
+
+    assert datasets._worker_identity(global_rank=1, world_size=3) == (6, 12)
+
+
 def test_query():
     expr = datasets.query("[*].foo.bar")
     result = expr.search([[{"foo": {"bar": 42}}]])
@@ -54,7 +60,7 @@ def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     records = [{"id": i} for i in range(5)]
     path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
 
-    monkeypatch.setattr(datasets, "_worker_identity", lambda: (0, 2))
+    monkeypatch.setattr(datasets, "_worker_identity", lambda **_: (0, 2))
 
     def assign_first_chunk_only(shard_key: str, worker_id: int, num_workers: int) -> bool:
         return int(shard_key.rsplit(":", 1)[1]) == 0
@@ -78,7 +84,7 @@ def test_read_ndjson_record_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyP
     records = [{"id": i} for i in range(6)]
     path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
 
-    monkeypatch.setattr(datasets, "_worker_identity", lambda: (0, 2))
+    monkeypatch.setattr(datasets, "_worker_identity", lambda **_: (0, 2))
 
     def assign_even_records(shard_key: str, worker_id: int, num_workers: int) -> bool:
         return int(shard_key.rsplit(":", 1)[1]) % 2 == 0
@@ -101,7 +107,7 @@ def test_fetch_file_sharding_filters_files(tmp_path: Path, monkeypatch: pytest.M
     (tmp_path / "keep.ndjson").write_text("", encoding="utf-8")
     (tmp_path / "skip.ndjson").write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(datasets, "_worker_identity", lambda: (0, 2))
+    monkeypatch.setattr(datasets, "_worker_identity", lambda **_: (0, 2))
 
     def assign_keep_only(shard_key: str, worker_id: int, num_workers: int) -> bool:
         return "keep.ndjson" in shard_key
@@ -157,7 +163,7 @@ def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPa
         patterns={strata: r".*" for strata in Strata},
     )
 
-    monkeypatch.setattr(datasets, "_worker_identity", lambda: (0, 2))
+    monkeypatch.setattr(datasets, "_worker_identity", lambda **_: (0, 2))
     monkeypatch.setattr(
         datasets,
         "_is_assigned_to_worker",
@@ -183,7 +189,7 @@ def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch
         patterns={strata: r".*" for strata in Strata},
     )
 
-    monkeypatch.setattr(datasets, "_worker_identity", lambda: (1, 2))
+    monkeypatch.setattr(datasets, "_worker_identity", lambda **_: (1, 2))
     monkeypatch.setattr(
         datasets,
         "_is_assigned_to_worker",
@@ -469,3 +475,105 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
 
     assert list(batch_dataset) == [[[{"id": 1}]]]
     assert seen["sample_rate"] == 0.25
+
+
+def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPatch):
+    class DistributedState:
+        def __init__(self):
+            self.calls = []
+
+        def configure_distributed(self, global_rank: int, world_size: int):
+            self.calls.append((global_rank, world_size))
+
+    state = DistributedState()
+
+    def observe(dataset, strata, sharding, chunk_batch_size, file_buffer_size, global_rank, world_size):
+        yield {"id": global_rank, "world_size": world_size}
+
+    def process(pipe, dataset, strata, state):
+        yield from ([item] for item in pipe)
+
+    def sample(pipe, sample_rate, strata):
+        yield from pipe
+
+    def batch(pipe, batch_size):
+        yield list(pipe)
+
+    def transform(pipe, hyperparameters, strata, state):
+        yield from pipe
+
+    def mask(pipe, hyperparameters):
+        yield from pipe
+
+    def target(pipe, hyperparameters):
+        yield from pipe
+
+    monkeypatch.setattr(datasets, "observe", observe)
+    monkeypatch.setattr(datasets, "process", process)
+    monkeypatch.setattr(datasets, "sample", sample)
+    monkeypatch.setattr(datasets, "batch", batch)
+    monkeypatch.setattr(datasets, "transform", transform)
+    monkeypatch.setattr(datasets, "mask", mask)
+    monkeypatch.setattr(datasets, "target", target)
+
+    batch_dataset = datasets.BatchDataset(
+        hyperparameters=SimpleNamespace(requests={}),
+        dataset=SimpleNamespace(),
+        state={"root/category": state},
+        batch_size=2,
+        strata=Strata.train,
+        sharding=ShardingStrategy.chunk,
+        chunk_batch_size=1,
+        file_buffer_size=1,
+        observation_buffer_size=1,
+        sample_rate=1.0,
+        global_rank=2,
+        world_size=4,
+    )
+
+    assert list(batch_dataset) == [[[{"id": 2, "world_size": 4}]]]
+    assert state.calls == [(2, 4)]
+
+
+def test_mask_uses_resolved_field_rates():
+    class Field:
+        def __init__(self):
+            self.calls = []
+
+        def mask(self, p_mask: float):
+            self.calls.append(p_mask)
+
+    first = Field()
+    second = Field()
+    hyperparameters = SimpleNamespace(
+        requests={"root/first": object(), "root/second": object()},
+        resolved_p_mask=lambda address: 0.25 if address == "root/first" else 0.0,
+    )
+
+    output = list(datasets.mask.__wrapped__([{"root/first": first, "root/second": second}], hyperparameters))
+
+    assert output == [{"root/first": first, "root/second": second}]
+    assert first.calls == [0.25]
+    assert second.calls == []
+
+
+def test_target_uses_resolved_field_rates():
+    class Field:
+        def __init__(self):
+            self.calls = []
+
+        def target(self, p_target: float):
+            self.calls.append(p_target)
+
+    first = Field()
+    second = Field()
+    hyperparameters = SimpleNamespace(
+        requests={"root/first": object(), "root/second": object()},
+        resolved_p_target=lambda address: 0.0 if address == "root/first" else 0.75,
+    )
+
+    output = list(datasets.target.__wrapped__([{"root/first": first, "root/second": second}], hyperparameters))
+
+    assert output == [{"root/first": first, "root/second": second}]
+    assert first.calls == []
+    assert second.calls == [0.75]

@@ -77,3 +77,28 @@ def test_hyperparameters_rejects_dataset_configuration():
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         Hyperparameters.model_validate(payload)
+
+
+@pytest.mark.parametrize("rate", ["dropout", "p_mask", "p_target"])
+def test_hyperparameters_rejects_root_rate_configuration(rate: str):
+    payload = _hyperparameters_payload()
+    payload[rate] = 0.1
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        Hyperparameters.model_validate(payload)
+
+
+def test_hyperparameters_rejects_invalid_node_mask_rate():
+    payload = _hyperparameters_payload()
+    payload["fields"]["p_mask"] = 1.0
+
+    with pytest.raises(ValueError):
+        Hyperparameters.model_validate(payload)
+
+
+def test_hyperparameters_rejects_invalid_leaf_target_rate():
+    payload = _hyperparameters_payload()
+    payload["fields"]["fields"][0]["p_target"] = -0.1
+
+    with pytest.raises(ValueError):
+        Hyperparameters.model_validate(payload)

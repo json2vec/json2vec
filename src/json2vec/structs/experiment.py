@@ -1,10 +1,10 @@
 import functools
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 
 import pydantic
 from anytree import LevelOrderGroupIter, RenderTree
 
-from json2vec.structs.structure import Array, Dropout, RequestTypes
+from json2vec.structs.structure import Array, RequestTypes
 from json2vec.structs.tree import Address, Node
 
 
@@ -15,15 +15,15 @@ class Hyperparameters(Node):
     type: Literal["hyperparameters"] = pydantic.Field(default="hyperparameters", exclude=True)
     description: Literal[None] = pydantic.Field(default=None, exclude=True)
     d_model: Annotated[int, pydantic.Field(gt=0, default=128)]
-    dropout: Dropout | None = None
     fields: Array
 
     target: list[Address]|Address = pydantic.Field(default_factory=list)
     reset: list[Address]|Address = pydantic.Field(default_factory=list)
     embed: list[Address]|Address = pydantic.Field(default_factory=list)
 
-    p_target: Annotated[float, pydantic.Field(ge=0.0, lt=1.0)] = 0.0
-    p_mask: Annotated[float, pydantic.Field(ge=0.0, lt=1.0)] = 0.0
+    dropout: ClassVar[None] = None
+    p_mask: ClassVar[None] = None
+    p_target: ClassVar[None] = None
 
     @pydantic.field_validator("target", "reset", "embed", mode="before")
     @classmethod
@@ -63,21 +63,34 @@ class Hyperparameters(Node):
 
         return out
 
-    def resolved_dropout(self, address: Address) -> float:
+    def resolved_dropout(self, address: Address | str) -> float:
+        return self._resolved_rate(address, "dropout")
+
+    def _node_at(self, address: Address | str) -> Node:
         if address in self.arrays:
-            node: Node | None = self.arrays[address]
-        elif address in self.requests:
-            node = self.requests[address].parent
-        else:
-            raise ValueError(f"address '{address}' not found in hyperparameters")
+            return self.arrays[Address(str(address))]
+
+        if address in self.requests:
+            return self.requests[Address(str(address))]
+
+        raise ValueError(f"address '{address}' not found in hyperparameters")
+
+    def _resolved_rate(self, address: Address | str, name: Literal["dropout", "p_mask", "p_target"]) -> float:
+        node: Node | None = self._node_at(address)
 
         while node is not None:
-            dropout = getattr(node, "dropout", None)
-            if dropout is not None:
-                return float(dropout)
+            rate = getattr(node, name, None)
+            if rate is not None:
+                return float(rate)
             node = getattr(node, "parent", None)
 
         return 0.0
+
+    def resolved_p_mask(self, address: Address | str) -> float:
+        return self._resolved_rate(address, "p_mask")
+
+    def resolved_p_target(self, address: Address | str) -> float:
+        return self._resolved_rate(address, "p_target")
 
     @pydantic.model_validator(mode="after")
     def check_overriden_fields(self):

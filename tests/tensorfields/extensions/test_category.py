@@ -71,12 +71,43 @@ class _DummyState:
 def test_category_vocabulary_refreshes_stale_validation_snapshot():
     master: list[str] = []
     lock = Lock()
-    validation_state = Vocabulary(master=master, lock=lock, max_vocab_size=8)
-    training_state = Vocabulary(master=master, lock=lock, max_vocab_size=8)
+    proposals: list[str] = []
+    proposal_lock = Lock()
+    validation_state = Vocabulary(
+        master=master,
+        lock=lock,
+        proposals=proposals,
+        proposal_lock=proposal_lock,
+        max_vocab_size=8,
+    )
+    training_state = Vocabulary(
+        master=master,
+        lock=lock,
+        proposals=proposals,
+        proposal_lock=proposal_lock,
+        max_vocab_size=8,
+    )
 
     assert training_state("ALPHA", update=True) == 0
     assert validation_state("ALPHA", update=False) == 0
     assert len(validation_state) == 1
+
+
+def test_category_vocabulary_nonzero_rank_proposes_unseen_tokens():
+    master: list[str] = []
+    proposals: list[str] = []
+    state = Vocabulary(
+        master=master,
+        lock=Lock(),
+        proposals=proposals,
+        proposal_lock=Lock(),
+        max_vocab_size=8,
+    )
+    state.configure_distributed(global_rank=1, world_size=2)
+
+    assert state("ALPHA", update=True) == state.unavailable_index
+    assert master == []
+    assert proposals == ["ALPHA"]
 
 
 def test_category_tensorfield_separates_state_and_content():
