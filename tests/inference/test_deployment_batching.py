@@ -36,9 +36,9 @@ class _DummyModel:
         )
 
 
-def _deployment() -> tuple[Deployment, _DummyModel]:
+def _deployment(deployment_cls=Deployment) -> tuple[Deployment, _DummyModel]:
     model = _DummyModel()
-    deployment = Deployment(checkpoint="unused")
+    deployment = deployment_cls(checkpoint="unused")
     deployment.model = model
     deployment.device = "cpu"
     return deployment, model
@@ -66,6 +66,31 @@ def test_deployment_batches_only_valid_inputs_and_preserves_per_item_errors():
         "message": "cxr DM not present",
     }
     assert encoded[2]["predictions"]["root/label"]["value"] == "ok"
+
+
+def test_deployment_postprocess_can_rewrite_encoded_response():
+    class PostprocessedDeployment(Deployment):
+        pass
+
+    seen = {}
+
+    def processor(predictions, embeddings):
+        seen["predictions"] = predictions
+        seen["embeddings"] = embeddings
+        return (
+            {"root/label": {"value": ["rewritten"]}},
+            {"root/vector": {"embedding": [[1.0, 2.0]]}},
+        )
+
+    deployment, _ = _deployment(PostprocessedDeployment)
+    PostprocessedDeployment.postprocess(processor)
+
+    encoded = deployment.encode_response([])
+
+    assert seen["predictions"]["root/label"]["value"] == ["ok"]
+    assert seen["embeddings"] == {}
+    assert encoded["predictions"]["root/label"]["value"] == "rewritten"
+    assert encoded["embeddings"]["root/vector"]["embedding"] == [1.0, 2.0]
 
 
 def test_deployment_skips_model_when_every_item_in_batch_is_invalid():

@@ -1,4 +1,5 @@
-from typing import Any, Literal, Type, TypeAlias
+from collections.abc import Callable
+from typing import Any, ClassVar, Literal, Type, TypeAlias
 
 import litserve as ls
 import pydantic
@@ -16,6 +17,10 @@ from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
+Postprocessor: TypeAlias = Callable[
+    [dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
+    tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
+]
 
 
 def default_dataset() -> Dataset:
@@ -87,6 +92,8 @@ class BatchItem(pydantic.BaseModel):
 
 
 class Deployment(ls.LitAPI):
+    _postprocessor: ClassVar[Postprocessor | None] = None
+
     def __init__(self, checkpoint: str, dataset: Dataset | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.checkpoint = checkpoint
@@ -188,6 +195,13 @@ class Deployment(ls.LitAPI):
             }
 
         predictions, embeddings = self.model.write(predictions=response)
+        postprocessor = type(self)._postprocessor
+
+        if postprocessor is not None:
+            processed = postprocessor(predictions, embeddings)
+
+            if processed is not None:
+                predictions, embeddings = processed
 
         payload = dict(predictions = predictions)
 
@@ -209,6 +223,13 @@ class Deployment(ls.LitAPI):
 
         if response is not None:
             cls.encode_response.__annotations__["return"] = response
+
+        return cls
+
+    @classmethod
+    @beartype
+    def postprocess(cls, processor: Postprocessor) -> Type["Deployment"]:
+        cls._postprocessor = processor
 
         return cls
 

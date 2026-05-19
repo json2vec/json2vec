@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import lightning.pytorch as lit
 import polars as pl
@@ -10,7 +11,6 @@ import pyarrow.parquet as pq
 from lightning.pytorch import callbacks
 from tensordict import TensorDict
 
-from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
@@ -18,15 +18,26 @@ from json2vec.tensorfields.base import TensorFieldBase
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
 
+Postprocessor: TypeAlias = Callable[
+    [dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
+    tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
+]
+
 
 class Writer(callbacks.BasePredictionWriter):
 
-    def __init__(self, path: os.PathLike | str, flush_every_n_batches: int | None = None):
+    def __init__(
+        self,
+        path: os.PathLike | str,
+        flush_every_n_batches: int | None = None,
+        postprocessor: Postprocessor | None = None,
+    ):
 
         super().__init__(write_interval="batch")
 
         self.path: os.PathLike = path
         self.flush_every_n_batches: int | None = flush_every_n_batches
+        self.postprocessor: Postprocessor | None = postprocessor
         self.schema: pa.schema | None = None
         self.writer: pq.ParquetWriter | None = None
 
@@ -57,10 +68,17 @@ class Writer(callbacks.BasePredictionWriter):
     ) -> None:
         num_rows = len(batch["metadata"])
 
-        supervised: dict[Address, dict[TensorKey, Any]]
-        embeddings: dict[Address, dict[TensorKey, Any]]
+        supervised: dict[Address, dict[str, Any]]
+        embeddings: dict[Address, dict[str, Any]]
 
         supervised, embeddings = pl_module.write(predictions=output["predictions"])
+        postprocessor = self.postprocessor
+
+        if postprocessor is not None:
+            processed = postprocessor(supervised, embeddings)
+
+            if processed is not None:
+                supervised, embeddings = processed
 
         items = [
             pl.from_records(data=batch["metadata"], schema=["inputs"], orient="row"),
