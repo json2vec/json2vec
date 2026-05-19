@@ -52,6 +52,9 @@ def plot(
             values["address"] = node.address
 
         values |= node.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
+        if node.address in module.nodes:
+            values |= parameter_counts(module.nodes[node.address])
+
         pane = Pane(
             title=f"{node.name} ({node.type})",
             marked=node.address in hyperparameters.target or node.address in hyperparameters.embed,
@@ -67,9 +70,11 @@ def plot(
         return pane
 
     if address is None:
+        values = hyperparameters.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
+        values |= parameter_counts(module)
         pane = Pane(
             title="JSON2Vec",
-            values=hyperparameters.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True),
+            values=values,
             children=[build(hyperparameters.fields)],
         )
     else:
@@ -86,6 +91,11 @@ def plot(
         path.write_text(rendered, encoding="utf-8")
 
     return rendered
+
+
+def parameter_counts(module: torch.nn.Module) -> dict[str, int]:
+    parameters = list(module.parameters())
+    return {"parameters": sum(parameter.numel() for parameter in parameters)}
 
 
 def resolve_node(hyperparameters: "Hyperparameters", address: Address | str) -> Node:
