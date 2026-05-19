@@ -45,15 +45,6 @@ def test_hyperparameters_accepts_single_string_target():
     assert hyperparameters.target == [Address("root", "identifier")]
 
 
-def test_hyperparameters_accepts_single_address_reset():
-    payload = _hyperparameters_payload()
-    payload["reset"] = Address("root", "identifier")
-
-    hyperparameters = Hyperparameters.model_validate(payload)
-
-    assert hyperparameters.reset == [Address("root", "identifier")]
-
-
 def test_hyperparameters_rejects_unknown_embed_array():
     payload = _hyperparameters_payload()
     payload["embed"] = ["root/not_a_array"]

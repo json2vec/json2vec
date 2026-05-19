@@ -317,7 +317,6 @@ def loss(
 
     state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
     state_targets = batch.targets[TensorKey.state].reshape(N)
-    decoder.counters[TensorKey.state.name](batch.targets[TensorKey.state])
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),

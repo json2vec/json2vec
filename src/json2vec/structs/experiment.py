@@ -18,14 +18,13 @@ class Hyperparameters(Node):
     fields: Array
 
     target: list[Address]|Address = pydantic.Field(default_factory=list)
-    reset: list[Address]|Address = pydantic.Field(default_factory=list)
     embed: list[Address]|Address = pydantic.Field(default_factory=list)
 
     dropout: ClassVar[None] = None
     p_mask: ClassVar[None] = None
     p_target: ClassVar[None] = None
 
-    @pydantic.field_validator("target", "reset", "embed", mode="before")
+    @pydantic.field_validator("target", "embed", mode="before")
     @classmethod
     def normalize_address_list(cls, value: Any):
         if value is None:
@@ -94,10 +93,9 @@ class Hyperparameters(Node):
 
     @pydantic.model_validator(mode="after")
     def check_overriden_fields(self):
-        for attribute in ["target", "reset"]:
-            for field in getattr(self, attribute, []):
-                if field not in self.requests:
-                    raise ValueError(f"{attribute} field '{field}' not found in hyperparameter requests")
+        for field in self.target:
+            if field not in self.requests:
+                raise ValueError(f"target field '{field}' not found in hyperparameter requests")
 
         for attribute in ["embed"]:
             for field in getattr(self, attribute, []):

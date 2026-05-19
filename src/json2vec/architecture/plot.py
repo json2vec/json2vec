@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import pydantic
 import rich.box
 import torch
 from rich.console import Console, Group, RenderableType
 from rich.padding import Padding
 from rich.panel import Panel
-from rich.table import Table
-from rich.terminal_theme import DEFAULT_TERMINAL_THEME
 from rich.text import Text
 
 from json2vec.structs.tree import Address, Leaf, Node
@@ -24,25 +22,19 @@ if TYPE_CHECKING:
     from json2vec.structs.experiment import Hyperparameters
     from json2vec.tensorfields.shared.counter import Counter
 
-PLOT_WIDTH = 220
-PLOT_TITLE_STYLE = "bold"
-PLOT_SECTION_STYLE = "bold"
+PLOT_WIDTH = 120
 
 
-class Pane(pydantic.BaseModel):
+@dataclass(slots=True)
+class Pane:
     title: str
-    values: dict[str, Any] = pydantic.Field(default_factory=dict)
-    sections: dict[str, Any] = pydantic.Field(default_factory=dict)
-    children: list["Pane"] = pydantic.Field(default_factory=list)
+    marked: bool = False
+    values: dict[str, Any] = field(default_factory=dict)
+    sections: dict[str, Any] = field(default_factory=dict)
+    children: list["Pane"] = field(default_factory=list)
 
     def add_section(self, title: str, values: Any) -> None:
         self.sections[title] = values
-
-    def add_child(self, child: "Pane") -> None:
-        self.children.append(child)
-
-
-Pane.model_rebuild()
 
 
 def plot(
@@ -60,10 +52,12 @@ def plot(
             values["address"] = node.address
 
         values |= node.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
-        pane = Pane(title=f"{node.name} ({node.type})", values=values)
-
-        for child in node.children:
-            pane.add_child(build(child))
+        pane = Pane(
+            title=f"{node.name} ({node.type})",
+            marked=node.address in hyperparameters.target or node.address in hyperparameters.embed,
+            values=values,
+            children=[build(child) for child in node.children],
+        )
 
         if detail and isinstance(node, Leaf):
             extension = TENSORFIELDS[node.type]
@@ -76,16 +70,15 @@ def plot(
         pane = Pane(
             title="JSON2Vec",
             values=hyperparameters.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True),
+            children=[build(hyperparameters.fields)],
         )
-        pane.add_child(build(hyperparameters.fields))
     else:
         pane = build(resolve_node(hyperparameters=hyperparameters, address=address))
 
-    renderable = render_pane(pane, expand=True, depth=0)
-    Console(width=PLOT_WIDTH).print(renderable)
-    recorder = Console(file=io.StringIO(), record=True, width=PLOT_WIDTH, color_system="truecolor")
+    renderable = render_pane(pane)
+    recorder = Console(file=io.StringIO(), record=True, width=PLOT_WIDTH)
     recorder.print(renderable)
-    rendered = recorder.export_html(theme=DEFAULT_TERMINAL_THEME, clear=False)
+    rendered = recorder.export_html(clear=False)
 
     if out is not None:
         path = Path(out)
@@ -105,9 +98,7 @@ def resolve_node(hyperparameters: "Hyperparameters", address: Address | str) -> 
     return nodes[key]
 
 
-def render_pane(pane: Pane, *, expand: bool, depth: int) -> Panel:
-    color_index = depth % 8
-    foreground_index = 0 if color_index == 7 else 15
+def render_pane(pane: Pane) -> Panel:
     blocks: list[RenderableType] = []
 
     if pane.values:
@@ -117,7 +108,7 @@ def render_pane(pane: Pane, *, expand: bool, depth: int) -> Panel:
         if blocks:
             blocks.append(Text())
 
-        blocks.append(Text(title, style=PLOT_SECTION_STYLE))
+        blocks.append(Text(title))
         if isinstance(values, dict):
             section = render_values(values)
         else:
@@ -129,15 +120,14 @@ def render_pane(pane: Pane, *, expand: bool, depth: int) -> Panel:
 
         blocks.append(Padding(section, (0, 0, 0, 2)))
 
-    if pane.children:
+    for child in pane.children:
         if blocks:
             blocks.append(Text())
 
-        blocks.append(Text("children", style=PLOT_SECTION_STYLE))
         blocks.append(
             Padding(
-                render_children(pane.children, depth=depth),
-                (1, 0, 0, 0),
+                render_pane(child),
+                (0, 0, 0, 2),
             )
         )
 
@@ -145,40 +135,12 @@ def render_pane(pane: Pane, *, expand: bool, depth: int) -> Panel:
 
     return Panel(
         content,
-        title=Text(pane.title, style=PLOT_TITLE_STYLE),
-        box=rich.box.ROUNDED,
+        title=pane.title,
+        box=rich.box.HEAVY if pane.marked else rich.box.ROUNDED,
         padding=(0, 1),
-        expand=expand,
+        expand=True,
         title_align="left",
-        border_style=f"color({foreground_index})",
-        style=f"color({foreground_index}) on color({color_index})",
     )
-
-
-def render_children(children: list[Pane], depth: int = 0) -> RenderableType:
-    if len(children) == 1:
-        return render_pane(children[0], expand=True, depth=depth + 1)
-
-    columns = 2
-    grid = Table.grid(expand=True, padding=(1, 3))
-
-    for _ in range(columns):
-        grid.add_column(ratio=1)
-
-    row: list[RenderableType] = []
-
-    for child in children:
-        row.append(render_pane(child, expand=True, depth=depth + 1))
-
-        if len(row) == columns:
-            grid.add_row(*row)
-            row = []
-
-    if row:
-        row.extend(Text("") for _ in range(columns - len(row)))
-        grid.add_row(*row)
-
-    return grid
 
 
 def render_values(values: dict[str, Any]) -> RenderableType:

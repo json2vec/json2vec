@@ -335,7 +335,6 @@ def loss(
 
     trainable: torch.Tensor = batch.trainable.reshape(N)
     state_targets = batch.targets[TensorKey.state].reshape(N)
-    decoder.counter(batch.targets[TensorKey.state])
 
     loss: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),

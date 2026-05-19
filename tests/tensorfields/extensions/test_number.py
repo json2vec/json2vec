@@ -38,7 +38,7 @@ class _TrackingModule:
         return value
 
 
-def test_number_loss_updates_state_counter():
+def test_number_loss_does_not_mutate_counter():
     structure = Hyperparameters.model_validate(_structure_payload())
     hyperparameters = structure
 
@@ -68,9 +68,7 @@ def test_number_loss_updates_state_counter():
 
     loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
 
-    state_targets = field.targets[TensorKey.state]
     expected_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    expected_counts += torch.bincount(state_targets.reshape(-1), minlength=len(Tokens))
     assert torch.equal(decoder.counter.counts, expected_counts)
 
 

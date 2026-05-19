@@ -16,7 +16,7 @@ from tensordict import TensorDict
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets import EncodedBatch, encode, mock
-from json2vec.structs.enums import Metric, Strata, TensorKey
+from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Embedding, Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -46,6 +46,7 @@ def step(
     batch_idx: int,
     strata: Strata,
 ) -> Output:
+    update_counters(module=module, batch=batch, strata=strata)
     predictions: list[Prediction] = module.forward(batch)
 
     if strata == Strata.predict:
@@ -87,6 +88,54 @@ def groupname(names: tuple[str, ...]) -> str:
     key: str = ":".join(list(keys))
 
     return f"{group}/{key}"
+
+
+def _counter_value(field: TensorFieldBase, key: TensorKey) -> torch.Tensor | None:
+    targets = getattr(field, "targets", None)
+    if targets is not None and key in targets.keys():
+        return targets[key]
+
+    value = getattr(field, key.name, None)
+    if isinstance(value, torch.Tensor):
+        return value
+
+    return None
+
+
+@torch.no_grad()
+def update_counters(
+    module: "JSON2Vec",
+    batch: TensorDict[Address, TensorFieldBase],
+    strata: Strata,
+) -> None:
+    if strata != Strata.train:
+        return
+
+    for address in module.hyperparameters.requests:
+        field = batch[address]
+        decoder = module.nodes[address].decoder
+        state = _counter_value(field=field, key=TensorKey.state)
+
+        if state is not None and hasattr(decoder, "counter"):
+            decoder.counter(state)
+
+        counters = getattr(decoder, "counters", None)
+        if counters is None:
+            continue
+
+        if state is not None and TensorKey.state.name in counters:
+            counters[TensorKey.state.name](state)
+
+        if state is None or TensorKey.content.name not in counters:
+            continue
+
+        content = _counter_value(field=field, key=TensorKey.content)
+        if content is None or content.shape != state.shape:
+            continue
+
+        values = content.masked_select(state.eq(Tokens.valued.value))
+        if values.numel() > 0:
+            counters[TensorKey.content.name](values)
 
 
 class JSON2Vec(lit.LightningModule):
@@ -269,7 +318,7 @@ class JSON2Vec(lit.LightningModule):
                 migrated = dict(payload["structure"])
                 migrated.pop("name", None)
                 migrated.pop("type", None)
-                for key in ("target", "reset", "embed", "p_target", "p_mask"):
+                for key in ("target", "embed", "p_target", "p_mask"):
                     if key in payload:
                         migrated[key] = payload[key]
                 if "target" not in migrated and "pruned" in payload:

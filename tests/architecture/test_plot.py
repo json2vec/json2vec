@@ -46,6 +46,7 @@ def _hyperparameters() -> Hyperparameters:
                     },
                 ],
             },
+            "target": ["root/items/identifier"],
             "embed": ["root/items/label"],
         }
     )
@@ -69,19 +70,21 @@ def _model(tmp_path: Path) -> JSON2Vec:
     return model
 
 
-def test_plot_renders_full_model_and_writes_output(tmp_path: Path) -> None:
+def test_plot_renders_full_model_and_writes_output(tmp_path: Path, capsys) -> None:
     model = _model(tmp_path)
     output_path = tmp_path / "model-tree.html"
+    capsys.readouterr()
 
     rendered = model.plot(detail=True, out=output_path)
 
+    captured = capsys.readouterr()
+    assert captured.out == ""
     assert rendered.startswith("<!DOCTYPE html>")
     assert "<style>" in rendered
     assert "background-color: #ffffff;" in rendered
-    assert "background-color: #000000" in rendered
-    assert "background-color: #800000" in rendered
-    assert "background-color: #008000" in rendered
-    assert '<span class="r' in rendered
+    assert "background-color: #800000" not in rendered
+    assert "background-color: #008000" not in rendered
+    assert '<span class="r' not in rendered
     assert "JSON2Vec" in rendered
     assert "root (array)" in rendered
     assert "amount (number)" in rendered
@@ -92,12 +95,14 @@ def test_plot_renders_full_model_and_writes_output(tmp_path: Path) -> None:
     assert "address: root/items/label" in rendered
     assert "identifier (entity)" in rendered
     assert "address: root/items/identifier" in rendered
+    assert "┏━ label (category)" in rendered
+    assert "┏━ identifier (entity)" in rendered
     assert "vocabulary:" in rendered
     assert "alpha" in rendered
     assert "beta" in rendered
     assert "std_dev: 3.0000016689300537" in rendered
     assert "counts: [4, 2, 1, 1, 1]" in rendered
-    assert "children" in rendered
+    assert "children" not in rendered
     assert output_path.read_text(encoding="utf-8") == rendered
 
 
@@ -107,16 +112,17 @@ def test_plot_address_limits_output_to_selected_branch(tmp_path: Path) -> None:
     rendered = model.plot(address="root/items", detail=False)
 
     assert rendered.startswith("<!DOCTYPE html>")
-    assert '<span class="r' in rendered
     assert "background-color: #ffffff;" in rendered
-    assert "background-color: #000000" in rendered
-    assert "background-color: #800000" in rendered
+    assert "background-color: #800000" not in rendered
+    assert '<span class="r' not in rendered
     assert "items (array)" in rendered
     assert "address: root/items" in rendered
     assert "label (category)" in rendered
     assert "address: root/items/label" in rendered
     assert "identifier (entity)" in rendered
     assert "address: root/items/identifier" in rendered
+    assert "┏━ label (category)" in rendered
+    assert "┏━ identifier (entity)" in rendered
     assert "address: root/amount" not in rendered
     assert "JSON2Vec" not in rendered
 
@@ -127,11 +133,11 @@ def test_plot_leaf_uses_default_extension_renderer(tmp_path: Path) -> None:
     rendered = model.plot(address="root/items/identifier", detail=True)
 
     assert rendered.startswith("<!DOCTYPE html>")
-    assert '<span class="r' in rendered
     assert "background-color: #ffffff;" in rendered
-    assert "background-color: #000000" in rendered
+    assert '<span class="r' not in rendered
     assert "identifier (entity)" in rendered
     assert "address: root/items/identifier" in rendered
+    assert "┏━ identifier (entity)" in rendered
     assert "topk: [2]" in rendered
     assert "query: [*].id" in rendered
     assert "counters" not in rendered

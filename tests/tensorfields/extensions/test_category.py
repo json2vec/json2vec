@@ -307,7 +307,7 @@ class _TrackingModule:
         return value
 
 
-def test_category_loss_updates_state_and_content_counters():
+def test_category_loss_does_not_mutate_counters():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     hyperparameters = structure
     state = _DummyState()
@@ -340,19 +340,11 @@ def test_category_loss_updates_state_and_content_counters():
 
     loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
 
-    state_targets = field.targets[TensorKey.state]
     expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    expected_state_counts += torch.bincount(state_targets.reshape(-1), minlength=len(Tokens))
     assert torch.equal(decoder.counters[TensorKey.state.name].counts, expected_state_counts)
 
-    content_targets = field.targets[TensorKey.content]
-    valued = state_targets.eq(Tokens.valued.value)
     expected_content_counts = torch.ones(
         structure.requests["root/category"].max_vocab_size + 1,
         dtype=torch.int64,
-    )
-    expected_content_counts += torch.bincount(
-        content_targets.masked_select(valued).reshape(-1),
-        minlength=structure.requests["root/category"].max_vocab_size + 1,
     )
     assert torch.equal(decoder.counters[TensorKey.content.name].counts, expected_content_counts)

@@ -172,7 +172,7 @@ def test_set_write_emits_probability_for_each_known_vocab_item():
     assert content_payload["BETA"][0, 0] > content_payload["ALPHA"][0, 0]
 
 
-def test_set_loss_updates_state_counter():
+def test_set_loss_does_not_mutate_counter():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     state = _DummyState()
     field = TensorField.new(
@@ -199,8 +199,6 @@ def test_set_loss_updates_state_counter():
 
     result = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
 
-    state_targets = field.targets[TensorKey.state]
     expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    expected_state_counts += torch.bincount(state_targets.reshape(-1), minlength=len(Tokens))
     assert torch.equal(decoder.counters[TensorKey.state.name].counts, expected_state_counts)
     assert torch.isfinite(result)

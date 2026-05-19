@@ -4,9 +4,9 @@ from pathlib import Path
 
 import torch
 
-from json2vec.architecture.root import JSON2Vec
+from json2vec.architecture.root import JSON2Vec, update_counters
 from json2vec.data.datasets import encode
-from json2vec.structs.enums import Strata, TensorKey
+from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
@@ -254,6 +254,41 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
     assert TensorKey.state.name in model.nodes[address].decoder.counters
     assert TensorKey.content.name in model.nodes[address].decoder.counters
+
+
+def test_training_counters_observe_all_encoded_fields() -> None:
+    hyperparameters = _prediction_hyperparameters()
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    inputs = encode(
+        batch=[
+            [{"color": "red", "label": "warm"}],
+            [{"color": "blue", "label": "cool"}],
+        ],
+        hyperparameters=hyperparameters,
+        strata=Strata.train,
+        state=model.state,
+    )
+
+    update_counters(module=model, batch=inputs, strata=Strata.train)
+
+    address = Address("root", "color")
+    field = inputs[address]
+    decoder = model.nodes[address].decoder
+
+    expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
+    expected_state_counts += torch.bincount(field.state.reshape(-1), minlength=len(Tokens))
+    assert torch.equal(decoder.counters[TensorKey.state.name].counts.cpu(), expected_state_counts)
+
+    valued = field.state.eq(Tokens.valued.value)
+    expected_content_counts = torch.ones(
+        hyperparameters.requests[address].max_vocab_size + 1,
+        dtype=torch.int64,
+    )
+    expected_content_counts += torch.bincount(
+        field.content.masked_select(valued).reshape(-1),
+        minlength=hyperparameters.requests[address].max_vocab_size + 1,
+    )
+    assert torch.equal(decoder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
 
 
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:

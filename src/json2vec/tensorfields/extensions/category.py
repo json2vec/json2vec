@@ -295,7 +295,6 @@ def loss(
 
     state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
     state_targets = batch.targets[TensorKey.state].reshape(N)
-    decoder.counters[TensorKey.state.name](batch.targets[TensorKey.state])
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
@@ -322,9 +321,6 @@ def loss(
 
     content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
     content_targets = batch.targets[TensorKey.content].reshape(N)
-    content_counter_values = content_targets.masked_select(state_targets.eq(Tokens.valued.value))
-    if content_counter_values.numel() > 0:
-        decoder.counters[TensorKey.content.name](content_counter_values)
 
     loss += module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),
@@ -450,6 +446,5 @@ def plot(
         {
             "vocabulary_size": len(vocabulary),
             "vocabulary": vocabulary,
-            "unavailable_label": UNAVAILABLE_LABEL,
         },
     )
