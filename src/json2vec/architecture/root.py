@@ -198,12 +198,15 @@ class JSON2Vec(lit.LightningModule):
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
         # These metrics are emitted from data-dependent branches, so DDP ranks cannot
-        # safely synchronize every log call as a collective.
+        # safely synchronize every log call as a collective. rank_zero_only keeps
+        # Lightning from running a sync while still marking the metric as handled.
         self.log(
             name=groupname(names),
             value=value,
             on_step=False,
             on_epoch=True,
+            sync_dist=True,
+            rank_zero_only=True,
             batch_size=self.batch_size,
         )
 

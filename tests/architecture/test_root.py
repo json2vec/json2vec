@@ -346,7 +346,7 @@ def test_training_counters_call_content_counter_for_empty_updates() -> None:
     assert spy.calls[0].numel() == 0
 
 
-def test_track_does_not_request_distributed_sync(monkeypatch) -> None:
+def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None:
     calls = []
 
     def log(self, **kwargs):
@@ -359,7 +359,8 @@ def test_track_does_not_request_distributed_sync(monkeypatch) -> None:
     assert model.track(("loss", "train"), value=value) is value
 
     assert len(calls) == 1
-    assert "sync_dist" not in calls[0]
+    assert calls[0]["sync_dist"] is True
+    assert calls[0]["rank_zero_only"] is True
 
 
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
