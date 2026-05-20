@@ -77,6 +77,26 @@ def test_on_save_checkpoint_serializes_hyperparameters() -> None:
     assert restored.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
 
 
+def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
+    hyperparameters = _hyperparameters()
+    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
+    pathname = tmp_path / "nested" / "model.ckpt"
+
+    model.save(pathname=pathname)
+
+    restored = JSON2Vec.get_or_create(checkpoint=str(pathname), batch_size=2)
+
+    assert pathname.exists()
+    assert restored.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+
+    restored_state = restored.state_dict()
+    for key, value in model.state_dict().items():
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(restored_state[key], value)
+        else:
+            assert restored_state[key] == value
+
+
 def test_hyperparameters_from_checkpoint_accepts_lightning_hyper_parameters() -> None:
     hyperparameters = _hyperparameters()
 
@@ -332,3 +352,30 @@ def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
     embedding = embeddings[Address("root")]["embedding"]
     assert len(embedding) == 2
     assert all(not isinstance(row[0], list) for row in embedding)
+
+
+def test_inference_helpers_accept_preprocess() -> None:
+    model = _primed_prediction_model()
+    calls = []
+
+    def preprocess(batch):
+        calls.append(batch)
+        return [
+            [{"color": item["hue"]} for item in observation]
+            for observation in batch
+        ]
+
+    batch = [
+        [{"hue": "red"}],
+        [{"hue": "blue"}],
+    ]
+
+    supervised = model.predict(batch=batch, preprocess=preprocess)
+    embeddings = model.embed(batch=batch, preprocess=preprocess)
+    evaluated_supervised, evaluated_embeddings = model.evaluate(batch=batch, preprocess=preprocess)
+
+    assert len(calls) == 3
+    assert Address("root", "label") in supervised
+    assert Address("root") in embeddings
+    assert Address("root", "label") in evaluated_supervised
+    assert Address("root") in evaluated_embeddings

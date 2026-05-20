@@ -2,7 +2,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from functools import cache, partialmethod
 from pathlib import Path
-from typing import Any, NotRequired, Self, TypedDict, cast
+from typing import Any, NotRequired, Self, TypeAlias, TypedDict, cast
 from urllib.parse import urlparse
 
 import lightning.pytorch as lit
@@ -37,6 +37,7 @@ class Output(TypedDict):
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["JSON2Vec", torch.optim.Optimizer], Any]
+Preprocessor: TypeAlias = Callable[[EncodedBatch], EncodedBatch | None]
 
 
 @beartype
@@ -221,6 +222,15 @@ class JSON2Vec(lit.LightningModule):
         from json2vec.architecture.plot import plot
 
         return plot(module=self, address=address, detail=detail, out=out)
+
+    @beartype
+    def save(self, pathname: str | Path) -> None:
+        path = Path(pathname)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        checkpoint: dict[str, Any] = {"state_dict": self.state_dict()}
+        self.on_save_checkpoint(checkpoint)
+        torch.save(checkpoint, path)
 
     @beartype
     def forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
@@ -483,8 +493,16 @@ class JSON2Vec(lit.LightningModule):
     def evaluate(
         self,
         batch: EncodedBatch,
+        preprocess: Preprocessor | None = None,
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
+
+        if preprocess is not None:
+            processed = preprocess(batch)
+
+            if processed is not None:
+                batch = processed
+
         inputs = encode(
             batch=batch,
             hyperparameters=self.hyperparameters,
@@ -502,12 +520,12 @@ class JSON2Vec(lit.LightningModule):
 
         return self.write(predictions)
 
-    def predict(self, batch: EncodedBatch) -> dict[Address, dict[str, Any]]:
-        supervised, _ = self.evaluate(batch=batch)
+    def predict(self, batch: EncodedBatch, preprocess: Preprocessor | None = None) -> dict[Address, dict[str, Any]]:
+        supervised, _ = self.evaluate(batch=batch, preprocess=preprocess)
         return supervised
 
-    def embed(self, batch: EncodedBatch) -> dict[Address, dict[str, Any]]:
-        _, embeddings = self.evaluate(batch=batch)
+    def embed(self, batch: EncodedBatch, preprocess: Preprocessor | None = None) -> dict[Address, dict[str, Any]]:
+        _, embeddings = self.evaluate(batch=batch, preprocess=preprocess)
         return embeddings
 
     training_step = partialmethod(step, strata=Strata.train)
