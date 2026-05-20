@@ -37,7 +37,10 @@ class Output(TypedDict):
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["JSON2Vec", torch.optim.Optimizer], Any]
-Preprocessor: TypeAlias = Callable[[EncodedBatch], EncodedBatch | None]
+Postprocessor: TypeAlias = Callable[
+    [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
+    tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
+]
 
 
 @beartype
@@ -493,16 +496,9 @@ class JSON2Vec(lit.LightningModule):
     def evaluate(
         self,
         batch: EncodedBatch,
-        preprocess: Preprocessor | None = None,
+        postprocess: Postprocessor | None = None,
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
-
-        if preprocess is not None:
-            processed = preprocess(batch)
-
-            if processed is not None:
-                batch = processed
-
         inputs = encode(
             batch=batch,
             hyperparameters=self.hyperparameters,
@@ -518,14 +514,27 @@ class JSON2Vec(lit.LightningModule):
             if was_training:
                 self.train()
 
-        return self.write(predictions)
+        supervised, embeddings = self.write(predictions)
 
-    def predict(self, batch: EncodedBatch, preprocess: Preprocessor | None = None) -> dict[Address, dict[str, Any]]:
-        supervised, _ = self.evaluate(batch=batch, preprocess=preprocess)
+        if postprocess is not None:
+            context = {
+                "batch": batch,
+                "input": inputs,
+                "metadata": inputs["metadata"],
+            }
+            processed = postprocess(context, supervised, embeddings)
+
+            if processed is not None:
+                supervised, embeddings = processed
+
+        return supervised, embeddings
+
+    def predict(self, batch: EncodedBatch, postprocess: Postprocessor | None = None) -> dict[Address, dict[str, Any]]:
+        supervised, _ = self.evaluate(batch=batch, postprocess=postprocess)
         return supervised
 
-    def embed(self, batch: EncodedBatch, preprocess: Preprocessor | None = None) -> dict[Address, dict[str, Any]]:
-        _, embeddings = self.evaluate(batch=batch, preprocess=preprocess)
+    def embed(self, batch: EncodedBatch, postprocess: Postprocessor | None = None) -> dict[Address, dict[str, Any]]:
+        _, embeddings = self.evaluate(batch=batch, postprocess=postprocess)
         return embeddings
 
     training_step = partialmethod(step, strata=Strata.train)

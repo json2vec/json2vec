@@ -354,28 +354,33 @@ def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
     assert all(not isinstance(row[0], list) for row in embedding)
 
 
-def test_inference_helpers_accept_preprocess() -> None:
+def test_inference_helpers_accept_postprocess() -> None:
     model = _primed_prediction_model()
     calls = []
 
-    def preprocess(batch):
-        calls.append(batch)
-        return [
-            [{"color": item["hue"]} for item in observation]
-            for observation in batch
-        ]
+    def postprocess(context, supervised, embeddings):
+        calls.append((context, supervised, embeddings))
+        return (
+            {Address("root", "label"): {"value": ["postprocessed"]}},
+            {Address("root"): {"embedding": [[1.0, 2.0]]}},
+        )
 
     batch = [
-        [{"hue": "red"}],
-        [{"hue": "blue"}],
+        [{"color": "red"}],
+        [{"color": "blue"}],
     ]
 
-    supervised = model.predict(batch=batch, preprocess=preprocess)
-    embeddings = model.embed(batch=batch, preprocess=preprocess)
-    evaluated_supervised, evaluated_embeddings = model.evaluate(batch=batch, preprocess=preprocess)
+    supervised = model.predict(batch=batch, postprocess=postprocess)
+    embeddings = model.embed(batch=batch, postprocess=postprocess)
+    evaluated_supervised, evaluated_embeddings = model.evaluate(batch=batch, postprocess=postprocess)
 
     assert len(calls) == 3
-    assert Address("root", "label") in supervised
-    assert Address("root") in embeddings
-    assert Address("root", "label") in evaluated_supervised
-    assert Address("root") in evaluated_embeddings
+    assert calls[0][0]["batch"] is batch
+    assert "metadata" in calls[0][0]["input"].keys()
+    assert list(calls[0][0]["metadata"]) == batch
+    assert Address("root", "label") in calls[0][1]
+    assert Address("root") in calls[1][2]
+    assert supervised[Address("root", "label")]["value"] == ["postprocessed"]
+    assert embeddings[Address("root")]["embedding"] == [[1.0, 2.0]]
+    assert evaluated_supervised == supervised
+    assert evaluated_embeddings == embeddings
