@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 from tensordict import TensorDict
 
+import json2vec.inference.deployment as deployment_module
 from json2vec.inference.deployment import Deployment, ErrorItem
+from json2vec.processors.base import PROCESSORS, shim
 from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 
@@ -96,6 +100,38 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
     assert seen["embeddings"] == {}
     assert encoded["predictions"]["root/label"]["value"] == "rewritten"
     assert encoded["embeddings"]["root/vector"]["embedding"] == [1.0, 2.0]
+
+
+def test_deployment_preprocess_registers_shim_for_decode_request(monkeypatch):
+    class PreprocessedDeployment(Deployment):
+        pass
+
+    def __deployment_preprocess(observation: dict):
+        return {"color": observation["hue"]}
+
+    shimmed = shim(yields=False)(__deployment_preprocess)
+    captured = {}
+
+    def fake_encode(batch, hyperparameters, strata, state):
+        captured["batch"] = batch
+        return _input(1)
+
+    monkeypatch.setattr(deployment_module, "encode", fake_encode)
+
+    try:
+        PreprocessedDeployment.preprocess(shimmed)
+        deployment = PreprocessedDeployment(checkpoint="unused")
+        deployment.model = SimpleNamespace(hyperparameters=object())
+        deployment.state = {}
+        context = {}
+
+        encoded = deployment.decode_request({"hue": "red"}, context=context)
+    finally:
+        PROCESSORS.pop("__deployment_preprocess", None)
+
+    assert isinstance(encoded, TensorDict)
+    assert captured["batch"] == [[{"color": "red"}]]
+    assert context["observations"] == [[{"color": "red"}]]
 
 
 def test_deployment_skips_model_when_every_item_in_batch_is_invalid():

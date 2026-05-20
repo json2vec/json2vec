@@ -15,7 +15,7 @@ from tensordict import TensorDict
 
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
-from json2vec.data.datasets import EncodedBatch, encode, mock
+from json2vec.data.datasets import Dataset, EncodedBatch, encode, mock, process
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Embedding, Parcel, Prediction
@@ -37,6 +37,7 @@ class Output(TypedDict):
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["JSON2Vec", torch.optim.Optimizer], Any]
+Preprocessor: TypeAlias = str | Callable[..., Any]
 Postprocessor: TypeAlias = Callable[
     [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
@@ -495,10 +496,29 @@ class JSON2Vec(lit.LightningModule):
 
     def evaluate(
         self,
-        batch: EncodedBatch,
+        batch: EncodedBatch | list[dict[str, Any]],
+        preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
+        preprocess_kwargs: dict[str, Any] | None = None,
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
+        raw_batch = batch
+
+        if preprocess is not None:
+            dataset = Dataset(
+                root=None,
+                processor=preprocess,
+                kwargs={} if preprocess_kwargs is None else preprocess_kwargs,
+            )
+            batch = list(
+                process(
+                    pipe=batch,
+                    dataset=dataset,
+                    strata=Strata.predict,
+                    state=self.state,
+                )
+            )
+
         inputs = encode(
             batch=batch,
             hyperparameters=self.hyperparameters,
@@ -518,7 +538,8 @@ class JSON2Vec(lit.LightningModule):
 
         if postprocess is not None:
             context = {
-                "batch": batch,
+                "batch": raw_batch,
+                "observations": batch,
                 "input": inputs,
                 "metadata": inputs["metadata"],
             }
@@ -529,12 +550,34 @@ class JSON2Vec(lit.LightningModule):
 
         return supervised, embeddings
 
-    def predict(self, batch: EncodedBatch, postprocess: Postprocessor | None = None) -> dict[Address, dict[str, Any]]:
-        supervised, _ = self.evaluate(batch=batch, postprocess=postprocess)
+    def predict(
+        self,
+        batch: EncodedBatch | list[dict[str, Any]],
+        preprocess: Preprocessor | None = None,
+        postprocess: Postprocessor | None = None,
+        preprocess_kwargs: dict[str, Any] | None = None,
+    ) -> dict[Address, dict[str, Any]]:
+        supervised, _ = self.evaluate(
+            batch=batch,
+            preprocess=preprocess,
+            postprocess=postprocess,
+            preprocess_kwargs=preprocess_kwargs,
+        )
         return supervised
 
-    def embed(self, batch: EncodedBatch, postprocess: Postprocessor | None = None) -> dict[Address, dict[str, Any]]:
-        _, embeddings = self.evaluate(batch=batch, postprocess=postprocess)
+    def embed(
+        self,
+        batch: EncodedBatch | list[dict[str, Any]],
+        preprocess: Preprocessor | None = None,
+        postprocess: Postprocessor | None = None,
+        preprocess_kwargs: dict[str, Any] | None = None,
+    ) -> dict[Address, dict[str, Any]]:
+        _, embeddings = self.evaluate(
+            batch=batch,
+            preprocess=preprocess,
+            postprocess=postprocess,
+            preprocess_kwargs=preprocess_kwargs,
+        )
         return embeddings
 
     training_step = partialmethod(step, strata=Strata.train)

@@ -17,6 +17,7 @@ from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
+Preprocessor: TypeAlias = str | Callable[..., Any]
 Postprocessor: TypeAlias = Callable[
     [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
@@ -92,12 +93,21 @@ class BatchItem(pydantic.BaseModel):
 
 
 class Deployment(ls.LitAPI):
+    _preprocessor: ClassVar[str | None] = None
+    _preprocessor_kwargs: ClassVar[dict[str, Any]] = {}
     _postprocessor: ClassVar[Postprocessor | None] = None
 
     def __init__(self, checkpoint: str, dataset: Dataset | None = None, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.checkpoint = checkpoint
         self.dataset = default_dataset() if dataset is None else dataset
+        preprocessor = type(self)._preprocessor
+
+        if preprocessor is not None:
+            payload = self.dataset.model_dump(mode="python")
+            payload["processor"] = preprocessor
+            payload["kwargs"] = dict(type(self)._preprocessor_kwargs)
+            self.dataset = Dataset.model_validate(payload)
 
     def setup(self, device: str) -> None:
         self.model: JSON2Vec = JSON2Vec.get_or_create(checkpoint=self.checkpoint).to(device)
@@ -240,6 +250,15 @@ class Deployment(ls.LitAPI):
 
         if response is not None:
             cls.encode_response.__annotations__["return"] = response
+
+        return cls
+
+    @classmethod
+    @beartype
+    def preprocess(cls, processor: Preprocessor, **kwargs: Any) -> Type["Deployment"]:
+        dataset = Dataset(root=None, processor=processor, kwargs=kwargs)
+        cls._preprocessor = dataset.processor
+        cls._preprocessor_kwargs = dict(dataset.kwargs)
 
         return cls
 

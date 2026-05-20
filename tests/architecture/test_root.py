@@ -6,6 +6,7 @@ import torch
 
 from json2vec.architecture.root import JSON2Vec, update_counters
 from json2vec.data.datasets import encode
+from json2vec.processors.base import PROCESSORS, shim
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
@@ -384,3 +385,24 @@ def test_inference_helpers_accept_postprocess() -> None:
     assert embeddings[Address("root")]["embedding"] == [[1.0, 2.0]]
     assert evaluated_supervised == supervised
     assert evaluated_embeddings == embeddings
+
+
+def test_inference_helpers_accept_shim_preprocess() -> None:
+    def __root_helper_preprocess(observation: dict):
+        return {"color": observation["hue"]}
+
+    shimmed = shim(yields=False)(__root_helper_preprocess)
+    model = _primed_prediction_model()
+
+    try:
+        supervised = model.predict(
+            batch=[
+                {"hue": "red"},
+                {"hue": "blue"},
+            ],
+            preprocess=shimmed,
+        )
+    finally:
+        PROCESSORS.pop("__root_helper_preprocess", None)
+
+    assert Address("root", "label") in supervised
