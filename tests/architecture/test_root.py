@@ -312,6 +312,56 @@ def test_training_counters_observe_all_encoded_fields() -> None:
     assert torch.equal(decoder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
 
 
+def test_training_counters_call_content_counter_for_empty_updates() -> None:
+    class SpyCounter(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[torch.Tensor] = []
+
+        def forward(self, values: torch.Tensor) -> torch.Tensor:
+            self.calls.append(values.detach().cpu())
+            return values
+
+    hyperparameters = _prediction_hyperparameters()
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    inputs = encode(
+        batch=[
+            [{"color": "red", "label": "warm"}],
+            [{"color": "blue", "label": "cool"}],
+        ],
+        hyperparameters=hyperparameters,
+        strata=Strata.train,
+        state=model.state,
+    )
+
+    address = Address("root", "color")
+    field = inputs[address]
+    field.state.fill_(Tokens.null.value)
+    spy = SpyCounter()
+    model.nodes[address].decoder.counters[TensorKey.content.name] = spy
+
+    update_counters(module=model, batch=inputs, strata=Strata.train)
+
+    assert len(spy.calls) == 1
+    assert spy.calls[0].numel() == 0
+
+
+def test_track_does_not_request_distributed_sync(monkeypatch) -> None:
+    calls = []
+
+    def log(self, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(JSON2Vec, "log", log)
+    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+    value = torch.tensor(1.0)
+
+    assert model.track(("loss", "train"), value=value) is value
+
+    assert len(calls) == 1
+    assert "sync_dist" not in calls[0]
+
+
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
     model = _primed_prediction_model()
     model.train()

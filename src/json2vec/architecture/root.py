@@ -139,8 +139,7 @@ def update_counters(
             continue
 
         values = content.masked_select(state.eq(Tokens.valued.value))
-        if values.numel() > 0:
-            counters[TensorKey.content.name](values)
+        counters[TensorKey.content.name](values)
 
 
 class JSON2Vec(lit.LightningModule):
@@ -198,12 +197,13 @@ class JSON2Vec(lit.LightningModule):
         return callbacks
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
+        # These metrics are emitted from data-dependent branches, so DDP ranks cannot
+        # safely synchronize every log call as a collective.
         self.log(
             name=groupname(names),
             value=value,
             on_step=False,
             on_epoch=True,
-            sync_dist=True,
             batch_size=self.batch_size,
         )
 

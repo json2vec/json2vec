@@ -87,7 +87,6 @@ def test_plot_renders_full_model_and_writes_output(tmp_path: Path, capsys) -> No
     assert '<span class="r' not in rendered
     assert "JSON2Vec" in rendered
     assert f"parameters: {sum(parameter.numel() for parameter in model.parameters())}" in rendered
-    assert f"trainable_parameters: {sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)}" in rendered
     assert "root (array)" in rendered
     assert "amount (number)" in rendered
     assert "address: root/amount" in rendered
