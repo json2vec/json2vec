@@ -363,6 +363,26 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
     assert calls[0]["rank_zero_only"] is True
 
 
+def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(monkeypatch) -> None:
+    monkeypatch.setattr(JSON2Vec, "log", lambda self, **kwargs: None)
+    hyperparameters = _prediction_hyperparameters()
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    inputs = encode(
+        batch=[
+            [{"color": "red", "label": "warm"}],
+            [{"color": "blue", "label": "cool"}],
+        ],
+        hyperparameters=hyperparameters,
+        strata=Strata.train,
+        state=model.state,
+    )
+
+    output = model.training_step(inputs, 0)
+
+    assert set(output) == {"loss"}
+    assert output["loss"].requires_grad
+
+
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
     model = _primed_prediction_model()
     model.train()

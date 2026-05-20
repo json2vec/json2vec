@@ -32,7 +32,7 @@ from json2vec.tensorfields.base import (
 
 class Output(TypedDict):
     loss: NotRequired[torch.Tensor]
-    predictions: list[Prediction]
+    predictions: NotRequired[list[Prediction]]
 
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
@@ -77,11 +77,11 @@ def step(
         # but with small mask rates, batch sizes, and flat input data it is possible
         logger.warning("no trainable fields in batch, returning zero loss")
         loss: torch.Tensor = torch.tensor(0.0, device=batch.device, requires_grad=True)
-        return Output(loss=loss, predictions=[])
+        return Output(loss=loss)
 
     loss: torch.Tensor = module.track((Metric.loss, strata), value=torch.stack(losses).sum())
 
-    return Output(loss=loss, predictions=predictions)
+    return Output(loss=loss)
 
 
 @cache
