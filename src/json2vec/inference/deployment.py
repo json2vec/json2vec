@@ -18,7 +18,7 @@ from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 Postprocessor: TypeAlias = Callable[
-    [dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
+    [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
 ]
 
@@ -105,10 +105,17 @@ class Deployment(ls.LitAPI):
         self.state = self.model.state
 
     @beartype
-    def decode_request(self, request: dict[str, Any] | pydantic.BaseModel) -> Input | ErrorItem:
+    def decode_request(
+        self,
+        request: dict[str, Any] | pydantic.BaseModel,
+        context: dict[str, Any] | None = None,
+    ) -> Input | ErrorItem:
 
         if isinstance(request, pydantic.BaseModel):
             request = request.model_dump()
+
+        if context is not None:
+            context["request"] = request
 
         try:
             observations: list[Any] = list(
@@ -126,6 +133,9 @@ class Deployment(ls.LitAPI):
 
         if len(observations) == 0 or any(x is None for x in observations):
             return ErrorItem(status_code=422, message="processor returned no observations for request")
+
+        if context is not None:
+            context["observations"] = observations
     
 
         encoded = encode(
@@ -137,6 +147,9 @@ class Deployment(ls.LitAPI):
 
         if encoded is None:
             return ErrorItem(status_code=422, message="processor eliminated observation (filter)")
+
+        if context is not None:
+            context["input"] = encoded
 
         return encoded
 
@@ -184,7 +197,11 @@ class Deployment(ls.LitAPI):
         return outputs
 
     @beartype
-    def encode_response(self, response: list[Prediction] | ErrorItem) -> dict[str, Any] | pydantic.BaseModel:
+    def encode_response(
+        self,
+        response: list[Prediction] | ErrorItem,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | pydantic.BaseModel:
         if isinstance(response, ErrorItem):
             return {
                 "predictions": {},
@@ -198,7 +215,7 @@ class Deployment(ls.LitAPI):
         postprocessor = type(self)._postprocessor
 
         if postprocessor is not None:
-            processed = postprocessor(predictions, embeddings)
+            processed = postprocessor({} if context is None else context, predictions, embeddings)
 
             if processed is not None:
                 predictions, embeddings = processed

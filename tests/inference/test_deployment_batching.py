@@ -74,7 +74,10 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
 
     seen = {}
 
-    def processor(predictions, embeddings):
+    context = {"request": {"color": "r"}, "input": _input(7)}
+
+    def processor(context, predictions, embeddings):
+        seen["context"] = context
         seen["predictions"] = predictions
         seen["embeddings"] = embeddings
         return (
@@ -85,8 +88,10 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
     deployment, _ = _deployment(PostprocessedDeployment)
     PostprocessedDeployment.postprocess(processor)
 
-    encoded = deployment.encode_response([])
+    encoded = deployment.encode_response([], context=context)
 
+    assert seen["context"] is context
+    assert seen["context"]["request"] == {"color": "r"}
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
     assert seen["embeddings"] == {}
     assert encoded["predictions"]["root/label"]["value"] == "rewritten"

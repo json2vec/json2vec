@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
 
 Postprocessor: TypeAlias = Callable[
-    [dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
+    [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
 ]
 
@@ -75,7 +75,15 @@ class Writer(callbacks.BasePredictionWriter):
         postprocessor = self.postprocessor
 
         if postprocessor is not None:
-            processed = postprocessor(supervised, embeddings)
+            context = {
+                "input": batch,
+                "batch": batch,
+                "metadata": batch["metadata"],
+                "batch_indices": batch_indices,
+                "batch_idx": batch_idx,
+                "dataloader_idx": dataloader_idx,
+            }
+            processed = postprocessor(context, supervised, embeddings)
 
             if processed is not None:
                 supervised, embeddings = processed
