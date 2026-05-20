@@ -5,6 +5,7 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
+import polars as pl
 import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 
@@ -225,6 +226,46 @@ def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch
         )
     )
     assert output == []
+
+
+def test_observe_polars_yields_dataframe_rows():
+    frame = pl.DataFrame({"id": [1, 2], "name": ["alpha", "beta"]})
+
+    output = list(
+        datasets.observe_polars.__wrapped__(
+            dataframe=frame,
+            strata=Strata.train,
+            sharding=ShardingStrategy.chunk,
+            chunk_batch_size=1,
+            global_rank=0,
+            world_size=1,
+        )
+    )
+
+    assert output == [{"id": 1, "name": "alpha"}, {"id": 2, "name": "beta"}]
+
+
+def test_observe_polars_record_sharding_partitions_rows():
+    frame = pl.DataFrame({"id": list(range(8))})
+    rows_by_rank = [
+        list(
+            datasets.observe_polars.__wrapped__(
+                dataframe=frame,
+                strata=Strata.train,
+                sharding=ShardingStrategy.record,
+                chunk_batch_size=2,
+                global_rank=rank,
+                world_size=2,
+            )
+        )
+        for rank in range(2)
+    ]
+
+    first = {row["id"] for row in rows_by_rank[0]}
+    second = {row["id"] for row in rows_by_rank[1]}
+
+    assert first.isdisjoint(second)
+    assert first | second == set(range(8))
 
 
 def test_read_unsupported_suffix_raises_value_error():
@@ -461,6 +502,99 @@ def test_streaming_datamodule_rejects_invalid_loader_configuration():
 
     with pytest.raises(BeartypeCallHintParamViolation):
         datasets.StreamingDataModule(**kwargs, batch_size=2, sample_rate={Strata.train: 0.0})
+
+
+def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata():
+    frame = pl.DataFrame({"id": [1, 2]})
+    module = datasets.PolarsDataModule(
+        hyperparameters=_datamodule_hyperparameters(),
+        dataframe=frame,
+        dataset=_datamodule_dataset(),
+        state={},
+        batch_size=2,
+        num_workers={Strata.train: 0},
+        sharding={Strata.train: "record"},
+        chunk_batch_size={Strata.train: 7},
+        observation_buffer_size={Strata.train: 13},
+        sample_rate={Strata.train: 0.5},
+    )
+
+    assert module.dataframes[Strata.train] is frame
+    assert module.dataframes[Strata.validate] is frame
+    assert module.num_workers[Strata.train] == 0
+    assert module.num_workers[Strata.validate] is None
+    assert module.sharding[Strata.train] == ShardingStrategy.record
+    assert module.sharding[Strata.validate] == ShardingStrategy.chunk
+    assert module.chunk_batch_size[Strata.train] == 7
+    assert module.chunk_batch_size[Strata.validate] == 4096
+    assert module.observation_buffer_size[Strata.train] == 13
+    assert module.observation_buffer_size[Strata.validate] == 1
+    assert module.sample_rate[Strata.train] == 0.5
+    assert module.sample_rate[Strata.validate] == 1.0
+
+
+def test_polars_datamodule_accepts_partial_dataframe_mapping_until_loader_requested():
+    module = datasets.PolarsDataModule(
+        hyperparameters=_datamodule_hyperparameters(),
+        dataframe={Strata.train: pl.DataFrame({"id": [1]})},
+        dataset=_datamodule_dataset(),
+        state={},
+        batch_size=2,
+        num_workers=0,
+    )
+
+    assert set(module.dataframes) == {Strata.train}
+
+    with pytest.raises(ValueError, match="no dataframe configured"):
+        module.val_dataloader()
+
+
+def test_polars_datamodule_rejects_dataset_with_file_root(tmp_path: Path):
+    with pytest.raises(ValueError, match="must not define root"):
+        datasets.PolarsDataModule(
+            hyperparameters=_datamodule_hyperparameters(),
+            dataframe=pl.DataFrame({"id": [1]}),
+            dataset=datasets.Dataset(
+                root=str(tmp_path),
+                suffix=Suffix.ndjson,
+                patterns={strata: r".*" for strata in Strata},
+            ),
+            state={},
+            batch_size=2,
+        )
+
+
+def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch: pytest.MonkeyPatch):
+    def transform(pipe, hyperparameters, strata, state):
+        yield from pipe
+
+    def mask(pipe, hyperparameters):
+        yield from pipe
+
+    def target(pipe, hyperparameters):
+        yield from pipe
+
+    monkeypatch.setattr(datasets, "transform", transform)
+    monkeypatch.setattr(datasets, "mask", mask)
+    monkeypatch.setattr(datasets, "target", target)
+
+    batch_dataset = datasets.PolarsBatchDataset(
+        hyperparameters=SimpleNamespace(requests={}),
+        dataframe=pl.DataFrame({"id": [1, 2, 3]}),
+        dataset=datasets.Dataset(root=None, processor=None),
+        state={},
+        batch_size=2,
+        strata=Strata.train,
+        sharding=ShardingStrategy.chunk,
+        chunk_batch_size=2,
+        observation_buffer_size=1,
+        sample_rate=1.0,
+    )
+
+    assert list(batch_dataset) == [
+        [[{"id": 1}], [{"id": 2}]],
+        [[{"id": 3}]],
+    ]
 
 
 def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.MonkeyPatch):

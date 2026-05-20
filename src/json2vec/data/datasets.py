@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import jmespath
 import lightning.pytorch as lit
+import polars as pl
 import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import pydantic
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 StrataMap: TypeAlias = Mapping[Strata | str, T]
+DataFrameMap: TypeAlias = Mapping[Strata | str, pl.DataFrame]
 NonNegativeInt: TypeAlias = Annotated[int, Is[lambda value: not isinstance(value, bool) and value >= 0]]
 PositiveInt: TypeAlias = Annotated[int, Is[lambda value: not isinstance(value, bool) and value >= 1]]
 SampleRate: TypeAlias = Annotated[int | float, Is[lambda value: not isinstance(value, bool) and 0.0 < value <= 1.0]]
@@ -98,6 +100,22 @@ def _by_strata(value: T | StrataMap[T], *, default: T) -> dict[Strata, T]:
 
     item = cast(T, value)
     return {strata: item for strata in Strata}
+
+
+def _dataframes_by_strata(dataframe: pl.DataFrame | DataFrameMap) -> dict[Strata, pl.DataFrame]:
+    if not isinstance(dataframe, Mapping):
+        return {strata: dataframe for strata in Strata}
+
+    normalized: dict[Strata, pl.DataFrame] = {}
+    for key, frame in dataframe.items():
+        if not isinstance(frame, pl.DataFrame):
+            raise TypeError(f"dataframe for strata '{key}' must be a polars DataFrame")
+        normalized[Strata(str(key).lower())] = frame
+
+    if not normalized:
+        raise ValueError("dataframe mapping must include at least one strata")
+
+    return normalized
 
 
 @beartype
@@ -223,6 +241,47 @@ def observe(
         global_rank=global_rank,
         world_size=world_size,
     )
+
+
+@beartype
+def observe_polars(
+    dataframe: pl.DataFrame,
+    strata: Strata,
+    sharding: ShardingStrategy,
+    chunk_batch_size: int,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> Iterator[RawObservation]:
+    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
+
+    if sharding == ShardingStrategy.file:
+        if not _is_assigned_to_worker(
+            shard_key="dataframe:0",
+            worker_id=worker_id,
+            num_workers=num_workers,
+        ):
+            return
+
+    if sharding == ShardingStrategy.record:
+        for row_index, row in enumerate(dataframe.iter_rows(named=True)):
+            if _is_assigned_to_worker(
+                shard_key=f"dataframe:record:{row_index}",
+                worker_id=worker_id,
+                num_workers=num_workers,
+            ):
+                yield cast(RawObservation, row)
+        return
+
+    for chunk_index, offset in enumerate(range(0, dataframe.height, chunk_batch_size)):
+        if sharding == ShardingStrategy.chunk:
+            if not _is_assigned_to_worker(
+                shard_key=f"dataframe:chunk:{chunk_index}",
+                worker_id=worker_id,
+                num_workers=num_workers,
+            ):
+                continue
+
+        yield from cast(list[RawObservation], dataframe.slice(offset, chunk_batch_size).to_dicts())
 
 
 @beartype
@@ -601,6 +660,67 @@ class BatchDataset(IterableDataset):
         )
 
 
+class PolarsBatchDataset(IterableDataset):
+    def __init__(
+        self,
+        hyperparameters: Hyperparameters,
+        dataframe: pl.DataFrame,
+        dataset: Dataset,
+        state: dict[Address, Any],
+        batch_size: int,
+        strata: Strata,
+        sharding: ShardingStrategy,
+        chunk_batch_size: int,
+        observation_buffer_size: int,
+        sample_rate: float,
+        global_rank: int | None = None,
+        world_size: int | None = None,
+    ):
+        super().__init__()
+
+        self.hyperparameters: Hyperparameters = hyperparameters
+        self.dataframe: pl.DataFrame = dataframe
+        self.dataset: Dataset = dataset
+        self.state: dict[Address, Any] = state
+        self.global_rank: int = distributed_rank() if global_rank is None else global_rank
+        self.world_size: int = distributed_world_size() if world_size is None else world_size
+        self.batch_size: int = batch_size
+        self.strata: Strata = strata
+        self.sharding: ShardingStrategy = sharding
+        self.chunk_batch_size: int = chunk_batch_size
+        self.observation_buffer_size: int = observation_buffer_size
+        self.sample_rate: float = sample_rate
+
+    def __iter__(self):
+        for field_state in self.state.values():
+            if hasattr(field_state, "configure_distributed"):
+                field_state.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
+
+        yield from (
+            Pipeline(
+                hyperparameters=self.hyperparameters,
+                dataframe=self.dataframe,
+                dataset=self.dataset,
+                strata=self.strata,
+                state=self.state,
+                sharding=self.sharding,
+                chunk_batch_size=self.chunk_batch_size,
+                sample_rate=self.sample_rate,
+                batch_size=self.batch_size,
+                global_rank=self.global_rank,
+                world_size=self.world_size,
+            )
+            | observe_polars
+            | process
+            | sample
+            | partial(shuffle, size=self.observation_buffer_size)
+            | batch
+            | transform
+            | mask
+            | target
+        )
+
+
 def dataloader(
     hyperparameters: Hyperparameters,
     dataset: Dataset,
@@ -634,6 +754,53 @@ def dataloader(
             sharding=sharding,
             chunk_batch_size=chunk_batch_size,
             file_buffer_size=file_buffer_size,
+            observation_buffer_size=observation_buffer_size,
+            sample_rate=sample_rate,
+            global_rank=global_rank,
+            world_size=world_size,
+        ),
+        drop_last=False,
+        batch_size=None,
+        collate_fn=identity,
+        num_workers=workers,
+        persistent_workers=active_persistent_workers,
+        pin_memory=active_pin_memory,
+    )
+
+
+def polars_dataloader(
+    hyperparameters: Hyperparameters,
+    dataframe: pl.DataFrame,
+    dataset: Dataset,
+    state: dict[Address, Any],
+    batch_size: int,
+    strata: Strata,
+    num_workers: int | None,
+    persistent_workers: bool,
+    pin_memory: bool,
+    sharding: ShardingStrategy,
+    chunk_batch_size: int,
+    observation_buffer_size: int,
+    sample_rate: float,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> DataLoader:
+    workers: int = num_workers if num_workers is not None else (os.cpu_count() or 0)
+    active_persistent_workers: bool = persistent_workers and workers > 0
+    active_pin_memory: bool = pin_memory and strata != Strata.predict and torch.cuda.is_available()
+    global_rank = distributed_rank() if global_rank is None else global_rank
+    world_size = distributed_world_size() if world_size is None else world_size
+
+    return DataLoader(
+        dataset=PolarsBatchDataset(
+            hyperparameters=hyperparameters,
+            dataframe=dataframe,
+            dataset=dataset,
+            state=state,
+            batch_size=batch_size,
+            strata=strata,
+            sharding=sharding,
+            chunk_batch_size=chunk_batch_size,
             observation_buffer_size=observation_buffer_size,
             sample_rate=sample_rate,
             global_rank=global_rank,
@@ -719,6 +886,103 @@ class StreamingDataModule(lit.LightningDataModule):
             sharding=self.sharding[strata],
             chunk_batch_size=self.chunk_batch_size[strata],
             file_buffer_size=self.file_buffer_size[strata],
+            observation_buffer_size=self.observation_buffer_size[strata],
+            sample_rate=self.sample_rate[strata],
+            global_rank=global_rank,
+            world_size=world_size,
+        )
+
+    def train_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.train)
+
+    def val_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.validate)
+
+    def test_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.test)
+
+    def predict_dataloader(self) -> DataLoader:
+        return self.dataloader(strata=Strata.predict)
+
+
+class PolarsDataModule(lit.LightningDataModule):
+    @beartype
+    def __init__(
+        self,
+        hyperparameters: Hyperparameters,
+        dataframe: pl.DataFrame | DataFrameMap,
+        state: dict[Address, Any],
+        batch_size: PositiveInt,
+        dataset: Dataset | None = None,
+        num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
+        persistent_workers: bool | StrataMap[bool] = True,
+        pin_memory: bool | StrataMap[bool] = True,
+        sharding: ShardingStrategy | str | StrataMap[ShardingStrategy | str] = ShardingStrategy.chunk,
+        chunk_batch_size: PositiveInt | StrataMap[PositiveInt] = 4096,
+        observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
+        sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+    ):
+        super().__init__()
+
+        self.hyperparameters = hyperparameters
+        self.dataframes = _dataframes_by_strata(dataframe)
+        self.dataset = Dataset(root=None, processor="default") if dataset is None else dataset
+        if self.dataset.root is not None:
+            raise ValueError("PolarsDataModule dataset must not define root; pass processor configuration only")
+
+        self.state = state
+        self.batch_size = batch_size
+        self.num_workers = _by_strata(num_workers, default=None)
+        self.persistent_workers = _by_strata(persistent_workers, default=True)
+        self.pin_memory = _by_strata(pin_memory, default=True)
+        _sharding = lambda value: value if isinstance(value, ShardingStrategy) else ShardingStrategy(value.strip().lower())  # noqa: E731
+        self.sharding = {
+            strata: _sharding(strategy)
+            for strata, strategy in _by_strata(sharding, default=ShardingStrategy.chunk).items()
+        }
+        self.chunk_batch_size = _by_strata(chunk_batch_size, default=4096)
+        self.observation_buffer_size = _by_strata(observation_buffer_size, default=1)
+        self.sample_rate = {
+            strata: float(rate)
+            for strata, rate in _by_strata(sample_rate, default=1.0).items()
+        }
+
+    @classmethod
+    def from_model(
+        cls,
+        model: JSON2Vec,
+        dataframe: pl.DataFrame | DataFrameMap,
+        dataset: Dataset | None = None,
+        **kwargs: Any,
+    ) -> "PolarsDataModule":
+        return cls(
+            hyperparameters=model.hyperparameters,
+            dataframe=dataframe,
+            dataset=dataset,
+            state=model.state,
+            batch_size=model.batch_size,
+            **kwargs,
+        )
+
+    def dataloader(self, strata: Strata) -> DataLoader:
+        trainer = getattr(self, "trainer", None)
+        global_rank = getattr(trainer, "global_rank", None)
+        world_size = getattr(trainer, "world_size", None)
+        if strata not in self.dataframes:
+            raise ValueError(f"no dataframe configured for strata: {strata}")
+
+        return polars_dataloader(
+            hyperparameters=self.hyperparameters,
+            dataframe=self.dataframes[strata],
+            dataset=self.dataset,
+            state=self.state,
+            batch_size=self.batch_size,
+            strata=strata,
+            num_workers=self.num_workers[strata],
+            persistent_workers=self.persistent_workers[strata],
+            pin_memory=self.pin_memory[strata],
+            sharding=self.sharding[strata],
+            chunk_batch_size=self.chunk_batch_size[strata],
             observation_buffer_size=self.observation_buffer_size[strata],
             sample_rate=self.sample_rate[strata],
             global_rank=global_rank,

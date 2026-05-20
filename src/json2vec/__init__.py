@@ -1,5 +1,5 @@
 from json2vec.architecture.root import JSON2Vec as Architecture
-from json2vec.data.datasets import Dataset, StreamingDataModule
+from json2vec.data.datasets import Dataset, PolarsDataModule, StreamingDataModule
 from json2vec.processors import PROCESSORS, Processor, ProcessorMode, shim
 from json2vec.structs.enums import Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
@@ -31,6 +31,7 @@ __all__ = [
     "Number",
     "PROCESSORS",
     "Plugin",
+    "PolarsDataModule",
     "Processor",
     "ProcessorMode",
     "RequestBase",
