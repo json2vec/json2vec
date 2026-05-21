@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pydantic
 import torch
 from tensordict import TensorDict
 
 import json2vec.inference.deployment as deployment_module
-from json2vec.inference.deployment import Deployment, ErrorItem
-from json2vec.processors.base import PROCESSORS, shim
+from json2vec.inference.deployment import API, Deployment, ErrorItem
+from json2vec.processors.base import PROCESSORS
 from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 
@@ -40,16 +41,16 @@ class _DummyModel:
         )
 
 
-def _deployment(deployment_cls=Deployment) -> tuple[Deployment, _DummyModel]:
+def _api(**kwargs) -> tuple[API, _DummyModel]:
     model = _DummyModel()
-    deployment = deployment_cls(checkpoint="unused")
+    deployment = API(checkpoint="unused", **kwargs)
     deployment.model = model
     deployment.device = "cpu"
     return deployment, model
 
 
 def test_deployment_batches_only_valid_inputs_and_preserves_per_item_errors():
-    deployment, model = _deployment()
+    deployment, model = _api()
 
     batch = deployment.batch(
         [
@@ -73,9 +74,6 @@ def test_deployment_batches_only_valid_inputs_and_preserves_per_item_errors():
 
 
 def test_deployment_postprocess_can_rewrite_encoded_response():
-    class PostprocessedDeployment(Deployment):
-        pass
-
     seen = {}
 
     context = {"request": {"color": "r"}, "input": _input(7)}
@@ -89,8 +87,7 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
             {"root/vector": {"embedding": [[1.0, 2.0]]}},
         )
 
-    deployment, _ = _deployment(PostprocessedDeployment)
-    PostprocessedDeployment.postprocess(processor)
+    deployment, _ = _api(postprocessor=processor)
 
     encoded = deployment.encode_response([], context=context)
 
@@ -103,13 +100,9 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
 
 
 def test_deployment_preprocess_registers_shim_for_decode_request(monkeypatch):
-    class PreprocessedDeployment(Deployment):
-        pass
-
     def __deployment_preprocess(observation: dict):
         return {"color": observation["hue"]}
 
-    shimmed = shim(yields=False)(__deployment_preprocess)
     captured = {}
 
     def fake_encode(batch, hyperparameters, strata, state):
@@ -119,8 +112,7 @@ def test_deployment_preprocess_registers_shim_for_decode_request(monkeypatch):
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
 
     try:
-        PreprocessedDeployment.preprocess(shimmed)
-        deployment = PreprocessedDeployment(checkpoint="unused")
+        deployment = API(checkpoint="unused", preprocessor=__deployment_preprocess)
         deployment.model = SimpleNamespace(hyperparameters=object())
         deployment.state = {}
         context = {}
@@ -134,8 +126,25 @@ def test_deployment_preprocess_registers_shim_for_decode_request(monkeypatch):
     assert context["observations"] == [[{"color": "red"}]]
 
 
+def test_deployment_preprocess_generator_returns_error():
+    def __deployment_generator(observation: dict):
+        yield {"color": observation["hue"]}
+
+    try:
+        deployment = API(checkpoint="unused", preprocessor=__deployment_generator)
+        deployment.state = {}
+
+        error = deployment.decode_request({"hue": "red"})
+    finally:
+        PROCESSORS.pop("__deployment_generator", None)
+
+    assert isinstance(error, ErrorItem)
+    assert error.status_code == 422
+    assert "must produce dict objects" in error.message
+
+
 def test_deployment_skips_model_when_every_item_in_batch_is_invalid():
-    deployment, model = _deployment()
+    deployment, model = _api()
 
     batch = deployment.batch(
         [
@@ -158,3 +167,80 @@ def test_deployment_skips_model_when_every_item_in_batch_is_invalid():
             "error": {"status_code": 422, "message": "cxr RJ not present"},
         },
     ]
+
+
+def test_deployment_launcher_configures_litserve_api(monkeypatch):
+    class Request(pydantic.BaseModel):
+        color: str
+
+    class Response(pydantic.BaseModel):
+        predictions: dict = {}
+
+    captured = {}
+
+    class FakeServer:
+        def __init__(self, *, lit_api, accelerator, workers_per_device, track_requests):
+            captured["lit_api"] = lit_api
+            captured["accelerator"] = accelerator
+            captured["workers_per_device"] = workers_per_device
+            captured["track_requests"] = track_requests
+
+        def run(self, *, generate_client_file):
+            captured["generate_client_file"] = generate_client_file
+
+    monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
+
+    Deployment(
+        checkpoint="unused",
+        max_batch_size=16,
+        batch_timeout=0.25,
+        workers_per_device=2,
+        accelerator="cpu",
+        track_requests=True,
+    ).forge(request=Request, response=Response).serve()
+
+    assert isinstance(captured["lit_api"], API)
+    assert captured["lit_api"].checkpoint == "unused"
+    assert captured["lit_api"].preprocessor is None
+    assert captured["accelerator"] == "cpu"
+    assert captured["workers_per_device"] == 2
+    assert captured["track_requests"] is True
+    assert captured["generate_client_file"] is False
+    assert API.decode_request.__annotations__["request"] is Request
+    assert API.encode_response.__annotations__["return"] is Response
+
+
+def test_deployment_launcher_registers_preprocessor_with_partial_kwargs(monkeypatch):
+    def __deployment_preprocess(observation: dict, suffix: str):
+        return {"color": observation["hue"] + suffix}
+
+    captured = {}
+
+    class FakeServer:
+        def __init__(self, *, lit_api, accelerator, workers_per_device, track_requests):
+            captured["lit_api"] = lit_api
+
+        def run(self, *, generate_client_file):
+            pass
+
+    def fake_encode(batch, hyperparameters, strata, state):
+        captured["batch"] = batch
+        return _input(1)
+
+    monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
+    monkeypatch.setattr(deployment_module, "encode", fake_encode)
+
+    try:
+        Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!").serve()
+        api = captured["lit_api"]
+        api.model = SimpleNamespace(hyperparameters=object())
+        api.state = {}
+        context = {}
+
+        encoded = api.decode_request({"hue": "red"}, context=context)
+    finally:
+        PROCESSORS.pop("__deployment_preprocess", None)
+
+    assert isinstance(encoded, TensorDict)
+    assert captured["batch"] == [[{"color": "red!"}]]
+    assert context["observations"] == [[{"color": "red!"}]]

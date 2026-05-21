@@ -24,13 +24,13 @@ import sys
 
 import litserve as ls
 
-from json2vec.inference.deployment import Deployment
+from json2vec.inference.deployment import API
 
 checkpoint = sys.argv[1]
 port = int(sys.argv[2])
 
 server = ls.LitServer(
-    lit_api=Deployment(
+    lit_api=API(
         checkpoint=checkpoint,
         max_batch_size=1,
         batch_timeout=0.0,
@@ -78,8 +78,7 @@ def _wait_for_server(base_url: str, process: subprocess.Popen[str], log_path: Pa
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError(
-                "deployment exited before readiness probe succeeded\n"
-                f"log tail:\n{_tail_text(log_path)}"
+                f"deployment exited before readiness probe succeeded\nlog tail:\n{_tail_text(log_path)}"
             )
 
         try:
@@ -93,10 +92,7 @@ def _wait_for_server(base_url: str, process: subprocess.Popen[str], log_path: Pa
 
         time.sleep(0.1)
 
-    raise AssertionError(
-        f"timed out waiting for deployment readiness: {last_error}\n"
-        f"log tail:\n{_tail_text(log_path)}"
-    )
+    raise AssertionError(f"timed out waiting for deployment readiness: {last_error}\nlog tail:\n{_tail_text(log_path)}")
 
 
 def _stop_process(process: subprocess.Popen[str], timeout: float = 10.0) -> None:
@@ -249,4 +245,6 @@ def test_deployment_accepts_unseen_category_values_at_runtime(tmp_path: Path) ->
     assert gamma_payload["predictions"] == {}
     assert "root/label" in alpha_payload["embeddings"]
     assert "root/label" in gamma_payload["embeddings"]
-    assert alpha_payload["embeddings"]["root/label"]["embedding"] != gamma_payload["embeddings"]["root/label"]["embedding"]
+    assert (
+        alpha_payload["embeddings"]["root/label"]["embedding"] != gamma_payload["embeddings"]["root/label"]["embedding"]
+    )

@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from json2vec.inference.deployment import DeploymentEnvironment
+from json2vec.inference.deployment import Deployment
 
 ENV_VARS = (
     "JSON2VEC_CHECKPOINT",
@@ -29,7 +29,7 @@ def clear_data_env(monkeypatch: pytest.MonkeyPatch):
 def test_deployment_environment_from_env_accepts_s3_checkpoint(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("JSON2VEC_CHECKPOINT", "s3://bucket/models/model.ckpt")
 
-    env = DeploymentEnvironment()
+    env = Deployment()
     assert env.checkpoint == "s3://bucket/models/model.ckpt"
 
 
@@ -38,4 +38,4 @@ def test_deployment_environment_invalid_accelerator_raises(monkeypatch: pytest.M
     monkeypatch.setenv("JSON2VEC_ACCELERATOR", "tpu")
 
     with pytest.raises(ValidationError, match="JSON2VEC_ACCELERATOR"):
-        DeploymentEnvironment()
+        Deployment()
