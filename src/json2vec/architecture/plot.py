@@ -174,7 +174,22 @@ def format_value(value: Any) -> str:
     normalized = normalize_value(value)
     if isinstance(normalized, str):
         return normalized
+
+    inline_sequence = format_inline_sequence(normalized)
+    if inline_sequence is not None:
+        return inline_sequence
+
     return pformat(normalized, compact=True, sort_dicts=False, width=52)
+
+
+def format_inline_sequence(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return None
+
+    if not all(item is None or isinstance(item, (str, int, float, bool)) for item in value):
+        return None
+
+    return "[" + ", ".join(str(item) for item in value) + "]"
 
 
 def normalize_value(value: Any) -> Any:

@@ -121,29 +121,24 @@ The package requires Python `>=3.12`.
 ## Hello World Notebook
 
 `examples/hello_world.ipynb` trains a tiny model from an in-memory synthetic
-dataset. It demonstrates the full loop: register a streaming processor, declare
-a schema, train a supervised category target, then call `predict` and `embed`.
+dataset. It demonstrates the full loop: create a Polars DataFrame, declare a
+schema, train a supervised category target, then call `predict` and `embed`.
 
 ```python
 import lightning.pytorch as lit
+import polars as pl
 import torch
 from rich.pretty import pprint
 
 import json2vec as j2v
 
 
-@j2v.shim(yields=True)
-def hello_world_records(observation: dict, strata: j2v.Strata):
-    records = [
-        {"color": "red", "label": "warm"},
-        {"color": "orange", "label": "warm"},
-        {"color": "yellow", "label": "warm"},
-        {"color": "blue", "label": "cool"},
-        {"color": "green", "label": "cool"},
-        {"color": "purple", "label": "cool"},
-    ]
-
-    yield from records
+records = pl.DataFrame(
+    {
+        "color": ["red", "orange", "yellow", "blue", "green", "purple"],
+        "label": ["warm", "warm", "warm", "cool", "cool", "cool"],
+    }
+)
 
 
 params = j2v.Hyperparameters(
@@ -165,13 +160,12 @@ model = j2v.Architecture(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
 
-datamodule = j2v.StreamingDataModule.from_model(
+datamodule = j2v.PolarsDataModule.from_model(
     model,
-    dataset=j2v.Dataset(processor=hello_world_records),
+    dataframe=records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    file_buffer_size=1,
     observation_buffer_size=32,
     sample_rate=1.0,
 )

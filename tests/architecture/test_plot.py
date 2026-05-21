@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 
+from json2vec.architecture.plot import format_value
 from json2vec.architecture.root import JSON2Vec
 from json2vec.structs.experiment import Hyperparameters
 
@@ -142,3 +143,12 @@ def test_plot_leaf_uses_default_extension_renderer(tmp_path: Path) -> None:
     assert "topk: [2]" in rendered
     assert "query: [*].id" in rendered
     assert "counters" not in rendered
+
+
+def test_plot_formats_scalar_lists_inline() -> None:
+    vocabulary = [f"label_{index}" for index in range(12)]
+
+    rendered = format_value(vocabulary)
+
+    assert "\n" not in rendered
+    assert rendered == "[" + ", ".join(vocabulary) + "]"
