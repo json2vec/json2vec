@@ -8,7 +8,6 @@ from tensordict import TensorDict
 
 import json2vec.inference.deployment as deployment_module
 from json2vec.inference.deployment import API, Deployment, ErrorItem
-from json2vec.processors.base import PROCESSORS
 from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 
@@ -99,7 +98,7 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
     assert encoded["embeddings"]["root/vector"]["embedding"] == [1.0, 2.0]
 
 
-def test_deployment_preprocess_registers_shim_for_decode_request(monkeypatch):
+def test_deployment_preprocesses_decode_request(monkeypatch):
     def __deployment_preprocess(observation: dict):
         return {"color": observation["hue"]}
 
@@ -111,15 +110,12 @@ def test_deployment_preprocess_registers_shim_for_decode_request(monkeypatch):
 
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
 
-    try:
-        deployment = API(checkpoint="unused", preprocessor=__deployment_preprocess)
-        deployment.model = SimpleNamespace(hyperparameters=object())
-        deployment.state = {}
-        context = {}
+    deployment = API(checkpoint="unused", preprocessor=__deployment_preprocess)
+    deployment.model = SimpleNamespace(hyperparameters=object())
+    deployment.state = {}
+    context = {}
 
-        encoded = deployment.decode_request({"hue": "red"}, context=context)
-    finally:
-        PROCESSORS.pop("__deployment_preprocess", None)
+    encoded = deployment.decode_request({"hue": "red"}, context=context)
 
     assert isinstance(encoded, TensorDict)
     assert captured["batch"] == [[{"color": "red"}]]
@@ -130,17 +126,14 @@ def test_deployment_preprocess_generator_returns_error():
     def __deployment_generator(observation: dict):
         yield {"color": observation["hue"]}
 
-    try:
-        deployment = API(checkpoint="unused", preprocessor=__deployment_generator)
-        deployment.state = {}
+    deployment = API(checkpoint="unused", preprocessor=__deployment_generator)
+    deployment.state = {}
 
-        error = deployment.decode_request({"hue": "red"})
-    finally:
-        PROCESSORS.pop("__deployment_generator", None)
+    error = deployment.decode_request({"hue": "red"})
 
     assert isinstance(error, ErrorItem)
     assert error.status_code == 422
-    assert "must produce dict objects" in error.message
+    assert "preprocessor must return a dict object" in error.message
 
 
 def test_deployment_skips_model_when_every_item_in_batch_is_invalid():
@@ -210,7 +203,7 @@ def test_deployment_launcher_configures_litserve_api(monkeypatch):
     assert API.encode_response.__annotations__["return"] is Response
 
 
-def test_deployment_launcher_registers_preprocessor_with_partial_kwargs(monkeypatch):
+def test_deployment_launcher_binds_preprocessor_kwargs(monkeypatch):
     def __deployment_preprocess(observation: dict, suffix: str):
         return {"color": observation["hue"] + suffix}
 
@@ -230,16 +223,13 @@ def test_deployment_launcher_registers_preprocessor_with_partial_kwargs(monkeypa
     monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
 
-    try:
-        Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!").serve()
-        api = captured["lit_api"]
-        api.model = SimpleNamespace(hyperparameters=object())
-        api.state = {}
-        context = {}
+    Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!").serve()
+    api = captured["lit_api"]
+    api.model = SimpleNamespace(hyperparameters=object())
+    api.state = {}
+    context = {}
 
-        encoded = api.decode_request({"hue": "red"}, context=context)
-    finally:
-        PROCESSORS.pop("__deployment_preprocess", None)
+    encoded = api.decode_request({"hue": "red"}, context=context)
 
     assert isinstance(encoded, TensorDict)
     assert captured["batch"] == [[{"color": "red!"}]]

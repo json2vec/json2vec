@@ -1,5 +1,4 @@
 import functools
-from collections.abc import Callable
 from typing import Any, Literal, TypeAlias
 
 import litserve as ls
@@ -12,30 +11,12 @@ from tensordict import TensorDict
 
 from json2vec.architecture.root import JSON2Vec
 from json2vec.data.datasets import encode
-from json2vec.processors.base import PROCESSORS, Processor, shim
 from json2vec.structs.enums import Strata
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
-Preprocessor: TypeAlias = Callable[..., Any]
-Postprocessor: TypeAlias = Callable[
-    [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
-    tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
-]
-
-
-def _bind_kwargs(processor: Preprocessor, kwargs: dict[str, Any]) -> Preprocessor:
-    if len(kwargs) == 0:
-        return processor
-
-    return functools.update_wrapper(functools.partial(processor, **kwargs), processor)
-
-
-def _register_preprocessor(processor: Preprocessor) -> Processor:
-    registered = shim(yields=False)(processor)
-    return PROCESSORS[registered.__name__]
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -55,14 +36,14 @@ class API(ls.LitAPI):
     def __init__(
         self,
         checkpoint: str,
-        preprocessor: Preprocessor | None = None,
-        postprocessor: Postprocessor | None = None,
+        preprocessor=None,
+        postprocessor=None,
         *args,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.checkpoint = checkpoint
-        self.preprocessor = None if preprocessor is None else _register_preprocessor(preprocessor)
+        self.preprocessor = preprocessor
         self.postprocessor = postprocessor
 
     def setup(self, device: str) -> None:
@@ -88,13 +69,12 @@ class API(ls.LitAPI):
                 observations: list[Any] = [[request]]
 
             else:
-                observations = list(
-                    self.preprocessor.outputs(
-                        request,
-                        strata=Strata.predict,
-                        state=self.state,
-                    )
-                )
+                observation = self.preprocessor(request)
+
+                if not isinstance(observation, dict):
+                    raise TypeError(f"preprocessor must return a dict object, got {type(observation).__name__}")
+
+                observations = [[observation]]
 
         except Exception as exception:
             return ErrorItem(status_code=422, message=str(exception))
@@ -239,8 +219,8 @@ class Deployment(BaseSettings):
 
     _request_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
     _response_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
-    _preprocessor: Preprocessor | None = pydantic.PrivateAttr(default=None)
-    _postprocessor: Postprocessor | None = pydantic.PrivateAttr(default=None)
+    _preprocessor = pydantic.PrivateAttr(default=None)
+    _postprocessor = pydantic.PrivateAttr(default=None)
 
     @field_validator("checkpoint", "accelerator", mode="before")
     @classmethod
@@ -265,13 +245,13 @@ class Deployment(BaseSettings):
         return self
 
     @beartype
-    def preprocess(self, processor: Preprocessor, **kwargs: Any) -> "Deployment":
-        self._preprocessor = _bind_kwargs(processor, kwargs)
+    def preprocess(self, processor, **kwargs: Any) -> "Deployment":
+        self._preprocessor = functools.partial(processor, **kwargs) if len(kwargs) > 0 else processor
 
         return self
 
     @beartype
-    def postprocess(self, processor: Postprocessor, **kwargs: Any) -> "Deployment":
+    def postprocess(self, processor, **kwargs: Any) -> "Deployment":
         self._postprocessor = functools.partial(processor, **kwargs) if len(kwargs) > 0 else processor
 
         return self
