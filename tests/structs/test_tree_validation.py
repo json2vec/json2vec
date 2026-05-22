@@ -1,7 +1,7 @@
 import pydantic
 import pytest
 
-from json2vec.structs.tree import Address, Leaf, Node
+from json2vec.structs.tree import Address, Column, Leaf, Node
 
 
 class AddressPayload(pydantic.BaseModel):
@@ -58,6 +58,37 @@ def test_node_prune_rate_can_be_null_for_inheritance():
     node = Node.model_validate({"name": "ok_name", "type": "node", "n_heads": 4, "p_prune": None})
 
     assert node.p_prune is None
+
+
+def test_node_target_true_sets_prune_rate():
+    node = Node.model_validate({"name": "label", "type": "node", "n_heads": 4, "target": True})
+
+    assert node.p_prune == 1.0
+    assert not node.model_extra or "target" not in node.model_extra
+
+
+def test_node_target_false_is_input_only_noop():
+    node = Node.model_validate({"name": "label", "type": "node", "n_heads": 4, "target": False})
+
+    assert node.p_prune is None
+    assert not node.model_extra or "target" not in node.model_extra
+
+
+def test_node_target_rejects_conflicting_prune_rate():
+    with pytest.raises(ValueError, match="target=True is shorthand for p_prune=1.0"):
+        Node.model_validate({"name": "label", "type": "node", "n_heads": 4, "target": True, "p_prune": 0.5})
+
+
+def test_node_target_requires_boolean():
+    with pytest.raises(ValueError, match="target must be a boolean"):
+        Node.model_validate({"name": "label", "type": "node", "n_heads": 4, "target": "yes"})
+
+
+def test_column_target_shorthand_sets_prune_rate():
+    leaf = Column("label", "category", target=True)
+
+    assert leaf.p_prune == 1.0
+    assert not leaf.model_extra or "target" not in leaf.model_extra
 
 
 def test_node_description_trims_and_accepts_optional_metadata():

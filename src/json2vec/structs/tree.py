@@ -50,14 +50,22 @@ class Node(NodeMixin, pydantic.BaseModel):
         if not isinstance(data, Mapping):
             return data
 
+        if "p_prune" not in cls.model_fields:
+            return data
+
         values = dict(data)
-        target = values.get("target", False)
-        if isinstance(target, bool):
-            values.pop("target", None)
-            if target:
-                if "p_prune" in values and values["p_prune"] is not None and values["p_prune"] != 1.0:
-                    raise ValueError("target=True is shorthand for p_prune=1.0")
-                values["p_prune"] = 1.0
+        target = values.pop("target", None)
+
+        if target is None:
+            return values
+
+        if not isinstance(target, bool):
+            raise ValueError("target must be a boolean")
+
+        if target:
+            if values.get("p_prune") not in (None, 1.0):
+                raise ValueError("target=True is shorthand for p_prune=1.0")
+            values["p_prune"] = 1.0
 
         return values
 
@@ -195,11 +203,12 @@ def Column(name: str, field: TensorFieldSpec, /, **data: Any) -> Leaf:
         for key, value in kwargs.items():
             values.setdefault(key, value)
 
-    target = values.get("target", False)
-    if isinstance(target, bool):
-        values.pop("target", None)
+    target = values.pop("target", None)
+    if target is not None:
+        if not isinstance(target, bool):
+            raise ValueError("target must be a boolean")
         if target:
-            if "p_prune" in values and values["p_prune"] is not None and values["p_prune"] != 1.0:
+            if values.get("p_prune") not in (None, 1.0):
                 raise ValueError("target=True is shorthand for p_prune=1.0")
             values["p_prune"] = 1.0
 
