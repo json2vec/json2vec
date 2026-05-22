@@ -2,7 +2,7 @@ from typing import Annotated, Literal, Self, TypeAlias, Union
 
 import pydantic
 
-from json2vec.structs.tree import Node, Rate
+from json2vec.structs.tree import Leaf, Node, Rate
 from json2vec.tensorfields import extensions as _extensions  # noqa: F401
 from json2vec.tensorfields.base import TENSORFIELDS
 
@@ -23,7 +23,15 @@ class Array(Node):
     n_outputs: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
-    fields: list[Self | RequestTypes] = pydantic.Field(default_factory=list)
+    fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)
+
+    def __init__(self, *children: Self | RequestTypes | Leaf, **data):
+        if children:
+            if "fields" in data:
+                raise TypeError("array children were provided both positionally and by keyword")
+            data["fields"] = list(children)
+
+        super().__init__(**data)
 
     def model_post_init(self, __context):
         for field in self.fields:

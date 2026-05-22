@@ -17,7 +17,7 @@ from json2vec.structs.tree import Address, Leaf, Node
 
 logger = logging.getLogger("json2vec.hyperparameters")
 SelectionKey: TypeAlias = tuple[Any, ...]
-SchemaField: TypeAlias = Leaf
+SchemaField: TypeAlias = Array | Leaf
 _MISSING = object()
 
 
@@ -295,11 +295,63 @@ def jmespath_member(value: str) -> str:
     return json.dumps(value)
 
 
-def _to_concrete_request(leaf: Leaf) -> RequestTypes:
+def _request_from_leaf(leaf: Leaf) -> RequestTypes:
     from json2vec.tensorfields.base import TENSORFIELDS
 
     request_cls = getattr(TENSORFIELDS[leaf.type], "Request")
     return request_cls.model_validate(leaf.model_dump(mode="python", round_trip=True))
+
+
+def _schema_query(array_path: tuple[str, ...], source: str) -> str:
+    selectors = "".join(f".{jmespath_member(array)}[*]" for array in array_path)
+    return f"[*]{selectors}.{jmespath_member(source)}"
+
+
+def _normalize_schema_node(node: SchemaField, *, array_path: tuple[str, ...] = ()) -> Array | RequestTypes:
+    if isinstance(node, Leaf):
+        source = node.name
+        node_name = sanitize_node_name(source)
+        updates: dict[str, Any] = {}
+
+        if node_name != source:
+            updates["name"] = node_name
+            if node.description is None:
+                updates["description"] = source
+
+        if node.query is None:
+            updates["query"] = _schema_query(array_path, source)
+
+        return _request_from_leaf(node.model_copy(update=updates))
+
+    if isinstance(node, Array):
+        child_path = (*array_path, node.name)
+        fields = [_normalize_schema_node(field, array_path=child_path) for field in node.fields]
+        payload = node.model_dump(mode="python", round_trip=True, exclude={"fields"})
+        return Array(*fields, **payload)
+
+    raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
+
+
+def _materialize_raw_leaves(array: Array) -> Array:
+    fields: list[Array | RequestTypes] = []
+    for field in list(array.fields):
+        field.parent = None
+
+        if isinstance(field, Array):
+            fields.append(_materialize_raw_leaves(field))
+            continue
+
+        if type(field) is Leaf:
+            fields.append(_request_from_leaf(field))
+            continue
+
+        fields.append(field)
+
+    array.fields = fields
+    for field in array.fields:
+        field.parent = array
+
+    return array
 
 
 class Hyperparameters(Node):
@@ -334,28 +386,18 @@ class Hyperparameters(Node):
             raise ValueError("schema requires at least one field")
 
         seen_sources: set[str] = set()
-        root_fields: list[RequestTypes] = []
+        root_fields: list[Array | RequestTypes] = []
 
         for field in normalized:
-            if not isinstance(field, Leaf):
-                raise TypeError("schema fields must be Leaf or concrete request instances")
+            if not isinstance(field, (Array, Leaf)):
+                raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
 
             source = field.name
             if source in seen_sources:
                 raise ValueError(f"duplicate schema source field: {source}")
             seen_sources.add(source)
 
-            node_name = sanitize_node_name(source)
-            values: dict[str, Any] = {}
-            if node_name != source:
-                values["name"] = node_name
-                if getattr(field, "description", None) is None:
-                    values["description"] = source
-
-            if field.query is None:
-                values["query"] = f"[*].{jmespath_member(source)}"
-
-            root_fields.append(_to_concrete_request(field.model_copy(update=values)))
+            root_fields.append(_normalize_schema_node(field))
 
         array = Array(
             name=root,
@@ -368,6 +410,7 @@ class Hyperparameters(Node):
         return cls(d_model=d_model, fields=array)
 
     def model_post_init(self, __context):
+        self.fields = _materialize_raw_leaves(self.fields)
         self.fields.parent: Self = self
         for request in self.requests.values():
             request.post_bind_validate()

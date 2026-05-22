@@ -1,4 +1,8 @@
+import pytest
+
 from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.structure import Array
+from json2vec.structs.tree import Column
 
 
 def _payload() -> dict:
@@ -31,6 +35,25 @@ def _payload() -> dict:
         },
     }
 
+
+def test_array_accepts_positional_children():
+    array = Array(
+        Column("category_leaf", "category", query="[*].code"),
+        name="branch",
+    )
+
+    assert array.fields[0].name == "category_leaf"
+
+
+def test_array_rejects_positional_and_keyword_children():
+    with pytest.raises(TypeError, match="both positionally and by keyword"):
+        Array(
+            Column("category_leaf", "category", query="[*].code"),
+            name="branch",
+            fields=[],
+        )
+
+
 def test_hyperparameters_derives_arrays_requests_and_shapes():
     structure = Hyperparameters.model_validate(_payload())
 
@@ -38,6 +61,28 @@ def test_hyperparameters_derives_arrays_requests_and_shapes():
     assert "root/branch" in structure.arrays
     assert "root/branch/category_leaf" in structure.requests
     assert structure.shapes["root/branch/category_leaf"] == (2, 4)
+
+
+def test_hyperparameters_converts_leaf_instances_nested_in_arrays():
+    structure = Hyperparameters(
+        d_model=16,
+        fields={
+            "name": "root",
+            "type": "array",
+            "fields": [
+                {
+                    "name": "branch",
+                    "type": "array",
+                    "fields": [
+                        Column("category_leaf", "category", query="[*].code"),
+                    ],
+                }
+            ],
+        },
+    )
+
+    request = structure.requests["root/branch/category_leaf"]
+    assert request.max_vocab_size == 10_000
 
 
 def test_hyperparameters_depthwise_contains_array_levels():

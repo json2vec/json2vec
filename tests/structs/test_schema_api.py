@@ -49,6 +49,32 @@ def test_schema_rejects_duplicate_sources():
         )
 
 
+def test_schema_accepts_array_nodes_and_infers_nested_queries():
+    params = j2v.schema(
+        j2v.Array(
+            j2v.Number("amount"),
+            j2v.Column("merchant code", j2v.Category, max_vocab_size=32),
+            name="transactions",
+            max_length=4,
+        ),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    assert "record/transactions" in params.arrays
+
+    amount = params.requests["record/transactions/amount"]
+    assert amount.query == "[*].transactions[*].amount"
+    assert params.shapes["record/transactions/amount"] == (1, 4)
+
+    merchant = params.requests["record/transactions/merchant_code"]
+    assert merchant.name == "merchant_code"
+    assert merchant.description == "merchant code"
+    assert merchant.query == '[*].transactions[*]."merchant code"'
+    assert merchant.max_vocab_size == 32
+
+
 def test_selector_set_override_and_cached_role_views():
     params = j2v.schema(
         j2v.Number("amount"),
