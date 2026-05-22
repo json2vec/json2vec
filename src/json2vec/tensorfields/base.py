@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Type, TypeAlias
+from typing import TYPE_CHECKING, Callable, Type, TypeAlias
 
 import pluggy
 import torch
@@ -104,7 +104,6 @@ class TensorFieldBase(ABC):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        state: Any,
     ) -> "TensorFieldBase":
         raise NotImplementedError
 
@@ -123,7 +122,7 @@ class TensorFieldBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def target(self, p_target: float):
+    def target(self, p_prune: float):
         raise NotImplementedError
 
 

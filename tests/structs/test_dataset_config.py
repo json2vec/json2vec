@@ -53,15 +53,16 @@ def test_dataset_accepts_registered_processor_callable():
         PROCESSORS.pop("__dataset_callable_processor", None)
 
 
-def test_dataset_rejects_unregistered_processor_callable():
+def test_dataset_accepts_configured_processor_callable():
     def _unregistered_dataset_callable_processor(observation: dict):
         return observation
 
     payload = _dataset_payload()
     payload["processor"] = _unregistered_dataset_callable_processor
 
-    with pytest.raises(ValueError, match="you haven't registered processor _unregistered_dataset_callable_processor"):
-        Dataset.model_validate(payload)
+    dataset = Dataset.model_validate(payload)
+
+    assert dataset.processor is _unregistered_dataset_callable_processor
 
 
 def test_dataset_root_allows_none_for_processor_driven_mode():

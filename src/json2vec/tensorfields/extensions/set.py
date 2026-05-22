@@ -23,7 +23,7 @@ from json2vec.tensorfields.base import (
 from json2vec.tensorfields.extensions.category import (
     UNAVAILABLE_LABEL,
 )
-from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
 
 if TYPE_CHECKING:
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 sets: Plugin = Plugin(name="set")
 sets.callback(VocabularySyncCallback)
+sets.callback(CounterUpdateCallback)
 
 
 @sets.register
@@ -114,7 +115,7 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        state: Vocabulary,
+        interprocess_encoding_context: Vocabulary,
     ) -> TensorFieldBase:
         request: Request = hyperparameters.requests[address]
         shape: tuple[int, ...] = (len(values), *hyperparameters.shapes[address])
@@ -123,7 +124,7 @@ class TensorField(TensorFieldBase):
         data, states = _pad_sets(
             values=values,
             shape=shape,
-            state=state,
+            state=interprocess_encoding_context,
             update=(strata == Strata.train),
             n_tokens=n_tokens,
         )
@@ -167,12 +168,12 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def target(self, p_target: float = 1.0):
+    def target(self, p_prune: float = 1.0):
         mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
 
         is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_target)
+            .lt(p_prune)
             .expand_as(self.state)
         )
 
@@ -234,6 +235,11 @@ class Embedder(EmbedderBase):
                 ),
             }
         )
+        self.counters = torch.nn.ModuleDict(
+            {
+                TensorKey.state.name: Counter(address=address, size=len(Tokens)),
+            }
+        )
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -264,7 +270,7 @@ class Embedder(EmbedderBase):
         )
 
     @property
-    def state(self) -> Vocabulary:
+    def interprocess_encoding_context(self) -> Vocabulary:
         return self.vocab.state
 
 
@@ -288,12 +294,6 @@ class Decoder(DecoderBase):
             }
         )
 
-        self.counters = torch.nn.ModuleDict(
-            {
-                TensorKey.state.name: Counter(address=address, size=len(Tokens)),
-            }
-        )
-
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
         return TensorDict(
@@ -311,7 +311,7 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-    decoder: Decoder = module.nodes[prediction.address].decoder
+    embedder: Embedder = module.nodes[prediction.address].embedder
     N: int = batch.targets[TensorKey.state].numel()
     trainable = batch.trainable.reshape(N)
 
@@ -324,7 +324,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
                 target=state_targets,
-                weight=decoder.counters[TensorKey.state.name].weight,
+                weight=embedder.counters[TensorKey.state.name].weight,
                 reduction="none",
             )
             .masked_select(trainable)

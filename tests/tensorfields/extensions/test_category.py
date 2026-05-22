@@ -11,6 +11,7 @@ from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.category import (
     UNAVAILABLE_LABEL,
     Decoder,
+    Embedder,
     TensorField,
     Vocabulary,
     loss,
@@ -120,7 +121,7 @@ def test_category_tensorfield_separates_state_and_content():
         address="root/category",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     assert torch.equal(
@@ -155,7 +156,7 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
         address="root/category",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     field = TensorField.new(
@@ -163,7 +164,7 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
         address="root/category",
         hyperparameters=hyperparameters,
         strata=Strata.validate,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     assert torch.equal(
@@ -186,7 +187,7 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
         address="root/category",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     assert torch.equal(
@@ -299,9 +300,9 @@ def test_category_write_excludes_unavailable_when_it_has_highest_logit():
 
 
 class _TrackingModule:
-    def __init__(self, hyperparameters: Hyperparameters, decoder: Decoder):
+    def __init__(self, hyperparameters: Hyperparameters, embedder: Embedder, decoder: Decoder):
         self.hyperparameters = hyperparameters
-        self.nodes = {"root/category": SimpleNamespace(decoder=decoder)}
+        self.nodes = {"root/category": SimpleNamespace(embedder=embedder, decoder=decoder)}
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
         return value
@@ -317,12 +318,13 @@ def test_category_loss_does_not_mutate_counters():
         address="root/category",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
     field.mask(1.0)
 
+    embedder = Embedder(hyperparameters=structure, address="root/category")
     decoder = Decoder(hyperparameters=structure, address="root/category")
-    module = _TrackingModule(hyperparameters=structure, decoder=decoder)
+    module = _TrackingModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
 
     prediction = Prediction(
         address="root/category",
@@ -341,10 +343,10 @@ def test_category_loss_does_not_mutate_counters():
     loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
 
     expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    assert torch.equal(decoder.counters[TensorKey.state.name].counts, expected_state_counts)
+    assert torch.equal(embedder.counters[TensorKey.state.name].counts, expected_state_counts)
 
     expected_content_counts = torch.ones(
         structure.requests["root/category"].max_vocab_size + 1,
         dtype=torch.int64,
     )
-    assert torch.equal(decoder.counters[TensorKey.content.name].counts, expected_content_counts)
+    assert torch.equal(embedder.counters[TensorKey.content.name].counts, expected_content_counts)

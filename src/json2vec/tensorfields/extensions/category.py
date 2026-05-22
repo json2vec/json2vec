@@ -21,7 +21,7 @@ from json2vec.tensorfields.base import (
     RequestBase,
     TensorFieldBase,
 )
-from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
 
 if TYPE_CHECKING:
@@ -35,6 +35,7 @@ category: Plugin = Plugin(name="category")
 UNAVAILABLE_LABEL = "<unavailable>"
 
 category.callback(VocabularySyncCallback)
+category.callback(CounterUpdateCallback)
 
 @category.register
 class Request(RequestBase):
@@ -85,14 +86,14 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        state: Vocabulary,
+        interprocess_encoding_context: Vocabulary,
     ) -> TensorFieldBase:
 
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
-        tokens = apply(values, partial(state, update=(strata == Strata.train)))
+        tokens = apply(values, partial(interprocess_encoding_context, update=(strata == Strata.train)))
 
-        if len(state) > (max_vocab_size := hyperparameters.requests[address].max_vocab_size):
+        if len(interprocess_encoding_context) > (max_vocab_size := hyperparameters.requests[address].max_vocab_size):
             print(f"Vocab in address {address} exceeds max vocab size of {max_vocab_size}")
 
         data, states = pad(
@@ -143,12 +144,12 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def target(self, p_target: float = 1.0):
+    def target(self, p_prune: float = 1.0):
         mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
 
         is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_target)
+            .lt(p_prune)
             .expand_as(self.state)
         )
 
@@ -210,6 +211,12 @@ class Embedder(EmbedderBase):
                 ),
             }
         )
+        self.counters = torch.nn.ModuleDict(
+            {
+                TensorKey.state.name: Counter(address=address, size=len(Tokens)),
+                TensorKey.content.name: Counter(address=address, size=request.max_vocab_size + 1),
+            }
+        )
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -240,7 +247,7 @@ class Embedder(EmbedderBase):
         )
 
     @property
-    def state(self) -> Vocabulary:
+    def interprocess_encoding_context(self) -> Vocabulary:
         return self.vocab.state
 
 
@@ -265,13 +272,6 @@ class Decoder(DecoderBase):
             }
         )
 
-        self.counters = torch.nn.ModuleDict(
-            {
-                TensorKey.state.name: Counter(address=address, size=len(Tokens)),
-                TensorKey.content.name: Counter(address=address, size=request.max_vocab_size + 1),
-            }
-        )
-
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
         return TensorDict(
@@ -289,7 +289,7 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-    decoder: Decoder = module.nodes[prediction.address].decoder
+    embedder: Embedder = module.nodes[prediction.address].embedder
     N: int = batch.targets[TensorKey.state].numel()
     trainable = batch.trainable.reshape(N)
 
@@ -302,7 +302,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
                 target=state_targets,
-                weight=decoder.counters[TensorKey.state.name].weight,
+                weight=embedder.counters[TensorKey.state.name].weight,
                 reduction="none",
             )
             .masked_select(trainable)
@@ -328,7 +328,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=content_inputs,
                 target=content_targets,
-                weight=decoder.counters[TensorKey.content.name].weight,
+                weight=embedder.counters[TensorKey.content.name].weight,
                 reduction="none",
             )
             .masked_select(valued)

@@ -1,12 +1,10 @@
 from collections import defaultdict
 from collections.abc import Callable
-from functools import cache, partialmethod
+from functools import partialmethod
 from pathlib import Path
 from typing import Any, NotRequired, Self, TypeAlias, TypedDict, cast
-from urllib.parse import urlparse
 
 import lightning.pytorch as lit
-import pyarrow.fs as pafs
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
@@ -15,8 +13,8 @@ from tensordict import TensorDict
 
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
-from json2vec.data.datasets import Dataset, EncodedBatch, encode, mock, process
-from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
+from json2vec.data.datasets import EncodedBatch, encode, mock
+from json2vec.structs.enums import Metric, Strata, TensorKey
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Embedding, Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -37,7 +35,7 @@ class Output(TypedDict):
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["JSON2Vec", torch.optim.Optimizer], Any]
-Preprocessor: TypeAlias = str | Callable[..., Any]
+Preprocessor: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
 Postprocessor: TypeAlias = Callable[
     [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
@@ -51,7 +49,6 @@ def step(
     batch_idx: int,
     strata: Strata,
 ) -> Output:
-    update_counters(module=module, batch=batch, strata=strata)
     predictions: list[Prediction] = module.forward(batch)
 
     if strata == Strata.predict:
@@ -82,64 +79,6 @@ def step(
     loss: torch.Tensor = module.track((Metric.loss, strata), value=torch.stack(losses).sum())
 
     return Output(loss=loss)
-
-
-@cache
-def groupname(names: tuple[str, ...]) -> str:
-    assert len(names) > 1
-
-    group, *keys = tuple(map(lambda x: x.replace("/", ":").lower(), names))
-
-    key: str = ":".join(list(keys))
-
-    return f"{group}/{key}"
-
-
-def _counter_value(field: TensorFieldBase, key: TensorKey) -> torch.Tensor | None:
-    targets = getattr(field, "targets", None)
-    if targets is not None and key in targets.keys():
-        return targets[key]
-
-    value = getattr(field, key.name, None)
-    if isinstance(value, torch.Tensor):
-        return value
-
-    return None
-
-
-@torch.no_grad()
-def update_counters(
-    module: "JSON2Vec",
-    batch: TensorDict[Address, TensorFieldBase],
-    strata: Strata,
-) -> None:
-    if strata != Strata.train:
-        return
-
-    for address in module.hyperparameters.requests:
-        field = batch[address]
-        decoder = module.nodes[address].decoder
-        state = _counter_value(field=field, key=TensorKey.state)
-
-        if state is not None and hasattr(decoder, "counter"):
-            decoder.counter(state)
-
-        counters = getattr(decoder, "counters", None)
-        if counters is None:
-            continue
-
-        if state is not None and TensorKey.state.name in counters:
-            counters[TensorKey.state.name](state)
-
-        if state is None or TensorKey.content.name not in counters:
-            continue
-
-        content = _counter_value(field=field, key=TensorKey.content)
-        if content is None or content.shape != state.shape:
-            continue
-
-        values = content.masked_select(state.eq(Tokens.valued.value))
-        counters[TensorKey.content.name](values)
 
 
 class JSON2Vec(lit.LightningModule):
@@ -197,6 +136,14 @@ class JSON2Vec(lit.LightningModule):
         return callbacks
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
+        def groupname(names: tuple[str, ...]) -> str:
+            assert len(names) > 1
+
+            group, *keys = tuple(map(lambda x: x.replace("/", ":").lower(), names))
+            key = ":".join(list(keys))
+
+            return f"{group}/{key}"
+
         # These metrics are emitted from data-dependent branches, so DDP ranks cannot
         # safely synchronize every log call as a collective. rank_zero_only keeps
         # Lightning from running a sync while still marking the metric as handled.
@@ -213,11 +160,11 @@ class JSON2Vec(lit.LightningModule):
         return value
 
     @property
-    def state(self) -> dict[Address, Any]:
+    def interprocess_encoding_context(self) -> dict[Address, Any]:
         return {
-            address: node.embedder.state
+            address: node.embedder.interprocess_encoding_context
             for address, node in self.nodes.items()
-            if hasattr(node, "embedder") and hasattr(node.embedder, "state")
+            if hasattr(node, "embedder") and hasattr(node.embedder, "interprocess_encoding_context")
         }
 
     def plot(
@@ -246,10 +193,10 @@ class JSON2Vec(lit.LightningModule):
         predictions: list[Prediction] = []
 
         for address in self.hyperparameters.requests.keys():
+            tensorfield: TensorFieldBase = inputs[address]
             if address in self.hyperparameters.target:
                 continue
 
-            tensorfield: TensorFieldBase = inputs[address]
             embedder: EmbedderBase = self.nodes[address].embedder
             embedding: Parcel = embedder(tensorfield)
             processed[embedding.destination].append(embedding)
@@ -306,167 +253,26 @@ class JSON2Vec(lit.LightningModule):
 
         return dict(optimizer=optimizer, lr_scheduler=scheduler)
 
-    def on_load_checkpoint(self, checkpoint):
-        logger.bind(component="checkpoint").info("loading hyperparameters from checkpoint payload")
-        if getattr(self, "hyperparameters", None) is None:
-            self.hyperparameters = self._hyperparameters_from_checkpoint(checkpoint)
-
-        if getattr(self, "hyperparameters", None) is None:
-            raise ValueError("missing hyperparameters in checkpoint and constructor")
-
     def on_save_checkpoint(self, checkpoint):
         checkpoint["hyperparameters"] = self.hyperparameters.model_dump(mode="python")
+        checkpoint["batch_size"] = self.batch_size
 
     @classmethod
-    def _hyperparameters_from_checkpoint(cls, checkpoint: dict[str, Any]) -> Hyperparameters:
-        if "hyperparameters" in checkpoint:
-            return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(checkpoint["hyperparameters"]))
+    def load(cls, checkpoint: str | Path) -> Self:
+        path = Path(checkpoint)
+        logger.bind(component="model_factory", checkpoint=str(path)).info("loading JSON2Vec model from checkpoint")
+        state = torch.load(path, weights_only=False, map_location="cpu")
+        if "hyperparameters" not in state:
+            raise ValueError("missing hyperparameters in checkpoint")
 
-        if "hyper_parameters" in checkpoint:
-            payload = checkpoint["hyper_parameters"]
-            if isinstance(payload, dict) and "hyperparameters" in payload:
-                return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(payload["hyperparameters"]))
+        model: "JSON2Vec" = cls(
+            hyperparameters=Hyperparameters.model_validate(state["hyperparameters"]),
+            batch_size=state["batch_size"],
+        )
+        model.load_state_dict(state_dict=state["state_dict"])
+        logger.bind(component="model_factory", checkpoint=str(path)).info("restored model state from checkpoint")
 
-            return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(payload))
-
-        if "session" in checkpoint:
-            payload = checkpoint["session"]
-            if isinstance(payload, dict) and isinstance(payload.get("structure"), dict):
-                migrated = dict(payload["structure"])
-                migrated.pop("name", None)
-                migrated.pop("type", None)
-                for key in ("target", "embed", "p_target", "p_mask"):
-                    if key in payload:
-                        migrated[key] = payload[key]
-                if "target" not in migrated and "pruned" in payload:
-                    migrated["target"] = payload["pruned"]
-                if "p_target" not in migrated and "p_prune" in payload:
-                    migrated["p_target"] = payload["p_prune"]
-                return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(migrated))
-
-            return Hyperparameters.model_validate(cls._migrate_hyperparameters_payload(payload))
-
-        raise ValueError("missing hyperparameters in checkpoint")
-
-    @staticmethod
-    def _migrate_hyperparameters_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        migrated = dict(payload)
-        if "target" not in migrated and "pruned" in migrated:
-            migrated["target"] = migrated.pop("pruned")
-        if "p_target" not in migrated and "p_prune" in migrated:
-            migrated["p_target"] = migrated.pop("p_prune")
-        else:
-            migrated.pop("p_prune", None)
-
-        fields = migrated.get("fields")
-        if isinstance(fields, dict):
-            fields = dict(fields)
-            for key in ("dropout", "p_mask", "p_target"):
-                if key in migrated:
-                    value = migrated.pop(key)
-                    if fields.get(key) is None:
-                        fields[key] = value
-            migrated["fields"] = fields
-
-        def migrate_array(node: Any) -> Any:
-            if not isinstance(node, dict):
-                return node
-
-            node = dict(node)
-            if node.get("type") == "context":
-                node["type"] = "array"
-            if "max_length" not in node and "context_size" in node:
-                node["max_length"] = node.pop("context_size")
-            if "fields" in node:
-                node["fields"] = [migrate_array(child) for child in node["fields"]]
-            return node
-
-        if "fields" in migrated:
-            migrated["fields"] = migrate_array(migrated["fields"])
-
-        return migrated
-
-    @classmethod
-    def _load_checkpoint(cls, checkpoint: str) -> dict[str, Any]:
-        parsed = urlparse(checkpoint)
-        if parsed.scheme == "s3":
-            fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
-            path = f"{parsed.netloc}{parsed.path}"
-            with fs.open_input_file(path) as handle:
-                return torch.load(handle, weights_only=False, map_location="cpu")
-
-        return torch.load(checkpoint, weights_only=False, map_location="cpu")
-
-    def _load_compatible_state_dict(self, state_dict: dict[str, Any]) -> None:
-        current = self.state_dict()
-        compatible: dict[str, Any] = {}
-        skipped: list[str] = []
-
-        for key, value in state_dict.items():
-            if key not in current:
-                skipped.append(key)
-                continue
-
-            current_value = current[key]
-            if isinstance(current_value, torch.Tensor) and isinstance(value, torch.Tensor):
-                if current_value.shape != value.shape:
-                    skipped.append(key)
-                    continue
-            elif type(current_value) is not type(value):
-                skipped.append(key)
-                continue
-
-            compatible[key] = value
-
-        self.load_state_dict(state_dict=compatible, strict=False)
-
-        if skipped:
-            logger.bind(
-                component="checkpoint",
-                skipped=len(skipped),
-                keys=skipped,
-            ).warning("skipped checkpoint parameters with incompatible shapes")
-
-    @classmethod
-    def get_or_create(
-        cls,
-        hyperparameters: Hyperparameters | None = None,
-        checkpoint: str | None = None,
-        *,
-        batch_size: int = 1,
-        optimizer: OptimizerConfig | None = None,
-        scheduler: SchedulerConfig | None = None,
-    ) -> Self:
-
-        if checkpoint is None:
-            logger.bind(component="model_factory").info("creating new JSON2Vec model")
-            if hyperparameters is None:
-                raise ValueError("hyperparameters are required when checkpoint is not provided")
-
-            model: "JSON2Vec" = cls(
-                hyperparameters=hyperparameters,
-                batch_size=batch_size,
-                optimizer=optimizer,
-                scheduler=scheduler,
-            )
-
-            return model
-
-        else:
-            logger.bind(component="model_factory", checkpoint=checkpoint).info("loading JSON2Vec model from checkpoint")
-            state = cls._load_checkpoint(checkpoint)
-
-            model: "JSON2Vec" = cls(
-                hyperparameters=hyperparameters or cls._hyperparameters_from_checkpoint(state),
-                batch_size=batch_size,
-                optimizer=optimizer,
-                scheduler=scheduler,
-            )
-
-            model._load_compatible_state_dict(state_dict=state["state_dict"])
-            logger.bind(component="model_factory", checkpoint=checkpoint).info("restored model state from checkpoint")
-
-            return model
+        return model
 
     def write(self, predictions: list[Prediction]) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
 
@@ -502,31 +308,26 @@ class JSON2Vec(lit.LightningModule):
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-        preprocess_kwargs: dict[str, Any] | None = None,
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
         raw_batch = batch
 
         if preprocess is not None:
-            dataset = Dataset(
-                root=None,
-                processor=preprocess,
-                kwargs={} if preprocess_kwargs is None else preprocess_kwargs,
-            )
-            batch = list(
-                process(
-                    pipe=batch,
-                    dataset=dataset,
-                    strata=Strata.predict,
-                    state=self.state,
-                )
-            )
+            observations: EncodedBatch = []
+            for request in batch:
+                observation = preprocess(request)
+                if not isinstance(observation, dict):
+                    raise TypeError(f"preprocessor must return a dict object, got {type(observation).__name__}")
+
+                observations.append([observation])
+
+            batch = observations
 
         inputs = encode(
             batch=batch,
             hyperparameters=self.hyperparameters,
             strata=Strata.predict,
-            state=self.state,
+            interprocess_encoding_context=self.interprocess_encoding_context,
         )
 
         self.eval()
@@ -558,13 +359,11 @@ class JSON2Vec(lit.LightningModule):
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-        preprocess_kwargs: dict[str, Any] | None = None,
     ) -> dict[Address, dict[str, Any]]:
         supervised, _ = self.evaluate(
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
-            preprocess_kwargs=preprocess_kwargs,
         )
         return supervised
 
@@ -573,13 +372,11 @@ class JSON2Vec(lit.LightningModule):
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-        preprocess_kwargs: dict[str, Any] | None = None,
     ) -> dict[Address, dict[str, Any]]:
         _, embeddings = self.evaluate(
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
-            preprocess_kwargs=preprocess_kwargs,
         )
         return embeddings
 

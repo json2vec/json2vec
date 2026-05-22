@@ -145,13 +145,19 @@ params = j2v.Hyperparameters(
     d_model=16,
     fields=j2v.Array(
         name="record",
+        embed=True,
         fields=[
-            j2v.Category(name="color", query="[*].color", max_vocab_size=16),
-            j2v.Category(name="label", query="[*].label", max_vocab_size=8, topk=[2]),
+            j2v.Category(name="color", query="[*].color", embed=False, max_vocab_size=16),
+            j2v.Category(
+                name="label",
+                query="[*].label",
+                embed=False,
+                p_prune=1.0,
+                max_vocab_size=8,
+                topk=[2],
+            ),
         ],
     ),
-    target=j2v.Address("record", "label"),
-    embed=j2v.Address("record"),
 )
 
 model = j2v.Architecture(
@@ -233,7 +239,7 @@ For each batch:
 5. Leaf decoders consume the parcel sequence along their heritage path to
    reconstruct trainable targets.
 
-Random `p_mask` corrupts individual values. Random `p_target` removes whole
+Random `p_mask` corrupts individual values. Random `p_prune` removes whole
 field instances across an observation. Hyperparameter-level `target` fields are always
 withheld and become supervised targets; `embed` addresses are
 serialized as embeddings during prediction.
@@ -256,7 +262,7 @@ Each tensorfield plugin provides a request schema plus the model components
 needed to encode values, decode predictions, compute losses, and optionally
 serialize outputs. Built-in tensorfields share the base leaf options `name`,
 `query`, `pooling`, `weight`, `n_heads`, `n_linear`, `dropout`, `p_mask`, and
-`p_target`.
+`p_prune`.
 
 | Type | Use It For | Key Options |
 | --- | --- | --- |

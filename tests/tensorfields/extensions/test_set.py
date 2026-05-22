@@ -4,7 +4,7 @@ from tensordict import TensorDict
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.set import Decoder, TensorField, loss, write
+from json2vec.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
 
 
 def _structure_payload(*, p_unavailable: float | None = None) -> dict:
@@ -69,7 +69,7 @@ def test_set_tensorfield_encodes_multi_hot_content():
         address="root/tags",
         hyperparameters=structure,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     assert torch.equal(
@@ -98,7 +98,7 @@ def test_set_tensorfield_marks_oov_as_unavailable_without_changing_state():
         address="root/tags",
         hyperparameters=structure,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     field = TensorField.new(
@@ -106,7 +106,7 @@ def test_set_tensorfield_marks_oov_as_unavailable_without_changing_state():
         address="root/tags",
         hyperparameters=structure,
         strata=Strata.validate,
-        state=state,
+        interprocess_encoding_context=state,
     )
 
     unavailable = structure.requests["root/tags"].max_vocab_size
@@ -126,14 +126,14 @@ class _DummyEmbedder:
 
 
 class _DummyNode:
-    def __init__(self, decoder: Decoder | None = None):
-        self.embedder = _DummyEmbedder()
+    def __init__(self, embedder=None, decoder: Decoder | None = None):
+        self.embedder = embedder or _DummyEmbedder()
         self.decoder = decoder
 
 
 class _DummyModule:
-    def __init__(self, hyperparameters=None, decoder: Decoder | None = None):
-        self.nodes = {"root/tags": _DummyNode(decoder=decoder)}
+    def __init__(self, hyperparameters=None, embedder=None, decoder: Decoder | None = None):
+        self.nodes = {"root/tags": _DummyNode(embedder=embedder, decoder=decoder)}
         self.hyperparameters = hyperparameters
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
@@ -180,12 +180,13 @@ def test_set_loss_does_not_mutate_counter():
         address="root/tags",
         hyperparameters=structure,
         strata=Strata.train,
-        state=state,
+        interprocess_encoding_context=state,
     )
     field.mask(1.0)
 
+    embedder = Embedder(hyperparameters=structure, address="root/tags")
     decoder = Decoder(hyperparameters=structure, address="root/tags")
-    module = _DummyModule(hyperparameters=structure, decoder=decoder)
+    module = _DummyModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
     prediction = Prediction(
         address="root/tags",
         payload=TensorDict(
@@ -200,5 +201,5 @@ def test_set_loss_does_not_mutate_counter():
     result = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
 
     expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    assert torch.equal(decoder.counters[TensorKey.state.name].counts, expected_state_counts)
+    assert torch.equal(embedder.counters[TensorKey.state.name].counts, expected_state_counts)
     assert torch.isfinite(result)

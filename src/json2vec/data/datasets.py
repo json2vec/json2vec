@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import random
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from functools import cache, partial
 from typing import TYPE_CHECKING, Annotated, Any, TypeAlias, TypeVar, cast
 from urllib.parse import urlparse
@@ -26,7 +27,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from json2vec.data.processing import Pipeline
 from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
-from json2vec.processors.base import PROCESSORS, Processor
+from json2vec.processors.base import PROCESSORS, Processor, ProcessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Hyperparameters
 
@@ -48,13 +49,14 @@ RawObservation: TypeAlias = dict[str, Any]
 ProcessedObservation: TypeAlias = list[RawObservation]
 EncodedBatch: TypeAlias = list[ProcessedObservation]
 EncodedInput: TypeAlias = TensorDict[Address, TensorFieldBase]
+InterprocessEncodingContext: TypeAlias = dict[Address, Any]
 
 
 class Dataset(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(extra="forbid")
+    model_config = pydantic.ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     root: str | None = None
-    processor: Annotated[str | None, pydantic.Field(default="default")]
+    processor: Annotated[str | Callable[..., Any] | Processor | None, pydantic.Field(default="default")]
     kwargs: dict[str, Any] = pydantic.Field(default_factory=dict)
     suffix: Suffix | None = None
     patterns: dict[Strata, str] | None = None
@@ -65,14 +67,20 @@ class Dataset(pydantic.BaseModel):
         if value is None or isinstance(value, str):
             return value
 
+        if isinstance(value, Processor):
+            return value
+
         if callable(value):
-            return value.__name__
+            name = getattr(value, "__name__", None)
+            if isinstance(name, str) and name in PROCESSORS:
+                return name
+            return value
 
         return value
 
     @pydantic.model_validator(mode="after")
     def check_dataset_configuration(self):
-        if self.processor is not None and self.processor not in PROCESSORS:
+        if isinstance(self.processor, str) and self.processor not in PROCESSORS:
             raise ValueError(f"you haven't registered processor {self.processor}")
 
         if self.root is not None and self.suffix is None:
@@ -396,7 +404,7 @@ def process(
     pipe: Iterable[RawObservation],
     dataset: Dataset,
     strata: Strata,
-    state: dict[Address, Any],
+    interprocess_encoding_context: InterprocessEncodingContext,
 ) -> Iterator[ProcessedObservation]:
 
     if dataset.processor is None:
@@ -404,10 +412,24 @@ def process(
             yield [item]
 
     else:
-        processor: Processor = PROCESSORS[dataset.processor]
+        if isinstance(dataset.processor, str):
+            processor: Processor = PROCESSORS[dataset.processor]
+        elif isinstance(dataset.processor, Processor):
+            processor = dataset.processor
+        else:
+            processor = Processor(
+                name=getattr(dataset.processor, "__name__", type(dataset.processor).__name__),
+                func=dataset.processor,
+                mode=ProcessorMode.transformation,
+            )
 
         for item in pipe:
-            yield from processor.outputs(item, **dataset.kwargs, strata=strata, state=state)
+            yield from processor.outputs(
+                item,
+                **dataset.kwargs,
+                strata=strata,
+                interprocess_encoding_context=interprocess_encoding_context,
+            )
 
 
 @beartype
@@ -477,17 +499,7 @@ def query(expression: str) -> jmespath.parser.ParsedResult:
     return jmespath.compile(expression=f"[*]{expression}")
 
 
-_jmespath_counter = Counter()
-
-
-def spotcheck(result, address: Address, every: int = 1000):
-    _jmespath_counter[address] += 1
-    count = _jmespath_counter[address]
-
-    if count % every != 0:
-        return  # skip check
-
-    # Fast non-recursive emptiness check
+def _contains_observed_value(result: Any) -> bool:
     stack = [result]
     while stack:
         item = stack.pop()
@@ -495,25 +507,54 @@ def spotcheck(result, address: Address, every: int = 1000):
             stack.extend(item)
         elif isinstance(item, dict):
             stack.extend(item.values())
-        elif item not in (None, "", [], {}):
+        elif item is None:
+            continue
+        elif isinstance(item, str) and item == "":
+            continue
+        else:
+            return True
+
+    return False
+
+
+class JMESPathResolutionMonitor(pydantic.BaseModel):
+    every: Annotated[int, pydantic.Field(gt=0)] = 1000
+
+    _counts: Counter[Address] = pydantic.PrivateAttr(default_factory=Counter)
+
+    def observe(self, *, address: Address, expression: str, result: Any) -> None:
+        self._counts[address] += 1
+        count = self._counts[address]
+
+        if count % self.every != 0:
             return
 
-    raise ValueError(f"JMESPath query returned empty result for address: {address}")
+        if _contains_observed_value(result):
+            return
+
+        raise ValueError(f"JMESPath query returned empty result for address '{address}': {expression}")
+
+
+@cache
+def _accepts_interprocess_encoding_context(TensorField: type[TensorFieldBase]) -> bool:
+    return "interprocess_encoding_context" in inspect.signature(TensorField.new).parameters
 
 
 def encode(
     batch: EncodedBatch,
     hyperparameters: Hyperparameters,
     strata: Strata,
-    state: dict[Address, Any],
+    interprocess_encoding_context: InterprocessEncodingContext,
+    jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
 ) -> EncodedInput:
 
     out: dict[Address, TensorFieldBase] = {}
+    target_addresses = set(hyperparameters.target)
 
     for address, request in hyperparameters.requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
-        if (strata == Strata.predict) & (address in hyperparameters.target):
+        if (strata == Strata.predict) & (address in target_addresses):
             # basically, if we are in inference mode, we should create empty values
 
             out[address] = TensorField.empty(
@@ -524,22 +565,30 @@ def encode(
 
             continue
 
-        result: list = query(request.query).search(batch)
+        expression = request.query
+        if expression is None:
+            raise ValueError(f"request '{address}' must define query")
 
-        spotcheck(result=result, address=address)
+        result: list = query(expression).search(batch)
 
-        out[address] = TensorField.new(
+        if jmespath_resolution_monitor is not None:
+            jmespath_resolution_monitor.observe(address=address, expression=expression, result=result)
+
+        kwargs: dict[str, Any] = dict(
             values=result,
             address=address,
             hyperparameters=hyperparameters,
             strata=strata,
-            state=state.get(address),
         )
+        if _accepts_interprocess_encoding_context(TensorField):
+            kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
+
+        out[address] = TensorField.new(**kwargs)
 
         # otherwise, we should "target" them entirely during model training
         # but we still need to instantiate them for backpropagation
-        if address in hyperparameters.target:
-            out[address].target(p_target=1.0)
+        if address in target_addresses:
+            out[address].target(p_prune=1.0)
 
     inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
 
@@ -554,11 +603,18 @@ def transform(
     pipe: Iterable[EncodedBatch],
     hyperparameters: Hyperparameters,
     strata: Strata,
-    state: dict[Address, Any],
+    interprocess_encoding_context: InterprocessEncodingContext,
+    jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
 ) -> Iterator[EncodedInput]:
     for batch in pipe:
 
-        yield encode(batch=batch, hyperparameters=hyperparameters, strata=strata, state=state)
+        yield encode(
+            batch=batch,
+            hyperparameters=hyperparameters,
+            strata=strata,
+            interprocess_encoding_context=interprocess_encoding_context,
+            jmespath_resolution_monitor=jmespath_resolution_monitor,
+        )
 
 
 @beartype
@@ -585,12 +641,12 @@ def target(
 ) -> Iterator[EncodedInput]:
     for batch in pipe:
         for address in hyperparameters.requests.keys():
-            p_target = hyperparameters.resolved_p_target(address)
-            if p_target <= 0.0:
+            p_prune = hyperparameters.resolved_p_prune(address)
+            if p_prune <= 0.0:
                 continue
 
             field: TensorFieldBase = batch[address]
-            field.target(p_target=p_target)
+            field.target(p_prune=p_prune)
 
         yield batch
 
@@ -604,7 +660,7 @@ class BatchDataset(IterableDataset):
         self,
         hyperparameters: Hyperparameters,
         dataset: Dataset,
-        state: dict[Address, Any],
+        interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
         sharding: ShardingStrategy,
@@ -619,7 +675,7 @@ class BatchDataset(IterableDataset):
 
         self.hyperparameters: Hyperparameters = hyperparameters
         self.dataset: Dataset = dataset
-        self.state: dict[Address, Any] = state
+        self.interprocess_encoding_context: InterprocessEncodingContext = interprocess_encoding_context
         self.global_rank: int = distributed_rank() if global_rank is None else global_rank
         self.world_size: int = distributed_world_size() if world_size is None else world_size
         self.batch_size: int = batch_size
@@ -631,16 +687,17 @@ class BatchDataset(IterableDataset):
         self.sample_rate: float = sample_rate
 
     def __iter__(self):
-        for field_state in self.state.values():
-            if hasattr(field_state, "configure_distributed"):
-                field_state.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
+        for field_context in self.interprocess_encoding_context.values():
+            if hasattr(field_context, "configure_distributed"):
+                field_context.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
 
         yield from (
             Pipeline(
                 hyperparameters=self.hyperparameters,
                 dataset=self.dataset,
                 strata=self.strata,
-                state=self.state,
+                interprocess_encoding_context=self.interprocess_encoding_context,
+                jmespath_resolution_monitor=JMESPathResolutionMonitor(),
                 sharding=self.sharding,
                 chunk_batch_size=self.chunk_batch_size,
                 file_buffer_size=self.file_buffer_size,
@@ -666,7 +723,7 @@ class PolarsBatchDataset(IterableDataset):
         hyperparameters: Hyperparameters,
         dataframe: pl.DataFrame,
         dataset: Dataset,
-        state: dict[Address, Any],
+        interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
         sharding: ShardingStrategy,
@@ -681,7 +738,7 @@ class PolarsBatchDataset(IterableDataset):
         self.hyperparameters: Hyperparameters = hyperparameters
         self.dataframe: pl.DataFrame = dataframe
         self.dataset: Dataset = dataset
-        self.state: dict[Address, Any] = state
+        self.interprocess_encoding_context: InterprocessEncodingContext = interprocess_encoding_context
         self.global_rank: int = distributed_rank() if global_rank is None else global_rank
         self.world_size: int = distributed_world_size() if world_size is None else world_size
         self.batch_size: int = batch_size
@@ -692,9 +749,9 @@ class PolarsBatchDataset(IterableDataset):
         self.sample_rate: float = sample_rate
 
     def __iter__(self):
-        for field_state in self.state.values():
-            if hasattr(field_state, "configure_distributed"):
-                field_state.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
+        for field_context in self.interprocess_encoding_context.values():
+            if hasattr(field_context, "configure_distributed"):
+                field_context.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
 
         yield from (
             Pipeline(
@@ -702,7 +759,8 @@ class PolarsBatchDataset(IterableDataset):
                 dataframe=self.dataframe,
                 dataset=self.dataset,
                 strata=self.strata,
-                state=self.state,
+                interprocess_encoding_context=self.interprocess_encoding_context,
+                jmespath_resolution_monitor=JMESPathResolutionMonitor(),
                 sharding=self.sharding,
                 chunk_batch_size=self.chunk_batch_size,
                 sample_rate=self.sample_rate,
@@ -724,7 +782,7 @@ class PolarsBatchDataset(IterableDataset):
 def dataloader(
     hyperparameters: Hyperparameters,
     dataset: Dataset,
-    state: dict[Address, Any],
+    interprocess_encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
     num_workers: int | None,
@@ -748,7 +806,7 @@ def dataloader(
         dataset=BatchDataset(
             hyperparameters=hyperparameters,
             dataset=dataset,
-            state=state,
+            interprocess_encoding_context=interprocess_encoding_context,
             batch_size=batch_size,
             strata=strata,
             sharding=sharding,
@@ -772,7 +830,7 @@ def polars_dataloader(
     hyperparameters: Hyperparameters,
     dataframe: pl.DataFrame,
     dataset: Dataset,
-    state: dict[Address, Any],
+    interprocess_encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
     num_workers: int | None,
@@ -796,7 +854,7 @@ def polars_dataloader(
             hyperparameters=hyperparameters,
             dataframe=dataframe,
             dataset=dataset,
-            state=state,
+            interprocess_encoding_context=interprocess_encoding_context,
             batch_size=batch_size,
             strata=strata,
             sharding=sharding,
@@ -821,7 +879,7 @@ class StreamingDataModule(lit.LightningDataModule):
         self,
         hyperparameters: Hyperparameters,
         dataset: Dataset,
-        state: dict[Address, Any],
+        interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: PositiveInt,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
@@ -836,7 +894,7 @@ class StreamingDataModule(lit.LightningDataModule):
 
         self.hyperparameters = hyperparameters
         self.dataset = dataset
-        self.state = state
+        self.interprocess_encoding_context = interprocess_encoding_context
         self.batch_size = batch_size
         self.num_workers = _by_strata(num_workers, default=None)
         self.persistent_workers = _by_strata(persistent_workers, default=True)
@@ -864,7 +922,7 @@ class StreamingDataModule(lit.LightningDataModule):
         return cls(
             hyperparameters=model.hyperparameters,
             dataset=dataset,
-            state=model.state,
+            interprocess_encoding_context=model.interprocess_encoding_context,
             batch_size=model.batch_size,
             **kwargs,
         )
@@ -877,7 +935,7 @@ class StreamingDataModule(lit.LightningDataModule):
         return dataloader(
             hyperparameters=self.hyperparameters,
             dataset=self.dataset,
-            state=self.state,
+            interprocess_encoding_context=self.interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,
             num_workers=self.num_workers[strata],
@@ -911,7 +969,7 @@ class PolarsDataModule(lit.LightningDataModule):
         self,
         hyperparameters: Hyperparameters,
         dataframe: pl.DataFrame | DataFrameMap,
-        state: dict[Address, Any],
+        interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: PositiveInt,
         dataset: Dataset | None = None,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
@@ -930,7 +988,7 @@ class PolarsDataModule(lit.LightningDataModule):
         if self.dataset.root is not None:
             raise ValueError("PolarsDataModule dataset must not define root; pass processor configuration only")
 
-        self.state = state
+        self.interprocess_encoding_context = interprocess_encoding_context
         self.batch_size = batch_size
         self.num_workers = _by_strata(num_workers, default=None)
         self.persistent_workers = _by_strata(persistent_workers, default=True)
@@ -951,15 +1009,42 @@ class PolarsDataModule(lit.LightningDataModule):
     def from_model(
         cls,
         model: JSON2Vec,
-        dataframe: pl.DataFrame | DataFrameMap,
+        train: pl.DataFrame | None = None,
+        validate: pl.DataFrame | None = None,
+        test: pl.DataFrame | None = None,
+        predict: pl.DataFrame | None = None,
         dataset: Dataset | None = None,
+        processor: str | Callable[..., Any] | Processor | None = "default",
+        dataframe: pl.DataFrame | DataFrameMap | None = None,
         **kwargs: Any,
     ) -> "PolarsDataModule":
+        if dataframe is not None and any(frame is not None for frame in (train, validate, test, predict)):
+            raise ValueError("pass either dataframe or named splits, not both")
+
+        if dataframe is None:
+            dataframes = {
+                strata: frame
+                for strata, frame in {
+                    Strata.train: train,
+                    Strata.validate: validate,
+                    Strata.test: test,
+                    Strata.predict: predict,
+                }.items()
+                if frame is not None
+            }
+            if not dataframes:
+                raise ValueError("at least one dataframe split is required")
+        else:
+            dataframes = _dataframes_by_strata(dataframe)
+
+        if dataset is None:
+            dataset = Dataset(root=None, processor=processor)
+
         return cls(
             hyperparameters=model.hyperparameters,
-            dataframe=dataframe,
+            dataframe=dataframes,
             dataset=dataset,
-            state=model.state,
+            interprocess_encoding_context=model.interprocess_encoding_context,
             batch_size=model.batch_size,
             **kwargs,
         )
@@ -975,7 +1060,7 @@ class PolarsDataModule(lit.LightningDataModule):
             hyperparameters=self.hyperparameters,
             dataframe=self.dataframes[strata],
             dataset=self.dataset,
-            state=self.state,
+            interprocess_encoding_context=self.interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,
             num_workers=self.num_workers[strata],
@@ -989,17 +1074,22 @@ class PolarsDataModule(lit.LightningDataModule):
             world_size=world_size,
         )
 
-    def train_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.train)
+    def _maybe_dataloader(self, strata: Strata) -> DataLoader | None:
+        if strata not in self.dataframes:
+            return None
+        return self.dataloader(strata=strata)
 
-    def val_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.validate)
+    def train_dataloader(self) -> DataLoader | None:
+        return self._maybe_dataloader(strata=Strata.train)
 
-    def test_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.test)
+    def val_dataloader(self) -> DataLoader | None:
+        return self._maybe_dataloader(strata=Strata.validate)
 
-    def predict_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.predict)
+    def test_dataloader(self) -> DataLoader | None:
+        return self._maybe_dataloader(strata=Strata.test)
+
+    def predict_dataloader(self) -> DataLoader | None:
+        return self._maybe_dataloader(strata=Strata.predict)
 
 
 def mock(hyperparameters: Hyperparameters, batch_size: int) -> EncodedInput:

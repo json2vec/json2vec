@@ -28,3 +28,13 @@ class Array(Node):
     def model_post_init(self, __context):
         for field in self.fields:
             field.parent: Self = self
+
+    @pydantic.model_validator(mode="after")
+    def check_unique_child_names(self):
+        seen: set[str] = set()
+        for field in self.fields:
+            if field.name in seen:
+                raise ValueError(f"duplicate field name: {field.name}")
+            seen.add(field.name)
+
+        return self

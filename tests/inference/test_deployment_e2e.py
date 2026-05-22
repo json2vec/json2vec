@@ -12,8 +12,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-import torch
-
 from json2vec.architecture.root import JSON2Vec
 from json2vec.data.datasets import encode
 from json2vec.structs.enums import Strata
@@ -149,11 +147,11 @@ def _hyperparameters() -> Hyperparameters:
                         "name": "label",
                         "type": "category",
                         "query": "[*].label",
+                        "embed": True,
                         "max_vocab_size": 32,
                     }
                 ],
             },
-            "embed": ["root/label"],
         }
     )
 
@@ -168,24 +166,18 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
     dataset_path = tmp_path / "fake_records.ndjson"
     records = _write_fake_records(dataset_path)
     hyperparameters = _hyperparameters()
-    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
 
     inputs = encode(
         batch=[[record] for record in records],
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=model.state,
+        interprocess_encoding_context=model.interprocess_encoding_context,
     )
     model.forward(inputs)
 
     checkpoint_path = tmp_path / "fake_model.ckpt"
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "hyperparameters": hyperparameters.model_dump(mode="python"),
-        },
-        checkpoint_path,
-    )
+    model.save(checkpoint_path)
     return checkpoint_path, hyperparameters
 
 

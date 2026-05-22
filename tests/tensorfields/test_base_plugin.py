@@ -25,13 +25,13 @@ def _build_plugin() -> Plugin:
 
     class TensorField(TensorFieldBase):
         @classmethod
-        def new(cls, values, address, hyperparameters, strata, state):
+        def new(cls, values, address, hyperparameters, strata):
             return object()
 
         def mask(self, p_mask: float):
             return None
 
-        def target(self, p_target: float):
+        def target(self, p_prune: float):
             return None
 
     class Embedder(EmbedderBase):

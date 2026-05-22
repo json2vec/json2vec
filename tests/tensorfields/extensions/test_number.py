@@ -47,7 +47,6 @@ def test_number_loss_does_not_mutate_counter():
         address="root/amount",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
     field.mask(1.0)
 
@@ -69,7 +68,7 @@ def test_number_loss_does_not_mutate_counter():
     loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
 
     expected_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    assert torch.equal(decoder.counter.counts, expected_counts)
+    assert torch.equal(embedder.counter.counts, expected_counts)
 
 
 def test_number_write_emits_state_probability_map():

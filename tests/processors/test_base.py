@@ -69,7 +69,7 @@ def test_processor_call_filters_unknown_kwargs():
 
     processor = base.Processor(name="filtered", func=returning, mode=base.ProcessorMode.transformation)
 
-    output = processor({"id": 1}, strata="train", state={"unused": True})
+    output = processor({"id": 1}, strata="train", interprocess_encoding_context={"unused": True})
     assert output == ({"id": 1}, "train")
 
 

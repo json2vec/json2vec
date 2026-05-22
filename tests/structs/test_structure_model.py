@@ -88,9 +88,9 @@ def test_hyperparameters_resolves_field_dropout_from_nearest_node():
 def test_hyperparameters_resolves_mask_and_target_rates_from_nearest_node():
     payload = _payload()
     payload["fields"]["p_mask"] = 0.2
-    payload["fields"]["p_target"] = 0.1
+    payload["fields"]["p_prune"] = 0.1
     payload["fields"]["fields"][0]["p_mask"] = 0.3
-    payload["fields"]["fields"][0]["p_target"] = 0.4
+    payload["fields"]["fields"][0]["p_prune"] = 0.4
     payload["fields"]["fields"][0]["fields"][0]["p_mask"] = 0.5
 
     structure = Hyperparameters.model_validate(payload)
@@ -98,11 +98,11 @@ def test_hyperparameters_resolves_mask_and_target_rates_from_nearest_node():
     assert structure.resolved_p_mask("root") == 0.2
     assert structure.resolved_p_mask("root/branch") == 0.3
     assert structure.resolved_p_mask("root/branch/category_leaf") == 0.5
-    assert structure.resolved_p_target("root/branch/category_leaf") == 0.4
+    assert structure.resolved_p_prune("root/branch/category_leaf") == 0.4
 
 
 def test_hyperparameters_resolves_missing_mask_and_target_rates_to_zero():
     structure = Hyperparameters.model_validate(_payload())
 
     assert structure.resolved_p_mask("root/branch/category_leaf") == 0.0
-    assert structure.resolved_p_target("root/branch/category_leaf") == 0.0
+    assert structure.resolved_p_prune("root/branch/category_leaf") == 0.0

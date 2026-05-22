@@ -1,7 +1,8 @@
 import torch
 
 from json2vec.structs.tree import Address
-from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.base import TENSORFIELDS
+from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 
 def test_counter():
@@ -44,3 +45,8 @@ def test_counter_str_exposes_plot_details():
             "counts: [4, 2, 1]",
         )
     )
+
+
+def test_counter_callback_is_registered_for_counter_extensions():
+    for extension in ("category", "number", "set", "text"):
+        assert CounterUpdateCallback in TENSORFIELDS[extension].callback_factories

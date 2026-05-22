@@ -22,7 +22,7 @@ from json2vec.tensorfields.base import (
     RequestBase,
     TensorFieldBase,
 )
-from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 
 text: Plugin = Plugin(name="text")
+text.callback(CounterUpdateCallback)
 
 INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
@@ -189,7 +190,6 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        state: Any,
     ) -> TensorFieldBase:
         request: Request = hyperparameters.requests[address]
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
@@ -273,11 +273,11 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def target(self, p_target: float = 1.0):
+    def target(self, p_prune: float = 1.0):
         mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
         is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_target)
+            .lt(p_prune)
             .expand_as(self.state)
         )
         self._cache_targets()
@@ -330,6 +330,7 @@ class Embedder(EmbedderBase):
             num_embeddings=len(Tokens),
             embedding_dim=hyperparameters.d_model,
         )
+        self.counter = Counter(address=address, size=len(Tokens))
         self.linear = torch.nn.Sequential(
             torch.nn.Linear(in_features=self.hidden_size, out_features=hyperparameters.d_model),
             torch.nn.GELU(),
@@ -461,7 +462,6 @@ class Decoder(DecoderBase):
             in_features=hyperparameters.d_model,
             out_features=hidden_size,
         )
-        self.counter = Counter(address=address, size=len(Tokens))
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -483,7 +483,6 @@ def loss(
     address: Address = prediction.address
     request: Request = module.hyperparameters.requests[address]
     embedder: Embedder = module.nodes[address].embedder
-    decoder: Decoder = module.nodes[address].decoder
 
     trainable = batch.trainable.reshape(-1)
     state_targets = batch.targets[TensorKey.state].reshape(-1)
@@ -495,7 +494,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
                 target=state_targets,
-                weight=decoder.counter.weight,
+                weight=embedder.counter.weight,
                 reduction="none",
             )
             .masked_select(trainable)

@@ -104,7 +104,7 @@ def test_deployment_preprocesses_decode_request(monkeypatch):
 
     captured = {}
 
-    def fake_encode(batch, hyperparameters, strata, state):
+    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         captured["batch"] = batch
         return _input(1)
 
@@ -112,7 +112,7 @@ def test_deployment_preprocesses_decode_request(monkeypatch):
 
     deployment = API(checkpoint="unused", preprocessor=__deployment_preprocess)
     deployment.model = SimpleNamespace(hyperparameters=object())
-    deployment.state = {}
+    deployment.interprocess_encoding_context = {}
     context = {}
 
     encoded = deployment.decode_request({"hue": "red"}, context=context)
@@ -127,7 +127,7 @@ def test_deployment_preprocess_generator_returns_error():
         yield {"color": observation["hue"]}
 
     deployment = API(checkpoint="unused", preprocessor=__deployment_generator)
-    deployment.state = {}
+    deployment.interprocess_encoding_context = {}
 
     error = deployment.decode_request({"hue": "red"})
 
@@ -216,7 +216,7 @@ def test_deployment_launcher_binds_preprocessor_kwargs(monkeypatch):
         def run(self, *, generate_client_file):
             pass
 
-    def fake_encode(batch, hyperparameters, strata, state):
+    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         captured["batch"] = batch
         return _input(1)
 
@@ -226,7 +226,7 @@ def test_deployment_launcher_binds_preprocessor_kwargs(monkeypatch):
     Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!").serve()
     api = captured["lit_api"]
     api.model = SimpleNamespace(hyperparameters=object())
-    api.state = {}
+    api.interprocess_encoding_context = {}
     context = {}
 
     encoded = api.decode_request({"hue": "red"}, context=context)

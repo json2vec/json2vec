@@ -82,7 +82,6 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        state: Any,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
         request: Request = hyperparameters.requests[address]
@@ -134,11 +133,11 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def target(self, p_target: float = 1.0):
+    def target(self, p_prune: float = 1.0):
         mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked)
         is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_target)
+            .lt(p_prune)
             .expand_as(self.state)
         )
         expanded = is_targeted.unsqueeze(-1).expand_as(self.content)

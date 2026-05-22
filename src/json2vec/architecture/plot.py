@@ -222,14 +222,14 @@ def add_counter_details(
     module: "JSON2Vec",
     address: Address,
 ) -> None:
-    decoder = module.nodes[address].decoder
+    embedder = module.nodes[address].embedder
     counters: dict[str, "Counter"] = {}
 
-    if hasattr(decoder, "counter"):
-        counters["counter"] = decoder.counter
+    if hasattr(embedder, "counter"):
+        counters["counter"] = embedder.counter
 
-    if hasattr(decoder, "counters"):
-        counters |= dict(decoder.counters.items())
+    if hasattr(embedder, "counters"):
+        counters |= dict(embedder.counters.items())
 
     if not counters:
         return

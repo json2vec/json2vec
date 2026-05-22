@@ -58,7 +58,6 @@ def test_entity_tensorfield_uses_batch_local_unique_ids():
         address="root/identifier",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
 
     unique_values = {token.item() for token in field.content.reshape(-1)}
@@ -77,7 +76,6 @@ def test_entity_tensorfield_separates_state_and_content():
         address="root/identifier",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
 
     assert torch.equal(
@@ -117,7 +115,6 @@ def test_entity_tensorfield_rejects_unhashable_values():
             address="root/identifier",
             hyperparameters=hyperparameters,
             strata=Strata.train,
-            state=None,
         )
 
 
@@ -134,7 +131,6 @@ def test_entity_mask_preserves_targets_before_replacement():
         address="root/identifier",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
     original_state = field.state.clone()
     original_content = field.content.clone()

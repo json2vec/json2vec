@@ -22,7 +22,7 @@ from json2vec.tensorfields.base import (
     RequestBase,
     TensorFieldBase,
 )
-from json2vec.tensorfields.shared.counter import Counter
+from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import JSON2Vec
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 
 number: Plugin = Plugin(name="number")
+number.callback(CounterUpdateCallback)
 
 
 def jitter(inputs: torch.Tensor, jitter_amount: torch.Tensor) -> torch.Tensor:
@@ -74,7 +75,6 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        state: Any,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
@@ -113,12 +113,12 @@ class TensorField(TensorFieldBase):
 
         self.trainable |= is_masked
 
-    def target(self, p_target: float = 1.0):
+    def target(self, p_prune: float = 1.0):
         mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked)
 
         is_targeted = (
             torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_target)
+            .lt(p_prune)
             .expand_as(self.state)
         )
 
@@ -235,6 +235,7 @@ class Embedder(EmbedderBase):
         self.destination: Address = request.parent.address
 
         self.embeddings = torch.nn.Embedding(num_embeddings=len(Tokens), embedding_dim=hyperparameters.d_model)
+        self.counter = Counter(address=address, size=len(Tokens))
 
         n_bands = request.n_bands
         offset = request.offset
@@ -305,7 +306,6 @@ class Decoder(DecoderBase):
 
         self.classification = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=len(Tokens))
         self.regression = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=1)
-        self.counter = Counter(address=address, size=len(Tokens))
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -328,8 +328,8 @@ def loss(
     address: Address = prediction.address
     request: RequestBase = module.hyperparameters.requests[prediction.address]
 
-    normalizer: GlobalOnlineNormalizer = module.nodes[address].embedder.normalizer
-    decoder: Decoder = module.nodes[address].decoder
+    embedder: Embedder = module.nodes[address].embedder
+    normalizer: GlobalOnlineNormalizer = embedder.normalizer
 
     N: int = batch.targets[TensorKey.state].numel()
 
@@ -342,7 +342,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=prediction.payload[TensorKey.state].reshape(N, -1),
                 target=state_targets,
-                weight=decoder.counter.weight,
+                weight=embedder.counter.weight,
                 reduction="none",
             )
             .masked_select(trainable)

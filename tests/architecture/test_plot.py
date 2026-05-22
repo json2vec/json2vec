@@ -35,38 +35,39 @@ def _hyperparameters() -> Hyperparameters:
                                 "name": "label",
                                 "type": "category",
                                 "query": "[*].label",
+                                "embed": True,
                                 "max_vocab_size": 4,
                             },
                             {
                                 "name": "identifier",
                                 "type": "entity",
                                 "query": "[*].id",
+                                "embed": False,
+                                "p_prune": 1.0,
                                 "topk": [2],
                             },
                         ],
                     },
                 ],
             },
-            "target": ["root/items/identifier"],
-            "embed": ["root/items/label"],
         }
     )
 
 
 def _model(tmp_path: Path) -> JSON2Vec:
-    model = JSON2Vec.get_or_create(hyperparameters=_hyperparameters(), batch_size=2)
+    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
 
     label = model.nodes["root/items/label"]
     label.embedder.vocab.master.append("alpha")
     label.embedder.vocab.master.append("beta")
-    label.decoder.counters["state"].counts.copy_(torch.tensor([3, 2, 1, 1, 1], dtype=torch.int64))
-    label.decoder.counters["content"].counts.copy_(torch.tensor([4, 2, 1, 1, 1], dtype=torch.int64))
+    label.embedder.counters["state"].counts.copy_(torch.tensor([3, 2, 1, 1, 1], dtype=torch.int64))
+    label.embedder.counters["content"].counts.copy_(torch.tensor([4, 2, 1, 1, 1], dtype=torch.int64))
 
     amount = model.nodes["root/amount"]
     amount.embedder.normalizer.mean.fill_(12.0)
     amount.embedder.normalizer.var.fill_(9.0)
     amount.embedder.normalizer.count.fill_(5.0)
-    amount.decoder.counter.counts.copy_(torch.tensor([6, 2, 1, 1, 1], dtype=torch.int64))
+    amount.embedder.counter.counts.copy_(torch.tensor([6, 2, 1, 1, 1], dtype=torch.int64))
 
     return model
 

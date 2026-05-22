@@ -4,12 +4,12 @@ from pathlib import Path
 
 import torch
 
-from json2vec.architecture.root import JSON2Vec, update_counters
+from json2vec.architecture.root import JSON2Vec
 from json2vec.data.datasets import encode
-from json2vec.processors.base import PROCESSORS, shim
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
+from json2vec.tensorfields.shared.counter import CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
 
 
@@ -36,58 +36,29 @@ def _hyperparameters() -> Hyperparameters:
     )
 
 
-def test_checkpoint_migration_moves_root_rates_to_root_field_array() -> None:
-    hyperparameters = JSON2Vec._hyperparameters_from_checkpoint(
-        {
-            "hyperparameters": {
-                "d_model": 8,
-                "dropout": 0.1,
-                "p_mask": 0.2,
-                "p_target": 0.3,
-                "fields": {
-                    "name": "root",
-                    "type": "array",
-                    "max_length": 1,
-                    "n_outputs": 1,
-                    "fields": [
-                        {
-                            "name": "label",
-                            "type": "category",
-                            "query": "[*].label",
-                            "max_vocab_size": 32,
-                        }
-                    ],
-                },
-            }
-        }
-    )
-
-    assert hyperparameters.fields.dropout == 0.1
-    assert hyperparameters.fields.p_mask == 0.2
-    assert hyperparameters.fields.p_target == 0.3
-
-
 def test_on_save_checkpoint_serializes_hyperparameters() -> None:
     hyperparameters = _hyperparameters()
-    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
     checkpoint = {}
 
     model.on_save_checkpoint(checkpoint)
 
-    restored = JSON2Vec._hyperparameters_from_checkpoint(checkpoint)
+    restored = Hyperparameters.model_validate(checkpoint["hyperparameters"])
     assert restored.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+    assert checkpoint["batch_size"] == 2
 
 
 def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
     hyperparameters = _hyperparameters()
-    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
     pathname = tmp_path / "nested" / "model.ckpt"
 
     model.save(pathname=pathname)
 
-    restored = JSON2Vec.get_or_create(checkpoint=str(pathname), batch_size=2)
+    restored = JSON2Vec.load(pathname)
 
     assert pathname.exists()
+    assert restored.batch_size == 2
     assert restored.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
 
     restored_state = restored.state_dict()
@@ -98,28 +69,13 @@ def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
             assert restored_state[key] == value
 
 
-def test_hyperparameters_from_checkpoint_accepts_lightning_hyper_parameters() -> None:
-    hyperparameters = _hyperparameters()
-
-    restored = JSON2Vec._hyperparameters_from_checkpoint(
-        {
-            "hyper_parameters": {
-                "hyperparameters": hyperparameters.model_dump(mode="python"),
-            },
-        }
-    )
-
-    assert restored.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
-
-
 def _prediction_hyperparameters() -> Hyperparameters:
     return Hyperparameters(
         d_model=8,
-        target=Address("root", "label"),
-        embed=Address("root"),
         fields={
             "name": "root",
             "type": "array",
+            "embed": True,
             "max_length": 1,
             "n_outputs": 1,
             "attention": "none",
@@ -128,12 +84,15 @@ def _prediction_hyperparameters() -> Hyperparameters:
                     "name": "color",
                     "type": "category",
                     "query": "[*].color",
+                    "embed": False,
                     "max_vocab_size": 16,
                 },
                 {
                     "name": "label",
                     "type": "category",
                     "query": "[*].label",
+                    "embed": False,
+                    "p_prune": 1.0,
                     "max_vocab_size": 16,
                     "topk": [2],
                 },
@@ -152,7 +111,7 @@ def _primed_prediction_model() -> JSON2Vec:
         ],
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=model.state,
+        interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
     model(inputs)
@@ -161,44 +120,25 @@ def _primed_prediction_model() -> JSON2Vec:
 
 def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
     hyperparameters = _hyperparameters()
-    model = JSON2Vec.get_or_create(hyperparameters=hyperparameters, batch_size=2)
+    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
     checkpoint_path = tmp_path / "model.ckpt"
-
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "hyperparameters": hyperparameters.model_dump(mode="python"),
-        },
-        checkpoint_path,
-    )
+    model.save(checkpoint_path)
 
     return checkpoint_path, hyperparameters
 
 
-class FakeS3FileSystem:
-    def __init__(self, checkpoint_path: Path) -> None:
-        self.checkpoint_path = checkpoint_path
-        self.opened_paths: list[str] = []
-
-    def open_input_file(self, path: str):
-        self.opened_paths.append(path)
-        return self.checkpoint_path.open("rb")
-
-
-def test_get_or_create_loads_checkpoint_from_s3_uri(monkeypatch, tmp_path: Path) -> None:
+def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
     checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
-    filesystem = FakeS3FileSystem(checkpoint_path=checkpoint_path)
-    monkeypatch.setattr("json2vec.architecture.root.pafs.S3FileSystem", lambda: filesystem)
 
-    model = JSON2Vec.get_or_create(checkpoint="s3://bucket/models/model.ckpt")
+    model = JSON2Vec.load(checkpoint_path)
 
-    assert filesystem.opened_paths == ["bucket/models/model.ckpt"]
+    assert model.batch_size == 2
     assert model.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
 
 
 def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> None:
     _, hyperparameters = _build_checkpoint(tmp_path)
-    model = JSON2Vec.get_or_create(
+    model = JSON2Vec(
         hyperparameters=hyperparameters,
         batch_size=2,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
@@ -210,7 +150,7 @@ def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> No
 
 def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> None:
     _, hyperparameters = _build_checkpoint(tmp_path)
-    model = JSON2Vec.get_or_create(
+    model = JSON2Vec(
         hyperparameters=hyperparameters,
         batch_size=2,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
@@ -229,6 +169,7 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
     callbacks = model.configure_callbacks()
 
     assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
+    assert any(isinstance(callback, CounterUpdateCallback) for callback in callbacks)
 
 
 def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
@@ -259,13 +200,19 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     )
     model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
 
-    callbacks = [
+    vocabulary_callbacks = [
         callback
         for callback in model.configure_callbacks()
         if isinstance(callback, VocabularySyncCallback)
     ]
+    counter_callbacks = [
+        callback
+        for callback in model.configure_callbacks()
+        if isinstance(callback, CounterUpdateCallback)
+    ]
 
-    assert len(callbacks) == 1
+    assert len(vocabulary_callbacks) == 1
+    assert len(counter_callbacks) == 1
 
 
 def test_builtin_resources_are_attached_to_extension_modules() -> None:
@@ -273,8 +220,8 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
     address = Address("root", "label")
 
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
-    assert TensorKey.state.name in model.nodes[address].decoder.counters
-    assert TensorKey.content.name in model.nodes[address].decoder.counters
+    assert TensorKey.state.name in model.nodes[address].embedder.counters
+    assert TensorKey.content.name in model.nodes[address].embedder.counters
 
 
 def test_training_counters_observe_all_encoded_fields() -> None:
@@ -287,18 +234,18 @@ def test_training_counters_observe_all_encoded_fields() -> None:
         ],
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=model.state,
+        interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
-    update_counters(module=model, batch=inputs, strata=Strata.train)
+    CounterUpdateCallback().on_train_batch_start(trainer=None, pl_module=model, batch=inputs, batch_idx=0)
 
     address = Address("root", "color")
     field = inputs[address]
-    decoder = model.nodes[address].decoder
+    embedder = model.nodes[address].embedder
 
     expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
     expected_state_counts += torch.bincount(field.state.reshape(-1), minlength=len(Tokens))
-    assert torch.equal(decoder.counters[TensorKey.state.name].counts.cpu(), expected_state_counts)
+    assert torch.equal(embedder.counters[TensorKey.state.name].counts.cpu(), expected_state_counts)
 
     valued = field.state.eq(Tokens.valued.value)
     expected_content_counts = torch.ones(
@@ -309,7 +256,32 @@ def test_training_counters_observe_all_encoded_fields() -> None:
         field.content.masked_select(valued).reshape(-1),
         minlength=hyperparameters.requests[address].max_vocab_size + 1,
     )
-    assert torch.equal(decoder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
+    assert torch.equal(embedder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
+
+    target_address = Address("root", "label")
+    target_field = inputs[target_address]
+    target_embedder = model.nodes[target_address].embedder
+
+    expected_target_counts = torch.ones(len(Tokens), dtype=torch.int64)
+    expected_target_counts += torch.bincount(
+        target_field.targets[TensorKey.state].reshape(-1),
+        minlength=len(Tokens),
+    )
+    assert torch.equal(target_embedder.counters[TensorKey.state.name].counts.cpu(), expected_target_counts)
+
+    target_valued = target_field.targets[TensorKey.state].eq(Tokens.valued.value)
+    expected_target_content_counts = torch.ones(
+        hyperparameters.requests[target_address].max_vocab_size + 1,
+        dtype=torch.int64,
+    )
+    expected_target_content_counts += torch.bincount(
+        target_field.targets[TensorKey.content].masked_select(target_valued).reshape(-1),
+        minlength=hyperparameters.requests[target_address].max_vocab_size + 1,
+    )
+    assert torch.equal(
+        target_embedder.counters[TensorKey.content.name].counts.cpu(),
+        expected_target_content_counts,
+    )
 
 
 def test_training_counters_call_content_counter_for_empty_updates() -> None:
@@ -331,16 +303,16 @@ def test_training_counters_call_content_counter_for_empty_updates() -> None:
         ],
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=model.state,
+        interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
     address = Address("root", "color")
     field = inputs[address]
     field.state.fill_(Tokens.null.value)
     spy = SpyCounter()
-    model.nodes[address].decoder.counters[TensorKey.content.name] = spy
+    model.nodes[address].embedder.counters[TensorKey.content.name] = spy
 
-    update_counters(module=model, batch=inputs, strata=Strata.train)
+    CounterUpdateCallback().on_train_batch_start(trainer=None, pl_module=model, batch=inputs, batch_idx=0)
 
     assert len(spy.calls) == 1
     assert spy.calls[0].numel() == 0
@@ -374,7 +346,7 @@ def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(mo
         ],
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=model.state,
+        interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
     output = model.training_step(inputs, 0)
@@ -458,22 +430,18 @@ def test_inference_helpers_accept_postprocess() -> None:
     assert evaluated_embeddings == embeddings
 
 
-def test_inference_helpers_accept_shim_preprocess() -> None:
+def test_inference_helpers_accept_preprocess() -> None:
     def __root_helper_preprocess(observation: dict):
         return {"color": observation["hue"]}
 
-    shimmed = shim(yields=False)(__root_helper_preprocess)
     model = _primed_prediction_model()
 
-    try:
-        supervised = model.predict(
-            batch=[
-                {"hue": "red"},
-                {"hue": "blue"},
-            ],
-            preprocess=shimmed,
-        )
-    finally:
-        PROCESSORS.pop("__root_helper_preprocess", None)
+    supervised = model.predict(
+        batch=[
+            {"hue": "red"},
+            {"hue": "blue"},
+        ],
+        preprocess=__root_helper_preprocess,
+    )
 
     assert Address("root", "label") in supervised

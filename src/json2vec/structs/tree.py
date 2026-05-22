@@ -1,4 +1,5 @@
 import functools
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
 import jmespath
@@ -7,6 +8,7 @@ from anytree import NodeMixin
 from jmespath.exceptions import JMESPathError
 
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
+PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
 
 
 class Address(str):
@@ -31,13 +33,33 @@ class Address(str):
 
 
 class Node(NodeMixin, pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="allow")
+
     name: str
     type: str
     description: str | None = None
+    embed: bool = False
     n_heads: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     dropout: Rate | None = None
     p_mask: Rate | None = None
-    p_target: Rate | None = None
+    p_prune: PruneRate | None = None
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def resolve_role_shorthands(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+
+        values = dict(data)
+        target = values.get("target", False)
+        if isinstance(target, bool):
+            values.pop("target", None)
+            if target:
+                if "p_prune" in values and values["p_prune"] is not None and values["p_prune"] != 1.0:
+                    raise ValueError("target=True is shorthand for p_prune=1.0")
+                values["p_prune"] = 1.0
+
+        return values
 
     @functools.cached_property
     def address(self) -> Address:
@@ -86,16 +108,55 @@ class Node(NodeMixin, pydantic.BaseModel):
 
 
 class Leaf(Node):
+    embed: bool = False
     name: str
     type: str
-    query: str
+    query: str | None = None
     pooling: Literal["query", "mean"] = "query"
     weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
 
+    def __init__(self, name: str | None = None, **data: Any):
+        if name is not None:
+            if "name" in data:
+                raise TypeError("name was provided both positionally and by keyword")
+            data["name"] = name
+        super().__init__(**data)
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def merge_constructor_kwargs(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+
+        values = dict(data)
+        kwargs = values.pop("kwargs", None)
+
+        if kwargs is None:
+            return values
+        if not isinstance(kwargs, Mapping):
+            raise TypeError("kwargs must be a mapping")
+
+        for key, value in kwargs.items():
+            values.setdefault(key, value)
+
+        return values
+
+    @pydantic.field_validator("type")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        from json2vec.tensorfields import extensions as _extensions  # noqa: F401
+        from json2vec.tensorfields.base import TENSORFIELDS
+
+        if value not in TENSORFIELDS:
+            raise ValueError(f"unknown tensor field type: {value}")
+
+        return value
 
     @pydantic.model_validator(mode="after")
     def check_jmespath_query(self):
+        if self.query is None:
+            return self
 
         if not isinstance(self.query, str) or not self.query.strip():
             raise ValueError("query must be a non-empty string")
@@ -107,6 +168,10 @@ class Leaf(Node):
 
         return self
 
+    def post_bind_validate(self):
+        if self.query is None:
+            raise ValueError(f"request '{self.address}' must define query")
+
     @functools.cached_property
     def shape(self) -> tuple[int, ...]:
         out: list[int] = []
@@ -116,3 +181,32 @@ class Leaf(Node):
                 out.append(node.max_length)
 
         return tuple(out)
+
+
+TensorFieldSpec: TypeAlias = str | type[Leaf]
+
+def Column(name: str, field: TensorFieldSpec, /, **data: Any) -> Leaf:
+
+    values = dict(data)
+    kwargs = values.pop("kwargs", None)
+    if kwargs is not None:
+        if not isinstance(kwargs, Mapping):
+            raise TypeError("kwargs must be a mapping")
+        for key, value in kwargs.items():
+            values.setdefault(key, value)
+
+    target = values.get("target", False)
+    if isinstance(target, bool):
+        values.pop("target", None)
+        if target:
+            if "p_prune" in values and values["p_prune"] is not None and values["p_prune"] != 1.0:
+                raise ValueError("target=True is shorthand for p_prune=1.0")
+            values["p_prune"] = 1.0
+
+    if isinstance(field, str):
+        return Leaf.model_construct(name=name, type=field, **values)
+
+    if isinstance(field, type) and issubclass(field, Leaf):
+        return field.model_construct(name=name, **values)
+
+    raise TypeError("Column field must be a tensor field name or Leaf subclass")

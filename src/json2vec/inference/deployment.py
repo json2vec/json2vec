@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
 from json2vec.architecture.root import JSON2Vec
-from json2vec.data.datasets import encode
+from json2vec.data.datasets import JMESPathResolutionMonitor, encode
 from json2vec.structs.enums import Strata
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
@@ -47,9 +47,10 @@ class API(ls.LitAPI):
         self.postprocessor = postprocessor
 
     def setup(self, device: str) -> None:
-        self.model: JSON2Vec = JSON2Vec.get_or_create(checkpoint=self.checkpoint).to(device)
+        self.model: JSON2Vec = JSON2Vec.load(self.checkpoint).to(device)
         self.model.eval()
-        self.state = self.model.state
+        self.interprocess_encoding_context = self.model.interprocess_encoding_context
+        self.jmespath_resolution_monitor = JMESPathResolutionMonitor()
 
     @beartype
     def decode_request(
@@ -89,7 +90,8 @@ class API(ls.LitAPI):
             batch=observations,
             hyperparameters=self.model.hyperparameters,
             strata=Strata.predict,
-            state=self.state,
+            interprocess_encoding_context=self.interprocess_encoding_context,
+            jmespath_resolution_monitor=getattr(self, "jmespath_resolution_monitor", None),
         )
 
         if encoded is None:

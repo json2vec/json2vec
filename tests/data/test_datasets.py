@@ -298,7 +298,7 @@ def test_process_transformation_processor_wraps_dict_output(monkeypatch: pytest.
             [{"id": 1}, {"id": 2}],
             dataset=dataset,
             strata=Strata.train,
-            state={},
+            interprocess_encoding_context={},
         )
     )
     assert output == [[{"id": 1}], [{"id": 2}]]
@@ -318,7 +318,7 @@ def test_process_generator_processor_wraps_list_outputs(monkeypatch: pytest.Monk
             [{"id": 1}],
             dataset=dataset,
             strata=Strata.train,
-            state={},
+            interprocess_encoding_context={},
         )
     )
     assert output == [[{"id": 1}], [{"id": 101}]]
@@ -327,8 +327,8 @@ def test_process_generator_processor_wraps_list_outputs(monkeypatch: pytest.Monk
 def test_process_generator_processor_receives_strata_and_state(monkeypatch: pytest.MonkeyPatch):
     dataset = SimpleNamespace(processor="__test_generator_context", kwargs={})
 
-    def generator(observation: dict, strata, state):
-        yield {"id": observation["id"], "strata": strata, "marker": state["marker"]}
+    def generator(observation: dict, strata, interprocess_encoding_context):
+        yield {"id": observation["id"], "strata": strata, "marker": interprocess_encoding_context["marker"]}
 
     processor = Processor(name="__test_generator_context", func=generator, mode=ProcessorMode.generator)
     monkeypatch.setitem(datasets.PROCESSORS, "__test_generator_context", processor)
@@ -338,7 +338,7 @@ def test_process_generator_processor_receives_strata_and_state(monkeypatch: pyte
             [{"id": 1}],
             dataset=dataset,
             strata=Strata.validate,
-            state={"marker": "seen"},
+            interprocess_encoding_context={"marker": "seen"},
         )
     )
     assert output == [[{"id": 1, "strata": Strata.validate, "marker": "seen"}]]
@@ -363,7 +363,7 @@ def test_process_transformation_processor_rejects_non_dict(monkeypatch: pytest.M
                 [{"id": 1}],
                 dataset=dataset,
                 strata=Strata.train,
-                state={},
+                interprocess_encoding_context={},
             )
         )
 
@@ -376,7 +376,7 @@ def test_process_without_processor_still_wraps_root_array():
             [{"id": 1}, {"id": 2}],
             dataset=dataset,
             strata=Strata.train,
-            state={},
+            interprocess_encoding_context={},
         )
     )
     assert output == [[{"id": 1}], [{"id": 2}]]
@@ -447,23 +447,31 @@ def test_shuffle_stops_refilling_after_source_exhausted():
     assert iterator.stop_count == 1
 
 
-def test_spotcheck_raises_for_repeated_empty_result(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(datasets, "_jmespath_counter", Counter())
+def test_jmespath_resolution_monitor_raises_for_empty_result():
+    monitor = datasets.JMESPathResolutionMonitor(every=1)
+
     with pytest.raises(ValueError, match="JMESPath query returned empty result"):
-        datasets.spotcheck([], "root/id", every=1)
+        monitor.observe(address="root/id", expression="[*].id", result=[])
 
 
-def test_spotcheck_ignores_empty_result_until_threshold(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(datasets, "_jmespath_counter", Counter())
-    datasets.spotcheck([], "root/id", every=3)
-    datasets.spotcheck([], "root/id", every=3)
+def test_jmespath_resolution_monitor_ignores_empty_result_until_threshold():
+    monitor = datasets.JMESPathResolutionMonitor(every=3)
+
+    monitor.observe(address="root/id", expression="[*].id", result=[])
+    monitor.observe(address="root/id", expression="[*].id", result=[])
+
+
+def test_jmespath_resolution_monitor_accepts_nested_observed_value():
+    monitor = datasets.JMESPathResolutionMonitor(every=1)
+
+    monitor.observe(address="root/id", expression="[*].id", result=[[None, {"id": 0}]])
 
 
 def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     module = datasets.StreamingDataModule(
         hyperparameters=_datamodule_hyperparameters(),
         dataset=_datamodule_dataset(),
-        state={},
+        interprocess_encoding_context={},
         batch_size=2,
         num_workers={Strata.train: 0},
         sharding={Strata.train: "record"},
@@ -510,7 +518,7 @@ def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata
         hyperparameters=_datamodule_hyperparameters(),
         dataframe=frame,
         dataset=_datamodule_dataset(),
-        state={},
+        interprocess_encoding_context={},
         batch_size=2,
         num_workers={Strata.train: 0},
         sharding={Strata.train: "record"},
@@ -533,20 +541,57 @@ def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata
     assert module.sample_rate[Strata.validate] == 1.0
 
 
+def test_polars_datamodule_from_model_accepts_named_splits():
+    train = pl.DataFrame({"id": [1]})
+    predict = pl.DataFrame({"id": [2]})
+    model = SimpleNamespace(
+        hyperparameters=_datamodule_hyperparameters(),
+        interprocess_encoding_context={},
+        batch_size=2,
+    )
+
+    module = datasets.PolarsDataModule.from_model(
+        model,
+        train=train,
+        predict=predict,
+        processor=None,
+        num_workers=0,
+    )
+
+    assert module.dataframes[Strata.train] is train
+    assert module.dataframes[Strata.predict] is predict
+    assert set(module.dataframes) == {Strata.train, Strata.predict}
+    assert module.dataset.root is None
+    assert module.dataset.processor is None
+    assert module.val_dataloader() is None
+
+
+def test_polars_datamodule_from_model_requires_at_least_one_split():
+    model = SimpleNamespace(
+        hyperparameters=_datamodule_hyperparameters(),
+        interprocess_encoding_context={},
+        batch_size=2,
+    )
+
+    with pytest.raises(ValueError, match="at least one dataframe split is required"):
+        datasets.PolarsDataModule.from_model(model)
+
+
 def test_polars_datamodule_accepts_partial_dataframe_mapping_until_loader_requested():
     module = datasets.PolarsDataModule(
         hyperparameters=_datamodule_hyperparameters(),
         dataframe={Strata.train: pl.DataFrame({"id": [1]})},
         dataset=_datamodule_dataset(),
-        state={},
+        interprocess_encoding_context={},
         batch_size=2,
         num_workers=0,
     )
 
     assert set(module.dataframes) == {Strata.train}
+    assert module.val_dataloader() is None
 
     with pytest.raises(ValueError, match="no dataframe configured"):
-        module.val_dataloader()
+        module.dataloader(strata=Strata.validate)
 
 
 def test_polars_datamodule_rejects_dataset_with_file_root(tmp_path: Path):
@@ -559,13 +604,13 @@ def test_polars_datamodule_rejects_dataset_with_file_root(tmp_path: Path):
                 suffix=Suffix.ndjson,
                 patterns={strata: r".*" for strata in Strata},
             ),
-            state={},
+            interprocess_encoding_context={},
             batch_size=2,
         )
 
 
 def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch: pytest.MonkeyPatch):
-    def transform(pipe, hyperparameters, strata, state):
+    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
         yield from pipe
 
     def mask(pipe, hyperparameters):
@@ -582,7 +627,7 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
         hyperparameters=SimpleNamespace(requests={}),
         dataframe=pl.DataFrame({"id": [1, 2, 3]}),
         dataset=datasets.Dataset(root=None, processor=None),
-        state={},
+        interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
         sharding=ShardingStrategy.chunk,
@@ -603,7 +648,7 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     def observe(dataset, strata, sharding, chunk_batch_size, file_buffer_size):
         yield {"id": 1}
 
-    def process(pipe, dataset, strata, state):
+    def process(pipe, dataset, strata, interprocess_encoding_context):
         yield from ([item] for item in pipe)
 
     def sample(pipe, sample_rate, strata):
@@ -613,7 +658,7 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     def batch(pipe, batch_size):
         yield list(pipe)
 
-    def transform(pipe, hyperparameters, strata, state):
+    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
         yield from pipe
 
     def mask(pipe, hyperparameters):
@@ -633,7 +678,7 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     batch_dataset = datasets.BatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
         dataset=SimpleNamespace(),
-        state={},
+        interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
         sharding=ShardingStrategy.chunk,
@@ -660,7 +705,7 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     def observe(dataset, strata, sharding, chunk_batch_size, file_buffer_size, global_rank, world_size):
         yield {"id": global_rank, "world_size": world_size}
 
-    def process(pipe, dataset, strata, state):
+    def process(pipe, dataset, strata, interprocess_encoding_context):
         yield from ([item] for item in pipe)
 
     def sample(pipe, sample_rate, strata):
@@ -669,7 +714,7 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     def batch(pipe, batch_size):
         yield list(pipe)
 
-    def transform(pipe, hyperparameters, strata, state):
+    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
         yield from pipe
 
     def mask(pipe, hyperparameters):
@@ -689,7 +734,7 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     batch_dataset = datasets.BatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
         dataset=SimpleNamespace(),
-        state={"root/category": state},
+        interprocess_encoding_context={"root/category": state},
         batch_size=2,
         strata=Strata.train,
         sharding=ShardingStrategy.chunk,
@@ -732,14 +777,14 @@ def test_target_uses_resolved_field_rates():
         def __init__(self):
             self.calls = []
 
-        def target(self, p_target: float):
-            self.calls.append(p_target)
+        def target(self, p_prune: float):
+            self.calls.append(p_prune)
 
     first = Field()
     second = Field()
     hyperparameters = SimpleNamespace(
         requests={"root/first": object(), "root/second": object()},
-        resolved_p_target=lambda address: 0.0 if address == "root/first" else 0.75,
+        resolved_p_prune=lambda address: 0.0 if address == "root/first" else 0.75,
     )
 
     output = list(datasets.target.__wrapped__([{"root/first": first, "root/second": second}], hyperparameters))

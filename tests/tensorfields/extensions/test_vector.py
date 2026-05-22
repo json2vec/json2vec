@@ -64,7 +64,6 @@ def test_vector_tensorfield_new_rejects_wrong_embedding_length():
             address="root/embedding",
             hyperparameters=hyperparameters,
             strata=Strata.train,
-            state=None,
         )
 
 
@@ -77,7 +76,6 @@ def test_vector_embedder_and_decoder_shapes():
         address="root/embedding",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
 
     embedder = Embedder(hyperparameters=structure, address="root/embedding")
@@ -109,7 +107,6 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
         address="root/embedding",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
     field.mask(1.0)
 

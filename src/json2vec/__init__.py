@@ -1,10 +1,19 @@
 from json2vec.architecture.root import JSON2Vec as Architecture
 from json2vec.data.datasets import Dataset, PolarsDataModule, StreamingDataModule
 from json2vec.processors import PROCESSORS, Processor, ProcessorMode, shim
+from json2vec.processors.extensions.noop import default as default_processor
 from json2vec.structs.enums import Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import (
+    Hyperparameters,
+    MutationChange,
+    MutationResult,
+    NodePredicate,
+    predicate,
+    schema,
+    where,
+)
 from json2vec.structs.structure import Array
-from json2vec.structs.tree import Address
+from json2vec.structs.tree import Address, Column, Leaf
 from json2vec.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
 from json2vec.tensorfields.extensions.category import Request as Category
 from json2vec.tensorfields.extensions.dateparts import Request as DateParts
@@ -20,6 +29,7 @@ __all__ = [
     "Architecture",
     "Array",
     "Category",
+    "Column",
     "Component",
     "DateParts",
     "Dataset",
@@ -27,7 +37,11 @@ __all__ = [
     "EmbedderBase",
     "Entity",
     "Hyperparameters",
+    "Leaf",
     "Metric",
+    "MutationChange",
+    "MutationResult",
+    "NodePredicate",
     "Number",
     "PROCESSORS",
     "Plugin",
@@ -47,5 +61,9 @@ __all__ = [
     "Tokens",
     "Vector",
     "VocabularySyncCallback",
+    "default_processor",
+    "predicate",
+    "schema",
     "shim",
+    "where",
 ]

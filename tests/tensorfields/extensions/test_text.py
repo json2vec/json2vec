@@ -160,7 +160,6 @@ def test_text_tensorfield_tokenizes_strings(monkeypatch: pytest.MonkeyPatch):
         address="root/body",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
 
     assert field.content[INPUT_IDS].shape == (2, 2, 4)
@@ -179,7 +178,6 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
         address="root/body",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
 
     embedder = Embedder(hyperparameters=structure, address="root/body")
@@ -215,7 +213,6 @@ def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch
         address="root/body",
         hyperparameters=hyperparameters,
         strata=Strata.train,
-        state=None,
     )
     field.mask(1.0)
 
