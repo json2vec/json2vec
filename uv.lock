@@ -807,15 +807,13 @@ wheels = [
 
 [[package]]
 name = "json2vec"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "anytree" },
     { name = "beartype" },
-    { name = "ipython" },
     { name = "jmespath" },
     { name = "lightning" },
-    { name = "litserve" },
     { name = "loguru" },
     { name = "numpy" },
     { name = "ordered-set" },
@@ -823,13 +821,16 @@ dependencies = [
     { name = "polars" },
     { name = "pyarrow" },
     { name = "pydantic" },
-    { name = "pydantic-settings" },
     { name = "rich" },
     { name = "tensordict" },
     { name = "torch" },
 ]
 
 [package.optional-dependencies]
+serving = [
+    { name = "litserve" },
+    { name = "pydantic-settings" },
+]
 text = [
     { name = "transformers" },
 ]
@@ -837,7 +838,10 @@ text = [
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
+    { name = "ipython" },
+    { name = "litserve" },
     { name = "pre-commit" },
+    { name = "pydantic-settings" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
@@ -847,10 +851,9 @@ dev = [
 requires-dist = [
     { name = "anytree", specifier = ">=2.13.0" },
     { name = "beartype", specifier = ">=0.21.0" },
-    { name = "ipython", specifier = ">=9.9.0" },
     { name = "jmespath", specifier = ">=1.0.1" },
     { name = "lightning", specifier = ">=2.5.2" },
-    { name = "litserve", specifier = ">=0.2.13" },
+    { name = "litserve", marker = "extra == 'serving'", specifier = ">=0.2.13" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "ordered-set", specifier = ">=4.1.0" },
@@ -858,18 +861,21 @@ requires-dist = [
     { name = "polars", specifier = ">=1.35.2" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
-    { name = "pydantic-settings", specifier = ">=2.10.1" },
+    { name = "pydantic-settings", marker = "extra == 'serving'", specifier = ">=2.10.1" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tensordict", specifier = ">=0.10.0" },
     { name = "torch", specifier = ">=2.7.1" },
     { name = "transformers", marker = "extra == 'text'", specifier = ">=4.55.0" },
 ]
-provides-extras = ["text"]
+provides-extras = ["serving", "text"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "ipykernel", specifier = ">=6.29.5" },
+    { name = "ipython", specifier = ">=9.9.0" },
+    { name = "litserve", specifier = ">=0.2.13" },
     { name = "pre-commit", specifier = ">=4.3.0" },
+    { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pytest", specifier = ">=8.4.1" },
     { name = "ruff", specifier = ">=0.12.12" },
     { name = "ty", specifier = ">=0.0.1a20" },

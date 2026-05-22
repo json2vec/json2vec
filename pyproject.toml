@@ -1,6 +1,6 @@
 [project]
 name = "json2vec"
-version = "0.2.1"
+version = "0.3.0"
 description = "JSON -> [*]"
 readme = "README.md"
 license = "Apache-2.0"
@@ -10,7 +10,6 @@ dependencies = [
     "pluggy>=1.6.0",
     "rich>=14.0.0",
     "pydantic>=2.11.7",
-    "pydantic-settings>=2.10.1",
     "jmespath>=1.0.1",
     "loguru>=0.7.3",
     "anytree>=2.13.0",
@@ -19,13 +18,15 @@ dependencies = [
     "polars>=1.35.2",
     "numpy>=2.2.6",
     "lightning>=2.5.2",
-    "litserve>=0.2.13",
     "tensordict>=0.10.0",
     "torch>=2.7.1",
-    "ipython>=9.9.0",
 ]
 
 [project.optional-dependencies]
+serving = [
+    "litserve>=0.2.13",
+    "pydantic-settings>=2.10.1",
+]
 text = [
     "transformers>=4.55.0",
 ]
@@ -34,7 +35,10 @@ text = [
 dev = [
     "ruff>=0.12.12",
     "pytest>=8.4.1",
+    "ipython>=9.9.0",
     "ipykernel>=6.29.5",
+    "litserve>=0.2.13",
+    "pydantic-settings>=2.10.1",
     "ty>=0.0.1a20",
     "pre-commit>=4.3.0",
 ]
