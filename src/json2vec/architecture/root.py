@@ -277,7 +277,7 @@ class Model(lit.LightningModule):
         """Return a reusable selection of schema nodes.
 
         Selections can be inspected or mutated with
-        `model.select(...).set(...)`.
+        `model.select(...).update(...)`.
         """
         selection = self.hyperparameters.select(
             *predicates,
@@ -286,7 +286,7 @@ class Model(lit.LightningModule):
         )
         return selection.model_copy(update={"owner": self})
 
-    def set(
+    def update(
         self,
         *predicates: NodePredicate | Callable[[Node], bool],
         strict: bool = True,
@@ -307,12 +307,12 @@ class Model(lit.LightningModule):
                 allow unknown fields.
             include_root: Include the root node in predicate matching.
             validate: Validate each node after applying candidate values.
-            **values: Schema attributes to set.
+            **values: Schema attributes to update.
 
         Returns:
             The same model instance.
         """
-        self.hyperparameters.set(
+        self.hyperparameters.update(
             *predicates,
             strict=strict,
             allow_extra=allow_extra,
@@ -323,7 +323,7 @@ class Model(lit.LightningModule):
         self._rebuild_modules()
         return self
 
-    def _set_nodes(
+    def _update_nodes(
         self,
         nodes: Sequence[Node],
         *,
@@ -332,7 +332,7 @@ class Model(lit.LightningModule):
         validate: bool = True,
         **values: Any,
     ) -> Self:
-        self.hyperparameters._set_nodes(
+        self.hyperparameters._update_nodes(
             nodes,
             strict=strict,
             allow_extra=allow_extra,

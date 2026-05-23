@@ -57,7 +57,7 @@ nav:
   - Core Concepts:
       - Why JSON2Vec: motivation.md
       - Schemas & Queries: guides/model-schemas.md
-      - Model Mutation: guides/model-set.ipynb
+      - Model Updates: guides/model-update.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
       - Masked Pretraining: tutorials/pretraining.ipynb

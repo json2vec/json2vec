@@ -47,7 +47,7 @@ class NodeSelection(pydantic.BaseModel):
     def to_list(self) -> list[Node]:
         return list(self.nodes)
 
-    def set(
+    def update(
         self,
         strict: bool = True,
         allow_extra: bool = False,
@@ -55,7 +55,7 @@ class NodeSelection(pydantic.BaseModel):
         **values: Any,
     ) -> "Hyperparameters":
         """Mutate every node in this selection."""
-        return self.owner._set_nodes(
+        return self.owner._update_nodes(
             self.nodes,
             strict=strict,
             allow_extra=allow_extra,
@@ -73,7 +73,7 @@ class MutationChange(pydantic.BaseModel):
     field: str
     old: Any
     new: Any
-    action: Literal["set", "restore"]
+    action: Literal["update", "restore"]
 
 
 class MutationResult(pydantic.BaseModel):
@@ -83,7 +83,7 @@ class MutationResult(pydantic.BaseModel):
 
     operation_id: str
     parent_operation_id: str | None = None
-    action: Literal["set", "restore"] = "set"
+    action: Literal["update", "restore"] = "update"
     matched: int
     updated: int
     skipped: int = 0
@@ -243,8 +243,8 @@ def where(name: str) -> NodeAttribute:
 
     Example:
         ```python
-        model.set(where("type") == "number", p_mask=0.10)
-        model.set(where("name") == "label", target=True)
+        model.update(where("type") == "number", p_mask=0.10)
+        model.update(where("name") == "label", target=True)
         ```
     """
     return NodeAttribute(name=name)
@@ -270,7 +270,7 @@ def _validate_node_update(node: Node, values: Mapping[str, Any]) -> None:
     type(node).model_validate(payload)
 
 
-def _normalize_set_values(values: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_update_values(values: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(values)
     target = normalized.pop("target", None)
 
@@ -606,7 +606,7 @@ class Hyperparameters(Node):
 
         return NodeSelection(owner=self, key=key, nodes=nodes)
 
-    def set(
+    def update(
         self,
         *predicates: NodePredicate | Callable[[Node], bool],
         strict: bool = True,
@@ -621,7 +621,7 @@ class Hyperparameters(Node):
         target prune rate.
         """
         nodes = tuple(self.nodes(*predicates, include_root=include_root))
-        return self._set_nodes(
+        return self._update_nodes(
             nodes,
             strict=strict,
             allow_extra=allow_extra,
@@ -629,20 +629,20 @@ class Hyperparameters(Node):
             **values,
         )
 
-    def _set_nodes(
+    def _update_nodes(
         self,
         nodes: Sequence[Node],
         *,
         strict: bool = True,
         allow_extra: bool = False,
         validate: bool = True,
-        action: Literal["set", "restore"] = "set",
+        action: Literal["update", "restore"] = "update",
         parent_operation_id: str | None = None,
         **values: Any,
     ) -> Self:
-        values = _normalize_set_values(values)
+        values = _normalize_update_values(values)
         if not values:
-            raise ValueError("set requires at least one field value")
+            raise ValueError("update requires at least one field value")
 
         changes: list[MutationChange] = []
         matched = updated = skipped = 0
@@ -722,7 +722,7 @@ class Hyperparameters(Node):
             if _has_model_attribute(node, name) or (allow_extra and _allows_extra_attributes(node))
         ]
 
-        self._set_nodes(
+        self._update_nodes(
             nodes,
             strict=strict,
             allow_extra=allow_extra,

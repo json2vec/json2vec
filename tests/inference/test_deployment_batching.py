@@ -192,12 +192,12 @@ def test_deployment_launcher_configures_litserve_api(monkeypatch):
         workers_per_device=2,
         accelerator="cpu",
         track_requests=True,
-    ).set(where("name") == "label", target=False).forge(request=Request, response=Response).serve()
+    ).update(where("name") == "label", target=False).forge(request=Request, response=Response).serve()
 
     assert isinstance(captured["lit_api"], API)
     assert captured["lit_api"].checkpoint == "unused"
     assert captured["lit_api"].preprocessor is None
-    assert len(captured["lit_api"].set_operations) == 1
+    assert len(captured["lit_api"].update_operations) == 1
     assert captured["accelerator"] == "cpu"
     assert captured["workers_per_device"] == 2
     assert captured["track_requests"] is True
@@ -244,7 +244,7 @@ def test_deployment_rejects_explicit_checkpoint_and_model():
         Deployment(checkpoint="model.ckpt", model=model)
 
 
-def test_deployment_api_applies_queued_set_operations(monkeypatch):
+def test_deployment_api_applies_queued_update_operations(monkeypatch):
     calls = []
 
     class Mutation:
@@ -262,8 +262,8 @@ def test_deployment_api_applies_queued_set_operations(monkeypatch):
             calls.append(("to", device))
             return self
 
-        def set(self, *predicates, **values):
-            calls.append(("set", predicates, values))
+        def update(self, *predicates, **values):
+            calls.append(("update", predicates, values))
             return self
 
         def eval(self):
@@ -276,7 +276,7 @@ def test_deployment_api_applies_queued_set_operations(monkeypatch):
     predicate = where("name") == "label"
     api = API(
         checkpoint="unused",
-        set_operations=[
+        update_operations=[
             ((predicate,), {"target": False}),
         ],
     )
@@ -284,9 +284,9 @@ def test_deployment_api_applies_queued_set_operations(monkeypatch):
     api.setup(device="cpu")
 
     assert calls[0] == ("to", "cpu")
-    assert calls[1] == ("set", (predicate,), {"target": False})
+    assert calls[1] == ("update", (predicate,), {"target": False})
     assert calls[2] == ("eval",)
-    assert api.applied_set_operations == [{"mode": "python", "updated": 1}]
+    assert api.applied_update_operations == [{"mode": "python", "updated": 1}]
 
 
 def test_deployment_api_setup_uses_model_instance(monkeypatch):

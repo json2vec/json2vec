@@ -30,7 +30,7 @@ This page is generated from public docstrings and is meant as a lookup companion
         - from_spec
         - nodes_matching
         - select
-        - set
+        - update
         - plot
         - save
         - load
@@ -55,7 +55,7 @@ This page is generated from public docstrings and is meant as a lookup companion
         - target
         - embed
         - select
-        - set
+        - update
         - mutation_history
 
 ::: json2vec.where
@@ -155,7 +155,7 @@ This page is generated from public docstrings and is meant as a lookup companion
         - forge
         - preprocess
         - postprocess
-        - set
+        - update
         - serve
 
 ## Tensorfield Extension API

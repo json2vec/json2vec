@@ -23,7 +23,7 @@ from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 ModelSource: TypeAlias = str | Path | Model
-SetOperation: TypeAlias = tuple[tuple[NodePredicate | Callable[[Node], bool], ...], dict[str, Any]]
+UpdateOperation: TypeAlias = tuple[tuple[NodePredicate | Callable[[Node], bool], ...], dict[str, Any]]
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -46,7 +46,7 @@ class API(ls.LitAPI):
         model: Model | None = None,
         preprocessor=None,
         postprocessor=None,
-        set_operations: list[SetOperation] | None = None,
+        update_operations: list[UpdateOperation] | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -69,8 +69,8 @@ class API(ls.LitAPI):
 
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
-        self.set_operations = list(set_operations or [])
-        self.applied_set_operations: list[dict[str, Any]] = []
+        self.update_operations = list(update_operations or [])
+        self.applied_update_operations: list[dict[str, Any]] = []
 
     @property
     def model_source(self) -> ModelSource:
@@ -84,11 +84,11 @@ class API(ls.LitAPI):
 
     def setup(self, device: str) -> None:
         self.model: Model = self._load_model().to(device)
-        for predicates, values in self.set_operations:
-            self.model.set(*predicates, **values)
+        for predicates, values in self.update_operations:
+            self.model.update(*predicates, **values)
             last_mutation = self.model.hyperparameters.last_mutation
             if last_mutation is not None:
-                self.applied_set_operations.append(last_mutation.model_dump(mode="python"))
+                self.applied_update_operations.append(last_mutation.model_dump(mode="python"))
 
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
@@ -229,7 +229,7 @@ class Deployment(BaseSettings):
     """Serving configuration for a JSON2Vec checkpoint or model instance.
 
     `Deployment` queues request/response schemas, optional preprocessors,
-    optional postprocessors, and `set(...)` mutations before the model is
+    optional postprocessors, and `update(...)` mutations before the model is
     loaded by LitServe workers.
     """
 
@@ -274,7 +274,7 @@ class Deployment(BaseSettings):
     _response_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
     _preprocessor = pydantic.PrivateAttr(default=None)
     _postprocessor = pydantic.PrivateAttr(default=None)
-    _set_operations: list[SetOperation] = pydantic.PrivateAttr(default_factory=list)
+    _update_operations: list[UpdateOperation] = pydantic.PrivateAttr(default_factory=list)
 
     @field_validator("checkpoint", "accelerator", mode="before")
     @classmethod
@@ -324,7 +324,7 @@ class Deployment(BaseSettings):
         return self
 
     @beartype
-    def set(
+    def update(
         self,
         *predicates: NodePredicate | Callable[[Node], bool],
         strict: bool = True,
@@ -335,10 +335,10 @@ class Deployment(BaseSettings):
     ) -> "Deployment":
         """Queue a model schema mutation to apply during server startup.
 
-        This mirrors `Model.set(...)` and is useful for serving-time changes
+        This mirrors `Model.update(...)` and is useful for serving-time changes
         such as `target=False`.
         """
-        self._set_operations.append(
+        self._update_operations.append(
             (
                 tuple(predicates),
                 {
@@ -371,7 +371,7 @@ class Deployment(BaseSettings):
                 batch_timeout=self.batch_timeout,
                 preprocessor=self._preprocessor,
                 postprocessor=self._postprocessor,
-                set_operations=self._set_operations,
+                update_operations=self._update_operations,
             ),
             accelerator=self.accelerator,
             workers_per_device=self.workers_per_device,

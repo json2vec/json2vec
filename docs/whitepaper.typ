@@ -1047,8 +1047,8 @@ model = j2v.Model.from_schema(
     n_heads=4,
     batch_size=256,
 )
-model.set(j2v.where("type") == "number", p_mask=0.15)
-model.set(j2v.where("type") == "category", p_mask=0.05)
+model.update(j2v.where("type") == "number", p_mask=0.15)
+model.update(j2v.where("type") == "category", p_mask=0.05)
 ```
 
 ```python

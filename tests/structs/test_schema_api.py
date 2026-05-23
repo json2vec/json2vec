@@ -146,7 +146,7 @@ def test_from_spec_aliases_schema_constructor():
     assert model.hyperparameters.embed == ["record"]
 
 
-def test_model_selector_set_and_cached_role_views():
+def test_model_selector_update_and_cached_role_views():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),
         j2v.Category("label", target=True, embed=False),
@@ -159,19 +159,19 @@ def test_model_selector_set_and_cached_role_views():
     numeric = j2v.where("type") == "number"
     assert model.select(numeric).to_list() == model.select(j2v.where("type") == "number").to_list()
 
-    model.set(numeric, weight=2.0)
+    model.update(numeric, weight=2.0)
     assert params.requests["record/amount"].weight == 2.0
     assert params.last_mutation is not None
     assert params.last_mutation.updated == 1
 
-    model.set(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+    model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
     assert model.select(j2v.where("benchmark") == "schema_api").to_list() == [params.requests["record/amount"]]
 
-    model.set(j2v.where("name") == "amount", target=True)
+    model.update(j2v.where("name") == "amount", target=True)
     assert params.requests["record/amount"].p_prune == 1.0
 
-    model.set(j2v.where("name") == "amount", target=False)
+    model.update(j2v.where("name") == "amount", target=False)
     assert params.requests["record/amount"].p_prune is None
 
-    model.select(j2v.where("name") == "amount").set(p_prune=0.25)
+    model.select(j2v.where("name") == "amount").update(p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25

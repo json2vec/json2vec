@@ -124,8 +124,8 @@ model = j2v.Model.from_schema(
 The same object can then be mutated explicitly:
 
 ```python
-model.set(j2v.where("type") == "number", p_mask=0.10)
-model.set(j2v.where("name") == "cultivar", target=True)
+model.update(j2v.where("type") == "number", p_mask=0.10)
+model.update(j2v.where("name") == "cultivar", target=True)
 ```
 
 This matters because a schema can evolve with the use case. A pretraining model,
