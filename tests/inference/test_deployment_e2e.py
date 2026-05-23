@@ -12,8 +12,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from json2vec.architecture.root import JSON2Vec
-from json2vec.data.datasets import encode
+from json2vec.architecture.root import Model
+from json2vec.data.iterables import encode
 from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import Hyperparameters
 
@@ -166,7 +166,7 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
     dataset_path = tmp_path / "fake_records.ndjson"
     records = _write_fake_records(dataset_path)
     hyperparameters = _hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
 
     inputs = encode(
         batch=[[record] for record in records],

@@ -16,7 +16,7 @@ from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
 
 Postprocessor: TypeAlias = Callable[
     [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
@@ -59,7 +59,7 @@ class Writer(callbacks.BasePredictionWriter):
     def write_on_batch_end(
         self,
         trainer: lit.Trainer,
-        pl_module: JSON2Vec,
+        pl_module: Model,
         output: dict[str, list[Prediction]],
         batch_indices: list[int]|None,
         batch: TensorDict[Address, TensorFieldBase],

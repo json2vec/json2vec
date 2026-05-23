@@ -11,7 +11,7 @@ from loguru import logger
 from json2vec.structs.enums import Strata
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
 
 
 class ThroughputLogger(Callback):
@@ -21,14 +21,14 @@ class ThroughputLogger(Callback):
         self.timestamp: dict[Strata, datetime.datetime] = defaultdict(lambda: datetime.datetime.now())
         self.batches: dict[Strata, int] = defaultdict(int)
 
-    def start(self, trainer: Trainer, pl_module: JSON2Vec, strata: Strata):
+    def start(self, trainer: Trainer, pl_module: Model, strata: Strata):
         self.timestamp[strata] = datetime.datetime.now()
         self.batches[strata] = 0
 
-    def count(self, trainer: Trainer, pl_module: JSON2Vec, *args, strata: Strata, **kwargs):
+    def count(self, trainer: Trainer, pl_module: Model, *args, strata: Strata, **kwargs):
         self.batches[strata] += 1
 
-    def end(self, trainer: Trainer, pl_module: JSON2Vec, strata: Strata):
+    def end(self, trainer: Trainer, pl_module: Model, strata: Strata):
         now = datetime.datetime.now()
         then = self.timestamp[strata]
         elapsed = (now - then).total_seconds()

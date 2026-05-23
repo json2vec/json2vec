@@ -25,7 +25,7 @@ from json2vec.tensorfields.base import (
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 
@@ -475,7 +475,7 @@ class Decoder(DecoderBase):
 
 @text.register
 def loss(
-    module: JSON2Vec,
+    module: Model,
     prediction: Prediction,
     batch: TensorField,
     strata: Strata,
@@ -534,5 +534,5 @@ def loss(
 
 
 @text.register
-def write(module: JSON2Vec, prediction: Prediction):
+def write(module: Model, prediction: Prediction):
     pass

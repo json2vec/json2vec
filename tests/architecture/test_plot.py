@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from json2vec.architecture.plot import format_value
-from json2vec.architecture.root import JSON2Vec
+from json2vec.architecture.root import Model
 from json2vec.structs.experiment import Hyperparameters
 
 
@@ -54,8 +54,8 @@ def _hyperparameters() -> Hyperparameters:
     )
 
 
-def _model(tmp_path: Path) -> JSON2Vec:
-    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+def _model(tmp_path: Path) -> Model:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
 
     label = model.nodes["root/items/label"]
     label.embedder.vocab.master.append("alpha")
@@ -87,7 +87,7 @@ def test_plot_renders_full_model_and_writes_output(tmp_path: Path, capsys) -> No
     assert "background-color: #800000" not in rendered
     assert "background-color: #008000" not in rendered
     assert '<span class="r' not in rendered
-    assert "JSON2Vec" in rendered
+    assert "Model" in rendered
     assert f"parameters: {sum(parameter.numel() for parameter in model.parameters())}" in rendered
     assert "root (array)" in rendered
     assert "amount (number)" in rendered
@@ -127,7 +127,7 @@ def test_plot_address_limits_output_to_selected_branch(tmp_path: Path) -> None:
     assert "┏━ label (category)" in rendered
     assert "┏━ identifier (entity)" in rendered
     assert "address: root/amount" not in rendered
-    assert "JSON2Vec" not in rendered
+    assert "Model" not in rendered
 
 
 def test_plot_leaf_uses_default_extension_renderer(tmp_path: Path) -> None:

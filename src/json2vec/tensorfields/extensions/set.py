@@ -27,7 +27,7 @@ from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 sets: Plugin = Plugin(name="set")
@@ -306,7 +306,7 @@ class Decoder(DecoderBase):
 
 @sets.register
 def loss(
-    module: JSON2Vec,
+    module: Model,
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
@@ -368,7 +368,7 @@ def loss(
 
 
 @sets.register
-def write(module: JSON2Vec, prediction: Prediction):
+def write(module: Model, prediction: Prediction):
     node = module.nodes[prediction.address]
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     content_logits: torch.Tensor = prediction.payload[TensorKey.content]
@@ -396,7 +396,7 @@ def write(module: JSON2Vec, prediction: Prediction):
 
 @sets.register
 def plot(
-    module: JSON2Vec,
+    module: Model,
     address: Address,
     branch: Pane,
     detail: bool,

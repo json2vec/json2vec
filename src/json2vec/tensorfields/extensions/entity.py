@@ -23,7 +23,7 @@ from json2vec.tensorfields.base import (
 )
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 
@@ -251,7 +251,7 @@ class Decoder(DecoderBase):
 
 @entity.register
 def loss(
-    module: JSON2Vec,
+    module: Model,
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
@@ -327,5 +327,5 @@ def loss(
 
 
 @entity.register
-def write(module: JSON2Vec, prediction: Prediction):
+def write(module: Model, prediction: Prediction):
     return None

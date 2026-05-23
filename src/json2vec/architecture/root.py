@@ -1,5 +1,6 @@
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
+from copy import deepcopy
 from functools import partialmethod
 from pathlib import Path
 from typing import Any, NotRequired, Self, TypeAlias, TypedDict, cast
@@ -13,11 +14,12 @@ from tensordict import TensorDict
 
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
-from json2vec.data.datasets import EncodedBatch, encode, mock
+from json2vec.data.datasets.base import EncodedBatch
+from json2vec.data.iterables import encode, mock
 from json2vec.structs.enums import Metric, Strata, TensorKey
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Hyperparameters, NodePredicate, NodeSelection, SchemaField
 from json2vec.structs.packages import Embedding, Parcel, Prediction
-from json2vec.structs.tree import Address
+from json2vec.structs.tree import Address, Node
 from json2vec.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
@@ -33,9 +35,9 @@ class Output(TypedDict):
     predictions: NotRequired[list[Prediction]]
 
 
-OptimizerConfig = torch.optim.Optimizer | Callable[["JSON2Vec"], torch.optim.Optimizer]
-SchedulerConfig = Any | Callable[["JSON2Vec", torch.optim.Optimizer], Any]
-Preprocessor: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
+OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
+SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
+PreprocessFn: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
 Postprocessor: TypeAlias = Callable[
     [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
@@ -44,7 +46,7 @@ Postprocessor: TypeAlias = Callable[
 
 @beartype
 def step(
-    module: "JSON2Vec",
+    module: "Model",
     batch: TensorDict[Address, TensorFieldBase],
     batch_idx: int,
     strata: Strata,
@@ -81,7 +83,42 @@ def step(
     return Output(loss=loss)
 
 
-class JSON2Vec(lit.LightningModule):
+def _compatible_state_value(current: Any, previous: Any) -> bool:
+    if isinstance(current, torch.Tensor) and isinstance(previous, torch.Tensor):
+        return current.shape == previous.shape
+
+    return type(current) is type(previous)
+
+
+class Model(lit.LightningModule):
+    @classmethod
+    def from_schema(
+        cls,
+        *field_args: SchemaField,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        batch_size: int = 1,
+        fields: Sequence[SchemaField] | None = None,
+        root: str = "record",
+        optimizer: OptimizerConfig | None = None,
+        scheduler: SchedulerConfig | None = None,
+    ) -> Self:
+        hyperparameters = Hyperparameters.from_schema(
+            *field_args,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            fields=fields,
+            root=root,
+        )
+        return cls(
+            hyperparameters=hyperparameters,
+            batch_size=batch_size,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+
     @beartype
     def __init__(
         self,
@@ -101,6 +138,17 @@ class JSON2Vec(lit.LightningModule):
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
 
+        self._build_modules()
+
+        logger.bind(
+            component="model",
+            batch_size=self.batch_size,
+            requests=len(self.hyperparameters.requests),
+            arrays=len(self.hyperparameters.arrays),
+            embeds=len(self.hyperparameters.embed),
+        ).info("initialized Model module")
+
+    def _build_modules(self) -> None:
         self.nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
         for address in self.hyperparameters.requests | self.hyperparameters.arrays:
@@ -112,13 +160,83 @@ class JSON2Vec(lit.LightningModule):
 
         self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
 
-        logger.bind(
-            component="model",
-            batch_size=self.batch_size,
-            requests=len(self.hyperparameters.requests),
-            arrays=len(self.hyperparameters.arrays),
-            embeds=len(self.hyperparameters.embed),
-        ).info("initialized JSON2Vec module")
+    def _rebuild_modules(self) -> None:
+        previous = {
+            name: value.detach().clone() if isinstance(value, torch.Tensor) else deepcopy(value)
+            for name, value in self.state_dict().items()
+        }
+        self._build_modules()
+        current = self.state_dict()
+        compatible = {
+            name: value
+            for name, value in previous.items()
+            if name in current and _compatible_state_value(current[name], value)
+        }
+        self.load_state_dict(compatible, strict=False)
+
+    def nodes_matching(
+        self,
+        *predicates: NodePredicate | Callable[[Node], bool],
+        include_root: bool = True,
+        use_cache: bool = True,
+    ) -> Iterator[Node]:
+        yield from self.hyperparameters.nodes(
+            *predicates,
+            include_root=include_root,
+            use_cache=use_cache,
+        )
+
+    def select(
+        self,
+        *predicates: NodePredicate | Callable[[Node], bool],
+        include_root: bool = True,
+        use_cache: bool = True,
+    ) -> NodeSelection:
+        selection = self.hyperparameters.select(
+            *predicates,
+            include_root=include_root,
+            use_cache=use_cache,
+        )
+        return selection.model_copy(update={"owner": self})
+
+    def set(
+        self,
+        *predicates: NodePredicate | Callable[[Node], bool],
+        strict: bool = True,
+        allow_extra: bool = False,
+        include_root: bool = True,
+        validate: bool = True,
+        **values: Any,
+    ) -> Self:
+        self.hyperparameters.set(
+            *predicates,
+            strict=strict,
+            allow_extra=allow_extra,
+            include_root=include_root,
+            validate=validate,
+            **values,
+        )
+        self._rebuild_modules()
+        return self
+
+    def _set_nodes(
+        self,
+        nodes: Sequence[Node],
+        *,
+        strict: bool = True,
+        allow_extra: bool = False,
+        validate: bool = True,
+        **values: Any,
+    ) -> Self:
+        self.hyperparameters._set_nodes(
+            nodes,
+            strict=strict,
+            allow_extra=allow_extra,
+            validate=validate,
+            **values,
+        )
+        self._rebuild_modules()
+        return self
 
     def configure_callbacks(self) -> list[Callback]:
         callbacks: list[Callback] = []
@@ -239,7 +357,7 @@ class JSON2Vec(lit.LightningModule):
     @beartype
     def configure_optimizers(self):
         if self.optimizer is None:
-            raise ValueError("optimizer must be passed to JSON2Vec before fitting")
+            raise ValueError("optimizer must be passed to Model before fitting")
 
         if isinstance(self.optimizer, torch.optim.Optimizer):
             optimizer = self.optimizer
@@ -260,12 +378,12 @@ class JSON2Vec(lit.LightningModule):
     @classmethod
     def load(cls, checkpoint: str | Path) -> Self:
         path = Path(checkpoint)
-        logger.bind(component="model_factory", checkpoint=str(path)).info("loading JSON2Vec model from checkpoint")
+        logger.bind(component="model_factory", checkpoint=str(path)).info("loading Model from checkpoint")
         state = torch.load(path, weights_only=False, map_location="cpu")
         if "hyperparameters" not in state:
             raise ValueError("missing hyperparameters in checkpoint")
 
-        model: "JSON2Vec" = cls(
+        model: "Model" = cls(
             hyperparameters=Hyperparameters.model_validate(state["hyperparameters"]),
             batch_size=state["batch_size"],
         )
@@ -306,7 +424,7 @@ class JSON2Vec(lit.LightningModule):
     def evaluate(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: Preprocessor | None = None,
+        preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
@@ -357,7 +475,7 @@ class JSON2Vec(lit.LightningModule):
     def predict(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: Preprocessor | None = None,
+        preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
         supervised, _ = self.evaluate(
@@ -370,7 +488,7 @@ class JSON2Vec(lit.LightningModule):
     def embed(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: Preprocessor | None = None,
+        preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
         _, embeddings = self.evaluate(

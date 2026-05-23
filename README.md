@@ -96,7 +96,7 @@ This repository currently contains:
 
 - the core library under `src/json2vec/`
 - tensorfield plugins for `number`, `category`, `set`, `dateparts`, `entity`, `vector`, and `text`
-- a processor registry for dataset-specific preprocessing
+- a preprocessor registry for dataset-specific preprocessing
 - a LitServe deployment entrypoint for serving from checkpoints
 - a hello-world Lightning notebook under `examples/hello_world.ipynb`
 - tests covering structure loading, data processing, tensorfields, training helpers, logging, and inference
@@ -141,30 +141,16 @@ records = pl.DataFrame(
 )
 
 
-params = j2v.Hyperparameters(
+model = j2v.Model.from_schema(
+    j2v.Column("color", j2v.Category, max_vocab_size=16),
+    j2v.Column("label", j2v.Category, target=True, max_vocab_size=8, topk=[2]),
     d_model=16,
-    fields=j2v.Array(
-        name="record",
-        embed=True,
-        fields=[
-            j2v.Category(name="color", query="[*].color", embed=False, max_vocab_size=16),
-            j2v.Category(
-                name="label",
-                query="[*].label",
-                embed=False,
-                p_prune=1.0,
-                max_vocab_size=8,
-                topk=[2],
-            ),
-        ],
-    ),
-)
-
-model = j2v.Architecture(
-    hyperparameters=params,
+    n_layers=1,
+    n_heads=4,
     batch_size=4,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
+model.set(j2v.where("name") == "record", embed=True)
 
 datamodule = j2v.PolarsDataModule.from_model(
     model,
@@ -200,7 +186,7 @@ input observation.
 
 ## Core Concepts
 
-- `Hyperparameters` defines the model tree plus masking, targeting, and embedding controls.
+- `Model.from_schema(...)` builds the model tree plus masking, targeting, and embedding controls.
 - `Array` nodes describe hierarchical grouping and aggregation.
 - Field `Request` nodes declare a `type`, a `query`, and type-specific options.
 - `Address` values are stable paths such as `root/account/transaction/amount`.
@@ -222,7 +208,7 @@ Supported dataset suffixes are:
 - `orc`
 - `json`
 
-Supported dataset roots are local paths and `s3://...` URIs. If `dataset.root` is `null`, the pipeline runs in processor-driven mode and expects the configured processor to generate observations.
+Supported dataset roots are local paths and `s3://...` URIs. If `dataset.root` is `null`, the pipeline seeds an empty observation that an optional preprocessor may expand.
 
 ## How The Graph Runs
 
@@ -244,17 +230,17 @@ field instances across an observation. Hyperparameter-level `target` fields are 
 withheld and become supervised targets; `embed` addresses are
 serialized as embeddings during prediction.
 
-## Processor Model
+## Preprocessor Model
 
-Processors are registered Python callables. The built-in `default` processor is a no-op and returns each observation unchanged.
+Preprocessors are optional registered Python callables. If no preprocessor is configured, each observation is used as-is without calling a default function.
 
-Custom processors are registered with `@shim(yields=False)` for single-object transformations or `@shim(yields=True)` for generators.
+Custom preprocessors are registered with `@preprocess(yields=False)` for single-object transformations or `@preprocess(yields=True)` for generators.
 
-- transformation processors must return a single `dict`
-- generator processors may yield `dict` objects or return a `list[dict]`
+- transformation preprocessors must return a single `dict`
+- generator preprocessors may yield `dict` objects or return a `list[dict]`
 - every emitted object is wrapped as a single-item root array before tensorization
 
-Configured `dataset.kwargs` are passed into the processor, with unsupported keyword arguments automatically ignored.
+Configured `dataset.kwargs` are passed into the preprocessor, with unsupported keyword arguments automatically ignored.
 
 ## Tensorfield Plugins
 
@@ -292,7 +278,7 @@ Join the Discord channel for questions, design discussion, and release notes:
 - `src/json2vec/data`: dataset fetch/read/process/batch/encode pipeline
 - `src/json2vec/inference`: serving and prediction callbacks
 - `src/json2vec/logging`: runtime logging callbacks
-- `src/json2vec/processors`: processor registry and built-in extensions
+- `src/json2vec/preprocessors`: preprocessor registry
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in field types
 - `examples/`: hello-world training and inference notebook

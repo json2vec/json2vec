@@ -3,16 +3,19 @@ import pytest
 import json2vec as j2v
 
 
-def test_schema_builds_record_array_and_infers_queries():
-    params = j2v.schema(
+def test_model_from_schema_builds_record_array_and_infers_queries():
+    model = j2v.Model.from_schema(
         j2v.Column("job code", j2v.Category, kwargs={"max_vocab_size": 128}, source="openml"),
         j2v.Number("amount"),
         j2v.Column("label", "category", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
         d_model=32,
         n_layers=2,
         n_heads=4,
+        batch_size=8,
     )
+    params = model.hyperparameters
 
+    assert model.batch_size == 8
     assert params.d_model == 32
     assert params.fields.name == "record"
     assert params.fields.max_length == 1
@@ -38,9 +41,9 @@ def test_schema_builds_record_array_and_infers_queries():
     assert params.target == ["record/label"]
 
 
-def test_schema_rejects_duplicate_sources():
+def test_model_from_schema_rejects_duplicate_sources():
     with pytest.raises(ValueError, match="duplicate schema source field"):
-        j2v.schema(
+        j2v.Model.from_schema(
             j2v.Number("amount"),
             j2v.Column("amount", "number"),
             d_model=16,
@@ -49,8 +52,8 @@ def test_schema_rejects_duplicate_sources():
         )
 
 
-def test_schema_accepts_array_nodes_and_infers_nested_queries():
-    params = j2v.schema(
+def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
+    model = j2v.Model.from_schema(
         j2v.Array(
             j2v.Number("amount"),
             j2v.Column("merchant code", j2v.Category, max_vocab_size=32),
@@ -61,6 +64,7 @@ def test_schema_accepts_array_nodes_and_infers_nested_queries():
         n_layers=1,
         n_heads=4,
     )
+    params = model.hyperparameters
 
     assert "record/transactions" in params.arrays
 
@@ -75,29 +79,29 @@ def test_schema_accepts_array_nodes_and_infers_nested_queries():
     assert merchant.max_vocab_size == 32
 
 
-def test_selector_set_override_and_cached_role_views():
-    params = j2v.schema(
+def test_model_selector_set_and_cached_role_views():
+    model = j2v.Model.from_schema(
         j2v.Number("amount"),
         j2v.Column("label", j2v.Category, target=True, embed=False),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
+    params = model.hyperparameters
 
     numeric = j2v.where("type") == "number"
-    assert params.select(numeric).to_list() == params.select(j2v.where("type") == "number").to_list()
+    assert model.select(numeric).to_list() == model.select(j2v.where("type") == "number").to_list()
 
-    params.set(numeric, weight=2.0)
+    model.set(numeric, weight=2.0)
     assert params.requests["record/amount"].weight == 2.0
     assert params.last_mutation is not None
     assert params.last_mutation.updated == 1
 
-    params.set(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-    assert params.select(j2v.where("benchmark") == "schema_api").to_list() == [params.requests["record/amount"]]
+    model.set(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+    assert model.select(j2v.where("benchmark") == "schema_api").to_list() == [params.requests["record/amount"]]
 
-    with params.override(j2v.where("type") == "array", p_prune=0.25) as result:
-        assert result.action == "set"
-        assert params.resolved_p_prune("record/amount") == 0.25
+    model.set(j2v.where("name") == "amount", target=True)
+    assert params.requests["record/amount"].p_prune == 1.0
 
-    assert params.resolved_p_prune("record/amount") == 0.0
-    assert params.mutation_history[-1].action == "restore"
+    model.select(j2v.where("name") == "amount").set(p_prune=0.25)
+    assert params.requests["record/amount"].p_prune == 0.25

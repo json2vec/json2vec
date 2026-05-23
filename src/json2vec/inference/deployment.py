@@ -9,8 +9,8 @@ from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
-from json2vec.architecture.root import JSON2Vec
-from json2vec.data.datasets import JMESPathResolutionMonitor, encode
+from json2vec.architecture.root import Model
+from json2vec.data.iterables import JMESPathResolutionMonitor, encode
 from json2vec.structs.enums import Strata
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
@@ -47,7 +47,7 @@ class API(ls.LitAPI):
         self.postprocessor = postprocessor
 
     def setup(self, device: str) -> None:
-        self.model: JSON2Vec = JSON2Vec.load(self.checkpoint).to(device)
+        self.model: Model = Model.load(self.checkpoint).to(device)
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
         self.jmespath_resolution_monitor = JMESPathResolutionMonitor()
@@ -81,7 +81,7 @@ class API(ls.LitAPI):
             return ErrorItem(status_code=422, message=str(exception))
 
         if len(observations) == 0 or any(x is None for x in observations):
-            return ErrorItem(status_code=422, message="processor returned no observations for request")
+            return ErrorItem(status_code=422, message="preprocessor returned no observations for request")
 
         if context is not None:
             context["observations"] = observations
@@ -95,7 +95,7 @@ class API(ls.LitAPI):
         )
 
         if encoded is None:
-            return ErrorItem(status_code=422, message="processor eliminated observation (filter)")
+            return ErrorItem(status_code=422, message="preprocessor eliminated observation (filter)")
 
         if context is not None:
             context["input"] = encoded
@@ -247,14 +247,14 @@ class Deployment(BaseSettings):
         return self
 
     @beartype
-    def preprocess(self, processor, **kwargs: Any) -> "Deployment":
-        self._preprocessor = functools.partial(processor, **kwargs) if len(kwargs) > 0 else processor
+    def preprocess(self, preprocessor, **kwargs: Any) -> "Deployment":
+        self._preprocessor = functools.partial(preprocessor, **kwargs) if len(kwargs) > 0 else preprocessor
 
         return self
 
     @beartype
-    def postprocess(self, processor, **kwargs: Any) -> "Deployment":
-        self._postprocessor = functools.partial(processor, **kwargs) if len(kwargs) > 0 else processor
+    def postprocess(self, postprocessor, **kwargs: Any) -> "Deployment":
+        self._postprocessor = functools.partial(postprocessor, **kwargs) if len(kwargs) > 0 else postprocessor
 
         return self
 

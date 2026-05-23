@@ -1,74 +1,74 @@
 import pytest
 
 from json2vec.data.datasets import Dataset
-from json2vec.processors.base import PROCESSORS, shim
+from json2vec.preprocessors.base import PREPROCESSORS, preprocess
 from json2vec.structs.enums import Strata
 
 
-def _processor_name() -> str:
-    if PROCESSORS:
-        return next(iter(PROCESSORS))
+def _preprocessor_name() -> str:
+    if PREPROCESSORS:
+        return next(iter(PREPROCESSORS))
 
-    def _dataset_test_processor(observation: dict):
+    def _dataset_test_preprocessor(observation: dict):
         return observation
 
-    _dataset_test_processor.__name__ = "__dataset_test_processor"
-    shim(yields=False)(_dataset_test_processor)
-    return _dataset_test_processor.__name__
+    _dataset_test_preprocessor.__name__ = "__dataset_test_preprocessor"
+    preprocess(yields=False)(_dataset_test_preprocessor)
+    return _dataset_test_preprocessor.__name__
 
 
 def _dataset_payload() -> dict:
     return {
         "root": "/tmp/dataset",
-        "processor": _processor_name(),
+        "preprocessor": _preprocessor_name(),
         "kwargs": {},
         "suffix": "ndjson",
         "patterns": {strata.value: ".*" for strata in Strata},
     }
 
 
-def test_dataset_rejects_unregistered_processor():
+def test_dataset_rejects_unregistered_preprocessor():
     payload = _dataset_payload()
-    payload["processor"] = "__missing_processor"
+    payload["preprocessor"] = "__missing_preprocessor"
 
-    with pytest.raises(ValueError, match="you haven't registered processor"):
+    with pytest.raises(ValueError, match="you haven't registered preprocessor"):
         Dataset.model_validate(payload)
 
 
-def test_dataset_accepts_registered_processor_callable():
-    def _dataset_callable_processor(observation: dict):
+def test_dataset_accepts_registered_preprocessor_callable():
+    def _dataset_callable_preprocessor(observation: dict):
         return observation
 
-    _dataset_callable_processor.__name__ = "__dataset_callable_processor"
-    processor = shim(yields=False)(_dataset_callable_processor)
+    _dataset_callable_preprocessor.__name__ = "__dataset_callable_preprocessor"
+    preprocessor = preprocess(yields=False)(_dataset_callable_preprocessor)
 
     try:
         payload = _dataset_payload()
-        payload["processor"] = processor
+        payload["preprocessor"] = preprocessor
 
         dataset = Dataset.model_validate(payload)
 
-        assert dataset.processor == "__dataset_callable_processor"
+        assert dataset.preprocessor == "__dataset_callable_preprocessor"
     finally:
-        PROCESSORS.pop("__dataset_callable_processor", None)
+        PREPROCESSORS.pop("__dataset_callable_preprocessor", None)
 
 
-def test_dataset_accepts_configured_processor_callable():
-    def _unregistered_dataset_callable_processor(observation: dict):
+def test_dataset_accepts_configured_preprocessor_callable():
+    def _unregistered_dataset_callable_preprocessor(observation: dict):
         return observation
 
     payload = _dataset_payload()
-    payload["processor"] = _unregistered_dataset_callable_processor
+    payload["preprocessor"] = _unregistered_dataset_callable_preprocessor
 
     dataset = Dataset.model_validate(payload)
 
-    assert dataset.processor is _unregistered_dataset_callable_processor
+    assert dataset.preprocessor is _unregistered_dataset_callable_preprocessor
 
 
-def test_dataset_root_allows_none_for_processor_driven_mode():
+def test_dataset_root_allows_none_for_preprocessor_driven_mode():
     payload = {
         "root": None,
-        "processor": _processor_name(),
+        "preprocessor": _preprocessor_name(),
         "kwargs": {},
     }
 
@@ -76,6 +76,12 @@ def test_dataset_root_allows_none_for_processor_driven_mode():
     assert dataset.root is None
     assert dataset.suffix is None
     assert dataset.patterns is None
+
+
+def test_dataset_preprocessor_is_optional():
+    dataset = Dataset.model_validate({"root": None})
+
+    assert dataset.preprocessor is None
 
 
 def test_dataset_requires_suffix_when_root_is_configured():

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from lightning.pytorch import Trainer
     from tensordict import TensorDict
 
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.tensorfields.base import TensorFieldBase
 
 
@@ -123,7 +123,7 @@ class CounterUpdateCallback(Callback):
     def on_train_batch_start(
         self,
         trainer: Trainer,
-        pl_module: JSON2Vec,
+        pl_module: Model,
         batch: TensorDict,
         batch_idx: int,
     ) -> None:

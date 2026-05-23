@@ -66,7 +66,7 @@ class ArrayEncoder(torch.nn.Module):
         super().__init__()
 
         array = hyperparameters.arrays[address]
-        dropout = hyperparameters.resolved_dropout(address)
+        dropout = float(array.dropout or 0.0)
 
         self.origin: Address = address
         self.destination: Address = array.parent.address

@@ -429,7 +429,7 @@ Sample input:
 
 #querynote()
 
-In practice, a processor can derive `fare_basis_code_chars` from the original string before encoding, so source systems do not need to store the data in this exact shape. This can be done with streaming transformation functions, further discussed in @sec:shims.
+In practice, a preprocessor can derive `fare_basis_code_chars` from the original string before encoding, so source systems do not need to store the data in this exact shape. This can be done with streaming transformation functions, further discussed in @sec:preprocessors.
 
 Naturally, developers can also represent multiple fare basis codes with additional context blocks. The broader point is that nested contexts are far more common than one might expect.
 
@@ -658,7 +658,7 @@ Because there are multiple context windows, flushing behavior can be separated b
 
 This is one of the practical reasons nested contexts matter. They are not only a cleaner representation of the data; they reduce the number of ways important behavioral context can be accidentally (or intentionally) pushed out of view.
 
-Custom transformation functions defined in @sec:shims provide another mitigation. Developers can programmatically filter out irrelevant events during training and inference before they enter the model context.
+Custom preprocessing functions defined in @sec:preprocessors provide another mitigation. Developers can programmatically filter out irrelevant events during training and inference before they enter the model context.
 
 == Transfer Learning with Schema Evolution <sec:mutability>
 
@@ -975,26 +975,21 @@ More generally, `jmespath` makes the schema responsible for selecting data while
 
 The implementation validates queries when schemas are loaded and compiles them for reuse during encoding. It also performs periodic spot checks to catch queries that consistently return empty results, which is one of the easiest ways to silently train a bad model.
 
-=== Wrangling with Shims and Processors <sec:shims>
+=== Wrangling with Preprocessors <sec:preprocessors>
 
 Some data transformations are too domain-specific for a declarative query. Examples include parsing vendor-specific payloads, sampling time windows from a customer history, deriving auxiliary labels, normalizing inconsistent field names, or splitting one raw record into multiple training observations.
 
-For this, `json2vec` supports dataset processors. A processor runs before tensorization and receives the raw observation plus configured dataset keyword arguments. There are two modes:
-- A transformation processor returns one modified observation.
-- A generator processor yields zero or more observations from one input.
+For this, `json2vec` supports optional dataset preprocessors. A preprocessor runs before tensorization and receives the raw observation plus configured dataset keyword arguments. There are two modes:
+- A transformation preprocessor returns one modified observation.
+- A generator preprocessor yields zero or more observations from one input.
 
-The default processor returns the observation unchanged:
-
-```python
-@register.transformation
-def default(item):
-    return item
-```
-
-A custom processor can be used as a shim between a messy source system and a clean modeling schema:
+When no preprocessor is configured, observations pass through unchanged. A custom preprocessor can sit between a messy source system and a clean modeling schema:
 
 ```python
-@register.generator
+import json2vec as j2v
+
+
+@j2v.preprocess(yields=True)
 def customer_windows(customer, window_days: int):
     for window in sample_windows(customer, days=window_days):
         yield {
@@ -1004,9 +999,9 @@ def customer_windows(customer, window_days: int):
         }
 ```
 
-The schema still owns the model-facing contract. The processor only prepares observations into a shape the schema can query. This separation keeps domain wrangling explicit without forcing developers to materialize a separate feature table.
+The schema still owns the model-facing contract. The preprocessor only prepares observations into a shape the schema can query. This separation keeps domain wrangling explicit without forcing developers to materialize a separate feature table.
 
-The same processor path is used during training, batch prediction, and real-time serving. That is the key design point: once a processor and schema are paired, the model sees the same transformation logic in every environment.
+The same preprocessor path is used during training, batch prediction, and real-time serving. That is the key design point: once a preprocessor and schema are paired, the model sees the same transformation logic in every environment.
 
 === Logging and Prediction Outputs
 
@@ -1035,28 +1030,37 @@ The idea is simple: the same datatype-specific losses are used for self-supervis
 
 During pretraining, all masked values are imputed regardless of their dimensionality. During supervised learning, all targeted values are predicted regardless of their dimensionality.
 The difference is that masking happens value-by-value according to the masking rate. Targeting removes a field from the input and trains the model to reconstruct it.
-`dropout`, `p_mask`, and `p_prune` can be configured on the root field array, nested arrays, or fields; child nodes inherit the closest parent value unless they override it.
+`dropout`, `p_mask`, and `p_prune` can be configured explicitly on arrays or fields. These rates do not inherit down the schema tree; broad updates are made deliberately with schema selections.
 
 This means that the control flow is the same for pretraining and finetuning. The difference between pretraining and finetuning is configuration, not a separate model architecture.
 
-```yaml
-- name: "my-pretrain-job"
-  task: "fit"
-  dataset: ...
-  structure:
-    ...
-    p_mask: 0.15 # mask 15% of values by default
-    p_prune: 0.05 # target 5% of each field's observations by default
-  ...
+```python
+import json2vec as j2v
+
+
+model = j2v.Model.from_schema(
+    j2v.Number("amount"),
+    j2v.Category("merchant", max_vocab_size=4096),
+    j2v.Category("is_fraud", max_vocab_size=2),
+    d_model=128,
+    n_layers=4,
+    n_heads=4,
+    batch_size=256,
+)
+model.set(j2v.where("type") == "number", p_mask=0.15)
+model.set(j2v.where("type") == "category", p_mask=0.05)
 ```
 
-```yaml
-- name: "my-finetune-job"
-  task: "fit"
-  dataset: ...
-  structure: ...
-  target: ["customer/transaction/is_fraud"] # always hide this field and train the model to reconstruct it
-  ...
+```python
+model = j2v.Model.from_schema(
+    j2v.Number("amount"),
+    j2v.Category("merchant", max_vocab_size=4096),
+    j2v.Category("is_fraud", target=True, max_vocab_size=2),
+    d_model=128,
+    n_layers=4,
+    n_heads=4,
+    batch_size=256,
+)
 ```
 
 == Heritage-based Forward Pass <sec:forward-pass>
@@ -1164,7 +1168,7 @@ There are two related plugin boundaries to add:
 This separation matters because source and format are independent.
 A parquet file might live locally, in S3, or behind an internal data platform. A streaming record might arrive from a queue but still decode into the same observation shape used during batch training.
 
-A more general data pipeline would make it easier to preserve the central promise of `json2vec`: the same schema, processor, tokenizer state, and model path should be used for training, batch inference, and real-time inference.
+A more general data pipeline would make it easier to preserve the central promise of `json2vec`: the same schema, preprocessor, tokenizer state, and model path should be used for training, batch inference, and real-time inference.
 
 
 = Appendix

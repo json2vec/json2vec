@@ -9,23 +9,23 @@ from typing import Any
 import pluggy
 import pydantic
 
-from json2vec.processors.spec import PluginSpec
+from json2vec.preprocessors.spec import PluginSpec
 
-pm: pluggy.PluginManager = pluggy.PluginManager(project_name="processors")
+pm: pluggy.PluginManager = pluggy.PluginManager(project_name="preprocessors")
 
 pm.add_hookspecs(module_or_class=PluginSpec)
 
 
-class ProcessorMode(enum.StrEnum):
+class PreprocessorMode(enum.StrEnum):
     generator = "generator"
     transformation = "transformation"
 
 
-class Processor(pydantic.BaseModel):
+class Preprocessor(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
     name: str
     func: Callable[..., Any]
-    mode: ProcessorMode
+    mode: PreprocessorMode
 
     def __call__(self, observation: dict, **kwargs) -> Any:
         return self.func(observation, **_filter_supported_kwargs(self.func, kwargs))
@@ -33,18 +33,18 @@ class Processor(pydantic.BaseModel):
     def outputs(self, observation: dict, **kwargs) -> Iterator[list[dict[str, Any]]]:
         result = self(observation, **kwargs)
 
-        if self.mode == ProcessorMode.transformation:
+        if self.mode == PreprocessorMode.transformation:
             yield [self._normalize_object(result, mode=self.mode)]
             return
 
-        if self.mode == ProcessorMode.generator:
+        if self.mode == PreprocessorMode.generator:
             if isinstance(result, list):
                 iterable: list[Any] | Iterator[Any] = result
             elif isinstance(result, Iterator):
                 iterable = result
             else:
                 raise TypeError(
-                    f"generator processor '{self.name}' must yield dict objects or return a list of dict objects, "
+                    f"generator preprocessor '{self.name}' must yield dict objects or return a list of dict objects, "
                     f"got {type(result).__name__}"
                 )
 
@@ -52,12 +52,12 @@ class Processor(pydantic.BaseModel):
                 yield [self._normalize_object(output, mode=self.mode)]
             return
 
-        raise ValueError(f"unsupported processor mode: {self.mode}")
+        raise ValueError(f"unsupported preprocessor mode: {self.mode}")
 
-    def _normalize_object(self, output: Any, *, mode: ProcessorMode) -> dict[str, Any]:
+    def _normalize_object(self, output: Any, *, mode: PreprocessorMode) -> dict[str, Any]:
         if not isinstance(output, dict):
             raise TypeError(
-                f"{mode} processor '{self.name}' must produce dict objects, got {type(output).__name__}"
+                f"{mode} preprocessor '{self.name}' must produce dict objects, got {type(output).__name__}"
             )
 
         return output
@@ -82,17 +82,17 @@ def _filter_supported_kwargs(func: Callable[..., Any], kwargs: dict[str, Any]) -
     return {key: value for key, value in kwargs.items() if key in accepted}
 
 
-PROCESSORS: dict[str, Processor] = {}
+PREPROCESSORS: dict[str, Preprocessor] = {}
 
 
-def _register(func: Callable[..., Any], *, mode: ProcessorMode) -> Callable[..., Any]:
+def _register(func: Callable[..., Any], *, mode: PreprocessorMode) -> Callable[..., Any]:
     name = func.__name__
-    PROCESSORS[name] = Processor(name=name, func=func, mode=mode)
+    PREPROCESSORS[name] = Preprocessor(name=name, func=func, mode=mode)
 
     return func
 
 
-def shim(
+def preprocess(
     func: Callable[..., Any] | None = None,
     *,
     yields: bool | None = None,
@@ -105,7 +105,7 @@ def shim(
 
     if kwargs:
         unexpected = ", ".join(sorted(kwargs))
-        raise TypeError(f"unexpected shim keyword argument(s): {unexpected}")
+        raise TypeError(f"unexpected preprocess keyword argument(s): {unexpected}")
 
     if yields is None:
         yields = False
@@ -113,7 +113,7 @@ def shim(
     if not isinstance(yields, bool):
         raise TypeError("yields must be a boolean")
 
-    mode = ProcessorMode.generator if yields else ProcessorMode.transformation
+    mode = PreprocessorMode.generator if yields else PreprocessorMode.transformation
 
     def decorator(inner: Callable[..., Any]) -> Callable[..., Any]:
         return _register(inner, mode=mode)
@@ -122,6 +122,6 @@ def shim(
         return decorator
 
     if not callable(func):
-        raise TypeError("shim can only decorate callables")
+        raise TypeError("preprocess can only decorate callables")
 
     return decorator(func)

@@ -18,7 +18,7 @@ from json2vec.structs.tree import Address, Leaf, Node
 from json2vec.tensorfields.base import TENSORFIELDS
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
     from json2vec.tensorfields.shared.counter import Counter
 
@@ -38,7 +38,7 @@ class Pane:
 
 
 def plot(
-    module: "JSON2Vec",
+    module: "Model",
     address: Address | str | None = None,
     detail: bool = False,
     out: str | Path | None = None,
@@ -73,7 +73,7 @@ def plot(
         values = hyperparameters.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
         values |= parameter_counts(module)
         pane = Pane(
-            title="JSON2Vec",
+            title="Model",
             values=values,
             children=[build(hyperparameters.fields)],
         )
@@ -219,7 +219,7 @@ def normalize_value(value: Any) -> Any:
 
 def add_counter_details(
     pane: Pane,
-    module: "JSON2Vec",
+    module: "Model",
     address: Address,
 ) -> None:
     embedder = module.nodes[address].embedder

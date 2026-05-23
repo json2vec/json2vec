@@ -2,7 +2,7 @@ import torch
 
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.pool import MeanPool
-from json2vec.architecture.root import JSON2Vec
+from json2vec.architecture.root import Model
 from json2vec.structs.enums import TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Parcel
@@ -56,7 +56,7 @@ def test_array_encoder_none_skips_transformer_layers():
 
 def test_decoder_mean_pooling_repeats_heritage_mean_for_each_target_slot():
     hyperparameters = Hyperparameters.model_validate(_payload(pooling="mean"))
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     decoder = model.nodes["root/category"].decoder
     parcel = Parcel(
         origin="root",

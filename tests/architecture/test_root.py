@@ -4,8 +4,8 @@ from pathlib import Path
 
 import torch
 
-from json2vec.architecture.root import JSON2Vec
-from json2vec.data.datasets import encode
+from json2vec.architecture.root import Model
+from json2vec.data.iterables import encode
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
@@ -38,7 +38,7 @@ def _hyperparameters() -> Hyperparameters:
 
 def test_on_save_checkpoint_serializes_hyperparameters() -> None:
     hyperparameters = _hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     checkpoint = {}
 
     model.on_save_checkpoint(checkpoint)
@@ -50,12 +50,12 @@ def test_on_save_checkpoint_serializes_hyperparameters() -> None:
 
 def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
     hyperparameters = _hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     pathname = tmp_path / "nested" / "model.ckpt"
 
     model.save(pathname=pathname)
 
-    restored = JSON2Vec.load(pathname)
+    restored = Model.load(pathname)
 
     assert pathname.exists()
     assert restored.batch_size == 2
@@ -101,9 +101,9 @@ def _prediction_hyperparameters() -> Hyperparameters:
     )
 
 
-def _primed_prediction_model() -> JSON2Vec:
+def _primed_prediction_model() -> Model:
     hyperparameters = _prediction_hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
@@ -120,7 +120,7 @@ def _primed_prediction_model() -> JSON2Vec:
 
 def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
     hyperparameters = _hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     checkpoint_path = tmp_path / "model.ckpt"
     model.save(checkpoint_path)
 
@@ -130,7 +130,7 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
 def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
     checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
 
-    model = JSON2Vec.load(checkpoint_path)
+    model = Model.load(checkpoint_path)
 
     assert model.batch_size == 2
     assert model.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
@@ -138,7 +138,7 @@ def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
 
 def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> None:
     _, hyperparameters = _build_checkpoint(tmp_path)
-    model = JSON2Vec(
+    model = Model(
         hyperparameters=hyperparameters,
         batch_size=2,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
@@ -150,7 +150,7 @@ def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> No
 
 def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> None:
     _, hyperparameters = _build_checkpoint(tmp_path)
-    model = JSON2Vec(
+    model = Model(
         hyperparameters=hyperparameters,
         batch_size=2,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
@@ -164,7 +164,7 @@ def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> No
 
 
 def test_configure_callbacks_collects_active_extension_callbacks() -> None:
-    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
 
     callbacks = model.configure_callbacks()
 
@@ -198,7 +198,7 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
             },
         }
     )
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
 
     vocabulary_callbacks = [
         callback
@@ -216,7 +216,7 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
 
 
 def test_builtin_resources_are_attached_to_extension_modules() -> None:
-    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
     address = Address("root", "label")
 
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
@@ -226,7 +226,7 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
 
 def test_training_counters_observe_all_encoded_fields() -> None:
     hyperparameters = _prediction_hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
@@ -295,7 +295,7 @@ def test_training_counters_call_content_counter_for_empty_updates() -> None:
             return values
 
     hyperparameters = _prediction_hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
@@ -324,8 +324,8 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
     def log(self, **kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr(JSON2Vec, "log", log)
-    model = JSON2Vec(hyperparameters=_hyperparameters(), batch_size=2)
+    monkeypatch.setattr(Model, "log", log)
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
     value = torch.tensor(1.0)
 
     assert model.track(("loss", "train"), value=value) is value
@@ -336,9 +336,9 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
 
 
 def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(monkeypatch) -> None:
-    monkeypatch.setattr(JSON2Vec, "log", lambda self, **kwargs: None)
+    monkeypatch.setattr(Model, "log", lambda self, **kwargs: None)
     hyperparameters = _prediction_hyperparameters()
-    model = JSON2Vec(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],

@@ -25,7 +25,7 @@ from json2vec.tensorfields.base import (
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 
@@ -319,7 +319,7 @@ class Decoder(DecoderBase):
 
 @number.register
 def loss(
-    module: JSON2Vec,
+    module: Model,
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
@@ -380,7 +380,7 @@ def loss(
 
 
 @number.register
-def write(module: JSON2Vec, prediction: Prediction):
+def write(module: Model, prediction: Prediction):
 
     content: np.ndarray = prediction.payload[TensorKey.content].detach().double().cpu().numpy()
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
@@ -402,7 +402,7 @@ def write(module: JSON2Vec, prediction: Prediction):
 
 @number.register
 def plot(
-    module: JSON2Vec,
+    module: Model,
     address: Address,
     branch: Pane,
     detail: bool,

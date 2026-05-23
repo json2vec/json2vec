@@ -14,7 +14,7 @@ from json2vec.distributed import all_gather_object, broadcast_object, is_distrib
 from json2vec.structs.tree import Address
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
 
 
 class Vocabulary:
@@ -202,7 +202,7 @@ class OnlineVocabularyModel(torch.nn.Module):
         self._snapshot_size = -1
 
 
-def vocabularies(module: JSON2Vec) -> dict[Address, Any]:
+def vocabularies(module: Model) -> dict[Address, Any]:
     resources: dict[Address, Any] = {}
 
     for address, node in module.nodes.items():
@@ -220,10 +220,10 @@ def vocabularies(module: JSON2Vec) -> dict[Address, Any]:
 class VocabularySyncCallback(Callback):
     """Synchronize online vocabularies registered by tensorfield extensions."""
 
-    def _vocabularies(self, pl_module: JSON2Vec) -> dict[Address, Any]:
+    def _vocabularies(self, pl_module: Model) -> dict[Address, Any]:
         return vocabularies(pl_module)
 
-    def _sync(self, trainer: Trainer, pl_module: JSON2Vec, reason: str) -> None:
+    def _sync(self, trainer: Trainer, pl_module: Model, reason: str) -> None:
         if not is_distributed():
             return
 
@@ -280,10 +280,10 @@ class VocabularySyncCallback(Callback):
                         max=stats["max"],
                     ).warning("vocabulary is near capacity")
 
-    def on_fit_start(self, trainer: Trainer, pl_module: JSON2Vec) -> None:
+    def on_fit_start(self, trainer: Trainer, pl_module: Model) -> None:
         self._sync(trainer=trainer, pl_module=pl_module, reason="fit_start")
 
-    def on_train_epoch_end(self, trainer: Trainer, pl_module: JSON2Vec) -> None:
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: Model) -> None:
         self._sync(trainer=trainer, pl_module=pl_module, reason="train_epoch_end")
 
 

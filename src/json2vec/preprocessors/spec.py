@@ -1,6 +1,6 @@
 import pluggy
 
-hookspec = pluggy.HookspecMarker("processors")
+hookspec = pluggy.HookspecMarker("preprocessors")
 
 
 class PluginSpec:

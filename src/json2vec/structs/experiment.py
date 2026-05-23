@@ -248,6 +248,24 @@ def _validate_node_update(node: Node, values: Mapping[str, Any]) -> None:
     type(node).model_validate(payload)
 
 
+def _normalize_set_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(values)
+    target = normalized.pop("target", None)
+
+    if target is None:
+        return normalized
+
+    if not isinstance(target, bool):
+        raise ValueError("target must be a boolean")
+
+    if target:
+        if normalized.get("p_prune") not in (None, 1.0):
+            raise ValueError("target=True is shorthand for p_prune=1.0")
+        normalized["p_prune"] = 1.0
+
+    return normalized
+
+
 def _normalize_predicate(value: NodePredicate | Callable[[Node], bool]) -> NodePredicate:
     if isinstance(value, NodePredicate):
         return value
@@ -372,7 +390,7 @@ class Hyperparameters(Node):
     _mutation_history: list[MutationResult] = pydantic.PrivateAttr(default_factory=list)
 
     @classmethod
-    def schema(
+    def from_schema(
         cls,
         *field_args: SchemaField,
         d_model: int,
@@ -383,7 +401,7 @@ class Hyperparameters(Node):
     ) -> Self:
         normalized = [*(fields or ()), *field_args]
         if not normalized:
-            raise ValueError("schema requires at least one field")
+            raise ValueError("from_schema requires at least one field")
 
         seen_sources: set[str] = set()
         root_fields: list[Array | RequestTypes] = []
@@ -561,6 +579,7 @@ class Hyperparameters(Node):
         parent_operation_id: str | None = None,
         **values: Any,
     ) -> Self:
+        values = _normalize_set_values(values)
         if not values:
             raise ValueError("set requires at least one field value")
 
@@ -695,57 +714,9 @@ class Hyperparameters(Node):
             self.refresh_selection_cache()
             self._record_mutation(restore_result)
 
-    def resolved_dropout(self, address: Address | str) -> float:
-        return self._resolved_rate(address, "dropout")
-
-    def _node_at(self, address: Address | str) -> Node:
-        key = Address(str(address))
-        if key in self.arrays:
-            return self.arrays[key]
-
-        if key in self.requests:
-            return self.requests[key]
-
-        raise ValueError(f"address '{address}' not found in hyperparameters")
-
-    def _resolved_rate(self, address: Address | str, name: Literal["dropout", "p_mask", "p_prune"]) -> float:
-        node: Node | None = self._node_at(address)
-
-        while node is not None:
-            rate = getattr(node, name, None)
-            if rate is not None:
-                return float(rate)
-            node = getattr(node, "parent", None)
-
-        return 0.0
-
-    def resolved_p_mask(self, address: Address | str) -> float:
-        return self._resolved_rate(address, "p_mask")
-
-    def resolved_p_prune(self, address: Address | str) -> float:
-        return self._resolved_rate(address, "p_prune")
-
     def __str__(self) -> str:
         lines: list[str] = []
         for pre, _, node in RenderTree(self):
             lines.append(f"{pre}{node.name} ({node.type})")
 
         return "\n".join(lines)
-
-
-def schema(
-    *field_args: SchemaField,
-    d_model: int,
-    n_layers: int,
-    n_heads: int,
-    fields: Sequence[SchemaField] | None = None,
-    root: str = "record",
-) -> Hyperparameters:
-    return Hyperparameters.schema(
-        *field_args,
-        d_model=d_model,
-        n_layers=n_layers,
-        n_heads=n_heads,
-        fields=fields,
-        root=root,
-    )

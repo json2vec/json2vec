@@ -17,7 +17,7 @@ from json2vec.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
     from json2vec.architecture.plot import Pane
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
@@ -29,7 +29,7 @@ CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 
 
 def default_plot(
-    module: "JSON2Vec",
+    module: "Model",
     address: Address,
     branch: "Pane",
     detail: bool,
@@ -37,7 +37,7 @@ def default_plot(
     pass
 
 
-def default_write(module: "JSON2Vec", prediction: Prediction) -> None:
+def default_write(module: "Model", prediction: Prediction) -> None:
     return None
 
 
@@ -63,7 +63,7 @@ class DecoderBase(torch.nn.Module):
                     n_context=n_context,
                     d_model=hyperparameters.d_model,
                     nhead=request.n_heads,
-                    dropout=hyperparameters.resolved_dropout(address),
+                    dropout=float(request.dropout or 0.0),
                     n_linear=request.n_linear,
                 )
             case "mean":

@@ -9,14 +9,14 @@ from loguru import logger
 from json2vec.structs.enums import Strata
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
 
 
 class EpochLifecycleLogger(Callback):
     def info(
         self,
         trainer: Trainer,
-        pl_module: JSON2Vec,
+        pl_module: Model,
         strata: Strata,
         hook: Literal["start", "end"],
     ):

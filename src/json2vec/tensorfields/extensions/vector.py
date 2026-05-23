@@ -23,7 +23,7 @@ from json2vec.tensorfields.base import (
 )
 
 if TYPE_CHECKING:
-    from json2vec.architecture.root import JSON2Vec
+    from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 
@@ -240,7 +240,7 @@ def _objective_loss(inputs: torch.Tensor, targets: torch.Tensor, objective: Obje
 
 @vector.register
 def loss(
-    module: JSON2Vec,
+    module: Model,
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
@@ -272,7 +272,7 @@ def loss(
 
 
 @vector.register
-def write(module: JSON2Vec, prediction: Prediction):
+def write(module: Model, prediction: Prediction):
     return {
         TensorKey.content.name: prediction.payload[TensorKey.content].detach().float().cpu().numpy(),
     }

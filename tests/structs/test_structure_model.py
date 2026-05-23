@@ -105,32 +105,33 @@ def test_hyperparameters_preserves_field_and_array_descriptions():
     assert structure.requests["root/branch/category_leaf"].description == "category docs"
 
 
-def test_hyperparameters_resolves_array_dropout_from_nearest_parent():
+def test_hyperparameters_uses_direct_array_dropout():
     structure = Hyperparameters.model_validate(_payload())
 
-    assert structure.resolved_dropout("root") == 0.1
-    assert structure.resolved_dropout("root/branch") == 0.1
-    assert structure.resolved_dropout("root/branch/category_leaf") == 0.1
+    assert structure.arrays["root"].dropout == 0.1
+    assert structure.arrays["root/branch"].dropout is None
+    assert structure.requests["root/branch/category_leaf"].dropout is None
 
 
-def test_hyperparameters_resolves_missing_dropout_to_zero():
+def test_hyperparameters_allows_missing_dropout():
     payload = _payload()
     payload["fields"].pop("dropout")
     structure = Hyperparameters.model_validate(payload)
 
-    assert structure.resolved_dropout("root/branch") == 0.0
+    assert structure.arrays["root"].dropout is None
+    assert structure.arrays["root/branch"].dropout is None
 
 
-def test_hyperparameters_resolves_field_dropout_from_nearest_node():
+def test_hyperparameters_preserves_direct_field_dropout():
     payload = _payload()
     payload["fields"]["fields"][0]["fields"][0]["dropout"] = 0.4
 
     structure = Hyperparameters.model_validate(payload)
 
-    assert structure.resolved_dropout("root/branch/category_leaf") == 0.4
+    assert structure.requests["root/branch/category_leaf"].dropout == 0.4
 
 
-def test_hyperparameters_resolves_mask_and_target_rates_from_nearest_node():
+def test_hyperparameters_preserves_direct_mask_and_target_rates():
     payload = _payload()
     payload["fields"]["p_mask"] = 0.2
     payload["fields"]["p_prune"] = 0.1
@@ -140,14 +141,14 @@ def test_hyperparameters_resolves_mask_and_target_rates_from_nearest_node():
 
     structure = Hyperparameters.model_validate(payload)
 
-    assert structure.resolved_p_mask("root") == 0.2
-    assert structure.resolved_p_mask("root/branch") == 0.3
-    assert structure.resolved_p_mask("root/branch/category_leaf") == 0.5
-    assert structure.resolved_p_prune("root/branch/category_leaf") == 0.4
+    assert structure.arrays["root"].p_mask == 0.2
+    assert structure.arrays["root/branch"].p_mask == 0.3
+    assert structure.requests["root/branch/category_leaf"].p_mask == 0.5
+    assert structure.requests["root/branch/category_leaf"].p_prune is None
 
 
-def test_hyperparameters_resolves_missing_mask_and_target_rates_to_zero():
+def test_hyperparameters_allows_missing_mask_and_target_rates():
     structure = Hyperparameters.model_validate(_payload())
 
-    assert structure.resolved_p_mask("root/branch/category_leaf") == 0.0
-    assert structure.resolved_p_prune("root/branch/category_leaf") == 0.0
+    assert structure.requests["root/branch/category_leaf"].p_mask is None
+    assert structure.requests["root/branch/category_leaf"].p_prune is None
