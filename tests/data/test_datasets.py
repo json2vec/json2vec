@@ -772,7 +772,7 @@ def test_mask_uses_direct_field_rates():
     first = Field()
     second = Field()
     hyperparameters = SimpleNamespace(
-        requests={
+        active_requests={
             "root/first": SimpleNamespace(p_mask=0.25),
             "root/second": SimpleNamespace(p_mask=None),
         },
@@ -796,7 +796,7 @@ def test_target_uses_direct_field_rates():
     first = Field()
     second = Field()
     hyperparameters = SimpleNamespace(
-        requests={
+        active_requests={
             "root/first": SimpleNamespace(p_prune=None),
             "root/second": SimpleNamespace(p_prune=0.75),
         },

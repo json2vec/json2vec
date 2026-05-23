@@ -215,6 +215,17 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     assert len(counter_callbacks) == 1
 
 
+def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model._trainer = type(  # noqa: SLF001
+        "TrainerStub",
+        (),
+        {"callbacks": [VocabularySyncCallback(), CounterUpdateCallback()]},
+    )()
+
+    assert model.configure_callbacks() == []
+
+
 def test_builtin_resources_are_attached_to_extension_modules() -> None:
     model = Model(hyperparameters=_hyperparameters(), batch_size=2)
     address = Address("root", "label")
@@ -353,6 +364,58 @@ def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(mo
 
     assert set(output) == {"loss"}
     assert output["loss"].requires_grad
+
+
+def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
+    model = Model(
+        hyperparameters=Hyperparameters(
+            d_model=8,
+            fields={
+                "name": "root",
+                "type": "array",
+                "embed": True,
+                "max_length": 1,
+                "n_outputs": 1,
+                "attention": "none",
+                "fields": [
+                    {
+                        "name": "color",
+                        "type": "category",
+                        "query": "[*].color",
+                        "max_vocab_size": 16,
+                    },
+                    {
+                        "name": "ignored",
+                        "type": "category",
+                        "query": "[*].ignored",
+                        "active": False,
+                        "embed": True,
+                        "p_prune": 1.0,
+                        "max_vocab_size": 16,
+                    },
+                ],
+            },
+        ),
+        batch_size=2,
+    )
+
+    inputs = encode(
+        batch=[
+            [{"color": "red"}],
+            [{"color": "blue"}],
+        ],
+        hyperparameters=model.hyperparameters,
+        strata=Strata.train,
+        interprocess_encoding_context=model.interprocess_encoding_context,
+    )
+    predictions = model(inputs)
+
+    assert Address("root", "ignored") not in inputs.keys()
+    assert Address("root", "ignored") in model.nodes
+    assert Address("root", "ignored") not in model.hyperparameters.active_requests
+    assert Address("root", "ignored") not in model.hyperparameters.target
+    assert Address("root", "ignored") not in model.hyperparameters.embed
+    assert all(prediction.address != Address("root", "ignored") for prediction in predictions)
 
 
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:

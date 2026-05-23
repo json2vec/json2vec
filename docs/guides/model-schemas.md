@@ -2,6 +2,8 @@
 
 A schema does two jobs at once. It describes where JSON2Vec should read values from a record, and it defines the model modules built for those values. Arrays become context encoders. Leaf fields become typed tensorfields such as `Number`, `Category`, `Set`, or `DateParts`.
 
+Every leaf field has `active=True` by default. Set `active=False` when you want to keep a field in the schema tree but ignore it during encoding, forward passes, losses, and prediction. Reactivating the same field later rebuilds the compatible modules.
+
 ## Top-Level Fields
 
 For simple records, omit `query`. JSON2Vec infers the source path from the field name.
@@ -16,6 +18,7 @@ record = {
 model = j2v.Model.from_schema(
     j2v.Number("alcohol"),
     j2v.Number("malic_acid"),
+    j2v.Number("ash", active=False),
     j2v.Category("cultivar", target=True, max_vocab_size=4),
     d_model=16,
     n_layers=1,
@@ -23,7 +26,7 @@ model = j2v.Model.from_schema(
 )
 ```
 
-The inferred request queries are `[*].alcohol`, `[*].malic_acid`, and `[*].cultivar`.
+The active inferred request queries are `[*].alcohol`, `[*].malic_acid`, and `[*].cultivar`. The inactive `ash` field remains selectable for later updates, but it is not encoded or trained.
 
 ## Nested Arrays
 

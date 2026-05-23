@@ -51,6 +51,14 @@ def test_custom_tensorfield_example_runs() -> None:
     assert _plot_output(notebook)
 
 
+def test_field_ablation_example_runs() -> None:
+    notebook = _execute_notebook("docs/guides/field-ablation.ipynb")
+    source = "\n".join(cell.source for cell in notebook.cells)
+
+    assert "active=False" in source
+    assert "trainer.test" in source
+
+
 def test_examples_live_under_docs() -> None:
     examples_path = _repo_root() / "examples"
 

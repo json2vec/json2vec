@@ -65,6 +65,7 @@ nav:
       - Supervised Tabular Training: tutorials/supervised-tabular-training.ipynb
       - Serving: tutorials/serving.ipynb
   - Guides:
+      - Field Ablation: guides/field-ablation.ipynb
       - Preprocessors: guides/preprocessors.ipynb
       - Tensorfield Extensions: guides/tensorfields.ipynb
   - Reference:

@@ -40,6 +40,7 @@ def test_model_from_schema_builds_record_array_and_infers_queries():
     # outer batch selector at search time, so this intentionally is not
     # `[*][*].amount`.
     assert amount.query == "[*].amount"
+    assert amount.active is True
     assert amount.embed is False
 
     label = params.requests["record/label"]
@@ -175,3 +176,28 @@ def test_model_selector_update_and_cached_role_views():
 
     model.select(j2v.where("name") == "amount").update(p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25
+
+
+def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        j2v.Number("memo", active=False, p_mask=0.5, embed=True),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    params = model.hyperparameters
+
+    assert "record/memo" in params.requests
+    assert "record/memo" not in params.active_requests
+    assert "record/memo" in model.nodes
+    assert params.embed == []
+    inactive = model.select(lambda node: getattr(node, "active", True) is False).to_list()
+    assert inactive[0].address == "record/memo"
+
+    model.update(j2v.where("name") == "memo", active=True)
+
+    assert "record/memo" in params.requests
+    assert "record/memo" in params.active_requests
+    assert "record/memo" in model.nodes
+    assert params.embed == ["record/memo"]

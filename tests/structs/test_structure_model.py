@@ -152,3 +152,21 @@ def test_hyperparameters_allows_missing_mask_and_target_rates():
 
     assert structure.requests["root/branch/category_leaf"].p_mask is None
     assert structure.requests["root/branch/category_leaf"].p_prune is None
+
+
+def test_inactive_leaf_nodes_are_kept_in_tree_but_removed_from_runtime_maps():
+    payload = _payload()
+    payload["fields"]["fields"][0]["fields"][0]["active"] = False
+    payload["fields"]["fields"][0]["fields"][0]["p_prune"] = 1.0
+    payload["fields"]["fields"][0]["fields"][0]["embed"] = True
+
+    structure = Hyperparameters.model_validate(payload)
+    inactive = structure.select(lambda node: getattr(node, "name", None) == "category_leaf").to_list()[0]
+
+    assert inactive.active is False
+    assert inactive.address == "root/branch/category_leaf"
+    assert "root/branch/category_leaf" in structure.requests
+    assert "root/branch/category_leaf" not in structure.active_requests
+    assert structure.shapes["root/branch/category_leaf"] == (2, 4)
+    assert structure.target == []
+    assert structure.embed == []

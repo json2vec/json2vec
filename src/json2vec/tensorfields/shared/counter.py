@@ -127,7 +127,7 @@ class CounterUpdateCallback(Callback):
         batch: TensorDict,
         batch_idx: int,
     ) -> None:
-        for address in pl_module.hyperparameters.requests:
+        for address in pl_module.hyperparameters.active_requests:
             field = batch[address]
             embedder = pl_module.nodes[address].embedder
             observe_counters(component=embedder, field=field)

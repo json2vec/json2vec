@@ -217,7 +217,7 @@ class Model(lit.LightningModule):
         logger.bind(
             component="model",
             batch_size=self.batch_size,
-            requests=len(self.hyperparameters.requests),
+            requests=len(self.hyperparameters.active_requests),
             arrays=len(self.hyperparameters.arrays),
             embeds=len(self.hyperparameters.embed),
         ).info("initialized Model module")
@@ -345,15 +345,22 @@ class Model(lit.LightningModule):
     def configure_callbacks(self) -> list[Callback]:
         callbacks: list[Callback] = []
         factories: set[Any] = set()
+        trainer = getattr(self, "_trainer", None)
+        attached_callback_types = {
+            type(callback)
+            for callback in getattr(trainer, "callbacks", ())
+        }
 
-        for request in self.hyperparameters.requests.values():
+        for request in self.hyperparameters.active_requests.values():
             plugin: Plugin = TENSORFIELDS[request.type]
             for factory in plugin.callback_factories:
                 if factory in factories:
                     continue
 
                 factories.add(factory)
-                callbacks.append(factory())
+                callback = factory()
+                if type(callback) not in attached_callback_types:
+                    callbacks.append(callback)
 
         return callbacks
 
@@ -425,7 +432,7 @@ class Model(lit.LightningModule):
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
 
-        for address in self.hyperparameters.requests.keys():
+        for address in self.hyperparameters.active_requests.keys():
             tensorfield: TensorFieldBase = inputs[address]
             if address in self.hyperparameters.target:
                 continue
@@ -454,7 +461,7 @@ class Model(lit.LightningModule):
                 if address in self.hyperparameters.embed:
                     predictions.append(Embedding.from_parcel(encoding))
 
-        for address in self.hyperparameters.requests.keys():
+        for address in self.hyperparameters.active_requests.keys():
 
             if (torch.any(inputs[address].trainable)) or (address in self.hyperparameters.target):
 

@@ -128,6 +128,7 @@ class Leaf(Node):
     from this class through their registered request models.
     """
 
+    active: bool = True
     embed: bool = False
     name: str
     type: str

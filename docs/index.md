@@ -36,6 +36,7 @@ The schema is the model blueprint: arrays become context encoders, typed fields 
 - **Evaluating fit:** read [Why JSON2Vec](motivation.md) before investing in examples.
 - **Working with record shapes:** use [Schemas & Queries](guides/model-schemas.md).
 - **Changing targets, masking, or embeddings:** use [Model Updates](guides/model-update.ipynb).
+- **Measuring field impact:** use [Field Ablation](guides/field-ablation.ipynb).
 - **Preparing awkward source data:** use [Preprocessors](guides/preprocessors.ipynb).
 - **Extending datatypes:** use [Tensorfield Extensions](guides/tensorfields.ipynb).
 

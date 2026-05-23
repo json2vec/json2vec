@@ -416,7 +416,7 @@ def encode(
     out: dict[Address, TensorFieldBase] = {}
     target_addresses = set(hyperparameters.target)
 
-    for address, request in hyperparameters.requests.items():
+    for address, request in hyperparameters.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
         if (strata == Strata.predict) & (address in target_addresses):
@@ -483,7 +483,7 @@ def mask(
     hyperparameters: Hyperparameters,
 ) -> Iterator[EncodedInput]:
     for item in pipe:
-        for address, request in hyperparameters.requests.items():
+        for address, request in hyperparameters.active_requests.items():
             p_mask = float(request.p_mask or 0.0)
             if p_mask <= 0.0:
                 continue
@@ -499,7 +499,7 @@ def target(
     hyperparameters: Hyperparameters,
 ) -> Iterator[EncodedInput]:
     for item in pipe:
-        for address, request in hyperparameters.requests.items():
+        for address, request in hyperparameters.active_requests.items():
             p_prune = float(request.p_prune or 0.0)
             if p_prune <= 0.0:
                 continue
@@ -512,7 +512,7 @@ def target(
 def mock(hyperparameters: Hyperparameters, batch_size: int) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
 
-    for address, request in hyperparameters.requests.items():
+    for address, request in hyperparameters.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
         out[address] = TensorField.empty(
             batch_size=batch_size,

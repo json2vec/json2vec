@@ -126,6 +126,7 @@ The same object can then be mutated explicitly:
 ```python
 model.update(j2v.where("type") == "number", p_mask=0.10)
 model.update(j2v.where("name") == "cultivar", target=True)
+model.update(j2v.where("name") == "proline", active=False)
 ```
 
 This matters because a schema can evolve with the use case. A pretraining model,

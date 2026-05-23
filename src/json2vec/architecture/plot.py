@@ -104,7 +104,7 @@ def render_schema_plot(
 def render_flow_plot(module: "Model", address: Address | str | None) -> RenderableType:
     hyperparameters = module.hyperparameters
     root = hyperparameters.fields if address is None else resolve_node(hyperparameters=hyperparameters, address=address)
-    fields = [node for node in root.descendants if isinstance(node, Leaf)]
+    fields = [node for node in root.descendants if isinstance(node, Leaf) and node.active]
     target_count = sum(1 for node in fields if node.address in hyperparameters.target)
     embed_count = sum(1 for node in [root, *root.descendants] if node.address in hyperparameters.embed)
 
@@ -133,7 +133,7 @@ def render_header(module: "Model", title: str, subtitle: str) -> Panel:
         "d_model": hyperparameters.d_model,
         "params": parameter_count(module),
         "arrays": len(hyperparameters.arrays),
-        "fields": len(hyperparameters.requests),
+        "fields": len(hyperparameters.active_requests),
         "targets": len(hyperparameters.target),
         "embeds": len(hyperparameters.embed),
         "batch": module.batch_size,
@@ -232,6 +232,8 @@ def append_detail_sections(tree: Tree, module: "Model", node: Node) -> None:
 
 def node_roles(module: "Model", node: Node) -> list[str]:
     roles: list[str] = []
+    if isinstance(node, Leaf) and not node.active:
+        roles.append("inactive")
     if node.address in module.hyperparameters.target:
         roles.append("target")
     if node.address in module.hyperparameters.embed:
@@ -253,6 +255,7 @@ def type_style(node_type: str) -> str:
 
 def role_style(role: str) -> str:
     return {
+        "inactive": "bold red",
         "target": "bold yellow",
         "embed": "bold green",
     }.get(role, "bold")
@@ -271,7 +274,11 @@ def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) ->
 
 
 def should_hide_metadata(key: str, value: Any) -> bool:
-    return (key == "embed" and value is False) or key == "description"
+    return (
+        (key == "active" and value is True)
+        or (key == "embed" and value is False)
+        or key == "description"
+    )
 
 
 def format_metadata_value(value: Any) -> str:
@@ -332,6 +339,8 @@ def summarize_value(value: Any, max_items: int = 8) -> Any:
 def collect_detail_sections(module: "Model", node: Node) -> dict[str, Any]:
     if not isinstance(node, Leaf):
         return {}
+    if not node.active or node.address not in module.nodes:
+        return {}
 
     pane = Pane(title=node.name)
     extension = TENSORFIELDS[node.type]
@@ -364,7 +373,7 @@ def render_debug_plot(
             children=[build(child) for child in node.children],
         )
 
-        if detail and isinstance(node, Leaf):
+        if detail and isinstance(node, Leaf) and node.active and node.address in module.nodes:
             extension = TENSORFIELDS[node.type]
             extension.plot(module=module, address=node.address, branch=pane, detail=detail)
             add_counter_details(pane=pane, module=module, address=node.address)
@@ -406,7 +415,8 @@ def format_compact_number(value: Any) -> str:
 
 def resolve_node(hyperparameters: "Hyperparameters", address: Address | str) -> Node:
     key = Address(str(address))
-    nodes: dict[Address, Node] = hyperparameters.arrays | hyperparameters.requests
+    leaves = {node.address: node for node in hyperparameters.descendants if isinstance(node, Leaf)}
+    nodes: dict[Address, Node] = hyperparameters.arrays | leaves
 
     if key not in nodes:
         raise ValueError(f"address '{address}' was not found in the hyperparameters")

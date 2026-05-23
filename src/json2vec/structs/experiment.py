@@ -492,7 +492,9 @@ class Hyperparameters(Node):
     @property
     def target(self) -> list[Address]:
         role = NodePredicate(
-            func=lambda node: getattr(node, "p_prune", 0.0) == 1.0,
+            func=lambda node: isinstance(node, Leaf)
+            and node.active
+            and getattr(node, "p_prune", 0.0) == 1.0,
             key=("role", "target"),
         )
         return [Address(str(node.address)) for node in self.select(role).to_list()]
@@ -500,7 +502,8 @@ class Hyperparameters(Node):
     @property
     def embed(self) -> list[Address]:  # noqa: F811
         role = NodePredicate(
-            func=lambda node: getattr(node, "embed", False) is True,
+            func=lambda node: getattr(node, "embed", False) is True
+            and (not isinstance(node, Leaf) or node.active),
             key=("role", "embed"),
         )
         return [Address(str(node.address)) for node in self.select(role).to_list()]
@@ -519,7 +522,15 @@ class Hyperparameters(Node):
 
     @functools.cached_property
     def requests(self) -> dict[Address, RequestTypes]:
-        return {node.address: node for node in self.descendants if not isinstance(node, Array)}
+        return {node.address: node for node in self.descendants if isinstance(node, Leaf)}
+
+    @functools.cached_property
+    def active_requests(self) -> dict[Address, RequestTypes]:
+        return {
+            node.address: node
+            for node in self.requests.values()
+            if node.active
+        }
 
     @functools.cached_property
     def shapes(self) -> dict[Address, tuple[int, ...]]:
@@ -546,7 +557,7 @@ class Hyperparameters(Node):
         _log_mutation(result)
 
     def _clear_tree_caches(self) -> None:
-        for name in ("arrays", "requests", "shapes", "depthwise"):
+        for name in ("arrays", "requests", "active_requests", "shapes", "depthwise"):
             self.__dict__.pop(name, None)
 
         for node in PreOrderIter(self.fields):
