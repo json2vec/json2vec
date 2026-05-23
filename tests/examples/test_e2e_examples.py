@@ -3,10 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import nbformat
-import pytest
 from nbclient import NotebookClient
-
-pytest.importorskip("sklearn")
 
 
 def _repo_root() -> Path:
@@ -33,8 +30,8 @@ def test_pretraining_example_runs() -> None:
     assert _plot_output(notebook)
 
 
-def test_fine_tuning_example_runs() -> None:
-    notebook = _execute_notebook("docs/tutorials/fine-tuning.ipynb")
+def test_supervised_tabular_example_runs() -> None:
+    notebook = _execute_notebook("docs/tutorials/supervised-tabular-training.ipynb")
 
     assert _plot_output(notebook)
 

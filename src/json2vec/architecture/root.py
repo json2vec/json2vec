@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from functools import partialmethod
 from pathlib import Path
-from typing import Any, NotRequired, Self, TypeAlias, TypedDict, cast
+from typing import Any, Literal, NotRequired, Self, TypeAlias, TypedDict, cast
 
 import lightning.pytorch as lit
 import torch
@@ -21,7 +21,7 @@ from json2vec.data.iterables import encode, mock
 from json2vec.structs.enums import Metric, Strata, TensorKey
 from json2vec.structs.experiment import Hyperparameters, NodePredicate, NodeSelection, SchemaField
 from json2vec.structs.packages import Embedding, Parcel, Prediction
-from json2vec.structs.tree import Address, Node
+from json2vec.structs.tree import Address, Node, PruneRate, Rate
 from json2vec.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
@@ -110,8 +110,8 @@ class Model(lit.LightningModule):
             n_layers=1,
             n_heads=4,
             batch_size=8,
+            embed=True,
         )
-        model.set(j2v.where("name") == "record", embed=True)
         ```
     """
 
@@ -125,6 +125,15 @@ class Model(lit.LightningModule):
         batch_size: int = 1,
         fields: Sequence[SchemaField] | None = None,
         root: str = "record",
+        description: str | None = None,
+        embed: bool = False,
+        attention: Literal["mha", "gqa", "mqa", "none"] = "mha",
+        max_length: int = 1,
+        n_outputs: int = 1,
+        n_linear: int = 1,
+        dropout: Rate | None = None,
+        p_mask: Rate | None = None,
+        p_prune: PruneRate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
     ) -> Self:
@@ -140,6 +149,15 @@ class Model(lit.LightningModule):
                 Lightning input arrays.
             fields: Optional sequence form of `field_args`.
             root: Root array name. Defaults to `record`.
+            description: Optional description on the generated root array.
+            embed: Configure the generated root array as an embedding output.
+            attention: Attention mode for the generated root array.
+            max_length: Maximum number of records per observation at the root.
+            n_outputs: Number of pooled outputs emitted by the generated root array.
+            n_linear: Feed-forward block count on the generated root array.
+            dropout: Optional dropout rate on the generated root array.
+            p_mask: Optional mask rate on the generated root array.
+            p_prune: Optional prune rate on the generated root array.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
 
@@ -153,6 +171,15 @@ class Model(lit.LightningModule):
             n_heads=n_heads,
             fields=fields,
             root=root,
+            description=description,
+            embed=embed,
+            attention=attention,
+            max_length=max_length,
+            n_outputs=n_outputs,
+            n_linear=n_linear,
+            dropout=dropout,
+            p_mask=p_mask,
+            p_prune=p_prune,
         )
         return cls(
             hyperparameters=hyperparameters,
@@ -160,6 +187,11 @@ class Model(lit.LightningModule):
             optimizer=optimizer,
             scheduler=scheduler,
         )
+
+    @classmethod
+    def from_spec(cls, *args: Any, **kwargs: Any) -> Self:
+        """Alias for `from_schema(...)`."""
+        return cls.from_schema(*args, **kwargs)
 
     @beartype
     def __init__(

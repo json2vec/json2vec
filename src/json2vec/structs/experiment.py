@@ -15,7 +15,7 @@ import pydantic
 from anytree import LevelOrderGroupIter, PreOrderIter, RenderTree
 
 from json2vec.structs.structure import Array, RequestTypes
-from json2vec.structs.tree import Address, Leaf, Node
+from json2vec.structs.tree import Address, Leaf, Node, PruneRate, Rate
 
 logger = logging.getLogger("json2vec.hyperparameters")
 SelectionKey: TypeAlias = tuple[Any, ...]
@@ -432,6 +432,15 @@ class Hyperparameters(Node):
         n_heads: int,
         fields: Sequence[SchemaField] | None = None,
         root: str = "record",
+        description: str | None = None,
+        embed: bool = False,
+        attention: Literal["mha", "gqa", "mqa", "none"] = "mha",
+        max_length: Annotated[int, pydantic.Field(gt=0)] = 1,
+        n_outputs: Annotated[int, pydantic.Field(gt=0)] = 1,
+        n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
+        dropout: Rate | None = None,
+        p_mask: Rate | None = None,
+        p_prune: PruneRate | None = None,
     ) -> Self:
         """Build hyperparameters from schema fields."""
         normalized = [*(fields or ()), *field_args]
@@ -454,13 +463,25 @@ class Hyperparameters(Node):
 
         array = Array(
             name=root,
+            description=description,
+            embed=embed,
+            attention=attention,
             n_layers=n_layers,
             n_heads=n_heads,
-            n_outputs=1,
-            max_length=1,
+            n_outputs=n_outputs,
+            n_linear=n_linear,
+            max_length=max_length,
+            dropout=dropout,
+            p_mask=p_mask,
+            p_prune=p_prune,
             fields=root_fields,
         )
         return cls(d_model=d_model, fields=array)
+
+    @classmethod
+    def from_spec(cls, *args: Any, **kwargs: Any) -> Self:
+        """Alias for `from_schema(...)`."""
+        return cls.from_schema(*args, **kwargs)
 
     def model_post_init(self, __context):
         self.fields = _materialize_raw_leaves(self.fields)

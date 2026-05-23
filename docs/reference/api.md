@@ -10,7 +10,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `PolarsDataModule.from_model(...)` builds data loaders from a configured model.
 - `Model.predict(...)` returns configured target predictions.
 - `Model.embed(...)` returns embeddings from nodes configured with `embed=True`.
-- `Deployment` wraps a saved model for serving.
+- `Deployment` wraps a checkpoint or model instance for serving.
 
 ## Package
 
@@ -27,6 +27,7 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_full_path: false
       members:
         - from_schema
+        - from_spec
         - nodes_matching
         - select
         - set
@@ -50,6 +51,7 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_full_path: false
       members:
         - from_schema
+        - from_spec
         - target
         - embed
         - select

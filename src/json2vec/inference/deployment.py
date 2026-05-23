@@ -2,13 +2,14 @@
 
 import functools
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import litserve as ls
 import pydantic
 import torch
 from beartype import beartype
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
@@ -21,6 +22,7 @@ from json2vec.structs.tree import Address, Node
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
+ModelSource: TypeAlias = str | Path | Model
 SetOperation: TypeAlias = tuple[tuple[NodePredicate | Callable[[Node], bool], ...], dict[str, Any]]
 
 
@@ -40,7 +42,8 @@ class BatchItem(pydantic.BaseModel):
 class API(ls.LitAPI):
     def __init__(
         self,
-        checkpoint: str,
+        checkpoint: ModelSource | None = None,
+        model: Model | None = None,
         preprocessor=None,
         postprocessor=None,
         set_operations: list[SetOperation] | None = None,
@@ -48,14 +51,39 @@ class API(ls.LitAPI):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.checkpoint = checkpoint
+        if isinstance(checkpoint, Model):
+            if model is not None:
+                raise ValueError("pass either checkpoint or model, not both")
+            self._model_source: ModelSource = checkpoint
+            self.checkpoint: str | None = None
+        elif model is not None:
+            if checkpoint is not None:
+                raise ValueError("pass either checkpoint or model, not both")
+            self._model_source = model
+            self.checkpoint = None
+        else:
+            if checkpoint is None:
+                raise ValueError("checkpoint or model is required")
+            self._model_source = checkpoint
+            self.checkpoint = str(checkpoint)
+
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.set_operations = list(set_operations or [])
         self.applied_set_operations: list[dict[str, Any]] = []
 
+    @property
+    def model_source(self) -> ModelSource:
+        return self._model_source
+
+    def _load_model(self) -> Model:
+        if isinstance(self._model_source, Model):
+            return self._model_source
+
+        return Model.load(self._model_source)
+
     def setup(self, device: str) -> None:
-        self.model: Model = Model.load(self.checkpoint).to(device)
+        self.model: Model = self._load_model().to(device)
         for predicates, values in self.set_operations:
             self.model.set(*predicates, **values)
             last_mutation = self.model.hyperparameters.last_mutation
@@ -198,10 +226,10 @@ _DEFAULT_ENCODE_RESPONSE_ANNOTATIONS = dict(API.encode_response.__annotations__)
 
 
 class Deployment(BaseSettings):
-    """Serving configuration for a JSON2Vec checkpoint.
+    """Serving configuration for a JSON2Vec checkpoint or model instance.
 
     `Deployment` queues request/response schemas, optional preprocessors,
-    optional postprocessors, and `set(...)` mutations before the checkpoint is
+    optional postprocessors, and `set(...)` mutations before the model is
     loaded by LitServe workers.
     """
 
@@ -210,12 +238,14 @@ class Deployment(BaseSettings):
         case_sensitive=False,
         validate_by_name=True,
         validate_by_alias=True,
+        arbitrary_types_allowed=True,
     )
 
-    checkpoint: str = Field(
+    checkpoint: ModelSource = Field(
         default="model.ckpt",
         validation_alias=AliasChoices("JSON2VEC_CHECKPOINT", "CHECKPOINT"),
     )
+    model: Model | None = Field(default=None, exclude=True)
     max_batch_size: int = Field(
         default=128,
         ge=1,
@@ -248,7 +278,7 @@ class Deployment(BaseSettings):
 
     @field_validator("checkpoint", "accelerator", mode="before")
     @classmethod
-    def strip_required_strings(cls, value: str | None, info: ValidationInfo) -> str | None:
+    def strip_required_strings(cls, value: Any, info: ValidationInfo) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
             if stripped == "":
@@ -256,6 +286,13 @@ class Deployment(BaseSettings):
             return stripped
 
         return value
+
+    @model_validator(mode="after")
+    def check_model_source(self) -> "Deployment":
+        if self.model is not None and "checkpoint" in self.model_fields_set:
+            raise ValueError("pass either checkpoint or model, not both")
+
+        return self
 
     @beartype
     def forge(
@@ -317,7 +354,7 @@ class Deployment(BaseSettings):
         return self
 
     def serve(self) -> None:
-        """Start the LitServe server for the configured checkpoint."""
+        """Start the LitServe server for the configured checkpoint or model."""
         API.decode_request.__annotations__ = dict(_DEFAULT_DECODE_REQUEST_ANNOTATIONS)
         API.encode_response.__annotations__ = dict(_DEFAULT_ENCODE_RESPONSE_ANNOTATIONS)
 
@@ -329,7 +366,7 @@ class Deployment(BaseSettings):
 
         server: ls.LitServer = ls.LitServer(
             lit_api=API(
-                checkpoint=self.checkpoint,
+                checkpoint=self.model if self.model is not None else self.checkpoint,
                 max_batch_size=self.max_batch_size,
                 batch_timeout=self.batch_timeout,
                 preprocessor=self._preprocessor,

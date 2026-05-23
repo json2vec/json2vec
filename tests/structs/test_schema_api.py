@@ -95,6 +95,57 @@ def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
     assert merchant.max_vocab_size == 32
 
 
+def test_model_from_schema_accepts_root_array_options():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=2,
+        n_heads=4,
+        root="events",
+        description="event records",
+        embed=True,
+        attention="none",
+        max_length=3,
+        n_outputs=2,
+        n_linear=2,
+        dropout=0.2,
+        p_mask=0.1,
+    )
+    params = model.hyperparameters
+
+    assert params.fields.name == "events"
+    assert params.fields.description == "event records"
+    assert params.fields.embed is True
+    assert params.fields.attention == "none"
+    assert params.fields.max_length == 3
+    assert params.fields.n_outputs == 2
+    assert params.fields.n_linear == 2
+    assert params.fields.dropout == 0.2
+    assert params.fields.p_mask == 0.1
+    assert params.embed == ["events"]
+    assert params.shapes["events/amount"] == (3,)
+
+
+def test_from_spec_aliases_schema_constructor():
+    params = j2v.Hyperparameters.from_spec(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+        embed=True,
+    )
+    model = j2v.Model.from_spec(
+        fields=[j2v.Number("amount")],
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+        embed=True,
+    )
+
+    assert params.embed == ["record"]
+    assert model.hyperparameters.embed == ["record"]
+
+
 def test_model_selector_set_and_cached_role_views():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),

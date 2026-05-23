@@ -34,7 +34,6 @@ docs = [
     "mkdocs-material>=9.6",
     "mkdocs-jupyter>=0.26.3",
     "mkdocstrings[python]>=0.27",
-    "scikit-learn>=1.8.0",
 ]
 
 [dependency-groups]

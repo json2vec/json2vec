@@ -121,7 +121,7 @@ The package requires Python `>=3.12`.
 ## Hello World Notebook
 
 `docs/tutorials/hello-world.ipynb` trains a tiny model from the bundled
-scikit-learn Iris dataset. It demonstrates the full loop: create a Polars DataFrame, declare a
+Iris JSONL buffer. It demonstrates the full loop: create a Polars DataFrame, declare a
 schema, train a supervised category target, then call `predict` and `embed`.
 
 ```python
@@ -129,22 +129,11 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 from rich.pretty import pprint
-from sklearn.datasets import load_iris
 
 import json2vec as j2v
 
 
-iris = load_iris()
-indices = [*range(0, 12), *range(50, 62), *range(100, 112)]
-
-records = pl.DataFrame(
-    {
-        "sepal_length": iris.data[indices, 0].tolist(),
-        "petal_length": iris.data[indices, 2].tolist(),
-        "species": [iris.target_names[index] for index in iris.target[indices]],
-    }
-)
-
+records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
 model = j2v.Model.from_schema(
     j2v.Number("sepal_length"),
@@ -154,9 +143,9 @@ model = j2v.Model.from_schema(
     n_layers=1,
     n_heads=4,
     batch_size=8,
+    embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
-model.set(j2v.where("name") == "record", embed=True)
 
 datamodule = j2v.PolarsDataModule.from_model(
     model,

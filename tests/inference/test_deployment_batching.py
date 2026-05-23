@@ -3,11 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pydantic
+import pytest
 import torch
 from tensordict import TensorDict
 
 import json2vec.inference.deployment as deployment_module
-from json2vec import where
+from json2vec import Model, Number, where
 from json2vec.inference.deployment import API, Deployment, ErrorItem
 from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
@@ -205,6 +206,44 @@ def test_deployment_launcher_configures_litserve_api(monkeypatch):
     assert API.encode_response.__annotations__["return"] is Response
 
 
+def test_deployment_launcher_accepts_model_instance(monkeypatch):
+    model = Model.from_schema(
+        Number("amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=1,
+        embed=True,
+    )
+    captured = []
+
+    class FakeServer:
+        def __init__(self, *, lit_api, accelerator, workers_per_device, track_requests):
+            captured.append({"lit_api": lit_api})
+
+        def run(self, *, generate_client_file):
+            captured[-1]["generate_client_file"] = generate_client_file
+
+    monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
+
+    Deployment(model=model, accelerator="cpu").serve()
+    Deployment(checkpoint=model, accelerator="cpu").serve()
+
+    assert len(captured) == 2
+    for item in captured:
+        assert isinstance(item["lit_api"], API)
+        assert item["lit_api"].checkpoint is None
+        assert item["lit_api"].model_source is model
+        assert item["generate_client_file"] is False
+
+
+def test_deployment_rejects_explicit_checkpoint_and_model():
+    model = Model.from_schema(Number("amount"), d_model=8, n_layers=1, n_heads=2)
+
+    with pytest.raises(ValueError, match="pass either checkpoint or model"):
+        Deployment(checkpoint="model.ckpt", model=model)
+
+
 def test_deployment_api_applies_queued_set_operations(monkeypatch):
     calls = []
 
@@ -248,6 +287,22 @@ def test_deployment_api_applies_queued_set_operations(monkeypatch):
     assert calls[1] == ("set", (predicate,), {"target": False})
     assert calls[2] == ("eval",)
     assert api.applied_set_operations == [{"mode": "python", "updated": 1}]
+
+
+def test_deployment_api_setup_uses_model_instance(monkeypatch):
+    model = Model.from_schema(Number("amount"), d_model=8, n_layers=1, n_heads=2)
+    monkeypatch.setattr(
+        deployment_module.Model,
+        "load",
+        classmethod(lambda cls, checkpoint: (_ for _ in ()).throw(AssertionError("checkpoint should not load"))),
+    )
+
+    api = API(checkpoint=model)
+
+    api.setup(device="cpu")
+
+    assert api.model is model
+    assert api.checkpoint is None
 
 
 def test_deployment_launcher_binds_preprocessor_kwargs(monkeypatch):

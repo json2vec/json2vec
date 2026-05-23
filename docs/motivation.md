@@ -117,13 +117,13 @@ model = j2v.Model.from_schema(
     n_layers=2,
     n_heads=4,
     batch_size=16,
+    embed=True,
 )
 ```
 
 The same object can then be mutated explicitly:
 
 ```python
-model.set(j2v.where("name") == "record", embed=True)
 model.set(j2v.where("type") == "number", p_mask=0.10)
 model.set(j2v.where("name") == "cultivar", target=True)
 ```
