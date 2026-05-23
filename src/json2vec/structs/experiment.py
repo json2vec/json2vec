@@ -347,6 +347,12 @@ def _request_from_leaf(leaf: Leaf) -> RequestTypes:
 
 
 def _schema_query(array_path: tuple[str, ...], source: str) -> str:
+    """Infer a request-level query for a leaf source field.
+
+    The encoder prepends the outer batch selector during search. Inferred
+    queries therefore start at the processed-observation level: `[*].amount`,
+    not `[*][*].amount`.
+    """
     selectors = "".join(f".{jmespath_member(array)}[*]" for array in array_path)
     return f"[*]{selectors}.{jmespath_member(source)}"
 

@@ -33,6 +33,10 @@ EncodedBatch: TypeAlias = list[ProcessedObservation]
 EncodedInput: TypeAlias = TensorDict[Address, TensorFieldBase]
 InterprocessEncodingContext: TypeAlias = dict[Address, Any]
 
+# Encoded batches are `list[list[dict]]`: outer batch, then records emitted for
+# one processed observation. Request queries are written relative to the inner
+# list; the encoder prepends the outer batch selector before JMESPath search.
+
 
 class Dataset(pydantic.BaseModel):
     """Input dataset configuration for streaming or in-memory records.

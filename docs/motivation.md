@@ -19,6 +19,16 @@ JSON2Vec starts from a different assumption: nested business data should be
 modeled in its natural shape, and the schema should be enough to instantiate the
 model that encodes it.
 
+## When JSON2Vec Helps
+
+Use JSON2Vec when the relationships inside a record are part of the signal:
+orders with line items, users with sessions, accounts with transactions,
+devices with event histories, or entities with repeated measurements.
+
+Do not reach for it just because a table has many columns. If flattening the
+record loses no meaningful context, a simpler tabular model may be the better
+tool.
+
 ## The Problem
 
 A flat feature table is a lossy reduction of an event history.
@@ -135,7 +145,7 @@ customer-level representation.
 
 This hierarchy helps preserve behavior that would otherwise be diluted.
 
-The whitepaper calls out a practical adversarial pattern: the flushing problem.
+One practical adversarial pattern is the flushing problem.
 If a model only sees the last `N` events in one flat window, a bad actor may be
 able to generate harmless events that push important events out of view. A
 password reset, email change, and new-device login may disappear behind noise.

@@ -1,21 +1,17 @@
 # Getting Started
 
-Install the development environment:
-
-```bash
-uv sync
-```
-
-The base install is enough for the library and test suite. The documentation uses notebooks, MkDocs, and a few bundled scikit-learn datasets, so docs work uses the optional `docs` extra.
-
-Serve the notebook-backed docs locally:
+Use the docs extra when you want the rendered notebooks, API reference, and local site.
 
 ```bash
 uv sync --extra docs
 uv run --extra docs mkdocs serve
 ```
 
-The examples use direct tensorfield constructors and the minimal model API:
+Open the local URL printed by MkDocs and run the **Hello World** tutorial first. It trains one tiny model, calls `predict`, calls `embed`, and plots the schema tree. The example is intentionally small so the full workflow stays readable.
+
+## Minimal Shape
+
+For top-level records, field names are enough. JSON2Vec infers the request query from the field name.
 
 ```python
 import json2vec as j2v
@@ -27,19 +23,47 @@ model = j2v.Model.from_schema(
     d_model=16,
     n_layers=1,
     n_heads=4,
-    batch_size=2,
+    batch_size=8,
 )
 ```
 
-The schema above creates a root `record` array containing two numeric inputs and one categorical target. The target field is hidden from model input during supervised training and decoded from the remaining context.
+`target=True` withholds `species` from the input during supervised training and asks the model to decode it from the remaining fields.
 
-`target=True` is shorthand for setting the field as a supervised target. `model.set(...)` can mutate selected nodes later:
+## Nested Shape
+
+Use `Array` when a record contains repeated child objects.
 
 ```python
-model.set(j2v.where("name") == "record", embed=True)
-model.set(j2v.where("type") == "category", p_mask=0.10)
+model = j2v.Model.from_schema(
+    j2v.Array(
+        j2v.Category("name", max_vocab_size=16),
+        j2v.Number("value"),
+        name="measurements",
+        max_length=8,
+    ),
+    j2v.Category("diagnosis", target=True, max_vocab_size=2),
+    d_model=16,
+    n_layers=1,
+    n_heads=4,
+)
 ```
 
-The preprocessor is optional. If no preprocessor is passed to a dataset or deployment, records are encoded unchanged.
+This schema reads records shaped like:
 
-Most examples use explicit `query=...` values because notebook records are passed through a batch wrapper before encoding. For simple top-level records, omitting `query` lets JSON2Vec infer the source path from the field name.
+```python
+{
+    "measurements": [
+        {"name": "mean_radius", "value": 17.99},
+        {"name": "mean_texture", "value": 10.38},
+    ],
+    "diagnosis": "malignant",
+}
+```
+
+For source data whose keys do not match the schema names, add explicit `query=...` expressions. See [Schemas & Queries](guides/model-schemas.md) for the query rules and the batching details.
+
+## Next Steps
+
+- Continue with **Hello World** for the complete supervised loop.
+- Jump to **Masked Pretraining** if you want a nested self-supervised example.
+- Use [Model Mutation](guides/model-set.ipynb) when you need to change masking, targets, or embeddings after creating a schema.

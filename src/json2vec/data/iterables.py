@@ -355,6 +355,13 @@ def shuffle(pipe: Iterable[T], size: int, strata: Strata) -> Iterator[T]:
 @beartype
 @cache
 def query(expression: str) -> jmespath.parser.ParsedResult:
+    """Compile a request-level JMESPath query for an encoded batch.
+
+    Request queries are written relative to one processed observation, not the
+    whole batch. This helper prepends the outer batch selector, so a request
+    query like `[*].amount` is searched as `[*][*].amount` at encode time.
+    Do not include both leading selectors in request definitions.
+    """
     return jmespath.compile(expression=f"[*]{expression}")
 
 
@@ -424,6 +431,8 @@ def encode(
         if expression is None:
             raise ValueError(f"request '{address}' must define query")
 
+        # `request.query` is relative to a processed observation. `query(...)`
+        # adds the outer batch selector before JMESPath searches `batch`.
         result = query(expression).search(batch)
         if jmespath_resolution_monitor is not None:
             jmespath_resolution_monitor.observe(address=address, expression=expression, result=result)

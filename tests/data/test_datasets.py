@@ -74,10 +74,16 @@ def test_worker_identity_combines_rank_and_dataloader_worker(monkeypatch: pytest
     assert _worker_identity(global_rank=1, world_size=3) == (6, 12)
 
 
-def test_query():
+def test_query_prepends_outer_batch_selector():
     expr = iterables.query("[*].foo.bar")
+    assert expr.expression == "[*][*].foo.bar"
+
     result = expr.search([[{"foo": {"bar": 42}}]])
     assert result == [[42]]
+
+    over_nested = iterables.query("[*][*].foo.bar")
+    assert over_nested.expression == "[*][*][*].foo.bar"
+    assert over_nested.search([[{"foo": {"bar": 42}}]]) == [[]]
 
 
 def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

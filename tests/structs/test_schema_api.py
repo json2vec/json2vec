@@ -36,6 +36,9 @@ def test_model_from_schema_builds_record_array_and_infers_queries():
     assert job.source == "openml"
 
     amount = params.requests["record/amount"]
+    # Inferred queries are request-level expressions. The encoder prepends the
+    # outer batch selector at search time, so this intentionally is not
+    # `[*][*].amount`.
     assert amount.query == "[*].amount"
     assert amount.embed is False
 
@@ -80,6 +83,8 @@ def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
     assert "record/transactions" in params.arrays
 
     amount = params.requests["record/transactions/amount"]
+    # Nested defaults follow the same convention: one leading selector here,
+    # with the outer batch selector added by the encoder.
     assert amount.query == "[*].transactions[*].amount"
     assert params.shapes["record/transactions/amount"] == (1, 4)
 

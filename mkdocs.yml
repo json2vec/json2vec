@@ -54,17 +54,18 @@ plugins:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - Motivation: motivation.md
+  - Core Concepts:
+      - Why JSON2Vec: motivation.md
+      - Schemas & Queries: guides/model-schemas.md
+      - Model Mutation: guides/model-set.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
-      - End-to-End Training: tutorials/e2e-training.ipynb
-      - Pretraining: tutorials/pretraining.ipynb
-      - Fine-Tuning: tutorials/fine-tuning.ipynb
+      - Masked Pretraining: tutorials/pretraining.ipynb
+      - Nested Supervised Training: tutorials/nested-supervised-training.ipynb
+      - Supervised Tabular Training: tutorials/supervised-tabular-training.ipynb
       - Serving: tutorials/serving.ipynb
   - Guides:
-      - Model Schemas: guides/model-schemas.md
       - Preprocessors: guides/preprocessors.ipynb
-      - Tensorfields: guides/tensorfields.ipynb
-      - Model Mutation: guides/model-set.ipynb
+      - Tensorfield Extensions: guides/tensorfields.ipynb
   - Reference:
       - API: reference/api.md

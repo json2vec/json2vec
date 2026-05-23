@@ -2,6 +2,16 @@
 
 This page is generated from public docstrings and is meant as a lookup companion to the tutorials. Start with the notebooks when learning the workflow, then use this page to inspect constructor options, mutation methods, and extension base classes.
 
+## Common Entry Points
+
+- `Model.from_schema(...)` builds the model tree from field constructors and arrays.
+- `Array(...)` declares a repeated nested context.
+- `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
+- `PolarsDataModule.from_model(...)` builds data loaders from a configured model.
+- `Model.predict(...)` returns configured target predictions.
+- `Model.embed(...)` returns embeddings from nodes configured with `embed=True`.
+- `Deployment` wraps a saved model for serving.
+
 ## Package
 
 ::: json2vec

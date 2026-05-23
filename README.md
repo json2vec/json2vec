@@ -5,10 +5,10 @@
 <h1 align="center">JSON2Vec</h1>
 
 <p align="center">
-  <img alt="Python >= 3.12" src="https://img.shields.io/badge/python-%3E%3D3.12-3776AB?logo=python&logoColor=white">
-  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2E8B57"></a>
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&amp;logoColor=white" />
+  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2E8B57" /></a>
   <!-- discord-invite:start -->
-  <a href="https://discord.gg/DVyZUkvTFA"><img alt="Discord channel invite" src="https://img.shields.io/badge/discord-join%20the%20channel-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://discord.gg/DVyZUkvTFA"><img alt="Discord channel invite" src="https://img.shields.io/badge/discord-join%20the%20channel-5865F2?logo=discord&amp;logoColor=white" /></a>
   <!-- discord-invite:end -->
 </p>
 
@@ -134,7 +134,6 @@ from sklearn.datasets import load_iris
 import json2vec as j2v
 
 
-ROOT = "[*][*]"
 iris = load_iris()
 indices = [*range(0, 12), *range(50, 62), *range(100, 112)]
 
@@ -148,9 +147,9 @@ records = pl.DataFrame(
 
 
 model = j2v.Model.from_schema(
-    j2v.Number("sepal_length", query=f"{ROOT}.sepal_length"),
-    j2v.Number("petal_length", query=f"{ROOT}.petal_length"),
-    j2v.Category("species", query=f"{ROOT}.species", target=True, max_vocab_size=4, topk=[2]),
+    j2v.Number("sepal_length"),
+    j2v.Number("petal_length"),
+    j2v.Category("species", target=True, max_vocab_size=4, topk=[2]),
     d_model=16,
     n_layers=1,
     n_heads=4,
