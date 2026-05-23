@@ -1,0 +1,242 @@
+# Motivation
+
+JSON2Vec is motivated by a practical modeling problem: important business data
+rarely starts as one clean table.
+
+Customers have accounts, accounts have transactions, customers have login
+sessions, sessions have clickstream events, orders have line items, products have
+metadata, and every level may contain useful signal. Traditional machine
+learning workflows usually force that structure into handcrafted tabular
+features before a model ever sees it.
+
+That flattening step is often where the real cost lives. Teams spend months
+building feature pipelines, maintaining rolling aggregates, keeping training and
+serving transformations consistent, and deciding which nested relationships are
+worth preserving. The model may be flexible, but the surrounding representation
+is rigid.
+
+JSON2Vec starts from a different assumption: nested business data should be
+modeled in its natural shape, and the schema should be enough to instantiate the
+model that encodes it.
+
+## The Problem
+
+A flat feature table is a lossy reduction of an event history.
+
+Flattening can work, but it creates hard tradeoffs:
+
+- Important local context is collapsed into summaries before learning begins.
+- Long histories become fixed trailing windows or handcrafted recency features.
+- Feature code tends to diverge between offline training and online serving.
+- New use cases require new feature engineering work instead of schema changes.
+- Explainability often points to derived feature names instead of business
+  events.
+
+The problem becomes sharper in domains such as fraud, risk, recommendations,
+marketplaces, telemetry, and operational monitoring. These domains are not just
+"wide tables." They are collections of related contexts.
+
+For example, an account-takeover snapshot may include:
+
+- recent transactions,
+- monthly statement history,
+- login sessions,
+- clickstream events inside each login session,
+- device identifiers,
+- regions,
+- timestamps,
+- profile changes,
+- and one or more fraud labels.
+
+Each branch has a different natural sequence length and a different semantic
+meaning. A single flat sequence or feature vector is a poor fit for that shape.
+
+## What JSON2Vec Tries To Provide
+
+JSON2Vec is built around a few requirements from the whitepaper.
+
+First, the model architecture should be dynamic. Developers should not need to
+hand-code a new neural architecture every time the data shape changes. A schema
+should define the model tree, tensorfield requests, targets, embeddings, and
+context encoders.
+
+Second, the model should support hierarchical context encoding. A transaction
+can be modeled alongside other transactions, then summarized into an account or
+customer context. A clickstream event can be modeled inside its login session
+instead of competing with unrelated behavior in one flat window.
+
+Third, transfer learning should work with schema evolution. Teams should be able
+to pretrain a broad model, then add fields, remove fields, set targets, prune
+inputs, or expose embeddings for a narrower task.
+
+Fourth, datatypes should be extensible. Numbers, categories, sets, entities,
+timestamps, text, vectors, and custom field types need different tensorization,
+masking, decoding, loss, and output behavior. They should share a training loop
+without being forced into one crude representation.
+
+Fifth, model inspection should be part of the modeling surface. A nested model
+should expose nested embeddings, schema-level plots, field pruning operations,
+and "what if" workflows that operate on the original observation shape.
+
+Finally, querying and preprocessing should live in the same path used for
+training and inference. The same schema and optional preprocessors should feed
+offline training, batch inference, and serving.
+
+## Schema As Model Blueprint
+
+In JSON2Vec, the schema is not metadata around the model. It is the model
+blueprint.
+
+Leaf fields become typed tensorfield requests. Array nodes become context
+encoders. Targets describe values the model should learn to reconstruct or
+predict. Embedding settings describe which nodes should expose intermediate
+representations.
+
+That lets the model be created directly from the API:
+
+```python
+import json2vec as j2v
+
+model = j2v.Model.from_schema(
+    j2v.Number("alcohol"),
+    j2v.Number("malic_acid"),
+    j2v.Number("color_intensity"),
+    j2v.Number("proline"),
+    j2v.Category("cultivar", target=True, max_vocab_size=4),
+    d_model=64,
+    n_layers=2,
+    n_heads=4,
+    batch_size=16,
+)
+```
+
+The same object can then be mutated explicitly:
+
+```python
+model.set(j2v.where("name") == "record", embed=True)
+model.set(j2v.where("type") == "number", p_mask=0.10)
+model.set(j2v.where("name") == "cultivar", target=True)
+```
+
+This matters because a schema can evolve with the use case. A pretraining model,
+a fine-tuned model, an embedding model, and a serving deployment can be
+different configurations of the same underlying tree.
+
+## Hierarchical Contexts
+
+Many structured-data models can handle either tabular fields or one sequence.
+Business data often needs many contexts at once.
+
+Consider a fraud model. Transactions, statement histories, login sessions, and
+clickstream events each deserve their own local context. The model should learn
+relationships among transactions separately from relationships among clickstream
+events inside one login session. Those summaries can then flow upward into the
+customer-level representation.
+
+This hierarchy helps preserve behavior that would otherwise be diluted.
+
+The whitepaper calls out a practical adversarial pattern: the flushing problem.
+If a model only sees the last `N` events in one flat window, a bad actor may be
+able to generate harmless events that push important events out of view. A
+password reset, email change, and new-device login may disappear behind noise.
+
+Nested contexts reduce that risk. Login-session events stay local to their
+session. Transactions stay in their transaction context. Statement histories
+stay separate from clickstream behavior. Each branch can use a window size that
+matches the business meaning of that branch.
+
+## Transfer Learning With Schema Evolution
+
+Foundation models for business data are usually organization-specific. They
+depend on internal data contracts, privacy requirements, risk tolerance, and
+regulatory constraints.
+
+That does not mean every team should rebuild the same modeling framework.
+
+The useful shared layer is the modeling language: schema patterns, datatype
+plugins, training loops, evaluation harnesses, deployment paths, and diagnostics.
+An organization can pretrain a broad model on general behavior, then adapt it to
+specific use cases by changing the schema.
+
+Examples:
+
+- Add a new target for account takeover fraud.
+- Add a task-specific entity field for device history.
+- Remove or hide fields that are inappropriate for a sensitive decision.
+- Continue pretraining after an upstream data contract changes.
+- Fine-tune a model by setting target fields explicitly.
+
+The goal is not that every organization shares the same model weights. The goal
+is that teams can use a shared surface for building and evaluating structured
+data encoders.
+
+## Datatypes Are Plugins
+
+The schema defines shape, but tensorfields define field behavior.
+
+A datatype owns how raw values become tensors, how missing values are
+represented, how masking and pruning work, how field embeddings are produced,
+how predictions are decoded, and how losses are computed.
+
+That local ownership is what allows JSON2Vec to support different field
+semantics under one model traversal:
+
+- `Number` fields can use regression-style reconstruction.
+- `Category` fields can learn bounded online vocabularies.
+- `Set` fields can model unordered collections of labels.
+- `Entity` fields can represent local sameness without a global vocabulary.
+- `DateParts` fields can decompose timestamps into calendar parts.
+- `Text` and `Vector` fields can bridge into pretrained or dense
+  representations.
+
+The architecture does not need to know whether a value started as a float, a
+string category, a timestamp, or an identifier. By the time the value reaches the
+context encoder, the datatype has converted it into a common vector interface.
+
+## Explainability Through Structure
+
+JSON2Vec treats the schema tree as an inspectable object.
+
+Pruning is one example. When a field is pruned, its observed value is removed
+from model input and cached as a target. The model must reconstruct it from the
+remaining context. This turns a field into a question:
+
+> Given everything else in this observation, what does the model believe this
+> hidden field should be?
+
+That mechanism supports supervised learning, but it also supports diagnostics.
+A developer can remove a branch, hold the rest of the pipeline constant, and
+measure what changes. If removing login-session clickstream events degrades
+account-takeover performance, that branch is contributing signal.
+
+Embedding trees are another example. The model can emit vectors at selected
+addresses, not only at the root. Two customers may look similar globally but
+diverge inside login sessions. Two transactions may look different locally while
+their parent account histories remain similar. Embeddings at multiple addresses
+make that distinction observable.
+
+Finally, counterfactual analysis can be expressed in the original record shape.
+Instead of asking which derived feature moved, a practitioner can edit the raw
+observation:
+
+- remove a suspicious login event,
+- change a transaction amount,
+- move a session to a known device,
+- add a normal statement month,
+- or remove a burst of low-value activity.
+
+The same schema then re-encodes the modified observation.
+
+## One Path For Training And Serving
+
+Training-serving skew is common when offline feature pipelines and online
+inference services implement the same logic twice.
+
+JSON2Vec avoids that by keeping extraction and optional preprocessing close to
+the model. Tensorfield queries define where values come from. Preprocessors can
+normalize or reshape observations. The same model schema is used for training,
+prediction, embedding, and serving.
+
+This is the core motivation: make structured business data modeling less about
+maintaining derived feature systems and more about directly describing the data
+structure that should be learned.

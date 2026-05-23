@@ -1,3 +1,11 @@
+"""Public JSON2Vec SDK surface.
+
+The top-level package exports the constructors and helpers used by most
+applications: `Model.from_schema(...)` for model construction, tensorfield
+request constructors such as `Category` and `Number`, data modules, schema
+mutation predicates, and the `@preprocess` decorator.
+"""
+
 from json2vec.architecture.root import Model, OptimizerConfig, SchedulerConfig
 from json2vec.data.datasets import Dataset, PolarsDataModule, StreamingDataModule
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
@@ -12,7 +20,7 @@ from json2vec.structs.experiment import (
     where,
 )
 from json2vec.structs.structure import Array
-from json2vec.structs.tree import Address, Column, Leaf
+from json2vec.structs.tree import Address, Leaf
 from json2vec.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
 from json2vec.tensorfields.extensions.category import Request as Category
 from json2vec.tensorfields.extensions.dateparts import Request as DateParts
@@ -27,7 +35,6 @@ __all__ = [
     "Address",
     "Array",
     "Category",
-    "Column",
     "Component",
     "DateParts",
     "Dataset",

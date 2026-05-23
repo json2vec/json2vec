@@ -1,3 +1,5 @@
+"""Schema hyperparameters, node predicates, and mutation helpers."""
+
 from __future__ import annotations
 
 import functools
@@ -31,6 +33,8 @@ class SelectionCacheEntry(pydantic.BaseModel):
 
 
 class NodeSelection(pydantic.BaseModel):
+    """Collection of schema nodes selected by predicates."""
+
     model_config = pydantic.ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     owner: Any = pydantic.Field(exclude=True)
@@ -50,6 +54,7 @@ class NodeSelection(pydantic.BaseModel):
         validate: bool = True,
         **values: Any,
     ) -> "Hyperparameters":
+        """Mutate every node in this selection."""
         return self.owner._set_nodes(
             self.nodes,
             strict=strict,
@@ -60,6 +65,8 @@ class NodeSelection(pydantic.BaseModel):
 
 
 class MutationChange(pydantic.BaseModel):
+    """Single field change recorded by a schema mutation."""
+
     model_config = pydantic.ConfigDict(frozen=True)
 
     node: str
@@ -70,6 +77,8 @@ class MutationChange(pydantic.BaseModel):
 
 
 class MutationResult(pydantic.BaseModel):
+    """Summary of a completed schema mutation."""
+
     model_config = pydantic.ConfigDict(frozen=True)
 
     operation_id: str
@@ -82,6 +91,8 @@ class MutationResult(pydantic.BaseModel):
 
 
 class NodePredicate(pydantic.BaseModel):
+    """Composable predicate used to select schema nodes."""
+
     model_config = pydantic.ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     func: Callable[[Node], bool]
@@ -124,6 +135,7 @@ def _cache_value(value: Any) -> Any:
 
 
 def predicate(key: str | tuple[Any, ...], func: Callable[[Node], bool]) -> NodePredicate:
+    """Create a cacheable node predicate from a callable."""
     cache_key = key if isinstance(key, tuple) else ("callable", key)
     return NodePredicate(func=func, key=cache_key)
 
@@ -140,6 +152,8 @@ _QUERYABLE_BUILTINS = frozenset(
 
 
 class NodeAttribute(pydantic.BaseModel):
+    """Queryable schema node attribute returned by `where(...)`."""
+
     model_config = pydantic.ConfigDict(frozen=True)
 
     name: str = pydantic.Field(
@@ -225,6 +239,14 @@ class NodeAttribute(pydantic.BaseModel):
 
 
 def where(name: str) -> NodeAttribute:
+    """Start a schema predicate against a node attribute.
+
+    Example:
+        ```python
+        model.set(where("type") == "number", p_mask=0.10)
+        model.set(where("name") == "label", target=True)
+        ```
+    """
     return NodeAttribute(name=name)
 
 
@@ -262,6 +284,10 @@ def _normalize_set_values(values: Mapping[str, Any]) -> dict[str, Any]:
         if normalized.get("p_prune") not in (None, 1.0):
             raise ValueError("target=True is shorthand for p_prune=1.0")
         normalized["p_prune"] = 1.0
+    else:
+        if normalized.get("p_prune") is not None:
+            raise ValueError("target=False is shorthand for p_prune=None")
+        normalized["p_prune"] = None
 
     return normalized
 
@@ -373,6 +399,8 @@ def _materialize_raw_leaves(array: Array) -> Array:
 
 
 class Hyperparameters(Node):
+    """Serializable schema and training metadata used to build a `Model`."""
+
     model_config = pydantic.ConfigDict(extra="forbid")
 
     name: Literal["hyperparameters"] = pydantic.Field(default="hyperparameters", exclude=True)
@@ -399,6 +427,7 @@ class Hyperparameters(Node):
         fields: Sequence[SchemaField] | None = None,
         root: str = "record",
     ) -> Self:
+        """Build hyperparameters from schema fields."""
         normalized = [*(fields or ()), *field_args]
         if not normalized:
             raise ValueError("from_schema requires at least one field")
@@ -559,6 +588,11 @@ class Hyperparameters(Node):
         validate: bool = True,
         **values: Any,
     ) -> Self:
+        """Mutate matching schema nodes.
+
+        `target=True` is normalized to `p_prune=1.0`; `target=False` clears the
+        target prune rate.
+        """
         nodes = tuple(self.nodes(*predicates, include_root=include_root))
         return self._set_nodes(
             nodes,

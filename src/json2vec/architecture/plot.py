@@ -4,7 +4,7 @@ import io
 from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import rich.box
@@ -12,7 +12,9 @@ import torch
 from rich.console import Console, Group, RenderableType
 from rich.padding import Padding
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 from json2vec.structs.tree import Address, Leaf, Node
 from json2vec.tensorfields.base import TENSORFIELDS
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
     from json2vec.structs.experiment import Hyperparameters
     from json2vec.tensorfields.shared.counter import Counter
 
+PlotMode = Literal["schema", "state", "flow", "debug"]
 PLOT_WIDTH = 120
 
 
@@ -42,7 +45,306 @@ def plot(
     address: Address | str | None = None,
     detail: bool = False,
     out: str | Path | None = None,
-) -> str:
+    mode: PlotMode = "schema",
+) -> None:
+    """Print a Rich model visualization and optionally write it as text."""
+    renderable = build_plot(module=module, address=address, detail=detail, mode=mode)
+    Console(width=PLOT_WIDTH, force_jupyter=False).print(renderable)
+
+    if out is None:
+        return
+
+    recorder = Console(file=io.StringIO(), record=True, width=PLOT_WIDTH, force_jupyter=False)
+    recorder.print(renderable)
+    path = Path(out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(recorder.export_text(clear=False), encoding="utf-8")
+
+
+def build_plot(
+    module: "Model",
+    address: Address | str | None,
+    detail: bool,
+    mode: PlotMode,
+) -> RenderableType:
+    match mode:
+        case "schema":
+            return render_schema_plot(module=module, address=address, detail=detail, state_focus=False)
+        case "state":
+            return render_schema_plot(module=module, address=address, detail=True, state_focus=True)
+        case "flow":
+            return render_flow_plot(module=module, address=address)
+        case "debug":
+            return render_debug_plot(module=module, address=address, detail=detail)
+        case _:
+            raise ValueError("plot mode must be one of: schema, state, flow, debug")
+
+
+def render_schema_plot(
+    module: "Model",
+    address: Address | str | None,
+    detail: bool,
+    state_focus: bool,
+) -> RenderableType:
+    hyperparameters = module.hyperparameters
+    root = hyperparameters.fields if address is None else resolve_node(hyperparameters=hyperparameters, address=address)
+    title = "Model" if address is None else str(root.address)
+    subtitle = "State diagnostics" if state_focus else "Schema map"
+
+    tree = Tree(render_node_label(module=module, node=root, state_focus=state_focus), guide_style="dim")
+    append_schema_children(tree=tree, module=module, node=root, detail=detail or state_focus, state_focus=state_focus)
+
+    return Group(
+        render_header(module=module, title=title, subtitle=subtitle),
+        Text("Schema", style="bold dim"),
+        tree,
+    )
+
+
+def render_flow_plot(module: "Model", address: Address | str | None) -> RenderableType:
+    hyperparameters = module.hyperparameters
+    root = hyperparameters.fields if address is None else resolve_node(hyperparameters=hyperparameters, address=address)
+    fields = [node for node in root.descendants if isinstance(node, Leaf)]
+    target_count = sum(1 for node in fields if node.address in hyperparameters.target)
+    embed_count = sum(1 for node in [root, *root.descendants] if node.address in hyperparameters.embed)
+
+    table = Table(box=rich.box.ROUNDED, expand=True)
+    table.add_column("Step", style="bold")
+    table.add_column("What Happens")
+    table.add_column("Count", justify="right")
+    table.add_row("JSON", "Raw nested records enter with the shape described by the schema.", "")
+    table.add_row("Tensorfields", "Typed requests read values with JMESPath queries.", str(len(fields)))
+    table.add_row("Encoders", "Array nodes pool child embeddings into parent contexts.", str(len(hyperparameters.arrays)))
+    table.add_row("Targets", "Target fields produce supervised predictions.", str(target_count))
+    table.add_row("Embeddings", "Selected nodes expose reusable embeddings.", str(embed_count))
+
+    return Group(
+        render_header(module=module, title="Model Flow", subtitle=f"Pipeline from {root.address or root.name}"),
+        table,
+    )
+
+
+def render_header(module: "Model", title: str, subtitle: str) -> Panel:
+    hyperparameters = module.hyperparameters
+    metrics = Table.grid(padding=(0, 2))
+    metrics.add_column(style="dim", justify="right")
+    metrics.add_column(style="bold")
+    for key, value in {
+        "d_model": hyperparameters.d_model,
+        "params": parameter_count(module),
+        "arrays": len(hyperparameters.arrays),
+        "fields": len(hyperparameters.requests),
+        "targets": len(hyperparameters.target),
+        "embeds": len(hyperparameters.embed),
+        "batch": module.batch_size,
+        "heads": hyperparameters.fields.n_heads,
+    }.items():
+        metrics.add_row(key, format_compact_number(value))
+
+    layout = Table.grid(expand=True)
+    layout.add_column(ratio=3)
+    layout.add_column(ratio=2)
+    layout.add_row(
+        Group(
+            Text("JSON2Vec", style="dim bold"),
+            Text(title, style="bold"),
+            Text(subtitle, style="dim"),
+        ),
+        metrics,
+    )
+    return Panel(layout, box=rich.box.ROUNDED, padding=(1, 2))
+
+
+def append_schema_children(
+    tree: Tree,
+    module: "Model",
+    node: Node,
+    detail: bool,
+    state_focus: bool,
+) -> None:
+    if detail:
+        append_detail_sections(tree=tree, module=module, node=node)
+
+    for child in getattr(node, "children", ()):
+        child_tree = tree.add(render_node_label(module=module, node=child, state_focus=state_focus))
+        append_schema_children(tree=child_tree, module=module, node=child, detail=detail, state_focus=state_focus)
+
+
+def render_node_label(module: "Model", node: Node, state_focus: bool) -> RenderableType:
+    heading = Text()
+    heading.append(node.name, style="bold")
+    heading.append(" ")
+    heading.append(f"[{node.type}]", style=type_style(node.type))
+
+    for role in node_roles(module=module, node=node):
+        heading.append(" ")
+        heading.append(role, style=role_style(role))
+
+    if node.address in module.nodes:
+        heading.append(" ")
+        heading.append(f"{format_compact_number(parameter_count(module.nodes[node.address]))} params", style="dim")
+
+    address = str(node.address) or node.name
+    meta = render_metadata_line(node=node, state_focus=state_focus)
+    lines: list[RenderableType] = [heading, Text(address, style="dim")]
+    if meta.plain:
+        lines.append(meta)
+
+    return Group(*lines)
+
+
+def render_metadata_line(node: Node, state_focus: bool) -> Text:
+    values = node.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
+    keys = node_metadata_keys(node=node, values=values, state_focus=state_focus)
+    text = Text(style="dim")
+    first = True
+    for key in keys:
+        if key not in values or should_hide_metadata(key, values[key]):
+            continue
+
+        if not first:
+            text.append("  ")
+        text.append(f"{key}=")
+        text.append(format_metadata_value(values[key]), style="cyan")
+        first = False
+
+    return text
+
+
+def append_detail_sections(tree: Tree, module: "Model", node: Node) -> None:
+    sections = collect_detail_sections(module=module, node=node)
+    description = getattr(node, "description", None)
+    if description:
+        sections = {"description": description} | sections
+
+    if not sections:
+        return
+
+    details = tree.add(Text("details", style="dim bold"))
+    for title, values in sections.items():
+        details.add(
+            Group(
+                Text(title, style="dim bold"),
+                Text(format_detail_value(values), style="dim"),
+            )
+        )
+
+
+def node_roles(module: "Model", node: Node) -> list[str]:
+    roles: list[str] = []
+    if node.address in module.hyperparameters.target:
+        roles.append("target")
+    if node.address in module.hyperparameters.embed:
+        roles.append("embed")
+    return roles
+
+
+def type_style(node_type: str) -> str:
+    return {
+        "array": "blue",
+        "category": "magenta",
+        "number": "green",
+        "set": "cyan",
+        "entity": "yellow",
+        "text": "bright_blue",
+        "vector": "bright_magenta",
+    }.get(node_type, "white")
+
+
+def role_style(role: str) -> str:
+    return {
+        "target": "bold yellow",
+        "embed": "bold green",
+    }.get(role, "bold")
+
+
+def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) -> list[str]:
+    if state_focus:
+        preferred = ["query", "max_vocab_size", "topk", "p_mask", "p_prune", "weight"]
+    elif isinstance(node, Leaf):
+        preferred = ["query", "pooling", "max_vocab_size", "topk", "objective", "weight"]
+    else:
+        preferred = ["attention", "max_length", "n_outputs", "n_layers", "n_heads"]
+
+    remaining = [key for key in values if key not in preferred]
+    return preferred + remaining
+
+
+def should_hide_metadata(key: str, value: Any) -> bool:
+    return (key == "embed" and value is False) or key == "description"
+
+
+def format_metadata_value(value: Any) -> str:
+    rendered = format_value(value)
+    return truncate(rendered.replace("\n", " "), width=82)
+
+
+def format_detail_value(value: Any) -> str:
+    summarized = summarize_value(normalize_value(value))
+    return "\n".join(format_detail_lines(summarized))
+
+
+def format_detail_lines(value: Any, indent: int = 0) -> list[str]:
+    prefix = " " * indent
+
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, dict):
+                lines.append(f"{prefix}{key}:")
+                lines.extend(format_detail_lines(item, indent=indent + 2))
+                continue
+
+            lines.append(f"{prefix}{key}: {format_detail_inline(item)}")
+        return lines
+
+    if isinstance(value, str) and "\n" in value:
+        return [prefix + truncate(line, width=100) for line in value.splitlines()]
+
+    return [prefix + format_detail_inline(value)]
+
+
+def format_detail_inline(value: Any) -> str:
+    if isinstance(value, str):
+        return truncate(value, width=100)
+
+    if isinstance(value, list):
+        return truncate(format_inline_sequence(value) or pformat(value, compact=True, sort_dicts=False, width=88), width=100)
+
+    return truncate(pformat(value, compact=True, sort_dicts=False, width=88), width=100)
+
+
+def summarize_value(value: Any, max_items: int = 8) -> Any:
+    if isinstance(value, str):
+        return truncate_multiline(value, width=100)
+
+    if isinstance(value, dict):
+        return {key: summarize_value(item, max_items=max_items) for key, item in value.items()}
+
+    if isinstance(value, list):
+        if len(value) <= max_items:
+            return [summarize_value(item, max_items=max_items) for item in value]
+        return [summarize_value(item, max_items=max_items) for item in value[:max_items]] + [f"... {len(value) - max_items} more"]
+
+    return value
+
+
+def collect_detail_sections(module: "Model", node: Node) -> dict[str, Any]:
+    if not isinstance(node, Leaf):
+        return {}
+
+    pane = Pane(title=node.name)
+    extension = TENSORFIELDS[node.type]
+    extension.plot(module=module, address=node.address, branch=pane, detail=True)
+    add_counter_details(pane=pane, module=module, address=node.address)
+    return pane.sections
+
+
+def render_debug_plot(
+    module: "Model",
+    address: Address | str | None = None,
+    detail: bool = False,
+) -> RenderableType:
     hyperparameters = module.hyperparameters
 
     def build(node: Node) -> Pane:
@@ -80,22 +382,26 @@ def plot(
     else:
         pane = build(resolve_node(hyperparameters=hyperparameters, address=address))
 
-    renderable = render_pane(pane)
-    recorder = Console(file=io.StringIO(), record=True, width=PLOT_WIDTH)
-    recorder.print(renderable)
-    rendered = recorder.export_html(clear=False)
-
-    if out is not None:
-        path = Path(out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(rendered, encoding="utf-8")
-
-    return rendered
+    return render_pane(pane)
 
 
 def parameter_counts(module: torch.nn.Module) -> dict[str, int]:
+    return {"parameters": parameter_count(module)}
+
+
+def parameter_count(module: torch.nn.Module) -> int:
     parameters = list(module.parameters())
-    return {"parameters": sum(parameter.numel() for parameter in parameters)}
+    return sum(parameter.numel() for parameter in parameters)
+
+
+def format_compact_number(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if not isinstance(value, int):
+        return str(value)
+
+    return f"{value:,}"
 
 
 def resolve_node(hyperparameters: "Hyperparameters", address: Address | str) -> Node:
@@ -215,6 +521,16 @@ def normalize_value(value: Any) -> Any:
         return normalize_value(value.value)
 
     return value
+
+
+def truncate(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    return value[: max(0, width - 1)] + "..."
+
+
+def truncate_multiline(value: str, width: int) -> str:
+    return "\n".join(truncate(line, width=width) for line in value.splitlines())
 
 
 def add_counter_details(

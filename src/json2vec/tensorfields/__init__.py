@@ -1,3 +1,5 @@
+"""Tensorfield plugin extension API and built-in extension imports."""
+
 from __future__ import annotations
 
 from json2vec.tensorfields import base as base

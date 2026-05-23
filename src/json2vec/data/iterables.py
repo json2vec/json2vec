@@ -1,3 +1,5 @@
+"""Composable iterable stages for fetching, preprocessing, and encoding data."""
+
 from __future__ import annotations
 
 import inspect

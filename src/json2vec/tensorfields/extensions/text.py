@@ -138,6 +138,8 @@ def coerce_text(value: Any, *, address: Address) -> str:
 
 @text.register
 class Request(RequestBase):
+    """Text tensorfield request encoded by a frozen Hugging Face model."""
+
     type: Literal["text"] = "text"
     model_name: str
     max_length: Annotated[int, pydantic.Field(gt=0, default=128)] = 128

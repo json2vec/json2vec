@@ -1,3 +1,5 @@
+"""Schema tree node primitives used by models and tensorfields."""
+
 import functools
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
@@ -12,6 +14,8 @@ PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
 
 
 class Address(str):
+    """Slash-delimited stable path to a schema node."""
+
     def __new__(cls, *parts: str) -> "Address":
         if len(parts) == 0:
             value = ""
@@ -33,6 +37,8 @@ class Address(str):
 
 
 class Node(NodeMixin, pydantic.BaseModel):
+    """Base schema tree node shared by arrays and tensorfield requests."""
+
     model_config = pydantic.ConfigDict(extra="allow")
 
     name: str
@@ -116,6 +122,12 @@ class Node(NodeMixin, pydantic.BaseModel):
 
 
 class Leaf(Node):
+    """Base tensorfield request node.
+
+    Concrete tensorfield constructors such as `Number` and `Category` inherit
+    from this class through their registered request models.
+    """
+
     embed: bool = False
     name: str
     type: str
@@ -189,33 +201,3 @@ class Leaf(Node):
                 out.append(node.max_length)
 
         return tuple(out)
-
-
-TensorFieldSpec: TypeAlias = str | type[Leaf]
-
-def Column(name: str, field: TensorFieldSpec, /, **data: Any) -> Leaf:
-
-    values = dict(data)
-    kwargs = values.pop("kwargs", None)
-    if kwargs is not None:
-        if not isinstance(kwargs, Mapping):
-            raise TypeError("kwargs must be a mapping")
-        for key, value in kwargs.items():
-            values.setdefault(key, value)
-
-    target = values.pop("target", None)
-    if target is not None:
-        if not isinstance(target, bool):
-            raise ValueError("target must be a boolean")
-        if target:
-            if values.get("p_prune") not in (None, 1.0):
-                raise ValueError("target=True is shorthand for p_prune=1.0")
-            values["p_prune"] = 1.0
-
-    if isinstance(field, str):
-        return Leaf.model_construct(name=name, type=field, **values)
-
-    if isinstance(field, type) and issubclass(field, Leaf):
-        return field.model_construct(name=name, **values)
-
-    raise TypeError("Column field must be a tensor field name or Leaf subclass")

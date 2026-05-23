@@ -53,6 +53,8 @@ def _local_reindex(data: np.ndarray, states: np.ndarray) -> np.ndarray:
 
 @entity.register
 class Request(RequestBase):
+    """Per-observation entity tensorfield request for local identity matching."""
+
     type: Literal["entity"] = "entity"
     topk: list[int] | None = None
 

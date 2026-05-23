@@ -2,7 +2,7 @@ import pytest
 
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.structure import Array
-from json2vec.structs.tree import Column
+from json2vec.tensorfields.extensions.category import Request as Category
 
 
 def _payload() -> dict:
@@ -38,7 +38,7 @@ def _payload() -> dict:
 
 def test_array_accepts_positional_children():
     array = Array(
-        Column("category_leaf", "category", query="[*].code"),
+        Category("category_leaf", query="[*].code"),
         name="branch",
     )
 
@@ -48,7 +48,7 @@ def test_array_accepts_positional_children():
 def test_array_rejects_positional_and_keyword_children():
     with pytest.raises(TypeError, match="both positionally and by keyword"):
         Array(
-            Column("category_leaf", "category", query="[*].code"),
+            Category("category_leaf", query="[*].code"),
             name="branch",
             fields=[],
         )
@@ -74,7 +74,7 @@ def test_hyperparameters_converts_leaf_instances_nested_in_arrays():
                     "name": "branch",
                     "type": "array",
                     "fields": [
-                        Column("category_leaf", "category", query="[*].code"),
+                        Category("category_leaf", query="[*].code"),
                     ],
                 }
             ],

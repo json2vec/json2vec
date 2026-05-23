@@ -40,7 +40,7 @@
 #align(center)[
   #text(weight: "bold")[Grantham Taylor] \
   #link("mailto:granthamtaylor@icloud.com")[granthamtaylor\@icloud.com] \
-  #link("https://github.com/granthamtaylor/json2vec")[github.com/granthamtaylor/json2vec]
+  #link("https://github.com/json2vec/json2vec")[github.com/json2vec/json2vec]
 ]
 
 #v(12pt)

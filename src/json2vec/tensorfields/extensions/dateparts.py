@@ -127,6 +127,8 @@ dateparts: Plugin = Plugin(name="dateparts")
 
 @dateparts.register
 class Request(RequestBase):
+    """Date/time tensorfield request that extracts configured calendar parts."""
+
     type: Literal["dateparts"] = "dateparts"
     dateparts: list[DatePart]
     pattern: Annotated[str | None, pydantic.Field(default=None)] = None

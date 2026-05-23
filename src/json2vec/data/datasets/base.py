@@ -1,3 +1,5 @@
+"""Shared dataset configuration models and type aliases."""
+
 from __future__ import annotations
 
 import hashlib
@@ -33,6 +35,13 @@ InterprocessEncodingContext: TypeAlias = dict[Address, Any]
 
 
 class Dataset(pydantic.BaseModel):
+    """Input dataset configuration for streaming or in-memory records.
+
+    A dataset may point at a file root for streaming reads, or it may only carry
+    an optional preprocessor for in-memory data modules. When `preprocessor` is
+    `None`, observations pass through unchanged.
+    """
+
     model_config = pydantic.ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     root: str | None = None

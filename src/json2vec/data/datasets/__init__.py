@@ -1,3 +1,5 @@
+"""Dataset and Lightning data module public exports."""
+
 from __future__ import annotations
 
 from json2vec.data.datasets.base import (

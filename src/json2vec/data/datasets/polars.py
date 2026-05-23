@@ -1,3 +1,5 @@
+"""Polars-backed iterable datasets and Lightning data modules."""
+
 from __future__ import annotations
 
 import os
@@ -162,6 +164,12 @@ def polars_dataloader(
 
 
 class PolarsDataModule(lit.LightningDataModule):
+    """Lightning data module for in-memory Polars DataFrames.
+
+    Use `PolarsDataModule.from_model(...)` for the common path where batch size
+    and encoding context come from a `Model`.
+    """
+
     @beartype
     def __init__(
         self,
@@ -215,6 +223,23 @@ class PolarsDataModule(lit.LightningDataModule):
         dataframe: pl.DataFrame | DataFrameMap | None = None,
         **kwargs: Any,
     ) -> "PolarsDataModule":
+        """Construct a Polars data module from a model and DataFrame splits.
+
+        Args:
+            model: Source model that provides hyperparameters, batch size, and
+                interprocess encoding context.
+            train: Optional training split.
+            validate: Optional validation split.
+            test: Optional test split.
+            predict: Optional prediction split.
+            dataset: Optional dataset configuration. If omitted, a dataset with
+                no preprocessor is used.
+            preprocessor: Optional registered preprocessor name, callable, or
+                `Preprocessor` object.
+            dataframe: Optional mapping or single frame used instead of named
+                split arguments.
+            **kwargs: Additional constructor options.
+        """
         if dataframe is not None and any(frame is not None for frame in (train, validate, test, predict)):
             raise ValueError("pass either dataframe or named splits, not both")
 

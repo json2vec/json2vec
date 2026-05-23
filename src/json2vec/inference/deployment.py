@@ -1,4 +1,7 @@
+"""LitServe deployment wrappers for JSON2Vec checkpoints."""
+
 import functools
+from collections.abc import Callable
 from typing import Any, Literal, TypeAlias
 
 import litserve as ls
@@ -12,11 +15,13 @@ from tensordict import TensorDict
 from json2vec.architecture.root import Model
 from json2vec.data.iterables import JMESPathResolutionMonitor, encode
 from json2vec.structs.enums import Strata
+from json2vec.structs.experiment import NodePredicate
 from json2vec.structs.packages import Prediction
-from json2vec.structs.tree import Address
+from json2vec.structs.tree import Address, Node
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
+SetOperation: TypeAlias = tuple[tuple[NodePredicate | Callable[[Node], bool], ...], dict[str, Any]]
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -38,6 +43,7 @@ class API(ls.LitAPI):
         checkpoint: str,
         preprocessor=None,
         postprocessor=None,
+        set_operations: list[SetOperation] | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -45,9 +51,17 @@ class API(ls.LitAPI):
         self.checkpoint = checkpoint
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
+        self.set_operations = list(set_operations or [])
+        self.applied_set_operations: list[dict[str, Any]] = []
 
     def setup(self, device: str) -> None:
         self.model: Model = Model.load(self.checkpoint).to(device)
+        for predicates, values in self.set_operations:
+            self.model.set(*predicates, **values)
+            last_mutation = self.model.hyperparameters.last_mutation
+            if last_mutation is not None:
+                self.applied_set_operations.append(last_mutation.model_dump(mode="python"))
+
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
         self.jmespath_resolution_monitor = JMESPathResolutionMonitor()
@@ -184,6 +198,13 @@ _DEFAULT_ENCODE_RESPONSE_ANNOTATIONS = dict(API.encode_response.__annotations__)
 
 
 class Deployment(BaseSettings):
+    """Serving configuration for a JSON2Vec checkpoint.
+
+    `Deployment` queues request/response schemas, optional preprocessors,
+    optional postprocessors, and `set(...)` mutations before the checkpoint is
+    loaded by LitServe workers.
+    """
+
     model_config = SettingsConfigDict(
         extra="ignore",
         case_sensitive=False,
@@ -223,6 +244,7 @@ class Deployment(BaseSettings):
     _response_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
     _preprocessor = pydantic.PrivateAttr(default=None)
     _postprocessor = pydantic.PrivateAttr(default=None)
+    _set_operations: list[SetOperation] = pydantic.PrivateAttr(default_factory=list)
 
     @field_validator("checkpoint", "accelerator", mode="before")
     @classmethod
@@ -241,6 +263,7 @@ class Deployment(BaseSettings):
         request: type[pydantic.BaseModel] | None = None,
         response: type[pydantic.BaseModel] | None = None,
     ) -> "Deployment":
+        """Attach optional Pydantic request and response signatures."""
         self._request_signature = request
         self._response_signature = response
 
@@ -248,17 +271,53 @@ class Deployment(BaseSettings):
 
     @beartype
     def preprocess(self, preprocessor, **kwargs: Any) -> "Deployment":
+        """Attach an optional request preprocessor.
+
+        If this method is not called, request objects are encoded unchanged.
+        """
         self._preprocessor = functools.partial(preprocessor, **kwargs) if len(kwargs) > 0 else preprocessor
 
         return self
 
     @beartype
     def postprocess(self, postprocessor, **kwargs: Any) -> "Deployment":
+        """Attach an optional response postprocessor."""
         self._postprocessor = functools.partial(postprocessor, **kwargs) if len(kwargs) > 0 else postprocessor
 
         return self
 
+    @beartype
+    def set(
+        self,
+        *predicates: NodePredicate | Callable[[Node], bool],
+        strict: bool = True,
+        allow_extra: bool = False,
+        include_root: bool = True,
+        validate: bool = True,
+        **values: Any,
+    ) -> "Deployment":
+        """Queue a model schema mutation to apply during server startup.
+
+        This mirrors `Model.set(...)` and is useful for serving-time changes
+        such as `target=False`.
+        """
+        self._set_operations.append(
+            (
+                tuple(predicates),
+                {
+                    "strict": strict,
+                    "allow_extra": allow_extra,
+                    "include_root": include_root,
+                    "validate": validate,
+                    **values,
+                },
+            )
+        )
+
+        return self
+
     def serve(self) -> None:
+        """Start the LitServe server for the configured checkpoint."""
         API.decode_request.__annotations__ = dict(_DEFAULT_DECODE_REQUEST_ANNOTATIONS)
         API.encode_response.__annotations__ = dict(_DEFAULT_ENCODE_RESPONSE_ANNOTATIONS)
 
@@ -275,6 +334,7 @@ class Deployment(BaseSettings):
                 batch_timeout=self.batch_timeout,
                 preprocessor=self._preprocessor,
                 postprocessor=self._postprocessor,
+                set_operations=self._set_operations,
             ),
             accelerator=self.accelerator,
             workers_per_device=self.workers_per_device,

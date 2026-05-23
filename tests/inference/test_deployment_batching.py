@@ -7,6 +7,7 @@ import torch
 from tensordict import TensorDict
 
 import json2vec.inference.deployment as deployment_module
+from json2vec import where
 from json2vec.inference.deployment import API, Deployment, ErrorItem
 from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
@@ -190,17 +191,63 @@ def test_deployment_launcher_configures_litserve_api(monkeypatch):
         workers_per_device=2,
         accelerator="cpu",
         track_requests=True,
-    ).forge(request=Request, response=Response).serve()
+    ).set(where("name") == "label", target=False).forge(request=Request, response=Response).serve()
 
     assert isinstance(captured["lit_api"], API)
     assert captured["lit_api"].checkpoint == "unused"
     assert captured["lit_api"].preprocessor is None
+    assert len(captured["lit_api"].set_operations) == 1
     assert captured["accelerator"] == "cpu"
     assert captured["workers_per_device"] == 2
     assert captured["track_requests"] is True
     assert captured["generate_client_file"] is False
     assert API.decode_request.__annotations__["request"] is Request
     assert API.encode_response.__annotations__["return"] is Response
+
+
+def test_deployment_api_applies_queued_set_operations(monkeypatch):
+    calls = []
+
+    class Mutation:
+        def model_dump(self, mode):
+            return {"mode": mode, "updated": 1}
+
+    class Hyperparameters:
+        last_mutation = Mutation()
+
+    class FakeModel:
+        hyperparameters = Hyperparameters()
+        interprocess_encoding_context = {}
+
+        def to(self, device):
+            calls.append(("to", device))
+            return self
+
+        def set(self, *predicates, **values):
+            calls.append(("set", predicates, values))
+            return self
+
+        def eval(self):
+            calls.append(("eval",))
+            return self
+
+    fake = FakeModel()
+    monkeypatch.setattr(deployment_module.Model, "load", classmethod(lambda cls, checkpoint: fake))
+
+    predicate = where("name") == "label"
+    api = API(
+        checkpoint="unused",
+        set_operations=[
+            ((predicate,), {"target": False}),
+        ],
+    )
+
+    api.setup(device="cpu")
+
+    assert calls[0] == ("to", "cpu")
+    assert calls[1] == ("set", (predicate,), {"target": False})
+    assert calls[2] == ("eval",)
+    assert api.applied_set_operations == [{"mode": "python", "updated": 1}]
 
 
 def test_deployment_launcher_binds_preprocessor_kwargs(monkeypatch):

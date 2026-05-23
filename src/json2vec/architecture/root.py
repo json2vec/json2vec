@@ -1,3 +1,5 @@
+"""Lightning model assembly and runtime helpers for JSON2Vec schemas."""
+
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
@@ -91,6 +93,28 @@ def _compatible_state_value(current: Any, previous: Any) -> bool:
 
 
 class Model(lit.LightningModule):
+    """Neural model generated from a JSON2Vec schema tree.
+
+    `Model` owns the schema hyperparameters, tensorfield embedders, array
+    encoders, decoders, and convenience methods for prediction, embedding,
+    checkpointing, plotting, and schema mutation.
+
+    Example:
+        ```python
+        import json2vec as j2v
+
+        model = j2v.Model.from_schema(
+            j2v.Category("segment", max_vocab_size=32),
+            j2v.Category("label", target=True, max_vocab_size=4),
+            d_model=16,
+            n_layers=1,
+            n_heads=4,
+            batch_size=8,
+        )
+        model.set(j2v.where("name") == "record", embed=True)
+        ```
+    """
+
     @classmethod
     def from_schema(
         cls,
@@ -104,6 +128,24 @@ class Model(lit.LightningModule):
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
     ) -> Self:
+        """Build a model directly from schema fields.
+
+        Args:
+            *field_args: Field constructors such as `Category`, `Number`, or
+                nested `Array` nodes.
+            d_model: Shared model width.
+            n_layers: Number of encoder layers on generated array nodes.
+            n_heads: Attention heads used by generated nodes.
+            batch_size: Batch size used by data modules, examples, and mocked
+                Lightning input arrays.
+            fields: Optional sequence form of `field_args`.
+            root: Root array name. Defaults to `record`.
+            optimizer: Optimizer instance or factory used by Lightning training.
+            scheduler: Optional scheduler config or factory.
+
+        Returns:
+            A compiled `Model` with modules built for the schema.
+        """
         hyperparameters = Hyperparameters.from_schema(
             *field_args,
             d_model=d_model,
@@ -180,6 +222,14 @@ class Model(lit.LightningModule):
         include_root: bool = True,
         use_cache: bool = True,
     ) -> Iterator[Node]:
+        """Yield schema nodes that satisfy every predicate.
+
+        Args:
+            *predicates: `where(...)` predicates or callables that accept a
+                schema node.
+            include_root: Include the root array node in the search.
+            use_cache: Reuse cached predicate selections when possible.
+        """
         yield from self.hyperparameters.nodes(
             *predicates,
             include_root=include_root,
@@ -192,6 +242,11 @@ class Model(lit.LightningModule):
         include_root: bool = True,
         use_cache: bool = True,
     ) -> NodeSelection:
+        """Return a reusable selection of schema nodes.
+
+        Selections can be inspected or mutated with
+        `model.select(...).set(...)`.
+        """
         selection = self.hyperparameters.select(
             *predicates,
             include_root=include_root,
@@ -208,6 +263,23 @@ class Model(lit.LightningModule):
         validate: bool = True,
         **values: Any,
     ) -> Self:
+        """Mutate selected schema nodes and rebuild compatible modules.
+
+        `target=True` is shorthand for `p_prune=1.0`; `target=False` clears
+        target behavior by setting `p_prune=None`.
+
+        Args:
+            *predicates: Predicates used to select nodes.
+            strict: Raise when a selected node cannot accept one of `values`.
+            allow_extra: Permit updates to extra metadata fields on models that
+                allow unknown fields.
+            include_root: Include the root node in predicate matching.
+            validate: Validate each node after applying candidate values.
+            **values: Schema attributes to set.
+
+        Returns:
+            The same model instance.
+        """
         self.hyperparameters.set(
             *predicates,
             strict=strict,
@@ -290,13 +362,24 @@ class Model(lit.LightningModule):
         address: Address | str | None = None,
         detail: bool = False,
         out: str | Path | None = None,
-    ) -> str:
+        mode: str = "schema",
+    ) -> None:
+        """Print a Rich model visualization.
+
+        Args:
+            address: Optional subtree address to render.
+            detail: Include tensorfield-specific detail sections.
+            out: Optional output path for the rendered console text.
+            mode: Plot mode. Supported values are `schema`, `state`, `flow`,
+                and `debug`.
+        """
         from json2vec.architecture.plot import plot
 
-        return plot(module=self, address=address, detail=detail, out=out)
+        return plot(module=self, address=address, detail=detail, out=out, mode=mode)
 
     @beartype
     def save(self, pathname: str | Path) -> None:
+        """Save model weights and schema hyperparameters to a checkpoint."""
         path = Path(pathname)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -377,6 +460,7 @@ class Model(lit.LightningModule):
 
     @classmethod
     def load(cls, checkpoint: str | Path) -> Self:
+        """Load a `Model` checkpoint written by `Model.save(...)`."""
         path = Path(checkpoint)
         logger.bind(component="model_factory", checkpoint=str(path)).info("loading Model from checkpoint")
         state = torch.load(path, weights_only=False, map_location="cpu")
@@ -427,6 +511,10 @@ class Model(lit.LightningModule):
         preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
+        """Run prediction and embedding for encoded or raw observations.
+
+        If `preprocess` is omitted, raw records are encoded unchanged.
+        """
         was_training = self.training
         raw_batch = batch
 
@@ -478,6 +566,7 @@ class Model(lit.LightningModule):
         preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
+        """Return typed predictions for a raw or encoded batch."""
         supervised, _ = self.evaluate(
             batch=batch,
             preprocess=preprocess,
@@ -491,6 +580,7 @@ class Model(lit.LightningModule):
         preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
+        """Return configured embeddings for a raw or encoded batch."""
         _, embeddings = self.evaluate(
             batch=batch,
             preprocess=preprocess,

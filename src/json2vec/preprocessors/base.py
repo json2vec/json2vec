@@ -1,3 +1,5 @@
+"""Preprocessor decorator and registry implementation."""
+
 from __future__ import annotations
 
 import enum
@@ -17,11 +19,20 @@ pm.add_hookspecs(module_or_class=PluginSpec)
 
 
 class PreprocessorMode(enum.StrEnum):
+    """Execution mode for a registered preprocessor."""
+
     generator = "generator"
     transformation = "transformation"
 
 
 class Preprocessor(pydantic.BaseModel):
+    """Registered observation preprocessor.
+
+    A transformation preprocessor returns one dict. A generator preprocessor
+    yields or returns multiple dict objects, each of which becomes a processed
+    observation.
+    """
+
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
     name: str
     func: Callable[..., Any]
@@ -31,6 +42,7 @@ class Preprocessor(pydantic.BaseModel):
         return self.func(observation, **_filter_supported_kwargs(self.func, kwargs))
 
     def outputs(self, observation: dict, **kwargs) -> Iterator[list[dict[str, Any]]]:
+        """Yield normalized processed observations for one raw observation."""
         result = self(observation, **kwargs)
 
         if self.mode == PreprocessorMode.transformation:
@@ -98,6 +110,25 @@ def preprocess(
     yields: bool | None = None,
     **kwargs: Any,
 ) -> Callable[..., Any]:
+    """Register a callable as a JSON2Vec preprocessor.
+
+    Args:
+        func: Callable to register when used as `@preprocess`.
+        yields: Set to `True` for generator preprocessors.
+        **kwargs: Reserved for validation of unsupported decorator arguments.
+
+    Returns:
+        The original callable, after registering it in `PREPROCESSORS`.
+
+    Example:
+        ```python
+        import json2vec as j2v
+
+        @j2v.preprocess
+        def normalize(record: dict) -> dict:
+            return {**record, "amount": float(record["amount"])}
+        ```
+    """
     if "yield" in kwargs:
         if yields is not None:
             raise TypeError("use either 'yields' or 'yield', not both")

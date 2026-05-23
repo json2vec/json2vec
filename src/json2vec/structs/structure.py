@@ -1,3 +1,5 @@
+"""Structured schema nodes that group tensorfield requests."""
+
 from typing import Annotated, Literal, Self, TypeAlias, Union
 
 import pydantic
@@ -16,6 +18,11 @@ Dropout: TypeAlias = Rate
 
 
 class Array(Node):
+    """Repeated nested object group in a JSON2Vec schema.
+
+    Positional children are treated as fields inside the array.
+    """
+
     name: str
     type: Annotated[Literal["array"], pydantic.Field(default="array")] = "array"
     attention: Literal["mha", "gqa", "mqa", "none"] = "mha"

@@ -1,7 +1,7 @@
 import pydantic
 import pytest
 
-from json2vec.structs.tree import Address, Column, Leaf, Node
+from json2vec.structs.tree import Address, Leaf, Node
 
 
 class AddressPayload(pydantic.BaseModel):
@@ -82,13 +82,6 @@ def test_node_target_rejects_conflicting_prune_rate():
 def test_node_target_requires_boolean():
     with pytest.raises(ValueError, match="target must be a boolean"):
         Node.model_validate({"name": "label", "type": "node", "n_heads": 4, "target": "yes"})
-
-
-def test_column_target_shorthand_sets_prune_rate():
-    leaf = Column("label", "category", target=True)
-
-    assert leaf.p_prune == 1.0
-    assert not leaf.model_extra or "target" not in leaf.model_extra
 
 
 def test_node_description_trims_and_accepts_optional_metadata():

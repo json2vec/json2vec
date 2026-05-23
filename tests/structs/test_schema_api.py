@@ -5,9 +5,15 @@ import json2vec as j2v
 
 def test_model_from_schema_builds_record_array_and_infers_queries():
     model = j2v.Model.from_schema(
-        j2v.Column("job code", j2v.Category, kwargs={"max_vocab_size": 128}, source="openml"),
+        j2v.Category(
+            "job_code",
+            query='[*]."job code"',
+            description="job code",
+            max_vocab_size=128,
+            source="openml",
+        ),
         j2v.Number("amount"),
-        j2v.Column("label", "category", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
+        j2v.Category("label", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
         d_model=32,
         n_layers=2,
         n_heads=4,
@@ -45,7 +51,7 @@ def test_model_from_schema_rejects_duplicate_sources():
     with pytest.raises(ValueError, match="duplicate schema source field"):
         j2v.Model.from_schema(
             j2v.Number("amount"),
-            j2v.Column("amount", "number"),
+            j2v.Number("amount"),
             d_model=16,
             n_layers=1,
             n_heads=4,
@@ -56,7 +62,12 @@ def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
     model = j2v.Model.from_schema(
         j2v.Array(
             j2v.Number("amount"),
-            j2v.Column("merchant code", j2v.Category, max_vocab_size=32),
+            j2v.Category(
+                "merchant_code",
+                query='[*].transactions[*]."merchant code"',
+                description="merchant code",
+                max_vocab_size=32,
+            ),
             name="transactions",
             max_length=4,
         ),
@@ -82,7 +93,7 @@ def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
 def test_model_selector_set_and_cached_role_views():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),
-        j2v.Column("label", j2v.Category, target=True, embed=False),
+        j2v.Category("label", target=True, embed=False),
         d_model=16,
         n_layers=1,
         n_heads=4,
@@ -102,6 +113,9 @@ def test_model_selector_set_and_cached_role_views():
 
     model.set(j2v.where("name") == "amount", target=True)
     assert params.requests["record/amount"].p_prune == 1.0
+
+    model.set(j2v.where("name") == "amount", target=False)
+    assert params.requests["record/amount"].p_prune is None
 
     model.select(j2v.where("name") == "amount").set(p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25

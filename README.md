@@ -98,7 +98,7 @@ This repository currently contains:
 - tensorfield plugins for `number`, `category`, `set`, `dateparts`, `entity`, `vector`, and `text`
 - a preprocessor registry for dataset-specific preprocessing
 - a LitServe deployment entrypoint for serving from checkpoints
-- a hello-world Lightning notebook under `examples/hello_world.ipynb`
+- rendered tutorial and guide notebooks under `docs/`
 - tests covering structure loading, data processing, tensorfields, training helpers, logging, and inference
 - diagrams plus longer design docs in `docs/`
 
@@ -120,8 +120,8 @@ The package requires Python `>=3.12`.
 
 ## Hello World Notebook
 
-`examples/hello_world.ipynb` trains a tiny model from an in-memory synthetic
-dataset. It demonstrates the full loop: create a Polars DataFrame, declare a
+`docs/tutorials/hello-world.ipynb` trains a tiny model from the bundled
+scikit-learn Iris dataset. It demonstrates the full loop: create a Polars DataFrame, declare a
 schema, train a supervised category target, then call `predict` and `embed`.
 
 ```python
@@ -129,32 +129,40 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 from rich.pretty import pprint
+from sklearn.datasets import load_iris
 
 import json2vec as j2v
 
 
+ROOT = "[*][*]"
+iris = load_iris()
+indices = [*range(0, 12), *range(50, 62), *range(100, 112)]
+
 records = pl.DataFrame(
     {
-        "color": ["red", "orange", "yellow", "blue", "green", "purple"],
-        "label": ["warm", "warm", "warm", "cool", "cool", "cool"],
+        "sepal_length": iris.data[indices, 0].tolist(),
+        "petal_length": iris.data[indices, 2].tolist(),
+        "species": [iris.target_names[index] for index in iris.target[indices]],
     }
 )
 
 
 model = j2v.Model.from_schema(
-    j2v.Column("color", j2v.Category, max_vocab_size=16),
-    j2v.Column("label", j2v.Category, target=True, max_vocab_size=8, topk=[2]),
+    j2v.Number("sepal_length", query=f"{ROOT}.sepal_length"),
+    j2v.Number("petal_length", query=f"{ROOT}.petal_length"),
+    j2v.Category("species", query=f"{ROOT}.species", target=True, max_vocab_size=4, topk=[2]),
     d_model=16,
     n_layers=1,
     n_heads=4,
-    batch_size=4,
+    batch_size=8,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
 model.set(j2v.where("name") == "record", embed=True)
 
 datamodule = j2v.PolarsDataModule.from_model(
     model,
-    dataframe=records,
+    train=records,
+    validate=records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
@@ -164,25 +172,36 @@ datamodule = j2v.PolarsDataModule.from_model(
 
 trainer = lit.Trainer(
     accelerator="cpu",
-    max_epochs=20,
+    max_epochs=1,
     logger=False,
     enable_progress_bar=False,
     enable_model_summary=False,
     enable_checkpointing=False,
+    limit_train_batches=1,
+    limit_val_batches=1,
 )
 
 trainer.fit(model=model, datamodule=datamodule)
 
-batch = [[{"color": "red"}], [{"color": "blue"}]]
+batch = [[record] for record in records.to_dicts()[:3]]
 
 pprint(model.predict(batch))
 pprint(model.embed(batch))
 ```
 
-The prediction call returns a typed result for `record/label`; after training on
-the toy data, red-like records should classify as `warm` and blue-like records
-as `cool`. The embedding call returns the configured `record` embedding for each
-input observation.
+The prediction call returns a typed result for `record/species`. The embedding
+call returns the configured `record` embedding for each input observation.
+
+## Documentation
+
+The documentation site can be built locally with:
+
+```bash
+uv run --extra docs mkdocs build --strict
+```
+
+The tutorial examples live as self-contained notebooks under `docs/` and are
+rendered in the documentation site.
 
 ## Core Concepts
 
@@ -281,7 +300,6 @@ Join the Discord channel for questions, design discussion, and release notes:
 - `src/json2vec/preprocessors`: preprocessor registry
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in field types
-- `examples/`: hello-world training and inference notebook
 - `tests/`: package test suite
 - `docs/whitepaper.typ`: longer written documentation
 

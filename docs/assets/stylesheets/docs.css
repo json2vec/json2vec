@@ -1,0 +1,132 @@
+.md-typeset .jupyter-wrapper {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.md-typeset .jupyter-wrapper .jp-Notebook {
+  padding: 0;
+  overflow: visible;
+}
+
+.md-typeset .jupyter-wrapper .jp-Cell {
+  margin: 1em 0;
+  padding: 0;
+  background: transparent;
+}
+
+.md-typeset .jupyter-wrapper .jp-Cell .jp-Cell {
+  margin: 0;
+}
+
+.md-typeset .jupyter-wrapper .jp-MarkdownCell {
+  margin: 0;
+}
+
+.md-typeset .jupyter-wrapper .jp-Cell-inputWrapper,
+.md-typeset .jupyter-wrapper .jp-Cell-outputWrapper,
+.md-typeset .jupyter-wrapper .jp-InputArea,
+.md-typeset .jupyter-wrapper .jp-Cell-inputArea,
+.md-typeset .jupyter-wrapper .jp-OutputArea {
+  display: block;
+  margin: 0;
+  padding: 0;
+}
+
+.md-typeset .jupyter-wrapper .jp-Collapser,
+.md-typeset .jupyter-wrapper .jp-InputPrompt,
+.md-typeset .jupyter-wrapper .jp-OutputPrompt,
+.md-typeset .jupyter-wrapper .jp-CodeCell .jp-Cell-inputWrapper .jp-InputPrompt {
+  display: none !important;
+}
+
+.md-typeset .jupyter-wrapper .jp-MarkdownOutput,
+.md-typeset .jupyter-wrapper .jp-RenderedHTMLCommon {
+  padding: 0;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.md-typeset .jupyter-wrapper h1 .anchor-link,
+.md-typeset .jupyter-wrapper h2 .anchor-link,
+.md-typeset .jupyter-wrapper h3 .anchor-link,
+.md-typeset .jupyter-wrapper h4 .anchor-link,
+.md-typeset .jupyter-wrapper h5 .anchor-link,
+.md-typeset .jupyter-wrapper h6 .anchor-link {
+  display: none !important;
+}
+
+.md-typeset .jupyter-wrapper .jp-InputArea-editor {
+  width: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.md-typeset .jupyter-wrapper .highlight-ipynb {
+  margin: 1em 0;
+  overflow: auto;
+  border-radius: 0.1rem;
+  background: var(--md-code-bg-color);
+  color: var(--md-code-fg-color);
+}
+
+.md-typeset .jupyter-wrapper .highlight-ipynb,
+.md-typeset .jupyter-wrapper .jp-OutputArea-output.jp-RenderedHTMLCommon,
+.md-typeset .jupyter-wrapper .jp-OutputArea-output.jp-RenderedText {
+  font-size: var(--jp-code-font-size) !important;
+}
+
+.md-typeset .jupyter-wrapper .highlight-ipynb pre,
+.md-typeset .jupyter-wrapper .jp-RenderedHTMLCommon pre,
+.md-typeset .jupyter-wrapper .jp-RenderedText pre {
+  margin: 0;
+  padding: 0.7720588235em 1.1764705882em;
+  font-family: var(--md-code-font-family, var(--jp-code-font-family)) !important;
+  font-size: 0.85em !important;
+  line-height: 1.4 !important;
+  letter-spacing: 0;
+}
+
+.md-typeset .jupyter-wrapper .highlight-ipynb pre {
+  overflow: visible;
+  background: transparent;
+}
+
+.md-typeset .jupyter-wrapper .zeroclipboard-container {
+  top: 0.35rem;
+  right: 0.35rem;
+}
+
+.md-typeset .jupyter-wrapper .jp-Cell-outputWrapper {
+  margin-top: 0.25em;
+}
+
+.md-typeset .jupyter-wrapper .jp-OutputArea-child {
+  margin: 0 0 1em;
+  padding: 0;
+}
+
+.md-typeset .jupyter-wrapper .jp-RenderedHTMLCommon pre,
+.md-typeset .jupyter-wrapper .jp-RenderedText pre {
+  overflow: auto;
+  border-radius: 0.1rem;
+  background: var(--md-code-bg-color);
+  color: var(--md-code-fg-color);
+  white-space: pre;
+}
+
+.md-typeset .jupyter-wrapper .jp-RenderedHTMLCommon pre[style],
+.md-typeset .jupyter-wrapper .jp-RenderedText pre[style] {
+  overflow-x: auto !important;
+  font-family: var(--md-code-font-family, var(--jp-code-font-family)) !important;
+  line-height: 1.4 !important;
+}
+
+.md-typeset .jupyter-wrapper table.dataframe {
+  margin: 1em 0;
+  width: auto;
+  max-width: 100%;
+}

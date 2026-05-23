@@ -68,14 +68,17 @@ def test_plugin_rejects_invalid_name():
         Plugin(name="Bad-Name")
 
 
-def test_plugin_rejects_duplicate_name():
+def test_plugin_warns_and_overwrites_duplicate_name():
     name = _plugin_name("duplicate")
-    plugin = Plugin(name=name)
+    first = Plugin(name=name)
     try:
-        with pytest.raises(ValueError, match="already registered"):
-            Plugin(name=name)
+        with pytest.warns(UserWarning, match="overriding existing tensorfield plugin"):
+            second = Plugin(name=name)
+
+        assert TENSORFIELDS[name] is second
+        assert TENSORFIELDS[name] is not first
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(name, None)
 
 
 def test_plugin_registers_components_and_wraps_loss():

@@ -1,0 +1,70 @@
+site_name: JSON2Vec
+repo_url: https://github.com/json2vec/json2vec
+extra:
+  generator: false
+theme:
+  name: material
+  palette:
+    scheme: slate
+    primary: teal
+    accent: deep orange
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+extra_css:
+  - assets/stylesheets/docs.css
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path:
+        - .
+      check_paths: true
+  - pymdownx.superfences
+plugins:
+  - search
+  - mkdocs-jupyter:
+      execute: false
+      include: ["*.ipynb"]
+      include_source: true
+      no_prompt: true
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            filters:
+              - "!^_"
+            merge_init_into_class: true
+            members_order: source
+            separate_signature: true
+            show_if_no_docstring: true
+            show_signature_annotations: true
+            show_source: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Motivation: motivation.md
+  - Tutorials:
+      - Hello World: tutorials/hello-world.ipynb
+      - End-to-End Training: tutorials/e2e-training.ipynb
+      - Pretraining: tutorials/pretraining.ipynb
+      - Fine-Tuning: tutorials/fine-tuning.ipynb
+      - Serving: tutorials/serving.ipynb
+  - Guides:
+      - Model Schemas: guides/model-schemas.md
+      - Preprocessors: guides/preprocessors.ipynb
+      - Tensorfields: guides/tensorfields.ipynb
+      - Model Mutation: guides/model-set.ipynb
+  - Reference:
+      - API: reference/api.md

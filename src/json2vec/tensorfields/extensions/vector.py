@@ -37,6 +37,8 @@ class Objective(enum.StrEnum):
 
 @vector.register
 class Request(RequestBase):
+    """Fixed-width numeric vector tensorfield request."""
+
     type: Literal["vector"] = "vector"
     n_dim: Annotated[int, pydantic.Field(gt=0)]
     objective: Objective = Objective.l2

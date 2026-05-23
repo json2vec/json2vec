@@ -39,6 +39,8 @@ category.callback(CounterUpdateCallback)
 
 @category.register
 class Request(RequestBase):
+    """Categorical scalar tensorfield request backed by an online vocabulary."""
+
     type: Literal["category"] = "category"
     max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10000
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8

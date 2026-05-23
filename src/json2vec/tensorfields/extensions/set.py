@@ -37,6 +37,8 @@ sets.callback(CounterUpdateCallback)
 
 @sets.register
 class Request(RequestBase):
+    """Multi-label set tensorfield request backed by an online vocabulary."""
+
     type: Literal["set"] = "set"
     max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10_000
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01

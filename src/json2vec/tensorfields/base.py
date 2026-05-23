@@ -1,6 +1,9 @@
+"""Tensorfield plugin base classes and registry."""
+
 from __future__ import annotations
 
 import re
+import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Callable, Type, TypeAlias
 
@@ -42,11 +45,15 @@ def default_write(module: "Model", prediction: Prediction) -> None:
 
 
 class EmbedderBase(torch.nn.Module):
+    """Base class for tensorfield embedders."""
+
     def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__()
 
 
 class DecoderBase(torch.nn.Module):
+    """Base class for tensorfield decoders."""
+
     def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__()
 
@@ -91,6 +98,8 @@ class DecoderBase(torch.nn.Module):
 
 
 class TensorFieldBase(ABC):
+    """Tensorized field values plus trainable target state."""
+
     content: torch.Tensor
     state: torch.Tensor
     trainable: torch.Tensor
@@ -130,6 +139,13 @@ TENSORFIELDS: dict[str, "Plugin"] = {}
 
 
 class Plugin:
+    """Registry object for a tensorfield implementation.
+
+    Register request, tensorfield, embedder, decoder, loss, write, and plot
+    components with `@plugin.register`. Creating a plugin with an existing
+    name replaces the registry entry and emits a warning.
+    """
+
     def __init__(self, name: str):
         if not isinstance(name, str):
             raise TypeError("Plugin name must be a string")
@@ -143,11 +159,16 @@ class Plugin:
         self.callback_factories: list[CallbackFactory] = []
 
         if name in TENSORFIELDS:
-            raise ValueError(f"Plugin '{name}' already registered")
+            warnings.warn(
+                f"Plugin '{name}' already registered; overriding existing tensorfield plugin",
+                UserWarning,
+                stacklevel=2,
+            )
 
         TENSORFIELDS[name] = self
 
     def register(self, obj: Type | Callable | None, component: Component | str | None = None) -> Type | Callable | None:
+        """Register one tensorfield component with this plugin."""
         if obj is None:
             if component is None:
                 raise TypeError("component must be provided when registering None")
@@ -259,6 +280,7 @@ class Plugin:
         return obj
 
     def callback(self, factory: CallbackFactory) -> CallbackFactory:
+        """Register a Lightning callback factory for this tensorfield."""
         callback = factory()
         if not isinstance(callback, Callback):
             raise TypeError(f"Plugin callback factory for '{self.name}' must produce a Lightning Callback")
@@ -267,6 +289,7 @@ class Plugin:
         return factory
 
     def callbacks(self) -> list[Callback]:
+        """Instantiate all registered callback factories."""
         return [factory() for factory in self.callback_factories]
 
     def __getattr__(self, key: Component) -> Callable | Type:

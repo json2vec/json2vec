@@ -1,3 +1,5 @@
+"""File-backed streaming datasets and Lightning data modules."""
+
 from __future__ import annotations
 
 import os
@@ -157,6 +159,13 @@ def dataloader(
 
 
 class StreamingDataModule(lit.LightningDataModule):
+    """Lightning data module for streaming records from files.
+
+    The dataset reads records from `Dataset.root`, applies the optional
+    preprocessor, batches observations, and encodes them with model
+    hyperparameters.
+    """
+
     @beartype
     def __init__(
         self,
@@ -201,6 +210,7 @@ class StreamingDataModule(lit.LightningDataModule):
         dataset: Dataset,
         **kwargs: Any,
     ) -> "StreamingDataModule":
+        """Construct a streaming data module from a model and dataset config."""
         return cls(
             hyperparameters=model.hyperparameters,
             dataset=dataset,

@@ -74,76 +74,69 @@ def _model(tmp_path: Path) -> Model:
 
 def test_plot_renders_full_model_and_writes_output(tmp_path: Path, capsys) -> None:
     model = _model(tmp_path)
-    output_path = tmp_path / "model-tree.html"
+    output_path = tmp_path / "model-tree.txt"
     capsys.readouterr()
 
     rendered = model.plot(detail=True, out=output_path)
 
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert rendered.startswith("<!DOCTYPE html>")
-    assert "<style>" in rendered
-    assert "background-color: #ffffff;" in rendered
-    assert "background-color: #800000" not in rendered
-    assert "background-color: #008000" not in rendered
-    assert '<span class="r' not in rendered
-    assert "Model" in rendered
-    assert f"parameters: {sum(parameter.numel() for parameter in model.parameters())}" in rendered
-    assert "root (array)" in rendered
-    assert "amount (number)" in rendered
-    assert "address: root/amount" in rendered
-    assert "items (array)" in rendered
-    assert "address: root/items" in rendered
-    assert "label (category)" in rendered
-    assert "address: root/items/label" in rendered
-    assert "identifier (entity)" in rendered
-    assert "address: root/items/identifier" in rendered
-    assert "┏━ label (category)" in rendered
-    assert "┏━ identifier (entity)" in rendered
-    assert "vocabulary:" in rendered
-    assert "alpha" in rendered
-    assert "beta" in rendered
-    assert "std_dev: 3.0000016689300537" in rendered
-    assert "counts: [4, 2, 1, 1, 1]" in rendered
-    assert "children" not in rendered
-    assert output_path.read_text(encoding="utf-8") == rendered
+    written = output_path.read_text(encoding="utf-8")
+    assert rendered is None
+    assert captured.out
+    assert written
+    assert "<!DOCTYPE html>" not in written
+    assert ".json2vec" not in written
+    assert "JSON2Vec" in captured.out
+    assert "Model" in captured.out
+    assert f"{sum(parameter.numel() for parameter in model.parameters()):,}" in captured.out
+    assert "root [array]" in captured.out
+    assert "amount [number]" in captured.out
+    assert "root/amount" in captured.out
+    assert "items [array]" in captured.out
+    assert "root/items" in captured.out
+    assert "label [category]" in captured.out
+    assert "root/items/label" in captured.out
+    assert "identifier [entity]" in captured.out
+    assert "root/items/identifier" in captured.out
+    assert "vocabulary:" in written
+    assert "alpha" in written
+    assert "beta" in written
+    assert "std_dev: 3.0000016689300537" in written
+    assert "counts: [4, 2, 1, 1, 1]" in written
+    assert "children" not in written
 
 
-def test_plot_address_limits_output_to_selected_branch(tmp_path: Path) -> None:
+def test_plot_address_limits_output_to_selected_branch(tmp_path: Path, capsys) -> None:
     model = _model(tmp_path)
+    capsys.readouterr()
 
     rendered = model.plot(address="root/items", detail=False)
+    captured = capsys.readouterr()
 
-    assert rendered.startswith("<!DOCTYPE html>")
-    assert "background-color: #ffffff;" in rendered
-    assert "background-color: #800000" not in rendered
-    assert '<span class="r' not in rendered
-    assert "items (array)" in rendered
-    assert "address: root/items" in rendered
-    assert "label (category)" in rendered
-    assert "address: root/items/label" in rendered
-    assert "identifier (entity)" in rendered
-    assert "address: root/items/identifier" in rendered
-    assert "┏━ label (category)" in rendered
-    assert "┏━ identifier (entity)" in rendered
-    assert "address: root/amount" not in rendered
-    assert "Model" not in rendered
+    assert rendered is None
+    assert "items [array]" in captured.out
+    assert "root/items" in captured.out
+    assert "label [category]" in captured.out
+    assert "root/items/label" in captured.out
+    assert "identifier [entity]" in captured.out
+    assert "root/items/identifier" in captured.out
+    assert "root/amount" not in captured.out
+    assert "Model" not in captured.out
 
 
-def test_plot_leaf_uses_default_extension_renderer(tmp_path: Path) -> None:
+def test_plot_leaf_uses_default_extension_renderer(tmp_path: Path, capsys) -> None:
     model = _model(tmp_path)
+    capsys.readouterr()
 
     rendered = model.plot(address="root/items/identifier", detail=True)
+    captured = capsys.readouterr()
 
-    assert rendered.startswith("<!DOCTYPE html>")
-    assert "background-color: #ffffff;" in rendered
-    assert '<span class="r' not in rendered
-    assert "identifier (entity)" in rendered
-    assert "address: root/items/identifier" in rendered
-    assert "┏━ identifier (entity)" in rendered
-    assert "topk: [2]" in rendered
-    assert "query: [*].id" in rendered
-    assert "counters" not in rendered
+    assert rendered is None
+    assert "identifier [entity]" in captured.out
+    assert "root/items/identifier" in captured.out
+    assert "topk=[2]" in captured.out
+    assert "query=[*].id" in captured.out
+    assert "counters" not in captured.out
 
 
 def test_plot_formats_scalar_lists_inline() -> None:

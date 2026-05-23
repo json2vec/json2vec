@@ -30,6 +30,12 @@ serving = [
 text = [
     "transformers>=4.55.0",
 ]
+docs = [
+    "mkdocs-material>=9.6",
+    "mkdocs-jupyter>=0.26.3",
+    "mkdocstrings[python]>=0.27",
+    "scikit-learn>=1.8.0",
+]
 
 [dependency-groups]
 dev = [
@@ -37,6 +43,8 @@ dev = [
     "pytest>=8.4.1",
     "ipython>=9.9.0",
     "ipykernel>=6.29.5",
+    "nbclient>=0.10.2",
+    "nbformat>=5.10.4",
     "litserve>=0.2.13",
     "pydantic-settings>=2.10.1",
     "ty>=0.0.1a20",
