@@ -60,8 +60,6 @@ This page is generated from public docstrings and is meant as a lookup companion
         - extend
         - delete
         - override
-        - mutation_history
-        - mutation_revision
 
 ::: json2vec.where
     options:

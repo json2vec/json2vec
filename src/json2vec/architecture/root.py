@@ -1,6 +1,5 @@
 """Lightning model assembly and runtime helpers for JSON2Vec schemas."""
 
-import uuid
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -23,8 +22,6 @@ from json2vec.data.iterables import encode, mock
 from json2vec.structs.enums import Metric, Strata, TensorKey
 from json2vec.structs.experiment import (
     Hyperparameters,
-    MutationChange,
-    MutationResult,
     NodeAttribute,
     NodePredicate,
     SchemaField,
@@ -132,7 +129,6 @@ def step(
     losses: list[torch.Tensor] = []
 
     for prediction in predictions:
-
         if isinstance(prediction, Embedding):
             continue
 
@@ -416,35 +412,14 @@ class Model(lit.LightningModule):
         if not selected_by_address:
             raise ValueError("reset matched no runtime nodes")
 
-        changes: list[MutationChange] = []
-        for address, node in selected_by_address.items():
-            module = self.nodes[address]
-            state_keys = tuple(module.state_dict().keys())
-            parameter_count = sum(parameter.numel() for parameter in module.parameters())
+        for address in selected_by_address:
             self.nodes[address] = NodeModule(
                 hyperparameters=self.hyperparameters,
                 address=address,
                 batch_size=self.batch_size,
             )
-            changes.append(
-                MutationChange(
-                    node=str(node.address),
-                    field="state",
-                    old={"parameter_count": parameter_count, "state_keys": state_keys},
-                    new=None,
-                    action="reset",
-                )
-            )
 
         self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
-        result = MutationResult(
-            operation_id=uuid.uuid4().hex,
-            action="reset",
-            matched=len(selected),
-            updated=len(selected_by_address),
-            changes=tuple(changes),
-        )
-        self.hyperparameters._record_mutation(result)
 
     @contextmanager
     def override(
@@ -455,7 +430,7 @@ class Model(lit.LightningModule):
         include_root: bool = True,
         validate: bool = True,
         **values: Any,
-    ) -> Iterator[MutationResult]:
+    ) -> Iterator[None]:
         """Temporarily mutate selected schema nodes and keep runtime modules synchronized."""
         self._assert_mutation_allowed("override")
         try:
@@ -466,9 +441,9 @@ class Model(lit.LightningModule):
                 include_root=include_root,
                 validate=validate,
                 **values,
-            ) as result:
+            ):
                 self._rebuild()
-                yield result
+                yield
         finally:
             self._rebuild()
 
@@ -482,10 +457,7 @@ class Model(lit.LightningModule):
         callbacks: list[Callback] = []
         factories: set[Any] = set()
         trainer = getattr(self, "_trainer", None)
-        attached_callback_types = {
-            type(callback)
-            for callback in getattr(trainer, "callbacks", ())
-        }
+        attached_callback_types = {type(callback) for callback in getattr(trainer, "callbacks", ())}
 
         if RuntimePlacementCallback not in attached_callback_types:
             callbacks.append(RuntimePlacementCallback())
@@ -591,7 +563,6 @@ class Model(lit.LightningModule):
         for depth in reversed(self.hyperparameters.depthwise):
             # these are order-independent within the same depth
             for address in depth:
-
                 if len(processed[address]) == 0:
                     continue
 
@@ -604,12 +575,11 @@ class Model(lit.LightningModule):
                     predictions.append(Embedding.from_parcel(encoding))
 
         for address in self.hyperparameters.active_requests.keys():
-
             if (torch.any(inputs[address].trainable)) or (address in self.hyperparameters.target):
-
                 heritage: list[Address] = self.hyperparameters.requests[address].heritage
                 parcels: list[Parcel] = [
-                    outgoing[address] for address in heritage
+                    outgoing[address]
+                    for address in heritage
                     if address not in self.hyperparameters.target and address in outgoing.keys()
                 ]
 
@@ -657,15 +627,15 @@ class Model(lit.LightningModule):
 
         return model
 
-    def write(self, predictions: list[Prediction]) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
+    def write(
+        self, predictions: list[Prediction]
+    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
 
         supervised: dict[Address, dict[str, Any]] = {}
         embeddings: dict[Address, dict[str, Any]] = {}
 
         for prediction in predictions:
-
             if isinstance(prediction, Embedding):
-
                 embeddings[prediction.address] = Prediction.serialize(
                     Prediction.squeeze(Embedding.write(prediction), preserve_first_dimension=True)
                 )

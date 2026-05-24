@@ -247,15 +247,7 @@ def test_deployment_rejects_explicit_checkpoint_and_model():
 def test_deployment_api_applies_queued_update_operations(monkeypatch):
     calls = []
 
-    class Mutation:
-        def model_dump(self, mode):
-            return {"mode": mode, "updated": 1}
-
-    class Hyperparameters:
-        last_mutation = Mutation()
-
     class FakeModel:
-        hyperparameters = Hyperparameters()
         interprocess_encoding_context = {}
 
         def to(self, device):
@@ -286,7 +278,6 @@ def test_deployment_api_applies_queued_update_operations(monkeypatch):
     assert calls[0] == ("to", "cpu")
     assert calls[1] == ("update", (predicate,), {"target": False})
     assert calls[2] == ("eval",)
-    assert api.applied_update_operations == [{"mode": "python", "updated": 1}]
 
 
 def test_deployment_api_setup_uses_model_instance(monkeypatch):

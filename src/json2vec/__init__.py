@@ -18,8 +18,6 @@ from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode
 from json2vec.structs.enums import Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
 from json2vec.structs.experiment import (
     Hyperparameters,
-    MutationChange,
-    MutationResult,
     NodeAttribute,
     NodePredicate,
     SchemaField,
@@ -52,9 +50,7 @@ __all__ = [
     "Leaf",
     "Metric",
     "Model",
-    "MutationChange",
     "MutationLockCallback",
-    "MutationResult",
     "NodeAttribute",
     "NodePredicate",
     "Number",

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
-import logging
 import re
-import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
@@ -17,10 +15,8 @@ from anytree import LevelOrderGroupIter, PreOrderIter, RenderTree
 from json2vec.structs.structure import Array, RequestTypes
 from json2vec.structs.tree import Address, Leaf, Node, PruneRate, Rate
 
-logger = logging.getLogger("json2vec.hyperparameters")
 SelectionKey: TypeAlias = tuple[Any, ...]
 SchemaField: TypeAlias = Array | Leaf
-MutationAction: TypeAlias = Literal["update", "restore", "extend", "delete", "reset"]
 _MISSING = object()
 
 
@@ -31,32 +27,6 @@ class SelectionCacheEntry(pydantic.BaseModel):
     predicate: Callable[[Node], bool]
     include_root: bool
     nodes: tuple[Node, ...]
-
-
-class MutationChange(pydantic.BaseModel):
-    """Single field change recorded by a schema mutation."""
-
-    model_config = pydantic.ConfigDict(frozen=True)
-
-    node: str
-    field: str
-    old: Any
-    new: Any
-    action: MutationAction
-
-
-class MutationResult(pydantic.BaseModel):
-    """Summary of a completed schema mutation."""
-
-    model_config = pydantic.ConfigDict(frozen=True)
-
-    operation_id: str
-    parent_operation_id: str | None = None
-    action: MutationAction = "update"
-    matched: int
-    updated: int
-    skipped: int = 0
-    changes: tuple[MutationChange, ...] = ()
 
 
 class NodePredicate(pydantic.BaseModel):
@@ -360,8 +330,6 @@ class Hyperparameters(Node):
     p_mask: ClassVar[None] = None
 
     _selection_cache: dict[SelectionKey, SelectionCacheEntry] = pydantic.PrivateAttr(default_factory=dict)
-    _mutation_history: list[MutationResult] = pydantic.PrivateAttr(default_factory=list)
-    _mutation_revision: int = pydantic.PrivateAttr(default=0)
 
     @classmethod
     def from_schema(
@@ -458,18 +426,6 @@ class Hyperparameters(Node):
         )
         return [Address(str(node.address)) for node in self.select(role)]
 
-    @property
-    def last_mutation(self) -> MutationResult | None:
-        return self._mutation_history[-1] if self._mutation_history else None
-
-    @property
-    def mutation_history(self) -> tuple[MutationResult, ...]:
-        return tuple(self._mutation_history)
-
-    @property
-    def mutation_revision(self) -> int:
-        return self._mutation_revision
-
     @functools.cached_property
     def arrays(self) -> dict[Address, Array]:
         return {node.address: node for node in self.descendants if isinstance(node, Array)}
@@ -495,20 +451,6 @@ class Hyperparameters(Node):
                 out.append(arrays)
 
         return out
-
-    def _record_mutation(self, result: MutationResult) -> None:
-        self._mutation_revision += 1
-        self._mutation_history.append(result)
-        logger.info(
-            "json2vec.hyperparameters.%s",
-            result.action,
-            extra={"mutation": result.model_dump(mode="python", exclude={"changes"})},
-        )
-        for change in result.changes:
-            logger.debug(
-                "json2vec.hyperparameters.change",
-                extra={"mutation_change": change.model_dump(mode="python")},
-            )
 
     def _clear_tree_caches(self) -> None:
         for name in ("arrays", "requests", "active_requests", "shapes", "depthwise"):
@@ -579,7 +521,7 @@ class Hyperparameters(Node):
         include_root: bool = True,
         validate: bool = True,
         **values: Any,
-    ) -> Self:
+    ) -> None:
         """Mutate matching schema nodes.
 
         `target=True` is normalized to `p_prune=1.0`; `target=False` clears the
@@ -590,11 +532,7 @@ class Hyperparameters(Node):
             raise ValueError("update requires at least one field value")
 
         nodes = self.select(*predicates, include_root=include_root)
-        changes: list[MutationChange] = []
-        matched = updated = skipped = 0
-
         for node in nodes:
-            matched += 1
             can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
             missing = [name for name in values if not _has_model_attribute(node, name) and not can_apply_extra]
             if missing and strict:
@@ -604,52 +542,26 @@ class Hyperparameters(Node):
             applicable_values = {
                 name: value for name, value in values.items() if _has_model_attribute(node, name) or can_apply_extra
             }
-            skipped += len(values) - len(applicable_values)
 
             if validate and applicable_values:
                 payload = node.model_dump(mode="python", round_trip=True)
                 payload.update(applicable_values)
                 type(node).model_validate(payload)
 
-            changed = False
             for name, value in applicable_values.items():
-                old = getattr(node, name, _MISSING)
                 setattr(node, name, value)
                 if name in getattr(type(node), "model_fields", {}):
                     node.model_fields_set.add(name)
-                if old != value:
-                    changes.append(
-                        MutationChange(
-                            node=str(node.address),
-                            field=name,
-                            old=None if old is _MISSING else old,
-                            new=value,
-                            action="update",
-                        )
-                    )
-                    changed = True
 
-            updated += int(changed)
-
-        result = MutationResult(
-            operation_id=uuid.uuid4().hex,
-            action="update",
-            matched=matched,
-            updated=updated,
-            skipped=skipped,
-            changes=tuple(changes),
-        )
         self._clear_tree_caches()
         self.refresh_selection_cache()
-        self._record_mutation(result)
-        return self
 
     def extend(
         self,
         *args: ExtendArg,
         include_root: bool = True,
         use_cache: bool = True,
-    ) -> Self:
+    ) -> None:
         """Append new schema fields under the single array selected by predicates."""
         predicates: list[NodeSelector] = []
         fields: list[SchemaField] = []
@@ -720,33 +632,14 @@ class Hyperparameters(Node):
             self.refresh_selection_cache()
             raise
 
-        changes = tuple(
-            MutationChange(
-                node=str(field.address),
-                field="node",
-                old=None,
-                new=field.model_dump(mode="python", round_trip=True),
-                action="extend",
-            )
-            for field in new_fields
-        )
-        result = MutationResult(
-            operation_id=uuid.uuid4().hex,
-            action="extend",
-            matched=1,
-            updated=len(new_fields),
-            changes=changes,
-        )
         self.refresh_selection_cache()
-        self._record_mutation(result)
-        return self
 
     def delete(
         self,
         *predicates: NodeSelector,
         include_root: bool = False,
         use_cache: bool = True,
-    ) -> Self:
+    ) -> None:
         """Permanently remove selected schema nodes from the tree."""
         if not predicates:
             raise ValueError("delete requires at least one predicate")
@@ -780,17 +673,6 @@ class Hyperparameters(Node):
             if not any(str(request_address).startswith(prefix) for request_address in remaining_request_addresses):
                 raise ValueError(f"delete would leave array '{address}' without request descendants")
 
-        changes = tuple(
-            MutationChange(
-                node=str(node.address),
-                field="node",
-                old=node.model_dump(mode="python", round_trip=True),
-                new=None,
-                action="delete",
-            )
-            for node in roots
-        )
-
         for node in roots:
             parent = node.parent
             if not isinstance(parent, Array):
@@ -798,17 +680,8 @@ class Hyperparameters(Node):
             parent.fields = [field for field in parent.fields if field is not node]
             node.parent = None
 
-        result = MutationResult(
-            operation_id=uuid.uuid4().hex,
-            action="delete",
-            matched=len(selected),
-            updated=len(roots),
-            changes=changes,
-        )
         self._clear_tree_caches()
         self.refresh_selection_cache()
-        self._record_mutation(result)
-        return self
 
     @contextmanager
     def override(
@@ -819,7 +692,7 @@ class Hyperparameters(Node):
         include_root: bool = True,
         validate: bool = True,
         **values: Any,
-    ) -> Iterator[MutationResult]:
+    ) -> Iterator[None]:
         nodes = self.select(*predicates, include_root=include_root)
         normalized_values = _normalize_update_values(values)
         snapshot = [
@@ -838,20 +711,15 @@ class Hyperparameters(Node):
             validate=validate,
             **normalized_values,
         )
-        result = self.last_mutation
-        assert result is not None
 
         try:
-            yield result
+            yield
         finally:
-            restore_changes: list[MutationChange] = []
             for node, name, original, was_set in snapshot:
-                current = getattr(node, name, _MISSING)
                 if original is _MISSING:
-                    if current is _MISSING:
+                    if getattr(node, name, _MISSING) is _MISSING:
                         continue
                     delattr(node, name)
-                    restored = None
                 else:
                     setattr(node, name, original)
                     if name in getattr(type(node), "model_fields", {}):
@@ -859,30 +727,9 @@ class Hyperparameters(Node):
                             node.model_fields_set.add(name)
                         else:
                             node.model_fields_set.discard(name)
-                    restored = original
 
-                if current != original:
-                    restore_changes.append(
-                        MutationChange(
-                            node=str(node.address),
-                            field=name,
-                            old=None if current is _MISSING else current,
-                            new=restored,
-                            action="restore",
-                        )
-                    )
-
-            restore_result = MutationResult(
-                operation_id=uuid.uuid4().hex,
-                parent_operation_id=result.operation_id,
-                action="restore",
-                matched=len(nodes),
-                updated=len({change.node for change in restore_changes}),
-                changes=tuple(restore_changes),
-            )
             self._clear_tree_caches()
             self.refresh_selection_cache()
-            self._record_mutation(restore_result)
 
     def __str__(self) -> str:
         lines: list[str] = []

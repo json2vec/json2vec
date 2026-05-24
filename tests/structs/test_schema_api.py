@@ -142,8 +142,6 @@ def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
 
     model.update(numeric, weight=2.0)
     assert params.requests["record/amount"].weight == 2.0
-    assert params.last_mutation is not None
-    assert params.last_mutation.updated == 1
 
     model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
     assert model.select(j2v.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
@@ -222,8 +220,6 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
     assert "record/transactions/risk_score" in params.requests
     assert "record/transactions/risk_score" in model.nodes
     assert params.requests["record/transactions/risk_score"].query == "[*].transactions[*].risk_score"
-    assert params.last_mutation is not None
-    assert params.last_mutation.action == "extend"
 
 
 def test_model_extend_defaults_to_root_when_only_one_array_matches():
@@ -254,8 +250,6 @@ def test_model_delete_removes_nodes_permanently_and_rebuilds_modules():
 
     assert "record/risk_score" not in params.requests
     assert "record/risk_score" not in model.nodes
-    assert params.last_mutation is not None
-    assert params.last_mutation.action == "delete"
 
 
 def test_model_delete_rejects_removing_the_final_request():
@@ -283,8 +277,6 @@ def test_model_reset_reinitializes_runtime_node_without_changing_schema():
 
     assert model.nodes["record/amount"] is not before
     assert "record/amount" in model.hyperparameters.requests
-    assert model.hyperparameters.last_mutation is not None
-    assert model.hyperparameters.last_mutation.action == "reset"
 
 
 def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
@@ -296,14 +288,11 @@ def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
     )
     before = model.nodes["record/amount"]
 
-    with model.override(j2v.where("name") == "amount", active=False) as result:
-        assert result.action == "update"
+    with model.override(j2v.where("name") == "amount", active=False):
         assert "record/amount" not in model.hyperparameters.active_requests
         assert model.nodes["record/amount"] is not before
 
     assert "record/amount" in model.hyperparameters.active_requests
-    assert model.hyperparameters.last_mutation is not None
-    assert model.hyperparameters.last_mutation.action == "restore"
 
 
 def test_model_mutations_are_blocked_inside_training_loop_lock():

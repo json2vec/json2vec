@@ -70,7 +70,6 @@ class API(ls.LitAPI):
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.update_operations = list(update_operations or [])
-        self.applied_update_operations: list[dict[str, Any]] = []
 
     @property
     def model_source(self) -> ModelSource:
@@ -86,9 +85,6 @@ class API(ls.LitAPI):
         self.model: Model = self._load_model().to(device)
         for predicates, values in self.update_operations:
             self.model.update(*predicates, **values)
-            last_mutation = self.model.hyperparameters.last_mutation
-            if last_mutation is not None:
-                self.applied_update_operations.append(last_mutation.model_dump(mode="python"))
 
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
