@@ -66,4 +66,4 @@ For source data whose keys do not match the schema names, add explicit `query=..
 
 - Continue with **Hello World** for the complete supervised loop.
 - Jump to **Masked Pretraining** if you want a nested self-supervised example.
-- Use [Model Updates](guides/model-update.ipynb) when you need to change masking, targets, or embeddings after creating a schema.
+- Use [Model Updates](guides/model-update.ipynb) when you need to add, delete, reset, or temporarily override schema nodes after creating a model.
