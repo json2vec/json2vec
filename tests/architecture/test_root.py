@@ -370,11 +370,13 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
 
     monkeypatch.setattr(Model, "log", log)
     model = Model(hyperparameters=_hyperparameters(), batch_size=2)
-    value = torch.tensor(1.0)
+    value = torch.tensor(1.0, requires_grad=True)
 
     assert model.track(("loss", "train"), value=value) is value
 
     assert len(calls) == 1
+    assert calls[0]["value"] is not value
+    assert calls[0]["value"].requires_grad is False
     assert calls[0]["sync_dist"] is True
     assert calls[0]["rank_zero_only"] is True
 

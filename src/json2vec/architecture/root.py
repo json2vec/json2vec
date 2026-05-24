@@ -491,7 +491,7 @@ class Model(lit.LightningModule):
         # Lightning from running a sync while still marking the metric as handled.
         self.log(
             name=groupname(names),
-            value=value,
+            value=value.detach(),
             on_step=False,
             on_epoch=True,
             sync_dist=True,
