@@ -147,7 +147,7 @@ def test_from_spec_aliases_schema_constructor():
     assert model.hyperparameters.embed == ["record"]
 
 
-def test_model_selector_update_and_cached_role_views():
+def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),
         j2v.Category("label", target=True, embed=False),
@@ -158,7 +158,7 @@ def test_model_selector_update_and_cached_role_views():
     params = model.hyperparameters
 
     numeric = j2v.where("type") == "number"
-    assert model.select(numeric).to_list() == model.select(j2v.where("type") == "number").to_list()
+    assert model.select(numeric) == model.select(j2v.where("type") == "number")
 
     model.update(numeric, weight=2.0)
     assert params.requests["record/amount"].weight == 2.0
@@ -166,7 +166,7 @@ def test_model_selector_update_and_cached_role_views():
     assert params.last_mutation.updated == 1
 
     model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-    assert model.select(j2v.where("benchmark") == "schema_api").to_list() == [params.requests["record/amount"]]
+    assert model.select(j2v.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
 
     model.update(j2v.where("name") == "amount", target=True)
     assert params.requests["record/amount"].p_prune == 1.0
@@ -174,8 +174,29 @@ def test_model_selector_update_and_cached_role_views():
     model.update(j2v.where("name") == "amount", target=False)
     assert params.requests["record/amount"].p_prune is None
 
-    model.select(j2v.where("name") == "amount").update(p_prune=0.25)
+    model.update(j2v.where("name") == "amount", p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25
+
+
+def test_hyperparameters_select_returns_nodes_and_accepts_boolean_predicates():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        j2v.Number("memo", active=False),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    params = model.hyperparameters
+
+    active = params.select(j2v.where("active"), include_root=False)
+    inactive = params.select(~j2v.where("active"), include_root=False)
+
+    assert isinstance(active, list)
+    assert active == [params.requests["record/amount"]]
+    assert inactive == [params.requests["record/memo"]]
+
+    with pytest.raises(TypeError, match="Python 'not where"):
+        not j2v.where("active")
 
 
 def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
@@ -192,7 +213,7 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
     assert "record/memo" not in params.active_requests
     assert "record/memo" in model.nodes
     assert params.embed == []
-    inactive = model.select(lambda node: getattr(node, "active", True) is False).to_list()
+    inactive = model.select(lambda node: getattr(node, "active", True) is False)
     assert inactive[0].address == "record/memo"
 
     model.update(j2v.where("name") == "memo", active=True)
@@ -201,3 +222,125 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
     assert "record/memo" in params.active_requests
     assert "record/memo" in model.nodes
     assert params.embed == ["record/memo"]
+
+
+def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modules():
+    model = j2v.Model.from_schema(
+        j2v.Array(
+            j2v.Number("amount"),
+            name="transactions",
+            max_length=4,
+        ),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    params = model.hyperparameters
+
+    model.extend(j2v.where("address") == "record/transactions", j2v.Number("risk_score"))
+
+    assert "record/transactions/risk_score" in params.requests
+    assert "record/transactions/risk_score" in model.nodes
+    assert params.requests["record/transactions/risk_score"].query == "[*].transactions[*].risk_score"
+    assert params.last_mutation is not None
+    assert params.last_mutation.action == "extend"
+
+
+def test_model_extend_defaults_to_root_when_only_one_array_matches():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    model.extend(j2v.Number("risk_score"))
+
+    assert "record/risk_score" in model.hyperparameters.requests
+    assert "record/risk_score" in model.nodes
+
+
+def test_model_delete_removes_nodes_permanently_and_rebuilds_modules():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        j2v.Number("risk_score"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    params = model.hyperparameters
+
+    model.delete(j2v.where("name") == "risk_score")
+
+    assert "record/risk_score" not in params.requests
+    assert "record/risk_score" not in model.nodes
+    assert params.last_mutation is not None
+    assert params.last_mutation.action == "delete"
+
+
+def test_model_delete_rejects_removing_the_final_request():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    with pytest.raises(ValueError, match="every request"):
+        model.delete(j2v.where("name") == "amount")
+
+
+def test_model_reset_reinitializes_runtime_node_without_changing_schema():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    before = model.nodes["record/amount"]
+
+    model.reset(j2v.where("name") == "amount")
+
+    assert model.nodes["record/amount"] is not before
+    assert "record/amount" in model.hyperparameters.requests
+    assert model.hyperparameters.last_mutation is not None
+    assert model.hyperparameters.last_mutation.action == "reset"
+
+
+def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    before = model.nodes["record/amount"]
+
+    with model.override(j2v.where("name") == "amount", active=False) as result:
+        assert result.action == "update"
+        assert "record/amount" not in model.hyperparameters.active_requests
+        assert model.nodes["record/amount"] is not before
+
+    assert "record/amount" in model.hyperparameters.active_requests
+    assert model.hyperparameters.last_mutation is not None
+    assert model.hyperparameters.last_mutation.action == "restore"
+
+
+def test_model_mutations_are_blocked_inside_training_loop_lock():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    lock = j2v.MutationLockCallback()
+
+    lock.on_train_start(trainer=None, pl_module=model)
+    try:
+        with pytest.raises(RuntimeError, match="active loop: train"):
+            model.update(j2v.where("name") == "amount", weight=2.0)
+    finally:
+        lock.on_train_end(trainer=None, pl_module=model)
+
+    model.update(j2v.where("name") == "amount", weight=2.0)
+    assert model.hyperparameters.requests["record/amount"].weight == 2.0

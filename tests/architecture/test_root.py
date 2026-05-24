@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from json2vec.architecture.root import Model
+from json2vec.architecture.root import Model, MutationLockCallback
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
@@ -168,6 +168,7 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
 
     callbacks = model.configure_callbacks()
 
+    assert any(isinstance(callback, MutationLockCallback) for callback in callbacks)
     assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
     assert any(isinstance(callback, CounterUpdateCallback) for callback in callbacks)
 
@@ -211,6 +212,13 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
         if isinstance(callback, CounterUpdateCallback)
     ]
 
+    mutation_lock_callbacks = [
+        callback
+        for callback in model.configure_callbacks()
+        if isinstance(callback, MutationLockCallback)
+    ]
+
+    assert len(mutation_lock_callbacks) == 1
     assert len(vocabulary_callbacks) == 1
     assert len(counter_callbacks) == 1
 
@@ -220,7 +228,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
     model._trainer = type(  # noqa: SLF001
         "TrainerStub",
         (),
-        {"callbacks": [VocabularySyncCallback(), CounterUpdateCallback()]},
+        {"callbacks": [MutationLockCallback(), VocabularySyncCallback(), CounterUpdateCallback()]},
     )()
 
     assert model.configure_callbacks() == []
@@ -233,6 +241,34 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
     assert TensorKey.state.name in model.nodes[address].embedder.counters
     assert TensorKey.content.name in model.nodes[address].embedder.counters
+
+
+def test_runtime_mutations_preserve_current_floating_dtype() -> None:
+    hyperparameters = Hyperparameters.model_validate(
+        {
+            "d_model": 8,
+            "fields": {
+                "name": "root",
+                "type": "array",
+                "max_length": 1,
+                "n_outputs": 1,
+                "fields": [
+                    {
+                        "name": "amount",
+                        "type": "number",
+                        "query": "[*].amount",
+                    }
+                ],
+            },
+        }
+    )
+    model = Model(hyperparameters=hyperparameters, batch_size=2).to(dtype=torch.float64)
+
+    model.update(lambda node: node.name == "amount", weight=2.0)
+    model.reset(lambda node: node.name == "amount")
+
+    floating_dtypes = {parameter.dtype for parameter in model.parameters() if parameter.is_floating_point()}
+    assert floating_dtypes == {torch.float64}
 
 
 def test_training_counters_observe_all_encoded_fields() -> None:

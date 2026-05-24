@@ -28,9 +28,12 @@ This page is generated from public docstrings and is meant as a lookup companion
       members:
         - from_schema
         - from_spec
-        - nodes_matching
         - select
         - update
+        - extend
+        - delete
+        - reset
+        - override
         - plot
         - save
         - load
@@ -56,7 +59,11 @@ This page is generated from public docstrings and is meant as a lookup companion
         - embed
         - select
         - update
+        - extend
+        - delete
+        - override
         - mutation_history
+        - mutation_revision
 
 ::: json2vec.where
     options:

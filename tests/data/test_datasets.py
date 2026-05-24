@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 
+import json2vec as j2v
 from json2vec.data import iterables
 from json2vec.data.datasets import base, polars, streaming
 from json2vec.data.datasets.base import Dataset, _is_assigned_to_worker, _worker_identity, sha256
@@ -575,6 +576,30 @@ def test_polars_datamodule_from_model_accepts_named_splits():
     assert module.dataset.root is None
     assert module.dataset.preprocessor is None
     assert module.val_dataloader() is None
+
+
+def test_polars_datamodule_from_model_refreshes_context_after_model_reset():
+    model = j2v.Model.from_schema(
+        j2v.Category("code", max_vocab_size=16),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    module = PolarsDataModule.from_model(
+        model,
+        train=pl.DataFrame({"code": ["a"]}),
+        num_workers=0,
+    )
+    before = module.interprocess_encoding_context["record/code"]
+
+    model.reset(j2v.where("name") == "code")
+
+    after = module.interprocess_encoding_context["record/code"]
+    current = model.interprocess_encoding_context["record/code"]
+    assert after.master._id == current.master._id
+    assert after.master._id != before.master._id
+    assert after is not before
 
 
 def test_polars_datamodule_from_model_requires_at_least_one_split():

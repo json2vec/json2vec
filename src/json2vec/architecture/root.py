@@ -1,7 +1,10 @@
 """Lightning model assembly and runtime helpers for JSON2Vec schemas."""
 
-from collections import defaultdict
+import uuid
+import weakref
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from functools import partialmethod
 from pathlib import Path
@@ -19,7 +22,14 @@ from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch
 from json2vec.data.iterables import encode, mock
 from json2vec.structs.enums import Metric, Strata, TensorKey
-from json2vec.structs.experiment import Hyperparameters, NodePredicate, NodeSelection, SchemaField
+from json2vec.structs.experiment import (
+    Hyperparameters,
+    MutationChange,
+    MutationResult,
+    NodeAttribute,
+    NodePredicate,
+    SchemaField,
+)
 from json2vec.structs.packages import Embedding, Parcel, Prediction
 from json2vec.structs.tree import Address, Node, PruneRate, Rate
 from json2vec.tensorfields.base import (
@@ -44,6 +54,36 @@ Postprocessor: TypeAlias = Callable[
     [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
     tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
 ]
+
+
+class MutationLockCallback(Callback):
+    """Prevent runtime schema mutations while Lightning owns an active loop."""
+
+    locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
+
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
+        enter = getattr(pl_module, "_enter_mutation_lock", None)
+        if callable(enter):
+            enter(strata)
+
+    def _on_loop_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
+        exit_ = getattr(pl_module, "_exit_mutation_lock", None)
+        if callable(exit_):
+            exit_(strata)
+
+    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
+    on_train_end = partialmethod(_on_loop_end, strata=Strata.train)
+    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
+    on_validation_end = partialmethod(_on_loop_end, strata=Strata.validate)
+    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
+    on_test_end = partialmethod(_on_loop_end, strata=Strata.test)
+    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
+    on_predict_end = partialmethod(_on_loop_end, strata=Strata.predict)
+
+    def on_exception(self, trainer: lit.Trainer, pl_module: lit.LightningModule, exception: BaseException) -> None:
+        release = getattr(pl_module, "_release_mutation_locks", None)
+        if callable(release):
+            release(self.locks)
 
 
 @beartype
@@ -83,13 +123,6 @@ def step(
     loss: torch.Tensor = module.track((Metric.loss, strata), value=torch.stack(losses).sum())
 
     return Output(loss=loss)
-
-
-def _compatible_state_value(current: Any, previous: Any) -> bool:
-    if isinstance(current, torch.Tensor) and isinstance(previous, torch.Tensor):
-        return current.shape == previous.shape
-
-    return type(current) is type(previous)
 
 
 class Model(lit.LightningModule):
@@ -211,8 +244,10 @@ class Model(lit.LightningModule):
         self.batch_size: int = batch_size
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
+        self._mutation_locks: Counter[str] = Counter()
+        self._data_modules: weakref.WeakSet[Any] = weakref.WeakSet()
 
-        self._build_modules()
+        self._build()
 
         logger.bind(
             component="model",
@@ -222,7 +257,7 @@ class Model(lit.LightningModule):
             embeds=len(self.hyperparameters.embed),
         ).info("initialized Model module")
 
-    def _build_modules(self) -> None:
+    def _build(self) -> None:
         self.nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
         for address in self.hyperparameters.requests | self.hyperparameters.arrays:
@@ -234,67 +269,97 @@ class Model(lit.LightningModule):
 
         self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
 
-    def _rebuild_modules(self) -> None:
+    def _runtime_placement(self) -> tuple[torch.device | None, torch.dtype | None]:
+        device: torch.device | None = None
+        dtype: torch.dtype | None = None
+        for tensor in (*self.parameters(), *self.buffers()):
+            if device is None:
+                device = tensor.device
+            if dtype is None and tensor.is_floating_point():
+                dtype = tensor.dtype
+            if device is not None and dtype is not None:
+                break
+
+        return device, dtype
+
+    def _apply_runtime_placement(
+        self,
+        module: torch.nn.Module,
+        *,
+        device: torch.device | None,
+        dtype: torch.dtype | None,
+    ) -> None:
+        if device is None and dtype is None:
+            return
+        if device is None:
+            module.to(dtype=dtype)
+            return
+        if dtype is None:
+            module.to(device=device)
+            return
+
+        module.to(device=device, dtype=dtype)
+
+    def _rebuild(self) -> None:
+        device, dtype = self._runtime_placement()
         previous = {
             name: value.detach().clone() if isinstance(value, torch.Tensor) else deepcopy(value)
             for name, value in self.state_dict().items()
         }
-        self._build_modules()
+        self._build()
+        self._apply_runtime_placement(self, device=device, dtype=dtype)
         current = self.state_dict()
-        compatible = {
-            name: value
-            for name, value in previous.items()
-            if name in current and _compatible_state_value(current[name], value)
-        }
+        compatible = {}
+        for name, value in previous.items():
+            if name not in current:
+                continue
+
+            current_value = current[name]
+            if isinstance(current_value, torch.Tensor) and isinstance(value, torch.Tensor):
+                if current_value.shape != value.shape:
+                    continue
+            elif type(current_value) is not type(value):
+                continue
+
+            compatible[name] = value
+
         self.load_state_dict(compatible, strict=False)
+        self._refresh_data_modules()
 
-    def nodes_matching(
-        self,
-        *predicates: NodePredicate | Callable[[Node], bool],
-        include_root: bool = True,
-        use_cache: bool = True,
-    ) -> Iterator[Node]:
-        """Yield schema nodes that satisfy every predicate.
+    def _register_data_module(self, datamodule: Any) -> None:
+        self._data_modules.add(datamodule)
 
-        Args:
-            *predicates: `where(...)` predicates or callables that accept a
-                schema node.
-            include_root: Include the root array node in the search.
-            use_cache: Reuse cached predicate selections when possible.
-        """
-        yield from self.hyperparameters.nodes(
-            *predicates,
-            include_root=include_root,
-            use_cache=use_cache,
-        )
+    def _refresh_data_modules(self) -> None:
+        context = self.interprocess_encoding_context
+        for datamodule in list(self._data_modules):
+            setter = getattr(datamodule, "_set_interprocess_encoding_context", None)
+            if callable(setter):
+                setter(context)
+            else:
+                setattr(datamodule, "interprocess_encoding_context", context)
 
     def select(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         include_root: bool = True,
         use_cache: bool = True,
-    ) -> NodeSelection:
-        """Return a reusable selection of schema nodes.
-
-        Selections can be inspected or mutated with
-        `model.select(...).update(...)`.
-        """
-        selection = self.hyperparameters.select(
+    ) -> list[Node]:
+        """Return schema nodes that satisfy every predicate."""
+        return self.hyperparameters.select(
             *predicates,
             include_root=include_root,
             use_cache=use_cache,
         )
-        return selection.model_copy(update={"owner": self})
 
     def update(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,
         validate: bool = True,
         **values: Any,
-    ) -> Self:
+    ) -> None:
         """Mutate selected schema nodes and rebuild compatible modules.
 
         `target=True` is shorthand for `p_prune=1.0`; `target=False` clears
@@ -308,10 +373,8 @@ class Model(lit.LightningModule):
             include_root: Include the root node in predicate matching.
             validate: Validate each node after applying candidate values.
             **values: Schema attributes to update.
-
-        Returns:
-            The same model instance.
         """
+        self._assert_mutation_allowed("update")
         self.hyperparameters.update(
             *predicates,
             strict=strict,
@@ -320,27 +383,147 @@ class Model(lit.LightningModule):
             validate=validate,
             **values,
         )
-        self._rebuild_modules()
-        return self
+        self._rebuild()
 
-    def _update_nodes(
+    def extend(
         self,
-        nodes: Sequence[Node],
-        *,
+        *args: NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField,
+        include_root: bool = True,
+        use_cache: bool = True,
+    ) -> None:
+        """Append new schema fields under one selected array node and rebuild modules."""
+        self._assert_mutation_allowed("extend")
+        self.hyperparameters.extend(*args, include_root=include_root, use_cache=use_cache)
+        self._rebuild()
+
+    def delete(
+        self,
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        include_root: bool = False,
+        use_cache: bool = True,
+    ) -> None:
+        """Permanently remove selected schema nodes and rebuild modules."""
+        self._assert_mutation_allowed("delete")
+        self.hyperparameters.delete(*predicates, include_root=include_root, use_cache=use_cache)
+        self._rebuild()
+
+    def reset(
+        self,
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        include_root: bool = True,
+        use_cache: bool = True,
+        descendants: bool = False,
+    ) -> None:
+        """Reinitialize selected runtime node modules while preserving schema values."""
+        self._assert_mutation_allowed("reset")
+        selected = self.hyperparameters.select(
+            *predicates,
+            include_root=include_root,
+            use_cache=use_cache,
+        )
+        if not selected:
+            raise ValueError("reset matched no nodes")
+
+        selected_by_address: dict[Address, Node] = {}
+        for node in selected:
+            if node.address in self.nodes:
+                selected_by_address[Address(str(node.address))] = node
+
+            if descendants:
+                for descendant in getattr(node, "descendants", ()):
+                    if descendant.address in self.nodes:
+                        selected_by_address[Address(str(descendant.address))] = descendant
+
+        if not selected_by_address:
+            raise ValueError("reset matched no runtime nodes")
+
+        changes: list[MutationChange] = []
+        device, dtype = self._runtime_placement()
+        for address, node in selected_by_address.items():
+            module = self.nodes[address]
+            state_keys = tuple(module.state_dict().keys())
+            parameter_count = sum(parameter.numel() for parameter in module.parameters())
+            replacement = NodeModule(
+                hyperparameters=self.hyperparameters,
+                address=address,
+                batch_size=self.batch_size,
+            )
+            self._apply_runtime_placement(replacement, device=device, dtype=dtype)
+            self.nodes[address] = replacement
+            changes.append(
+                MutationChange(
+                    node=str(node.address),
+                    field="state",
+                    old={"parameter_count": parameter_count, "state_keys": state_keys},
+                    new=None,
+                    action="reset",
+                )
+            )
+
+        self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
+        self._refresh_data_modules()
+        result = MutationResult(
+            operation_id=uuid.uuid4().hex,
+            action="reset",
+            matched=len(selected),
+            updated=len(selected_by_address),
+            changes=tuple(changes),
+        )
+        self.hyperparameters._record_mutation(result)
+
+    @contextmanager
+    def override(
+        self,
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         strict: bool = True,
         allow_extra: bool = False,
+        include_root: bool = True,
         validate: bool = True,
         **values: Any,
-    ) -> Self:
-        self.hyperparameters._update_nodes(
-            nodes,
-            strict=strict,
-            allow_extra=allow_extra,
-            validate=validate,
-            **values,
-        )
-        self._rebuild_modules()
-        return self
+    ) -> Iterator[MutationResult]:
+        """Temporarily mutate selected schema nodes and keep runtime modules synchronized."""
+        self._assert_mutation_allowed("override")
+        try:
+            with self.hyperparameters.override(
+                *predicates,
+                strict=strict,
+                allow_extra=allow_extra,
+                include_root=include_root,
+                validate=validate,
+                **values,
+            ) as result:
+                self._rebuild()
+                yield result
+        finally:
+            self._rebuild()
+
+    def _assert_mutation_allowed(self, action: str) -> None:
+        active = tuple(name for name, count in self._mutation_locks.items() if count > 0)
+        if active:
+            labels = ", ".join(active)
+            raise RuntimeError(f"model.{action}(...) cannot run while the model is in an active loop: {labels}")
+
+    def _enter_mutation_lock(self, name: str) -> None:
+        self._mutation_locks[name] += 1
+
+    def _exit_mutation_lock(self, name: str) -> None:
+        if self._mutation_locks[name] <= 1:
+            self._mutation_locks.pop(name, None)
+            return
+
+        self._mutation_locks[name] -= 1
+
+    def _release_mutation_locks(self, names: Sequence[str]) -> None:
+        for name in names:
+            self._mutation_locks.pop(name, None)
+
+    @contextmanager
+    def _mutation_lock(self, name: str) -> Iterator[None]:
+        self._enter_mutation_lock(name)
+        try:
+            yield
+        finally:
+            self._exit_mutation_lock(name)
 
     def configure_callbacks(self) -> list[Callback]:
         callbacks: list[Callback] = []
@@ -350,6 +533,9 @@ class Model(lit.LightningModule):
             type(callback)
             for callback in getattr(trainer, "callbacks", ())
         }
+
+        if MutationLockCallback not in attached_callback_types:
+            callbacks.append(MutationLockCallback())
 
         for request in self.hyperparameters.active_requests.values():
             plugin: Plugin = TENSORFIELDS[request.type]
@@ -428,6 +614,10 @@ class Model(lit.LightningModule):
 
     @beartype
     def forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
+        with self._mutation_lock("forward"):
+            return self._forward(inputs)
+
+    def _forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
         processed: dict[Address, list[Parcel]] = defaultdict(list)
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
@@ -554,6 +744,15 @@ class Model(lit.LightningModule):
 
         If `preprocess` is omitted, raw records are encoded unchanged.
         """
+        with self._mutation_lock("inference"):
+            return self._evaluate(batch=batch, preprocess=preprocess, postprocess=postprocess)
+
+    def _evaluate(
+        self,
+        batch: EncodedBatch | list[dict[str, Any]],
+        preprocess: PreprocessFn | None = None,
+        postprocess: Postprocessor | None = None,
+    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
         raw_batch = batch
 

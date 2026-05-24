@@ -16,14 +16,14 @@ from tensordict import TensorDict
 from json2vec.architecture.root import Model
 from json2vec.data.iterables import JMESPathResolutionMonitor, encode
 from json2vec.structs.enums import Strata
-from json2vec.structs.experiment import NodePredicate
+from json2vec.structs.experiment import NodeAttribute, NodePredicate
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address, Node
 from json2vec.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 ModelSource: TypeAlias = str | Path | Model
-UpdateOperation: TypeAlias = tuple[tuple[NodePredicate | Callable[[Node], bool], ...], dict[str, Any]]
+UpdateOperation: TypeAlias = tuple[tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...], dict[str, Any]]
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -326,7 +326,7 @@ class Deployment(BaseSettings):
     @beartype
     def update(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,

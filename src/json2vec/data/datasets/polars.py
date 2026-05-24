@@ -262,7 +262,7 @@ class PolarsDataModule(lit.LightningDataModule):
         if dataset is None:
             dataset = Dataset(root=None, preprocessor=preprocessor)
 
-        return cls(
+        datamodule = cls(
             hyperparameters=model.hyperparameters,
             dataframe=dataframes,
             dataset=dataset,
@@ -270,6 +270,14 @@ class PolarsDataModule(lit.LightningDataModule):
             batch_size=model.batch_size,
             **kwargs,
         )
+        register = getattr(model, "_register_data_module", None)
+        if callable(register):
+            register(datamodule)
+
+        return datamodule
+
+    def _set_interprocess_encoding_context(self, context: InterprocessEncodingContext) -> None:
+        self.interprocess_encoding_context = context
 
     def dataloader(self, strata: Strata) -> DataLoader:
         trainer = getattr(self, "trainer", None)

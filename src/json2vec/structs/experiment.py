@@ -20,6 +20,7 @@ from json2vec.structs.tree import Address, Leaf, Node, PruneRate, Rate
 logger = logging.getLogger("json2vec.hyperparameters")
 SelectionKey: TypeAlias = tuple[Any, ...]
 SchemaField: TypeAlias = Array | Leaf
+MutationAction: TypeAlias = Literal["update", "restore", "extend", "delete", "reset"]
 _MISSING = object()
 
 
@@ -32,38 +33,6 @@ class SelectionCacheEntry(pydantic.BaseModel):
     nodes: tuple[Node, ...]
 
 
-class NodeSelection(pydantic.BaseModel):
-    """Collection of schema nodes selected by predicates."""
-
-    model_config = pydantic.ConfigDict(frozen=True, arbitrary_types_allowed=True)
-
-    owner: Any = pydantic.Field(exclude=True)
-    key: SelectionKey | None = None
-    nodes: tuple[Node, ...]
-
-    def __iter__(self) -> Iterator[Node]:
-        return iter(self.nodes)
-
-    def to_list(self) -> list[Node]:
-        return list(self.nodes)
-
-    def update(
-        self,
-        strict: bool = True,
-        allow_extra: bool = False,
-        validate: bool = True,
-        **values: Any,
-    ) -> "Hyperparameters":
-        """Mutate every node in this selection."""
-        return self.owner._update_nodes(
-            self.nodes,
-            strict=strict,
-            allow_extra=allow_extra,
-            validate=validate,
-            **values,
-        )
-
-
 class MutationChange(pydantic.BaseModel):
     """Single field change recorded by a schema mutation."""
 
@@ -73,7 +42,7 @@ class MutationChange(pydantic.BaseModel):
     field: str
     old: Any
     new: Any
-    action: Literal["update", "restore"]
+    action: MutationAction
 
 
 class MutationResult(pydantic.BaseModel):
@@ -83,7 +52,7 @@ class MutationResult(pydantic.BaseModel):
 
     operation_id: str
     parent_operation_id: str | None = None
-    action: Literal["update", "restore"] = "update"
+    action: MutationAction = "update"
     matched: int
     updated: int
     skipped: int = 0
@@ -102,7 +71,7 @@ class NodePredicate(pydantic.BaseModel):
     def __call__(self, node: Node) -> bool:
         return self.func(node)
 
-    def __and__(self, other: "NodePredicate | Callable[[Node], bool]") -> "NodePredicate":
+    def __and__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> "NodePredicate":
         predicate = _normalize_predicate(other)
         return NodePredicate(
             func=lambda node: self(node) and predicate(node),
@@ -110,7 +79,7 @@ class NodePredicate(pydantic.BaseModel):
             cacheable=self.cacheable and predicate.cacheable,
         )
 
-    def __or__(self, other: "NodePredicate | Callable[[Node], bool]") -> "NodePredicate":
+    def __or__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> "NodePredicate":
         predicate = _normalize_predicate(other)
         return NodePredicate(
             func=lambda node: self(node) or predicate(node),
@@ -188,6 +157,21 @@ class NodeAttribute(pydantic.BaseModel):
             func=lambda node: _has_model_attribute(node, self.name),
             key=("exists", self.name),
         )
+
+    def __and__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> NodePredicate:
+        return _normalize_predicate(self) & other
+
+    def __or__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> NodePredicate:
+        return _normalize_predicate(self) | other
+
+    def __invert__(self) -> NodePredicate:
+        return NodePredicate(
+            func=lambda node: not bool(self.get(node, False)),
+            key=("not_truthy", self.name),
+        )
+
+    def __bool__(self) -> bool:
+        raise TypeError("Use ~where(...) for negated predicates; Python 'not where(...)' cannot build a predicate")
 
     def is_in(self, values: Iterable[Any]) -> NodePredicate:
         cached_values = tuple(values)
@@ -292,9 +276,18 @@ def _normalize_update_values(values: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _normalize_predicate(value: NodePredicate | Callable[[Node], bool]) -> NodePredicate:
+def _normalize_predicate(value: NodePredicate | NodeAttribute | Callable[[Node], bool]) -> NodePredicate:
     if isinstance(value, NodePredicate):
         return value
+
+    if isinstance(value, NodeAttribute):
+        return NodePredicate(
+            func=lambda node: _has_model_attribute(node, value.name) and value.get(node) is True,
+            key=("truthy", value.name),
+        )
+
+    if not callable(value):
+        raise TypeError("node predicates must be where(...) expressions or callables")
 
     return NodePredicate(
         func=value,
@@ -303,7 +296,7 @@ def _normalize_predicate(value: NodePredicate | Callable[[Node], bool]) -> NodeP
     )
 
 
-def _combined(predicates: tuple[NodePredicate | Callable[[Node], bool], ...]) -> NodePredicate:
+def _combined(predicates: tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...]) -> NodePredicate:
     if not predicates:
         return NodePredicate(func=lambda node: True, key=("all",))
 
@@ -382,6 +375,48 @@ def _normalize_schema_node(node: SchemaField, *, array_path: tuple[str, ...] = (
     raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
 
 
+def _split_extend_args(
+    args: tuple[NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField, ...],
+) -> tuple[tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...], tuple[SchemaField, ...]]:
+    predicates: list[NodePredicate | NodeAttribute | Callable[[Node], bool]] = []
+    fields: list[SchemaField] = []
+    reading_fields = False
+
+    for item in args:
+        if isinstance(item, (Array, Leaf)):
+            reading_fields = True
+            fields.append(item)
+            continue
+
+        if reading_fields:
+            raise TypeError("extend predicates must come before new schema fields")
+
+        predicates.append(item)
+
+    if not fields:
+        raise ValueError("extend requires at least one schema field")
+
+    return tuple(predicates), tuple(fields)
+
+
+def _array_path_for_children(array: Array) -> tuple[str, ...]:
+    return tuple(node.name for node in array.path[2:] if isinstance(node, Array))
+
+
+def _descendant_requests(node: Node) -> Iterator[Leaf]:
+    if isinstance(node, Leaf):
+        yield node
+        return
+
+    for descendant in getattr(node, "descendants", ()):
+        if isinstance(descendant, Leaf):
+            yield descendant
+
+
+def _node_dump(node: Node) -> dict[str, Any]:
+    return node.model_dump(mode="python", round_trip=True)
+
+
 def _materialize_raw_leaves(array: Array) -> Array:
     fields: list[Array | RequestTypes] = []
     for field in list(array.fields):
@@ -422,6 +457,7 @@ class Hyperparameters(Node):
 
     _selection_cache: dict[SelectionKey, SelectionCacheEntry] = pydantic.PrivateAttr(default_factory=dict)
     _mutation_history: list[MutationResult] = pydantic.PrivateAttr(default_factory=list)
+    _mutation_revision: int = pydantic.PrivateAttr(default=0)
 
     @classmethod
     def from_schema(
@@ -497,7 +533,7 @@ class Hyperparameters(Node):
             and getattr(node, "p_prune", 0.0) == 1.0,
             key=("role", "target"),
         )
-        return [Address(str(node.address)) for node in self.select(role).to_list()]
+        return [Address(str(node.address)) for node in self.select(role)]
 
     @property
     def embed(self) -> list[Address]:  # noqa: F811
@@ -506,7 +542,7 @@ class Hyperparameters(Node):
             and (not isinstance(node, Leaf) or node.active),
             key=("role", "embed"),
         )
-        return [Address(str(node.address)) for node in self.select(role).to_list()]
+        return [Address(str(node.address)) for node in self.select(role)]
 
     @property
     def last_mutation(self) -> MutationResult | None:
@@ -515,6 +551,10 @@ class Hyperparameters(Node):
     @property
     def mutation_history(self) -> tuple[MutationResult, ...]:
         return tuple(self._mutation_history)
+
+    @property
+    def mutation_revision(self) -> int:
+        return self._mutation_revision
 
     @functools.cached_property
     def arrays(self) -> dict[Address, Array]:
@@ -553,6 +593,7 @@ class Hyperparameters(Node):
             yield node
 
     def _record_mutation(self, result: MutationResult) -> None:
+        self._mutation_revision += 1
         self._mutation_history.append(result)
         _log_mutation(result)
 
@@ -583,7 +624,7 @@ class Hyperparameters(Node):
 
     def nodes(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         include_root: bool = True,
         use_cache: bool = True,
     ) -> Iterator[Node]:
@@ -591,15 +632,15 @@ class Hyperparameters(Node):
 
     def select(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         include_root: bool = True,
         use_cache: bool = True,
-    ) -> NodeSelection:
+    ) -> list[Node]:
         combined = _combined(predicates)
         key = ("select", include_root, combined.key)
 
         if use_cache and combined.cacheable and key in self._selection_cache:
-            return NodeSelection(owner=self, key=key, nodes=self._selection_cache[key].nodes)
+            return list(self._selection_cache[key].nodes)
 
         nodes = tuple(
             node
@@ -615,11 +656,11 @@ class Hyperparameters(Node):
                 nodes=nodes,
             )
 
-        return NodeSelection(owner=self, key=key, nodes=nodes)
+        return list(nodes)
 
     def update(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,
@@ -715,10 +756,158 @@ class Hyperparameters(Node):
         self._record_mutation(result)
         return self
 
+    def extend(
+        self,
+        *args: NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField,
+        include_root: bool = True,
+        use_cache: bool = True,
+    ) -> Self:
+        """Append new schema fields under the single array selected by predicates."""
+        predicates, fields = _split_extend_args(args)
+        candidates = [
+            node
+            for node in self.select(*predicates, include_root=include_root, use_cache=use_cache)
+            if isinstance(node, Array)
+        ]
+
+        if len(candidates) != 1:
+            raise ValueError(f"extend requires exactly one matching array node, found {len(candidates)}")
+
+        parent = candidates[0]
+        array_path = _array_path_for_children(parent)
+        new_fields = [_normalize_schema_node(field, array_path=array_path) for field in fields]
+        existing_names = {field.name for field in parent.fields}
+        duplicate_names = sorted({field.name for field in new_fields if field.name in existing_names})
+        duplicate_names.extend(
+            sorted(
+                {
+                    field.name
+                    for index, field in enumerate(new_fields)
+                    if any(other.name == field.name for other in new_fields[index + 1 :])
+                }
+            )
+        )
+        if duplicate_names:
+            raise ValueError(f"duplicate field name(s): {sorted(set(duplicate_names))}")
+
+        original_fields = list(parent.fields)
+        try:
+            parent.fields.extend(new_fields)
+            for field in new_fields:
+                field.parent = parent
+
+            self._clear_tree_caches()
+            for field in new_fields:
+                for request in _descendant_requests(field):
+                    request.post_bind_validate()
+        except Exception:
+            parent.fields = original_fields
+            for field in new_fields:
+                field.parent = None
+            self._clear_tree_caches()
+            self.refresh_selection_cache()
+            raise
+
+        changes = tuple(
+            MutationChange(
+                node=str(field.address),
+                field="node",
+                old=None,
+                new=_node_dump(field),
+                action="extend",
+            )
+            for field in new_fields
+        )
+        result = MutationResult(
+            operation_id=uuid.uuid4().hex,
+            action="extend",
+            matched=1,
+            updated=len(new_fields),
+            changes=changes,
+        )
+        self.refresh_selection_cache()
+        self._record_mutation(result)
+        return self
+
+    def delete(
+        self,
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        include_root: bool = False,
+        use_cache: bool = True,
+    ) -> Self:
+        """Permanently remove selected schema nodes from the tree."""
+        if not predicates:
+            raise ValueError("delete requires at least one predicate")
+
+        selected = self.select(*predicates, include_root=include_root, use_cache=use_cache)
+        if not selected:
+            raise ValueError("delete matched no nodes")
+        if self.fields in selected:
+            raise ValueError("delete cannot remove the root array")
+
+        selected_ids = {id(node) for node in selected}
+        roots = [
+            node
+            for node in selected
+            if not any(id(ancestor) in selected_ids for ancestor in getattr(node, "ancestors", ()) if ancestor is not self)
+        ]
+        removed_by_id = {id(node): node for node in roots}
+        for node in roots:
+            removed_by_id.update({id(descendant): descendant for descendant in getattr(node, "descendants", ())})
+        removed_addresses = {node.address for node in removed_by_id.values()}
+
+        remaining_request_addresses = {
+            address
+            for address in self.requests
+            if address not in removed_addresses
+        }
+        if not remaining_request_addresses:
+            raise ValueError("delete would remove every request")
+
+        remaining_array_addresses = {
+            address
+            for address in self.arrays
+            if address not in removed_addresses
+        }
+        for address in remaining_array_addresses:
+            prefix = f"{address}/"
+            if not any(str(request_address).startswith(prefix) for request_address in remaining_request_addresses):
+                raise ValueError(f"delete would leave array '{address}' without request descendants")
+
+        changes = tuple(
+            MutationChange(
+                node=str(node.address),
+                field="node",
+                old=_node_dump(node),
+                new=None,
+                action="delete",
+            )
+            for node in roots
+        )
+
+        for node in roots:
+            parent = node.parent
+            if not isinstance(parent, Array):
+                raise ValueError(f"delete cannot remove '{node.address}' because it has no array parent")
+            parent.fields = [field for field in parent.fields if field is not node]
+            node.parent = None
+
+        result = MutationResult(
+            operation_id=uuid.uuid4().hex,
+            action="delete",
+            matched=len(selected),
+            updated=len(roots),
+            changes=changes,
+        )
+        self._clear_tree_caches()
+        self.refresh_selection_cache()
+        self._record_mutation(result)
+        return self
+
     @contextmanager
     def override(
         self,
-        *predicates: NodePredicate | Callable[[Node], bool],
+        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,
@@ -726,10 +915,11 @@ class Hyperparameters(Node):
         **values: Any,
     ) -> Iterator[MutationResult]:
         nodes = tuple(self.nodes(*predicates, include_root=include_root))
+        normalized_values = _normalize_update_values(values)
         snapshot = [
             (node, name, getattr(node, name, _MISSING), name in getattr(node, "model_fields_set", set()))
             for node in nodes
-            for name in values
+            for name in normalized_values
             if _has_model_attribute(node, name) or (allow_extra and _allows_extra_attributes(node))
         ]
 
@@ -738,7 +928,7 @@ class Hyperparameters(Node):
             strict=strict,
             allow_extra=allow_extra,
             validate=validate,
-            **values,
+            **normalized_values,
         )
         result = self.last_mutation
         assert result is not None

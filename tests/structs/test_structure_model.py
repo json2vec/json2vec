@@ -161,7 +161,7 @@ def test_inactive_leaf_nodes_are_kept_in_tree_but_removed_from_runtime_maps():
     payload["fields"]["fields"][0]["fields"][0]["embed"] = True
 
     structure = Hyperparameters.model_validate(payload)
-    inactive = structure.select(lambda node: getattr(node, "name", None) == "category_leaf").to_list()[0]
+    inactive = structure.select(lambda node: getattr(node, "name", None) == "category_leaf")[0]
 
     assert inactive.active is False
     assert inactive.address == "root/branch/category_leaf"

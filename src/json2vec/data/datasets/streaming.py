@@ -211,13 +211,21 @@ class StreamingDataModule(lit.LightningDataModule):
         **kwargs: Any,
     ) -> "StreamingDataModule":
         """Construct a streaming data module from a model and dataset config."""
-        return cls(
+        datamodule = cls(
             hyperparameters=model.hyperparameters,
             dataset=dataset,
             interprocess_encoding_context=model.interprocess_encoding_context,
             batch_size=model.batch_size,
             **kwargs,
         )
+        register = getattr(model, "_register_data_module", None)
+        if callable(register):
+            register(datamodule)
+
+        return datamodule
+
+    def _set_interprocess_encoding_context(self, context: InterprocessEncodingContext) -> None:
+        self.interprocess_encoding_context = context
 
     def dataloader(self, strata: Strata) -> DataLoader:
         trainer = getattr(self, "trainer", None)
