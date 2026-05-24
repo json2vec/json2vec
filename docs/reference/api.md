@@ -27,7 +27,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_full_path: false
       members:
         - from_schema
-        - from_spec
         - select
         - update
         - extend
@@ -54,7 +53,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_full_path: false
       members:
         - from_schema
-        - from_spec
         - target
         - embed
         - select

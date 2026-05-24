@@ -1,12 +1,11 @@
 """Lightning model assembly and runtime helpers for JSON2Vec schemas."""
 
 import uuid
-import weakref
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import partialmethod
+from functools import partialmethod, wraps
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Self, TypeAlias, TypedDict, cast
 
@@ -56,20 +55,43 @@ Postprocessor: TypeAlias = Callable[
 ]
 
 
+def immutable(name: str | Strata) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(method)
+        def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            locks = self.locks
+            locks[name] += 1
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                if locks[name] <= 1:
+                    locks.pop(name, None)
+                else:
+                    locks[name] -= 1
+
+        return wrapped
+
+    return decorator
+
+
 class MutationLockCallback(Callback):
     """Prevent runtime schema mutations while Lightning owns an active loop."""
 
     locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
 
-    def _on_loop_start(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
-        enter = getattr(pl_module, "_enter_mutation_lock", None)
-        if callable(enter):
-            enter(strata)
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        pl_module.locks[strata] += 1
 
-    def _on_loop_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
-        exit_ = getattr(pl_module, "_exit_mutation_lock", None)
-        if callable(exit_):
-            exit_(strata)
+    def _on_loop_end(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        locks = pl_module.locks
+        if locks[strata] <= 1:
+            locks.pop(strata, None)
+        else:
+            locks[strata] -= 1
+
+    def on_exception(self, trainer: lit.Trainer, pl_module: "Model", exception: BaseException) -> None:  # ty:ignore[invalid-method-override]
+        for lock in self.locks:
+            pl_module.locks.pop(lock, None)
 
     on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
     on_train_end = partialmethod(_on_loop_end, strata=Strata.train)
@@ -80,10 +102,19 @@ class MutationLockCallback(Callback):
     on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
     on_predict_end = partialmethod(_on_loop_end, strata=Strata.predict)
 
-    def on_exception(self, trainer: lit.Trainer, pl_module: lit.LightningModule, exception: BaseException) -> None:
-        release = getattr(pl_module, "_release_mutation_locks", None)
-        if callable(release):
-            release(self.locks)
+
+class RuntimePlacementCallback(Callback):
+    """Move late-created modules onto the Lightning module's active device."""
+
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
+        device = getattr(pl_module, "device", None)
+        if isinstance(device, torch.device):
+            pl_module.to(device=device)
+
+    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
+    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
+    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
+    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
 
 
 @beartype
@@ -221,11 +252,6 @@ class Model(lit.LightningModule):
             scheduler=scheduler,
         )
 
-    @classmethod
-    def from_spec(cls, *args: Any, **kwargs: Any) -> Self:
-        """Alias for `from_schema(...)`."""
-        return cls.from_schema(*args, **kwargs)
-
     @beartype
     def __init__(
         self,
@@ -244,8 +270,7 @@ class Model(lit.LightningModule):
         self.batch_size: int = batch_size
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
-        self._mutation_locks: Counter[str] = Counter()
-        self._data_modules: weakref.WeakSet[Any] = weakref.WeakSet()
+        self.locks: Counter[str | Strata] = Counter()
 
         self._build()
 
@@ -269,45 +294,12 @@ class Model(lit.LightningModule):
 
         self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
 
-    def _runtime_placement(self) -> tuple[torch.device | None, torch.dtype | None]:
-        device: torch.device | None = None
-        dtype: torch.dtype | None = None
-        for tensor in (*self.parameters(), *self.buffers()):
-            if device is None:
-                device = tensor.device
-            if dtype is None and tensor.is_floating_point():
-                dtype = tensor.dtype
-            if device is not None and dtype is not None:
-                break
-
-        return device, dtype
-
-    def _apply_runtime_placement(
-        self,
-        module: torch.nn.Module,
-        *,
-        device: torch.device | None,
-        dtype: torch.dtype | None,
-    ) -> None:
-        if device is None and dtype is None:
-            return
-        if device is None:
-            module.to(dtype=dtype)
-            return
-        if dtype is None:
-            module.to(device=device)
-            return
-
-        module.to(device=device, dtype=dtype)
-
     def _rebuild(self) -> None:
-        device, dtype = self._runtime_placement()
         previous = {
             name: value.detach().clone() if isinstance(value, torch.Tensor) else deepcopy(value)
             for name, value in self.state_dict().items()
         }
         self._build()
-        self._apply_runtime_placement(self, device=device, dtype=dtype)
         current = self.state_dict()
         compatible = {}
         for name, value in previous.items():
@@ -324,19 +316,6 @@ class Model(lit.LightningModule):
             compatible[name] = value
 
         self.load_state_dict(compatible, strict=False)
-        self._refresh_data_modules()
-
-    def _register_data_module(self, datamodule: Any) -> None:
-        self._data_modules.add(datamodule)
-
-    def _refresh_data_modules(self) -> None:
-        context = self.interprocess_encoding_context
-        for datamodule in list(self._data_modules):
-            setter = getattr(datamodule, "_set_interprocess_encoding_context", None)
-            if callable(setter):
-                setter(context)
-            else:
-                setattr(datamodule, "interprocess_encoding_context", context)
 
     def select(
         self,
@@ -438,18 +417,15 @@ class Model(lit.LightningModule):
             raise ValueError("reset matched no runtime nodes")
 
         changes: list[MutationChange] = []
-        device, dtype = self._runtime_placement()
         for address, node in selected_by_address.items():
             module = self.nodes[address]
             state_keys = tuple(module.state_dict().keys())
             parameter_count = sum(parameter.numel() for parameter in module.parameters())
-            replacement = NodeModule(
+            self.nodes[address] = NodeModule(
                 hyperparameters=self.hyperparameters,
                 address=address,
                 batch_size=self.batch_size,
             )
-            self._apply_runtime_placement(replacement, device=device, dtype=dtype)
-            self.nodes[address] = replacement
             changes.append(
                 MutationChange(
                     node=str(node.address),
@@ -461,7 +437,6 @@ class Model(lit.LightningModule):
             )
 
         self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
-        self._refresh_data_modules()
         result = MutationResult(
             operation_id=uuid.uuid4().hex,
             action="reset",
@@ -498,32 +473,10 @@ class Model(lit.LightningModule):
             self._rebuild()
 
     def _assert_mutation_allowed(self, action: str) -> None:
-        active = tuple(name for name, count in self._mutation_locks.items() if count > 0)
+        active = tuple(name for name, count in self.locks.items() if count > 0)
         if active:
             labels = ", ".join(active)
             raise RuntimeError(f"model.{action}(...) cannot run while the model is in an active loop: {labels}")
-
-    def _enter_mutation_lock(self, name: str) -> None:
-        self._mutation_locks[name] += 1
-
-    def _exit_mutation_lock(self, name: str) -> None:
-        if self._mutation_locks[name] <= 1:
-            self._mutation_locks.pop(name, None)
-            return
-
-        self._mutation_locks[name] -= 1
-
-    def _release_mutation_locks(self, names: Sequence[str]) -> None:
-        for name in names:
-            self._mutation_locks.pop(name, None)
-
-    @contextmanager
-    def _mutation_lock(self, name: str) -> Iterator[None]:
-        self._enter_mutation_lock(name)
-        try:
-            yield
-        finally:
-            self._exit_mutation_lock(name)
 
     def configure_callbacks(self) -> list[Callback]:
         callbacks: list[Callback] = []
@@ -534,6 +487,8 @@ class Model(lit.LightningModule):
             for callback in getattr(trainer, "callbacks", ())
         }
 
+        if RuntimePlacementCallback not in attached_callback_types:
+            callbacks.append(RuntimePlacementCallback())
         if MutationLockCallback not in attached_callback_types:
             callbacks.append(MutationLockCallback())
 
@@ -612,12 +567,9 @@ class Model(lit.LightningModule):
         self.on_save_checkpoint(checkpoint)
         torch.save(checkpoint, path)
 
+    @immutable("forward")
     @beartype
     def forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
-        with self._mutation_lock("forward"):
-            return self._forward(inputs)
-
-    def _forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
         processed: dict[Address, list[Parcel]] = defaultdict(list)
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
@@ -734,6 +686,7 @@ class Model(lit.LightningModule):
 
         return supervised, embeddings
 
+    @immutable("inference")
     def evaluate(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
@@ -744,15 +697,6 @@ class Model(lit.LightningModule):
 
         If `preprocess` is omitted, raw records are encoded unchanged.
         """
-        with self._mutation_lock("inference"):
-            return self._evaluate(batch=batch, preprocess=preprocess, postprocess=postprocess)
-
-    def _evaluate(
-        self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
         was_training = self.training
         raw_batch = batch
 

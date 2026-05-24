@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import weakref
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -218,14 +219,29 @@ class StreamingDataModule(lit.LightningDataModule):
             batch_size=model.batch_size,
             **kwargs,
         )
-        register = getattr(model, "_register_data_module", None)
-        if callable(register):
-            register(datamodule)
+        datamodule._bind_model(model)
 
         return datamodule
 
-    def _set_interprocess_encoding_context(self, context: InterprocessEncodingContext) -> None:
-        self.interprocess_encoding_context = context
+    def _bind_model(self, model: Model) -> None:
+        try:
+            self._model_ref = weakref.ref(model)
+        except TypeError:
+            self._model_ref = None
+
+    @property
+    def interprocess_encoding_context(self) -> InterprocessEncodingContext:
+        if self._model_ref is not None:
+            model = self._model_ref()
+            if model is not None:
+                return model.interprocess_encoding_context
+
+        return self._interprocess_encoding_context
+
+    @interprocess_encoding_context.setter
+    def interprocess_encoding_context(self, context: InterprocessEncodingContext) -> None:
+        self._model_ref = None
+        self._interprocess_encoding_context = context
 
     def dataloader(self, strata: Strata) -> DataLoader:
         trainer = getattr(self, "trainer", None)

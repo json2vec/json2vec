@@ -127,26 +127,6 @@ def test_model_from_schema_accepts_root_array_options():
     assert params.shapes["events/amount"] == (3,)
 
 
-def test_from_spec_aliases_schema_constructor():
-    params = j2v.Hyperparameters.from_spec(
-        j2v.Number("amount"),
-        d_model=16,
-        n_layers=1,
-        n_heads=4,
-        embed=True,
-    )
-    model = j2v.Model.from_spec(
-        fields=[j2v.Number("amount")],
-        d_model=16,
-        n_layers=1,
-        n_heads=4,
-        embed=True,
-    )
-
-    assert params.embed == ["record"]
-    assert model.hyperparameters.embed == ["record"]
-
-
 def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),

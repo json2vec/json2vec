@@ -6,7 +6,13 @@ request constructors such as `Category` and `Number`, data modules, schema
 mutation predicates, and the `@preprocess` decorator.
 """
 
-from json2vec.architecture.root import Model, MutationLockCallback, OptimizerConfig, SchedulerConfig
+from json2vec.architecture.root import (
+    Model,
+    MutationLockCallback,
+    OptimizerConfig,
+    RuntimePlacementCallback,
+    SchedulerConfig,
+)
 from json2vec.data.datasets import Dataset, PolarsDataModule, StreamingDataModule
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
 from json2vec.structs.enums import Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
@@ -59,6 +65,7 @@ __all__ = [
     "Preprocessor",
     "PreprocessorMode",
     "RequestBase",
+    "RuntimePlacementCallback",
     "Set",
     "SchedulerConfig",
     "SchemaField",
