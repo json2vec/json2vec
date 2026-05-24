@@ -1,6 +1,6 @@
 [project]
 name = "json2vec"
-version = "0.3.1"
+version = "0.3.2"
 description = "JSON -> [*]"
 readme = "README.md"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ dependencies = [
     "pyarrow>=21.0.0",
     "polars>=1.35.2",
     "numpy>=2.2.6",
-    "lightning>=2.5.2",
+    "lightning>=2.6.4",
     "tensordict>=0.10.0",
     "torch>=2.7.1",
 ]

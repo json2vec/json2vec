@@ -265,12 +265,6 @@ class VocabularySyncCallback(Callback):
 
         if is_rank_zero():
             for address, stats in payload["stats"].items():
-                logger.bind(
-                    component="vocabulary",
-                    reason=reason,
-                    address=address,
-                    **stats,
-                ).info("synchronized vocabulary")
 
                 if stats["max"] > 0 and stats["size"] / stats["max"] >= 0.95:
                     logger.bind(
