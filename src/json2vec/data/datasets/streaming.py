@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import weakref
 from collections.abc import Callable, Iterable, Iterator
@@ -101,6 +102,7 @@ def observe(
     sharding: ShardingStrategy,
     chunk_batch_size: int,
     file_buffer_size: int,
+    replacement: bool = False,
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> Iterator[RawObservation]:
@@ -111,6 +113,20 @@ def observe(
         global_rank=global_rank,
         world_size=world_size,
     )
+    if replacement:
+        sampled_paths = list(paths)
+        if not sampled_paths:
+            raise ValueError(
+                "no files assigned to this streaming worker; "
+                "use fewer distributed workers, add more files, or disable replacement sampling"
+            )
+
+        def choices() -> Iterator[str]:
+            while True:
+                yield random.choice(sampled_paths)
+
+        paths = choices()
+
     shuffled_paths = shuffle(paths, size=file_buffer_size, strata=strata)
     yield from read(
         shuffled_paths,
@@ -240,6 +256,7 @@ class BatchDataset(IterableDataset):
         file_buffer_size: int,
         observation_buffer_size: int,
         sample_rate: float,
+        replacement: bool = False,
         global_rank: int | None = None,
         world_size: int | None = None,
     ):
@@ -261,6 +278,7 @@ class BatchDataset(IterableDataset):
         self.file_buffer_size = file_buffer_size
         self.observation_buffer_size = observation_buffer_size
         self.sample_rate = sample_rate
+        self.replacement = replacement
 
     def __iter__(self):
         for field_context in self.interprocess_encoding_context.values():
@@ -282,6 +300,7 @@ class BatchDataset(IterableDataset):
                 chunk_batch_size=self.chunk_batch_size,
                 file_buffer_size=self.file_buffer_size,
                 sample_rate=self.sample_rate,
+                replacement=self.replacement,
                 batch_size=self.batch_size,
                 global_rank=self.global_rank,
                 world_size=self.world_size,
@@ -315,6 +334,7 @@ def dataloader(
     file_buffer_size: int,
     observation_buffer_size: int,
     sample_rate: float,
+    replacement: bool = False,
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> DataLoader:
@@ -340,6 +360,7 @@ def dataloader(
             file_buffer_size=file_buffer_size,
             observation_buffer_size=observation_buffer_size,
             sample_rate=sample_rate,
+            replacement=replacement,
             global_rank=global_rank,
             world_size=world_size,
         ),
@@ -373,11 +394,12 @@ class StreamingDataModule(lit.LightningDataModule):
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
         pin_memory: bool | StrataMap[bool] = True,
-        sharding: ShardingStrategy | str | StrataMap[ShardingStrategy | str] = ShardingStrategy.chunk,
+        sharding: ShardingStrategy | str | StrataMap[ShardingStrategy | str] = ShardingStrategy.file,
         chunk_batch_size: PositiveInt | StrataMap[PositiveInt] = 4096,
         file_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+        replacement: bool | StrataMap[bool] | None = None,
         **kwargs: Any,
     ):
         super().__init__()
@@ -400,7 +422,7 @@ class StreamingDataModule(lit.LightningDataModule):
         self.num_workers = Strata.expand(num_workers, default=None)
         self.persistent_workers = Strata.expand(persistent_workers, default=True)
         self.pin_memory = Strata.expand(pin_memory, default=True)
-        self.sharding = ShardingStrategy.expand(sharding, default=ShardingStrategy.chunk)
+        self.sharding = ShardingStrategy.expand(sharding, default=ShardingStrategy.file)
         self.chunk_batch_size = Strata.expand(chunk_batch_size, default=4096)
         self.file_buffer_size = Strata.expand(file_buffer_size, default=1)
         self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
@@ -408,6 +430,11 @@ class StreamingDataModule(lit.LightningDataModule):
             strata: float(rate)
             for strata, rate in Strata.expand(sample_rate, default=1.0).items()
         }
+        self.replacement = (
+            {strata: strata == Strata.train for strata in Strata}
+            if replacement is None
+            else Strata.expand(replacement, default=False)
+        )
 
     @property
     def interprocess_encoding_context(self) -> InterprocessEncodingContext:
@@ -453,6 +480,7 @@ class StreamingDataModule(lit.LightningDataModule):
             file_buffer_size=self.file_buffer_size[strata],
             observation_buffer_size=self.observation_buffer_size[strata],
             sample_rate=self.sample_rate[strata],
+            replacement=self.replacement[strata],
             global_rank=global_rank,
             world_size=world_size,
         )

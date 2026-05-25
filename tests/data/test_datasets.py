@@ -3,6 +3,7 @@ import json
 import random
 import re
 from collections import Counter
+from itertools import islice
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,6 +107,32 @@ def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert output == records[:2]
 
 
+def test_read_ndjson_chunk_sharding_partitions_records_across_ranks(tmp_path: Path):
+    path = tmp_path / "records.ndjson"
+    records = [{"id": i} for i in range(12)]
+    path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
+
+    outputs_by_rank = [
+        list(
+            streaming.read.__wrapped__(
+                [str(path)],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=3,
+                global_rank=rank,
+                world_size=2,
+            )
+        )
+        for rank in range(2)
+    ]
+
+    first = {record["id"] for record in outputs_by_rank[0]}
+    second = {record["id"] for record in outputs_by_rank[1]}
+
+    assert first.isdisjoint(second)
+    assert first | second == {record["id"] for record in records}
+
+
 def test_read_ndjson_record_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     path = tmp_path / "records.ndjson"
     records = [{"id": i} for i in range(6)]
@@ -177,6 +204,35 @@ def test_fetch_all_pattern_returns_all_files(tmp_path: Path):
         )
     )
     assert {Path(path).name for path in files} == {"first.ndjson", "second.csv"}
+
+
+def test_observe_replacement_repeats_sampled_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    first = tmp_path / "first.ndjson"
+    second = tmp_path / "second.ndjson"
+    first.write_text(json.dumps({"id": 1}), encoding="utf-8")
+    second.write_text(json.dumps({"id": 2}), encoding="utf-8")
+
+    monkeypatch.setattr(streaming.random, "choice", lambda paths: str(first))
+
+    output = list(
+        islice(
+            streaming.observe.__wrapped__(
+                root=tmp_path,
+                suffix=Suffix.ndjson,
+                pattern=re.compile(r".*\.ndjson$"),
+                strata=Strata.train,
+                sharding=ShardingStrategy.file,
+                chunk_batch_size=1,
+                file_buffer_size=1,
+                replacement=True,
+                global_rank=0,
+                world_size=1,
+            ),
+            3,
+        )
+    )
+
+    assert output == [{"id": 1}, {"id": 1}, {"id": 1}]
 
 
 def test_observe_polars_yields_dataframe_rows():
@@ -429,7 +485,7 @@ def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     assert module.num_workers[Strata.train] == 0
     assert module.num_workers[Strata.validate] is None
     assert module.sharding[Strata.train] == ShardingStrategy.record
-    assert module.sharding[Strata.validate] == ShardingStrategy.chunk
+    assert module.sharding[Strata.validate] == ShardingStrategy.file
     assert module.chunk_batch_size[Strata.train] == 7
     assert module.chunk_batch_size[Strata.validate] == 4096
     assert module.file_buffer_size[Strata.train] == 11
@@ -438,6 +494,8 @@ def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     assert module.observation_buffer_size[Strata.validate] == 1
     assert module.sample_rate[Strata.train] == 0.5
     assert module.sample_rate[Strata.validate] == 1.0
+    assert module.replacement[Strata.train] is True
+    assert module.replacement[Strata.validate] is False
     assert module.val_dataloader() is None
 
 
@@ -454,6 +512,32 @@ def test_streaming_datamodule_rejects_invalid_loader_configuration():
 
     with pytest.raises(BeartypeCallHintParamViolation):
         StreamingDataModule(**kwargs, sample_rate={Strata.train: 0.0})
+
+
+def test_streaming_datamodule_defaults_to_file_sharding():
+    module = StreamingDataModule(
+        model=_datamodule_model(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        train=re.compile(r".*\.ndjson$"),
+    )
+
+    assert module.sharding == {strata: ShardingStrategy.file for strata in Strata}
+    assert module.replacement == {strata: strata == Strata.train for strata in Strata}
+
+
+def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
+    module = StreamingDataModule(
+        model=_datamodule_model(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        train=re.compile(r".*\.ndjson$"),
+        replacement={Strata.train: False, Strata.validate: True},
+    )
+
+    assert module.replacement[Strata.train] is False
+    assert module.replacement[Strata.validate] is True
+    assert module.replacement[Strata.test] is False
 
 
 def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata():
