@@ -156,6 +156,15 @@ def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
     assert params.requests["record/amount"].p_prune == 0.25
 
 
+def test_schema_helper_classmethods_back_public_dsl():
+    predicate = j2v.NodePredicate.from_callable("amount-name", lambda node: node.name == "amount")
+    attribute = j2v.NodeAttribute.named("name")
+
+    assert j2v.predicate("amount-name", lambda node: node.name == "amount").key == predicate.key
+    assert j2v.where("name") == attribute
+    assert j2v.Hyperparameters.update_values({"target": True}) == {"p_prune": 1.0}
+
+
 def test_hyperparameters_select_returns_nodes_and_accepts_boolean_predicates():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),

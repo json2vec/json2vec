@@ -1,6 +1,7 @@
 """Schema tree node primitives used by models and tensorfields."""
 
 import functools
+import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -49,6 +50,11 @@ class Node(NodeMixin, pydantic.BaseModel):
     dropout: Rate | None = None
     p_mask: Rate | None = None
     p_prune: PruneRate | None = None
+
+    @classmethod
+    def sanitize_name(cls, value: str) -> str:
+        sanitized = re.sub(r"[^0-9A-Za-z_-]+", "_", value).strip("_")
+        return sanitized or "field"
 
     @pydantic.model_validator(mode="before")
     @classmethod

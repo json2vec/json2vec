@@ -1,4 +1,8 @@
 import enum
+from collections.abc import Mapping
+from typing import TypeVar
+
+T = TypeVar("T")
 
 
 class Tokens(enum.IntEnum):
@@ -14,6 +18,23 @@ class Strata(enum.StrEnum):
     validate = "validate"
     test = "test"
     predict = "predict"
+
+    @classmethod
+    def normalize(cls, value: "Strata | str") -> "Strata":
+        if isinstance(value, cls):
+            return value
+
+        return cls(str(value).strip().lower())
+
+    @classmethod
+    def expand(cls, value: T | Mapping["Strata | str", T], *, default: T) -> dict["Strata", T]:
+        if isinstance(value, Mapping):
+            normalized = {strata: default for strata in cls}
+            for key, item in value.items():
+                normalized[cls.normalize(key)] = item
+            return normalized
+
+        return {strata: value for strata in cls}
 
 
 class Suffix(enum.StrEnum):
@@ -51,6 +72,50 @@ class ShardingStrategy(enum.StrEnum):
     file = "file"
     chunk = "chunk"
     record = "record"
+
+    @classmethod
+    def normalize(cls, value: "ShardingStrategy | str") -> "ShardingStrategy":
+        if isinstance(value, cls):
+            return value
+
+        return cls(value.strip().lower())
+
+    @classmethod
+    def expand(
+        cls,
+        value: "ShardingStrategy | str | Mapping[Strata | str, ShardingStrategy | str]",
+        *,
+        default: "ShardingStrategy",
+    ) -> dict[Strata, "ShardingStrategy"]:
+        return {
+            strata: cls.normalize(strategy)
+            for strata, strategy in Strata.expand(value, default=default).items()
+        }
+
+
+class AttentionMode(enum.StrEnum):
+    mha = "mha"
+    gqa = "gqa"
+    mqa = "mqa"
+    none = "none"
+
+    @classmethod
+    def normalize(cls, value: "AttentionMode | str") -> "AttentionMode":
+        if isinstance(value, cls):
+            return value
+
+        return cls(value.strip().lower())
+
+    def kv_heads(self, n_heads: int) -> int:
+        match self:
+            case AttentionMode.mha:
+                return n_heads
+            case AttentionMode.gqa:
+                return max(1, n_heads // 2)
+            case AttentionMode.mqa:
+                return 1
+            case AttentionMode.none:
+                raise ValueError("attention mode 'none' does not define key/value heads")
 
 
 class Component(enum.StrEnum):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 import lightning.pytorch as lit
@@ -25,20 +26,18 @@ Postprocessor: TypeAlias = Callable[
 
 
 class Writer(callbacks.BasePredictionWriter):
-
     def __init__(
         self,
         path: os.PathLike | str,
         flush_every_n_batches: int | None = None,
         postprocessor: Postprocessor | None = None,
     ):
-
         super().__init__(write_interval="batch")
 
-        self.path: os.PathLike = path
+        self.path = Path(path)
         self.flush_every_n_batches: int | None = flush_every_n_batches
         self.postprocessor: Postprocessor | None = postprocessor
-        self.schema: pa.schema | None = None
+        self.schema: pa.Schema | None = None
         self.writer: pq.ParquetWriter | None = None
 
     @staticmethod
@@ -61,7 +60,7 @@ class Writer(callbacks.BasePredictionWriter):
         trainer: lit.Trainer,
         pl_module: Model,
         output: dict[str, list[Prediction]],
-        batch_indices: list[int]|None,
+        batch_indices: list[int] | None,
         batch: TensorDict[Address, TensorFieldBase],
         batch_idx: int,
         dataloader_idx: int,
@@ -93,22 +92,18 @@ class Writer(callbacks.BasePredictionWriter):
             self._as_struct_frame(values_by_address=supervised, alias="predictions", num_rows=num_rows),
         ]
 
-        if len(embeddings) > 0:
+        if embeddings:
             items.append(self._as_struct_frame(values_by_address=embeddings, alias="embeddings", num_rows=num_rows))
 
-        table: pa.Table = pl.concat(
-            items=items,
-            how="horizontal"
-        ).to_arrow()
+        table: pa.Table = pl.concat(items=items, how="horizontal").to_arrow()
 
         if self.writer is None:
+            self.path.mkdir(parents=True, exist_ok=True)
+            self.schema = table.schema
 
-            os.makedirs(self.path, exist_ok=True)
-            self.schema: pa.schema = table.schema
-
-            self.writer: pq.ParquetWriter = pq.ParquetWriter(
-                where=os.path.join(self.path, f"rank-{trainer.local_rank}.parquet"),
-                schema=self.schema
+            self.writer = pq.ParquetWriter(
+                where=self.path / f"rank-{trainer.local_rank}.parquet",
+                schema=self.schema,
             )
 
         if table.schema != self.schema:
@@ -116,10 +111,11 @@ class Writer(callbacks.BasePredictionWriter):
 
         self.writer.write_table(table)
 
-        if self.flush_every_n_batches and (batch_idx + 1) % self.flush_every_n_batches == 0 and hasattr(self.writer, "flush"):
-            self.writer.flush()
+        flush = getattr(self.writer, "flush", None)
+        if self.flush_every_n_batches and (batch_idx + 1) % self.flush_every_n_batches == 0 and callable(flush):
+            flush()
 
     def on_predict_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule) -> None:
         if self.writer:
             self.writer.close()
-            self.writer: None = None
+            self.writer = None

@@ -2,14 +2,15 @@
 
 import functools
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, TypeAlias
 
 import litserve as ls
 import pydantic
 import torch
 from beartype import beartype
-from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
@@ -24,6 +25,24 @@ from json2vec.tensorfields.base import TensorFieldBase
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 ModelSource: TypeAlias = str | Path | Model
 UpdateOperation: TypeAlias = tuple[tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...], dict[str, Any]]
+
+
+class Accelerator(StrEnum):
+    auto = "auto"
+    cpu = "cpu"
+    cuda = "cuda"
+    mps = "mps"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Accelerator | None":
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+        if normalized == "":
+            raise ValueError("accelerator must not be blank")
+
+        return cls._value2member_map_.get(normalized)
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -152,7 +171,7 @@ class API(ls.LitAPI):
             valid_indices.append(index)
             valid_inputs.append(item)
 
-        data = torch.stack(valid_inputs, dim=0) if len(valid_inputs) > 0 else None
+        data = torch.stack(valid_inputs, dim=0) if valid_inputs else None
         return BatchItem(data=data, valid_indices=valid_indices, items=inputs)
 
     @beartype
@@ -211,7 +230,7 @@ class API(ls.LitAPI):
 
         payload = dict(predictions=predictions)
 
-        if len(embeddings) > 0:
+        if embeddings:
             payload["embeddings"] = embeddings
 
         return Prediction.denest(payload)
@@ -257,8 +276,8 @@ class Deployment(BaseSettings):
         ge=1,
         validation_alias=AliasChoices("JSON2VEC_WORKERS_PER_DEVICE", "JSON2VEC_N_WORKERS", "N_WORKERS"),
     )
-    accelerator: Literal["auto", "cpu", "cuda", "mps"] = Field(
-        default="auto",
+    accelerator: Accelerator = Field(
+        default=Accelerator.auto,
         validation_alias=AliasChoices("JSON2VEC_ACCELERATOR", "ACCELERATOR"),
     )
     track_requests: bool = Field(
@@ -272,13 +291,13 @@ class Deployment(BaseSettings):
     _postprocessor = pydantic.PrivateAttr(default=None)
     _update_operations: list[UpdateOperation] = pydantic.PrivateAttr(default_factory=list)
 
-    @field_validator("checkpoint", "accelerator", mode="before")
+    @field_validator("checkpoint", mode="before")
     @classmethod
-    def strip_required_strings(cls, value: Any, info: ValidationInfo) -> Any:
+    def strip_checkpoint(cls, value: Any) -> Any:
         if isinstance(value, str):
             stripped = value.strip()
             if stripped == "":
-                raise ValueError(f"{info.field_name} must not be blank")
+                raise ValueError("checkpoint must not be blank")
             return stripped
 
         return value
@@ -308,14 +327,14 @@ class Deployment(BaseSettings):
 
         If this method is not called, request objects are encoded unchanged.
         """
-        self._preprocessor = functools.partial(preprocessor, **kwargs) if len(kwargs) > 0 else preprocessor
+        self._preprocessor = functools.partial(preprocessor, **kwargs) if kwargs else preprocessor
 
         return self
 
     @beartype
     def postprocess(self, postprocessor, **kwargs: Any) -> "Deployment":
         """Attach an optional response postprocessor."""
-        self._postprocessor = functools.partial(postprocessor, **kwargs) if len(kwargs) > 0 else postprocessor
+        self._postprocessor = functools.partial(postprocessor, **kwargs) if kwargs else postprocessor
 
         return self
 
@@ -369,7 +388,7 @@ class Deployment(BaseSettings):
                 postprocessor=self._postprocessor,
                 update_operations=self._update_operations,
             ),
-            accelerator=self.accelerator,
+            accelerator=self.accelerator.value,
             workers_per_device=self.workers_per_device,
             track_requests=self.track_requests,
         )

@@ -19,3 +19,5 @@ wandb/
 private/
 
 *.ckpt
+
+/specs

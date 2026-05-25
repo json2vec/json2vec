@@ -6,24 +6,12 @@ import torch
 
 from json2vec.architecture.attention import RotaryMultiheadAttention
 from json2vec.architecture.pool import LearnedQueryCrossAttention
+from json2vec.structs.enums import AttentionMode
 from json2vec.structs.packages import Parcel
 from json2vec.structs.tree import Address
 
 if TYPE_CHECKING:
     from json2vec.structs.experiment import Hyperparameters
-
-
-def n_kv_heads(attention: str, n_heads: int) -> int:
-    match attention:
-        case "mha":
-            return n_heads
-        case "gqa":
-            return max(1, n_heads // 2)
-        case "mqa":
-            return 1
-        case _:
-            raise ValueError(f"unsupported attention mode: {attention}")
-
 
 class RotaryTransformerEncoderLayer(torch.nn.Module):
     def __init__(
@@ -72,13 +60,14 @@ class ArrayEncoder(torch.nn.Module):
         self.destination: Address = array.parent.address
 
         layers: list[RotaryTransformerEncoderLayer] = []
-        if array.attention != "none":
+        attention = AttentionMode.normalize(array.attention)
+        if attention != AttentionMode.none:
             for _ in range(array.n_layers):
                 layers.append(
                     RotaryTransformerEncoderLayer(
                         d_model=hyperparameters.d_model,
                         nhead=array.n_heads,
-                        n_kv_heads=n_kv_heads(array.attention, array.n_heads),
+                        n_kv_heads=attention.kv_heads(array.n_heads),
                         dropout=dropout,
                     )
                 )

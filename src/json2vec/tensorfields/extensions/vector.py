@@ -34,6 +34,12 @@ class Objective(enum.StrEnum):
     l1 = "l1"
     l2 = "l2"
 
+    def loss(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        if self == Objective.l1:
+            return torch.nn.functional.l1_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
+
+        return torch.nn.functional.mse_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
+
 
 @vector.register
 class Request(RequestBase):
@@ -233,13 +239,6 @@ class Decoder(DecoderBase):
         )
 
 
-def _objective_loss(inputs: torch.Tensor, targets: torch.Tensor, objective: Objective) -> torch.Tensor:
-    if objective == Objective.l1:
-        return torch.nn.functional.l1_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
-
-    return torch.nn.functional.mse_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
-
-
 @vector.register
 def loss(
     module: Model,
@@ -257,7 +256,7 @@ def loss(
 
     loss: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.content),
-        value=_objective_loss(inputs=inputs, targets=targets, objective=request.objective).masked_select(trainable).mean(),
+        value=request.objective.loss(inputs=inputs, targets=targets).masked_select(trainable).mean(),
     )
 
     module.track(

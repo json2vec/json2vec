@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from json2vec.inference.deployment import Deployment
+from json2vec.inference.deployment import Accelerator, Deployment
 
 ENV_VARS = (
     "JSON2VEC_CHECKPOINT",
@@ -39,3 +39,10 @@ def test_deployment_environment_invalid_accelerator_raises(monkeypatch: pytest.M
 
     with pytest.raises(ValidationError, match="JSON2VEC_ACCELERATOR"):
         Deployment()
+
+
+def test_deployment_environment_normalizes_accelerator(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("JSON2VEC_CHECKPOINT", "s3://bucket/models/model.ckpt")
+    monkeypatch.setenv("JSON2VEC_ACCELERATOR", " CPU ")
+
+    assert Deployment().accelerator is Accelerator.cpu

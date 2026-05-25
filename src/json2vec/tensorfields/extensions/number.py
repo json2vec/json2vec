@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import math
-from typing import TYPE_CHECKING, Annotated, Any, Callable, Iterable, Literal
+from typing import TYPE_CHECKING, Annotated, Iterable, Literal
 
 import numpy as np
 import pydantic
@@ -44,11 +44,14 @@ class Objective(enum.StrEnum):
     mse = "mse"
     huber = "huber"
 
-OBJECTIVES: dict[Objective, Any] = {
-    Objective.mae: torch.nn.functional.l1_loss,
-    Objective.mse: torch.nn.functional.mse_loss,
-    Objective.huber: torch.nn.functional.huber_loss,
-}
+    def loss(self, *, input: torch.Tensor, target: torch.Tensor, reduction: str = "none") -> torch.Tensor:
+        match self:
+            case Objective.mae:
+                return torch.nn.functional.l1_loss(input=input, target=target, reduction=reduction)
+            case Objective.mse:
+                return torch.nn.functional.mse_loss(input=input, target=target, reduction=reduction)
+            case Objective.huber:
+                return torch.nn.functional.huber_loss(input=input, target=target, reduction=reduction)
 
 @number.register
 class Request(RequestBase):
@@ -356,11 +359,9 @@ def loss(
     inputs: torch.Tensor = prediction.payload[TensorKey.content].reshape(N)
     diff: torch.Tensor = inputs.subtract(target)
 
-    objective: Callable = OBJECTIVES[request.objective]
-
     loss += module.track(
         (address, strata, Metric.loss, TensorKey.content),
-        value=objective(
+        value=request.objective.loss(
             input=diff / normalizer.var.sqrt().clamp_min(normalizer.epsilon),
             target=torch.zeros_like(diff),
             reduction="none",

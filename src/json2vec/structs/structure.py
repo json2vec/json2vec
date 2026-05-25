@@ -4,6 +4,7 @@ from typing import Annotated, Literal, Self, TypeAlias, Union
 
 import pydantic
 
+from json2vec.structs.enums import AttentionMode
 from json2vec.structs.tree import Leaf, Node, Rate
 from json2vec.tensorfields import extensions as _extensions  # noqa: F401
 from json2vec.tensorfields.base import TENSORFIELDS
@@ -25,7 +26,7 @@ class Array(Node):
 
     name: str
     type: Annotated[Literal["array"], pydantic.Field(default="array")] = "array"
-    attention: Literal["mha", "gqa", "mqa", "none"] = "mha"
+    attention: AttentionMode = AttentionMode.mha
     max_length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_outputs: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1

@@ -39,10 +39,6 @@ class Vocabulary:
         self.global_rank = global_rank
         self.world_size = world_size
 
-    @property
-    def can_update(self) -> bool:
-        return self.global_rank == 0
-
     def refresh(self, force: bool = False) -> None:
         if not force and len(self.master) == len(self.vocab):
             return
@@ -69,7 +65,7 @@ class Vocabulary:
             # the label was never seen during training.
             return self.unavailable_index
 
-        if not self.can_update:
+        if self.global_rank != 0:
             with self.proposal_lock:
                 if word not in self.proposals:
                     self.proposals.append(word)
@@ -220,14 +216,11 @@ def vocabularies(module: Model) -> dict[Address, Any]:
 class VocabularySyncCallback(Callback):
     """Synchronize online vocabularies registered by tensorfield extensions."""
 
-    def _vocabularies(self, pl_module: Model) -> dict[Address, Any]:
-        return vocabularies(pl_module)
-
     def _sync(self, trainer: Trainer, pl_module: Model, reason: str) -> None:
         if not is_distributed():
             return
 
-        resources = self._vocabularies(pl_module=pl_module)
+        resources = vocabularies(pl_module)
         if not resources:
             return
 

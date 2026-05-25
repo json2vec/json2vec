@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from functools import partialmethod, wraps
 from pathlib import Path
-from typing import Any, Literal, NotRequired, Self, TypeAlias, TypedDict, cast
+from typing import Any, NotRequired, Self, TypeAlias, TypedDict, cast
 
 import lightning.pytorch as lit
 import torch
@@ -19,7 +19,7 @@ from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch
 from json2vec.data.iterables import encode, mock
-from json2vec.structs.enums import Metric, Strata, TensorKey
+from json2vec.structs.enums import AttentionMode, Metric, Strata, TensorKey
 from json2vec.structs.experiment import (
     Hyperparameters,
     NodeAttribute,
@@ -187,7 +187,7 @@ class Model(lit.LightningModule):
         root: str = "record",
         description: str | None = None,
         embed: bool = False,
-        attention: Literal["mha", "gqa", "mqa", "none"] = "mha",
+        attention: AttentionMode | str = AttentionMode.mha,
         max_length: int = 1,
         n_outputs: int = 1,
         n_linear: int = 1,

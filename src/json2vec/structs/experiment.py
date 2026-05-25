@@ -12,6 +12,7 @@ from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 import pydantic
 from anytree import LevelOrderGroupIter, PreOrderIter, RenderTree
 
+from json2vec.structs.enums import AttentionMode
 from json2vec.structs.structure import Array, RequestTypes
 from json2vec.structs.tree import Address, Leaf, Node, PruneRate, Rate
 
@@ -38,11 +39,36 @@ class NodePredicate(pydantic.BaseModel):
     key: SelectionKey
     cacheable: bool = True
 
+    @classmethod
+    def from_callable(cls, key: str | tuple[Any, ...], func: Callable[[Node], bool]) -> "NodePredicate":
+        cache_key = key if isinstance(key, tuple) else ("callable", key)
+        return cls(func=func, key=cache_key)
+
+    @classmethod
+    def from_selector(cls, value: "NodeSelector") -> "NodePredicate":
+        if isinstance(value, cls):
+            return value
+
+        if isinstance(value, NodeAttribute):
+            return cls(
+                func=lambda node: _has_model_attribute(node, value.name) and value.get(node) is True,
+                key=("truthy", value.name),
+            )
+
+        if not callable(value):
+            raise TypeError("node predicates must be where(...) expressions or callables")
+
+        return cls(
+            func=value,
+            key=("callable", id(value)),
+            cacheable=True,
+        )
+
     def __call__(self, node: Node) -> bool:
         return self.func(node)
 
     def __and__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> "NodePredicate":
-        predicate = _normalize_predicate(other)
+        predicate = NodePredicate.from_selector(other)
         return NodePredicate(
             func=lambda node: self(node) and predicate(node),
             key=("and", (self.key, predicate.key)),
@@ -50,7 +76,7 @@ class NodePredicate(pydantic.BaseModel):
         )
 
     def __or__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> "NodePredicate":
-        predicate = _normalize_predicate(other)
+        predicate = NodePredicate.from_selector(other)
         return NodePredicate(
             func=lambda node: self(node) or predicate(node),
             key=("or", (self.key, predicate.key)),
@@ -75,8 +101,7 @@ def _cache_value(value: Any) -> Any:
 
 def predicate(key: str | tuple[Any, ...], func: Callable[[Node], bool]) -> NodePredicate:
     """Create a cacheable node predicate from a callable."""
-    cache_key = key if isinstance(key, tuple) else ("callable", key)
-    return NodePredicate(func=func, key=cache_key)
+    return NodePredicate.from_callable(key=key, func=func)
 
 
 _QUERYABLE_BUILTINS = frozenset(
@@ -102,6 +127,10 @@ class NodeAttribute(pydantic.BaseModel):
             "fields are also queryable."
         )
     )
+
+    @classmethod
+    def named(cls, name: str) -> "NodeAttribute":
+        return cls(name=name)
 
     def get(self, node: Node, default: Any = None) -> Any:
         if self.name == "address":
@@ -129,10 +158,10 @@ class NodeAttribute(pydantic.BaseModel):
         )
 
     def __and__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> NodePredicate:
-        return _normalize_predicate(self) & other
+        return NodePredicate.from_selector(self) & other
 
     def __or__(self, other: "NodePredicate | NodeAttribute | Callable[[Node], bool]") -> NodePredicate:
-        return _normalize_predicate(self) | other
+        return NodePredicate.from_selector(self) | other
 
     def __invert__(self) -> NodePredicate:
         return NodePredicate(
@@ -201,7 +230,7 @@ def where(name: str) -> NodeAttribute:
         model.update(where("name") == "label", target=True)
         ```
     """
-    return NodeAttribute(name=name)
+    return NodeAttribute.named(name)
 
 
 NodeSelector: TypeAlias = NodePredicate | NodeAttribute | Callable[[Node], bool]
@@ -215,102 +244,6 @@ def _has_model_attribute(node: Node, name: str) -> bool:
     fields = getattr(type(node), "model_fields", {})
     extra = getattr(node, "model_extra", None) or {}
     return name in fields or name in extra or hasattr(node, name)
-
-
-def _normalize_update_values(values: Mapping[str, Any]) -> dict[str, Any]:
-    normalized = dict(values)
-    target = normalized.pop("target", None)
-
-    if target is None:
-        return normalized
-
-    if not isinstance(target, bool):
-        raise ValueError("target must be a boolean")
-
-    if target:
-        if normalized.get("p_prune") not in (None, 1.0):
-            raise ValueError("target=True is shorthand for p_prune=1.0")
-        normalized["p_prune"] = 1.0
-    else:
-        if normalized.get("p_prune") is not None:
-            raise ValueError("target=False is shorthand for p_prune=None")
-        normalized["p_prune"] = None
-
-    return normalized
-
-
-def _normalize_predicate(value: NodeSelector) -> NodePredicate:
-    if isinstance(value, NodePredicate):
-        return value
-
-    if isinstance(value, NodeAttribute):
-        return NodePredicate(
-            func=lambda node: _has_model_attribute(node, value.name) and value.get(node) is True,
-            key=("truthy", value.name),
-        )
-
-    if not callable(value):
-        raise TypeError("node predicates must be where(...) expressions or callables")
-
-    return NodePredicate(
-        func=value,
-        key=("callable", id(value)),
-        cacheable=True,
-    )
-
-
-def sanitize_node_name(value: str) -> str:
-    sanitized = re.sub(r"[^0-9A-Za-z_-]+", "_", value).strip("_")
-    return sanitized or "field"
-
-
-def jmespath_member(value: str) -> str:
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
-        return value
-    return json.dumps(value)
-
-
-def _request_from_leaf(leaf: Leaf) -> RequestTypes:
-    from json2vec.tensorfields.base import TENSORFIELDS
-
-    request_cls = getattr(TENSORFIELDS[leaf.type], "Request")
-    return request_cls.model_validate(leaf.model_dump(mode="python", round_trip=True))
-
-
-def _schema_query(array_path: tuple[str, ...], source: str) -> str:
-    """Infer a request-level query for a leaf source field.
-
-    The encoder prepends the outer batch selector during search. Inferred
-    queries therefore start at the processed-observation level: `[*].amount`,
-    not `[*][*].amount`.
-    """
-    selectors = "".join(f".{jmespath_member(array)}[*]" for array in array_path)
-    return f"[*]{selectors}.{jmespath_member(source)}"
-
-
-def _normalize_schema_node(node: SchemaField, *, array_path: tuple[str, ...] = ()) -> Array | RequestTypes:
-    if isinstance(node, Leaf):
-        source = node.name
-        node_name = sanitize_node_name(source)
-        updates: dict[str, Any] = {}
-
-        if node_name != source:
-            updates["name"] = node_name
-            if node.description is None:
-                updates["description"] = source
-
-        if node.query is None:
-            updates["query"] = _schema_query(array_path, source)
-
-        return _request_from_leaf(node.model_copy(update=updates))
-
-    if isinstance(node, Array):
-        child_path = (*array_path, node.name)
-        fields = [_normalize_schema_node(field, array_path=child_path) for field in node.fields]
-        payload = node.model_dump(mode="python", round_trip=True, exclude={"fields"})
-        return Array(*fields, **payload)
-
-    raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
 
 
 class Hyperparameters(Node):
@@ -332,6 +265,77 @@ class Hyperparameters(Node):
     _selection_cache: dict[SelectionKey, SelectionCacheEntry] = pydantic.PrivateAttr(default_factory=dict)
 
     @classmethod
+    def update_values(cls, values: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = dict(values)
+        target = normalized.pop("target", None)
+
+        if target is None:
+            return normalized
+
+        if not isinstance(target, bool):
+            raise ValueError("target must be a boolean")
+
+        if target:
+            if normalized.get("p_prune") not in (None, 1.0):
+                raise ValueError("target=True is shorthand for p_prune=1.0")
+            normalized["p_prune"] = 1.0
+        else:
+            if normalized.get("p_prune") is not None:
+                raise ValueError("target=False is shorthand for p_prune=None")
+            normalized["p_prune"] = None
+
+        return normalized
+
+    @classmethod
+    def jmespath_member(cls, value: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+            return value
+        return json.dumps(value)
+
+    @classmethod
+    def query_for_source(cls, array_path: tuple[str, ...], source: str) -> str:
+        """Infer a request-level query for a leaf source field.
+
+        The encoder prepends the outer batch selector during search. Inferred
+        queries therefore start at the processed-observation level: `[*].amount`,
+        not `[*][*].amount`.
+        """
+        selectors = "".join(f".{cls.jmespath_member(array)}[*]" for array in array_path)
+        return f"[*]{selectors}.{cls.jmespath_member(source)}"
+
+    @classmethod
+    def request_from_leaf(cls, leaf: Leaf) -> RequestTypes:
+        from json2vec.tensorfields.base import TENSORFIELDS
+
+        request_cls = getattr(TENSORFIELDS[leaf.type], "Request")
+        return request_cls.model_validate(leaf.model_dump(mode="python", round_trip=True))
+
+    @classmethod
+    def from_schema_node(cls, node: SchemaField, *, array_path: tuple[str, ...] = ()) -> Array | RequestTypes:
+        if isinstance(node, Leaf):
+            source = node.name
+            node_name = Node.sanitize_name(source)
+            updates: dict[str, Any] = {}
+
+            if node_name != source:
+                updates["name"] = node_name
+                if node.description is None:
+                    updates["description"] = source
+
+            if node.query is None:
+                updates["query"] = cls.query_for_source(array_path, source)
+
+            return cls.request_from_leaf(node.model_copy(update=updates))
+
+        if isinstance(node, Array):
+            child_path = (*array_path, node.name)
+            fields = [cls.from_schema_node(field, array_path=child_path) for field in node.fields]
+            payload = node.model_dump(mode="python", round_trip=True, exclude={"fields"})
+            return Array(*fields, **payload)
+
+        raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
+
+    @classmethod
     def from_schema(
         cls,
         *field_args: SchemaField,
@@ -342,7 +346,7 @@ class Hyperparameters(Node):
         root: str = "record",
         description: str | None = None,
         embed: bool = False,
-        attention: Literal["mha", "gqa", "mqa", "none"] = "mha",
+        attention: AttentionMode | str = AttentionMode.mha,
         max_length: Annotated[int, pydantic.Field(gt=0)] = 1,
         n_outputs: Annotated[int, pydantic.Field(gt=0)] = 1,
         n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
@@ -367,7 +371,7 @@ class Hyperparameters(Node):
                 raise ValueError(f"duplicate schema source field: {source}")
             seen_sources.add(source)
 
-            root_fields.append(_normalize_schema_node(field))
+            root_fields.append(cls.from_schema_node(field))
 
         array = Array(
             name=root,
@@ -395,7 +399,7 @@ class Hyperparameters(Node):
                 if isinstance(field, Array):
                     fields.append(materialize(field))
                 elif type(field) is Leaf:
-                    fields.append(_request_from_leaf(field))
+                    fields.append(self.request_from_leaf(field))
                 else:
                     fields.append(field)
 
@@ -485,7 +489,7 @@ class Hyperparameters(Node):
         use_cache: bool = True,
     ) -> list[Node]:
         if predicates:
-            normalized = tuple(_normalize_predicate(item) for item in predicates)
+            normalized = tuple(NodePredicate.from_selector(item) for item in predicates)
             combined = NodePredicate(
                 func=lambda node: all(item(node) for item in normalized),
                 key=("and", tuple(item.key for item in normalized)),
@@ -527,7 +531,7 @@ class Hyperparameters(Node):
         `target=True` is normalized to `p_prune=1.0`; `target=False` clears the
         target prune rate.
         """
-        values = _normalize_update_values(values)
+        values = self.update_values(values)
         if not values:
             raise ValueError("update requires at least one field value")
 
@@ -592,7 +596,7 @@ class Hyperparameters(Node):
 
         parent = candidates[0]
         array_path = tuple(node.name for node in parent.path[2:] if isinstance(node, Array))
-        new_fields = [_normalize_schema_node(field, array_path=array_path) for field in fields]
+        new_fields = [self.from_schema_node(field, array_path=array_path) for field in fields]
         existing_names = {field.name for field in parent.fields}
         duplicate_names = sorted({field.name for field in new_fields if field.name in existing_names})
         duplicate_names.extend(
@@ -694,7 +698,7 @@ class Hyperparameters(Node):
         **values: Any,
     ) -> Iterator[None]:
         nodes = self.select(*predicates, include_root=include_root)
-        normalized_values = _normalize_update_values(values)
+        normalized_values = self.update_values(values)
         snapshot = [
             (node, name, getattr(node, name, _MISSING), name in getattr(node, "model_fields_set", set()))
             for node in nodes

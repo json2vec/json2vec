@@ -37,7 +37,7 @@ def default_plot(
     branch: "Pane",
     detail: bool,
 ) -> None:
-    pass
+    return None
 
 
 def default_write(module: "Model", prediction: Prediction) -> None:
@@ -198,15 +198,6 @@ class Plugin:
 
                 if not issubclass(obj, Node):
                     raise TypeError("Request must be a subclass of Node")
-
-                # for attr in Leaf.__annotations__.keys():
-                #     if not hasattr(obj, attr):
-                #         raise AttributeError(f"Request class must have a '{attr}' attribute")
-
-                # if getattr(obj, "type") != self.name:
-                #     raise ValueError(
-                #         f"Request class 'type' attribute must be '{self.name}', got '{getattr(obj, 'type')}'"
-                #     )
 
             case Component.TensorField:
                 if not isinstance(obj, type):

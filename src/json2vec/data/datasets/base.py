@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import warnings
 from collections.abc import Callable, Mapping
-from typing import Annotated, Any, TypeAlias, TypeVar, cast
+from typing import Annotated, Any, TypeAlias, TypeVar
 
 import polars as pl
 import pydantic
@@ -90,19 +90,6 @@ class Dataset(pydantic.BaseModel):
         return self
 
 
-@beartype
-def _by_strata(value: T | StrataMap[T], *, default: T) -> dict[Strata, T]:
-    if isinstance(value, Mapping):
-        normalized = {strata: default for strata in Strata}
-        mapped = cast(StrataMap[T], value)
-        for key, item in mapped.items():
-            normalized[Strata(str(key).lower())] = item
-        return normalized
-
-    item = cast(T, value)
-    return {strata: item for strata in Strata}
-
-
 def _dataframes_by_strata(dataframe: pl.DataFrame | DataFrameMap) -> dict[Strata, pl.DataFrame]:
     if not isinstance(dataframe, Mapping):
         return {strata: dataframe for strata in Strata}
@@ -111,7 +98,7 @@ def _dataframes_by_strata(dataframe: pl.DataFrame | DataFrameMap) -> dict[Strata
     for key, frame in dataframe.items():
         if not isinstance(frame, pl.DataFrame):
             raise TypeError(f"dataframe for strata '{key}' must be a polars DataFrame")
-        normalized[Strata(str(key).lower())] = frame
+        normalized[Strata.normalize(key)] = frame
 
     if not normalized:
         raise ValueError("dataframe mapping must include at least one strata")

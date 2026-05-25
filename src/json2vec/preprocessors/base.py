@@ -24,6 +24,13 @@ class PreprocessorMode(enum.StrEnum):
     generator = "generator"
     transformation = "transformation"
 
+    @classmethod
+    def from_yields(cls, yields: bool) -> "PreprocessorMode":
+        if not isinstance(yields, bool):
+            raise TypeError("yields must be a boolean")
+
+        return cls.generator if yields else cls.transformation
+
 
 class Preprocessor(pydantic.BaseModel):
     """Registered observation preprocessor.
@@ -38,15 +45,39 @@ class Preprocessor(pydantic.BaseModel):
     func: Callable[..., Any]
     mode: PreprocessorMode
 
+    @staticmethod
+    @cache
+    def accepted_kwargs(func: Callable[..., Any]) -> tuple[bool, frozenset[str]]:
+        signature = inspect.signature(func)
+        accepts_variadic_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        accepted = frozenset(signature.parameters.keys())
+        return accepts_variadic_kwargs, accepted
+
+    @classmethod
+    def filter_supported_kwargs(cls, func: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+        accepts_variadic_kwargs, accepted = cls.accepted_kwargs(func)
+        if accepts_variadic_kwargs:
+            return kwargs
+
+        return {key: value for key, value in kwargs.items() if key in accepted}
+
+    @classmethod
+    def register(cls, func: Callable[..., Any], *, mode: PreprocessorMode) -> Callable[..., Any]:
+        PREPROCESSORS[func.__name__] = cls(name=func.__name__, func=func, mode=mode)
+        return func
+
     def __call__(self, observation: dict, **kwargs) -> Any:
-        return self.func(observation, **_filter_supported_kwargs(self.func, kwargs))
+        return self.func(observation, **self.filter_supported_kwargs(self.func, kwargs))
 
     def outputs(self, observation: dict, **kwargs) -> Iterator[list[dict[str, Any]]]:
         """Yield normalized processed observations for one raw observation."""
         result = self(observation, **kwargs)
 
         if self.mode == PreprocessorMode.transformation:
-            yield [self._normalize_object(result, mode=self.mode)]
+            yield [self.require_object(result, mode=self.mode)]
             return
 
         if self.mode == PreprocessorMode.generator:
@@ -61,12 +92,12 @@ class Preprocessor(pydantic.BaseModel):
                 )
 
             for output in iterable:
-                yield [self._normalize_object(output, mode=self.mode)]
+                yield [self.require_object(output, mode=self.mode)]
             return
 
         raise ValueError(f"unsupported preprocessor mode: {self.mode}")
 
-    def _normalize_object(self, output: Any, *, mode: PreprocessorMode) -> dict[str, Any]:
+    def require_object(self, output: Any, *, mode: PreprocessorMode) -> dict[str, Any]:
         if not isinstance(output, dict):
             raise TypeError(
                 f"{mode} preprocessor '{self.name}' must produce dict objects, got {type(output).__name__}"
@@ -75,33 +106,7 @@ class Preprocessor(pydantic.BaseModel):
         return output
 
 
-@cache
-def _accepted_kwargs(func: Callable[..., Any]) -> tuple[bool, frozenset[str]]:
-    signature = inspect.signature(func)
-    accepts_variadic_kwargs = any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    )
-    accepted = frozenset(signature.parameters.keys())
-    return accepts_variadic_kwargs, accepted
-
-
-def _filter_supported_kwargs(func: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:
-    accepts_variadic_kwargs, accepted = _accepted_kwargs(func)
-    if accepts_variadic_kwargs:
-        return kwargs
-
-    return {key: value for key, value in kwargs.items() if key in accepted}
-
-
 PREPROCESSORS: dict[str, Preprocessor] = {}
-
-
-def _register(func: Callable[..., Any], *, mode: PreprocessorMode) -> Callable[..., Any]:
-    name = func.__name__
-    PREPROCESSORS[name] = Preprocessor(name=name, func=func, mode=mode)
-
-    return func
 
 
 def preprocess(
@@ -141,13 +146,10 @@ def preprocess(
     if yields is None:
         yields = False
 
-    if not isinstance(yields, bool):
-        raise TypeError("yields must be a boolean")
-
-    mode = PreprocessorMode.generator if yields else PreprocessorMode.transformation
+    mode = PreprocessorMode.from_yields(yields)
 
     def decorator(inner: Callable[..., Any]) -> Callable[..., Any]:
-        return _register(inner, mode=mode)
+        return Preprocessor.register(inner, mode=mode)
 
     if func is None:
         return decorator

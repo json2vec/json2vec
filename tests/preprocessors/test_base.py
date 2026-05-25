@@ -29,6 +29,11 @@ def test_preprocess_assigns_preprocessor_mode():
     assert base.PREPROCESSORS[generator.__name__].mode == base.PreprocessorMode.generator
 
 
+def test_preprocessor_mode_from_yields():
+    assert base.PreprocessorMode.from_yields(False) is base.PreprocessorMode.transformation
+    assert base.PreprocessorMode.from_yields(True) is base.PreprocessorMode.generator
+
+
 def test_preprocess_overwrites_duplicate_preprocessor_names():
     def first(observation: dict):
         return {"first": observation}

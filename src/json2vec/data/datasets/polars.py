@@ -22,7 +22,6 @@ from json2vec.data.datasets.base import (
     PositiveInt,
     SampleRate,
     StrataMap,
-    _by_strata,
     _dataframes_by_strata,
     identity,
 )
@@ -46,13 +45,6 @@ from json2vec.structs.experiment import Hyperparameters
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-
-
-def _normalize_sharding(value: ShardingStrategy | str) -> ShardingStrategy:
-    if isinstance(value, ShardingStrategy):
-        return value
-
-    return ShardingStrategy(value.strip().lower())
 
 
 class PolarsBatchDataset(IterableDataset):
@@ -197,18 +189,15 @@ class PolarsDataModule(lit.LightningDataModule):
 
         self.interprocess_encoding_context = interprocess_encoding_context
         self.batch_size = batch_size
-        self.num_workers = _by_strata(num_workers, default=None)
-        self.persistent_workers = _by_strata(persistent_workers, default=True)
-        self.pin_memory = _by_strata(pin_memory, default=True)
-        self.sharding = {
-            strata: _normalize_sharding(strategy)
-            for strata, strategy in _by_strata(sharding, default=ShardingStrategy.chunk).items()
-        }
-        self.chunk_batch_size = _by_strata(chunk_batch_size, default=4096)
-        self.observation_buffer_size = _by_strata(observation_buffer_size, default=1)
+        self.num_workers = Strata.expand(num_workers, default=None)
+        self.persistent_workers = Strata.expand(persistent_workers, default=True)
+        self.pin_memory = Strata.expand(pin_memory, default=True)
+        self.sharding = ShardingStrategy.expand(sharding, default=ShardingStrategy.chunk)
+        self.chunk_batch_size = Strata.expand(chunk_batch_size, default=4096)
+        self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
         self.sample_rate = {
             strata: float(rate)
-            for strata, rate in _by_strata(sample_rate, default=1.0).items()
+            for strata, rate in Strata.expand(sample_rate, default=1.0).items()
         }
 
     @classmethod

@@ -47,6 +47,12 @@ class Objective(enum.StrEnum):
     l1 = "l1"
     l2 = "l2"
 
+    def loss(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        if self == Objective.l1:
+            return torch.nn.functional.l1_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
+
+        return torch.nn.functional.mse_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
+
 
 def _import_transformers():
     try:
@@ -120,13 +126,6 @@ def _hidden_size(
         raise ValueError(f"text model '{model_name}' does not expose `config.hidden_size`")
 
     return int(hidden_size)
-
-
-def _objective_loss(inputs: torch.Tensor, targets: torch.Tensor, objective: Objective) -> torch.Tensor:
-    if objective == Objective.l1:
-        return torch.nn.functional.l1_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
-
-    return torch.nn.functional.mse_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
 
 
 def coerce_text(value: Any, *, address: Address) -> str:
@@ -519,7 +518,7 @@ def loss(
 
     loss += module.track(
         (address, strata, Metric.loss, TensorKey.content),
-        value=_objective_loss(inputs=inputs, targets=targets, objective=request.objective).masked_select(valued).mean(),
+        value=request.objective.loss(inputs=inputs, targets=targets).masked_select(valued).mean(),
     )
 
     module.track(
@@ -537,4 +536,4 @@ def loss(
 
 @text.register
 def write(module: Model, prediction: Prediction):
-    pass
+    return None
