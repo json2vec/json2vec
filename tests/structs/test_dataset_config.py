@@ -1,8 +1,12 @@
 import pytest
+from beartype.roar import BeartypeCallHintParamViolation
 
-from json2vec.data.datasets import Dataset
+import json2vec as j2v
+from json2vec.data.datasets.base import PreprocessorConfig
+from json2vec.data.datasets.streaming import StreamingDataModule
 from json2vec.preprocessors.base import PREPROCESSORS, preprocess
-from json2vec.structs.enums import Strata
+from json2vec.structs.enums import Suffix
+from json2vec.structs.experiment import Hyperparameters
 
 
 def _preprocessor_name() -> str:
@@ -17,25 +21,36 @@ def _preprocessor_name() -> str:
     return _dataset_test_preprocessor.__name__
 
 
-def _dataset_payload() -> dict:
-    return {
-        "root": "/tmp/dataset",
-        "preprocessor": _preprocessor_name(),
-        "kwargs": {},
-        "suffix": "ndjson",
-        "patterns": {strata.value: ".*" for strata in Strata},
-    }
+def _hyperparameters():
+    return Hyperparameters.model_validate(
+        {
+            "d_model": 8,
+            "fields": {
+                "name": "record",
+                "type": "array",
+                "max_length": 1,
+                "fields": [],
+            },
+        }
+    )
 
 
-def test_dataset_rejects_unregistered_preprocessor():
-    payload = _dataset_payload()
-    payload["preprocessor"] = "__missing_preprocessor"
+def _model():
+    return j2v.Model.from_schema(
+        j2v.Category("id", max_vocab_size=16),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=1,
+    )
 
+
+def test_preprocessor_normalization_rejects_unregistered_name():
     with pytest.raises(ValueError, match="you haven't registered preprocessor"):
-        Dataset.model_validate(payload)
+        PreprocessorConfig.normalize("__missing_preprocessor")
 
 
-def test_dataset_accepts_registered_preprocessor_callable():
+def test_preprocessor_normalization_accepts_registered_callable():
     def _dataset_callable_preprocessor(observation: dict):
         return observation
 
@@ -43,68 +58,28 @@ def test_dataset_accepts_registered_preprocessor_callable():
     preprocessor = preprocess(yields=False)(_dataset_callable_preprocessor)
 
     try:
-        payload = _dataset_payload()
-        payload["preprocessor"] = preprocessor
-
-        dataset = Dataset.model_validate(payload)
-
-        assert dataset.preprocessor == "__dataset_callable_preprocessor"
+        assert PreprocessorConfig.normalize(preprocessor) == "__dataset_callable_preprocessor"
     finally:
         PREPROCESSORS.pop("__dataset_callable_preprocessor", None)
 
 
-def test_dataset_accepts_configured_preprocessor_callable():
+def test_preprocessor_normalization_accepts_configured_callable():
     def _unregistered_dataset_callable_preprocessor(observation: dict):
         return observation
 
-    payload = _dataset_payload()
-    payload["preprocessor"] = _unregistered_dataset_callable_preprocessor
-
-    dataset = Dataset.model_validate(payload)
-
-    assert dataset.preprocessor is _unregistered_dataset_callable_preprocessor
+    assert PreprocessorConfig.normalize(_unregistered_dataset_callable_preprocessor) is _unregistered_dataset_callable_preprocessor
 
 
-def test_dataset_root_allows_none_for_preprocessor_driven_mode():
-    payload = {
-        "root": None,
-        "preprocessor": _preprocessor_name(),
-        "kwargs": {},
-    }
-
-    dataset = Dataset.model_validate(payload)
-    assert dataset.root is None
-    assert dataset.suffix is None
-    assert dataset.patterns is None
+def test_preprocessor_normalization_is_optional():
+    assert PreprocessorConfig.normalize(None) is None
+    assert PreprocessorConfig.normalize(_preprocessor_name()) == _preprocessor_name()
 
 
-def test_dataset_preprocessor_is_optional():
-    dataset = Dataset.model_validate({"root": None})
-
-    assert dataset.preprocessor is None
-
-
-def test_dataset_requires_suffix_when_root_is_configured():
-    payload = _dataset_payload()
-    payload.pop("suffix")
-
-    with pytest.raises(ValueError, match="suffix is required when root is specified"):
-        Dataset.model_validate(payload)
-
-
-def test_dataset_warns_when_root_has_no_patterns():
-    payload = _dataset_payload()
-    payload.pop("patterns")
-
-    with pytest.warns(UserWarning, match="all strata will read the same files"):
-        dataset = Dataset.model_validate(payload)
-
-    assert dataset.patterns is None
-
-
-def test_dataset_rejects_dataloader_configuration():
-    payload = _dataset_payload()
-    payload["file_buffer_size"] = 32
-
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        Dataset.model_validate(payload)
+def test_streaming_datamodule_rejects_uncompiled_split_pattern():
+    with pytest.raises(BeartypeCallHintParamViolation):
+        StreamingDataModule(
+            model=_model(),
+            root="/tmp/json2vec-test",
+            suffix=Suffix.ndjson,
+            train=r".*",
+        )

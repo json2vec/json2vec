@@ -3,29 +3,37 @@
 from __future__ import annotations
 
 import os
+import re
 import weakref
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterable, Iterator
+from functools import partial, partialmethod
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
 
 import lightning.pytorch as lit
+import pyarrow.dataset as ds
+import pyarrow.fs as pafs
 import torch
 from beartype import beartype
 from torch.utils.data import DataLoader, IterableDataset
 
 from json2vec.data.datasets.base import (
-    Dataset,
     InterprocessEncodingContext,
     NonNegativeInt,
     PositiveInt,
+    PreprocessorConfig,
+    RawObservation,
     SampleRate,
     StrataMap,
+    _is_assigned_to_worker,
+    _worker_identity,
     identity,
 )
 from json2vec.data.iterables import (
     JMESPathResolutionMonitor,
     batch,
     mask,
-    observe,
     process,
     sample,
     shuffle,
@@ -35,18 +43,195 @@ from json2vec.data.iterables import (
 from json2vec.data.processing import Pipeline
 from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
-from json2vec.structs.enums import ShardingStrategy, Strata
+from json2vec.preprocessors.base import Preprocessor
+from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Hyperparameters
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
+else:
+    Model = "json2vec.architecture.root.Model"
+
+
+@beartype
+def fetch(
+    root: str | Path,
+    pattern: re.Pattern[str],
+    sharding: ShardingStrategy,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> Iterator[str]:
+    parsed = urlparse(str(root))
+
+    if parsed.scheme == "s3":
+        fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
+        path = f"{parsed.netloc}{parsed.path}"
+        uri_prefix = "s3://"
+    elif parsed.scheme in ("", "file"):
+        fs = pafs.LocalFileSystem()
+        path = parsed.path
+        uri_prefix = ""
+    else:
+        raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
+
+    selector = pafs.FileSelector(path, recursive=True)
+    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
+
+    for info in fs.get_file_info(selector):
+        if info.is_file:
+            uri_path = f"{uri_prefix}{info.path}" if uri_prefix else info.path
+            if pattern.search(uri_path):
+                if sharding == ShardingStrategy.file:
+                    if not _is_assigned_to_worker(
+                        shard_key=f"file:{uri_path}",
+                        worker_id=worker_id,
+                        num_workers=num_workers,
+                    ):
+                        continue
+
+                yield uri_path
+
+
+@beartype
+def observe(
+    root: str | Path,
+    suffix: Suffix,
+    pattern: re.Pattern[str],
+    strata: Strata,
+    sharding: ShardingStrategy,
+    chunk_batch_size: int,
+    file_buffer_size: int,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> Iterator[RawObservation]:
+    paths = fetch(
+        root=root,
+        pattern=pattern,
+        sharding=sharding,
+        global_rank=global_rank,
+        world_size=world_size,
+    )
+    shuffled_paths = shuffle(paths, size=file_buffer_size, strata=strata)
+    yield from read(
+        shuffled_paths,
+        suffix=suffix,
+        sharding=sharding,
+        chunk_batch_size=chunk_batch_size,
+        global_rank=global_rank,
+        world_size=world_size,
+    )
+
+
+@beartype
+def read(
+    pipe: Iterable[str],
+    suffix: Suffix,
+    sharding: ShardingStrategy,
+    chunk_batch_size: int,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> Iterator[RawObservation]:
+    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
+
+    match suffix:
+        case Suffix.ndjson:
+            import json
+
+            for uri_path in pipe:
+                record_index = 0
+
+                with open(uri_path, "r") as file:
+                    for line in file:
+                        if not line.strip():
+                            continue
+
+                        if sharding == ShardingStrategy.chunk:
+                            chunk_index = record_index // chunk_batch_size
+                            if not _is_assigned_to_worker(
+                                shard_key=f"chunk:{uri_path}:{chunk_index}",
+                                worker_id=worker_id,
+                                num_workers=num_workers,
+                            ):
+                                record_index += 1
+                                continue
+
+                        elif sharding == ShardingStrategy.record:
+                            if not _is_assigned_to_worker(
+                                shard_key=f"record:{uri_path}:{record_index}",
+                                worker_id=worker_id,
+                                num_workers=num_workers,
+                            ):
+                                record_index += 1
+                                continue
+
+                        record_index += 1
+                        yield json.loads(line)
+
+        case Suffix.feather | Suffix.parquet | Suffix.avro | Suffix.csv | Suffix.orc | Suffix.json:
+            for uri_path in pipe:
+                parsed = urlparse(uri_path)
+
+                if parsed.scheme == "s3":
+                    fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
+                    path = f"{parsed.netloc}{parsed.path}"
+                elif parsed.scheme in ("", "file"):
+                    fs = pafs.LocalFileSystem()
+                    path = parsed.path
+                else:
+                    raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
+
+                bucket = parsed.netloc
+                key = parsed.path.lstrip("/")
+
+                try:
+                    arrow_dataset = ds.dataset(
+                        f"{bucket}/{key}",
+                        format=suffix.value,
+                        filesystem=fs,
+                    )
+
+                    for chunk_index, batch in enumerate(arrow_dataset.to_batches(batch_size=chunk_batch_size)):
+                        if sharding == ShardingStrategy.chunk:
+                            if not _is_assigned_to_worker(
+                                shard_key=f"chunk:{uri_path}:{chunk_index}",
+                                worker_id=worker_id,
+                                num_workers=num_workers,
+                            ):
+                                continue
+
+                            yield from cast(list[RawObservation], batch.to_pylist())
+                            continue
+
+                        rows = cast(list[RawObservation], batch.to_pylist())
+
+                        if sharding == ShardingStrategy.record:
+                            for row_index, row in enumerate(rows):
+                                if _is_assigned_to_worker(
+                                    shard_key=f"record:{uri_path}:{chunk_index}:{row_index}",
+                                    worker_id=worker_id,
+                                    num_workers=num_workers,
+                                ):
+                                    yield row
+                            continue
+
+                        yield from rows
+                except Exception:
+                    print(f"Error reading {path}, skipping.")
+                    continue
+
+        case _:
+            raise ValueError(f"Unsupported suffix: {suffix}")
 
 
 class BatchDataset(IterableDataset):
     def __init__(
         self,
         hyperparameters: Hyperparameters,
-        dataset: Dataset,
+        root: str | Path,
+        suffix: Suffix,
+        pattern: re.Pattern[str],
+        preprocessor: PreprocessorConfig.Value,
+        preprocessor_kwargs: dict[str, Any],
         interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
@@ -61,7 +246,11 @@ class BatchDataset(IterableDataset):
         super().__init__()
 
         self.hyperparameters = hyperparameters
-        self.dataset = dataset
+        self.root = root
+        self.suffix = suffix
+        self.pattern = pattern
+        self.preprocessor = preprocessor
+        self.preprocessor_kwargs = preprocessor_kwargs
         self.interprocess_encoding_context = interprocess_encoding_context
         self.global_rank = distributed_rank() if global_rank is None else global_rank
         self.world_size = distributed_world_size() if world_size is None else world_size
@@ -81,7 +270,11 @@ class BatchDataset(IterableDataset):
         yield from (
             Pipeline(
                 hyperparameters=self.hyperparameters,
-                dataset=self.dataset,
+                root=self.root,
+                suffix=self.suffix,
+                pattern=self.pattern,
+                preprocessor=self.preprocessor,
+                preprocessor_kwargs=self.preprocessor_kwargs,
                 strata=self.strata,
                 interprocess_encoding_context=self.interprocess_encoding_context,
                 jmespath_resolution_monitor=JMESPathResolutionMonitor(),
@@ -106,7 +299,11 @@ class BatchDataset(IterableDataset):
 
 def dataloader(
     hyperparameters: Hyperparameters,
-    dataset: Dataset,
+    root: str | Path,
+    suffix: Suffix,
+    pattern: re.Pattern[str],
+    preprocessor: PreprocessorConfig.Value,
+    preprocessor_kwargs: dict[str, Any],
     interprocess_encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
@@ -130,7 +327,11 @@ def dataloader(
     return DataLoader(
         dataset=BatchDataset(
             hyperparameters=hyperparameters,
-            dataset=dataset,
+            root=root,
+            suffix=suffix,
+            pattern=pattern,
+            preprocessor=preprocessor,
+            preprocessor_kwargs=preprocessor_kwargs,
             interprocess_encoding_context=interprocess_encoding_context,
             batch_size=batch_size,
             strata=strata,
@@ -154,18 +355,21 @@ def dataloader(
 class StreamingDataModule(lit.LightningDataModule):
     """Lightning data module for streaming records from files.
 
-    The dataset reads records from `Dataset.root`, applies the optional
-    preprocessor, batches observations, and encodes them with model
-    hyperparameters.
+    Reads file-backed records, applies an optional preprocessor, batches
+    observations, and encodes them with model hyperparameters.
     """
 
     @beartype
     def __init__(
         self,
-        hyperparameters: Hyperparameters,
-        dataset: Dataset,
-        interprocess_encoding_context: InterprocessEncodingContext,
-        batch_size: PositiveInt,
+        model: Model,
+        root: str | Path,
+        suffix: Suffix | str,
+        train: re.Pattern[str] | None = None,
+        validate: re.Pattern[str] | None = None,
+        test: re.Pattern[str] | None = None,
+        predict: re.Pattern[str] | None = None,
+        preprocessor: str | Callable[..., Any] | Preprocessor | None = None,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
         pin_memory: bool | StrataMap[bool] = True,
@@ -174,13 +378,25 @@ class StreamingDataModule(lit.LightningDataModule):
         file_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+        **kwargs: Any,
     ):
         super().__init__()
 
-        self.hyperparameters = hyperparameters
-        self.dataset = dataset
-        self.interprocess_encoding_context = interprocess_encoding_context
-        self.batch_size = batch_size
+        self.hyperparameters = model.hyperparameters
+        self.root = root
+        self.suffix = Suffix(suffix)
+        self.train = train
+        self.validate = validate
+        self.test = test
+        self.predict = predict
+        self.preprocessor = PreprocessorConfig.normalize(preprocessor)
+        self.preprocessor_kwargs = dict(kwargs)
+        try:
+            self._model_ref = weakref.ref(model)
+        except TypeError:
+            self._model_ref = None
+        self._interprocess_encoding_context = model.interprocess_encoding_context
+        self.batch_size = model.batch_size
         self.num_workers = Strata.expand(num_workers, default=None)
         self.persistent_workers = Strata.expand(persistent_workers, default=True)
         self.pin_memory = Strata.expand(pin_memory, default=True)
@@ -192,31 +408,6 @@ class StreamingDataModule(lit.LightningDataModule):
             strata: float(rate)
             for strata, rate in Strata.expand(sample_rate, default=1.0).items()
         }
-
-    @classmethod
-    def from_model(
-        cls,
-        model: Model,
-        dataset: Dataset,
-        **kwargs: Any,
-    ) -> "StreamingDataModule":
-        """Construct a streaming data module from a model and dataset config."""
-        datamodule = cls(
-            hyperparameters=model.hyperparameters,
-            dataset=dataset,
-            interprocess_encoding_context=model.interprocess_encoding_context,
-            batch_size=model.batch_size,
-            **kwargs,
-        )
-        datamodule._bind_model(model)
-
-        return datamodule
-
-    def _bind_model(self, model: Model) -> None:
-        try:
-            self._model_ref = weakref.ref(model)
-        except TypeError:
-            self._model_ref = None
 
     @property
     def interprocess_encoding_context(self) -> InterprocessEncodingContext:
@@ -232,14 +423,25 @@ class StreamingDataModule(lit.LightningDataModule):
         self._model_ref = None
         self._interprocess_encoding_context = context
 
-    def dataloader(self, strata: Strata) -> DataLoader:
+    def dataloader(self, strata: Strata, required: bool = True) -> DataLoader | None:
+        strata = Strata.normalize(strata)
+        pattern = getattr(self, strata.value)
+        if pattern is None:
+            if not required:
+                return None
+            raise ValueError(f"no file pattern configured for strata: {strata}")
+
         trainer = getattr(self, "trainer", None)
         global_rank = getattr(trainer, "global_rank", None)
         world_size = getattr(trainer, "world_size", None)
 
         return dataloader(
             hyperparameters=self.hyperparameters,
-            dataset=self.dataset,
+            root=self.root,
+            suffix=self.suffix,
+            pattern=pattern,
+            preprocessor=self.preprocessor,
+            preprocessor_kwargs=self.preprocessor_kwargs,
             interprocess_encoding_context=self.interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,
@@ -255,14 +457,7 @@ class StreamingDataModule(lit.LightningDataModule):
             world_size=world_size,
         )
 
-    def train_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.train)
-
-    def val_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.validate)
-
-    def test_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.test)
-
-    def predict_dataloader(self) -> DataLoader:
-        return self.dataloader(strata=Strata.predict)
+    train_dataloader = partialmethod(dataloader, strata=Strata.train, required=False)
+    val_dataloader = partialmethod(dataloader, strata=Strata.validate, required=False)
+    test_dataloader = partialmethod(dataloader, strata=Strata.test, required=False)
+    predict_dataloader = partialmethod(dataloader, strata=Strata.predict, required=False)

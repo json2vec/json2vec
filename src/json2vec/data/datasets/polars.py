@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import weakref
-from collections.abc import Callable
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterator, Mapping
+from functools import partial, partialmethod
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import lightning.pytorch as lit
 import polars as pl
@@ -15,21 +15,21 @@ from beartype import beartype
 from torch.utils.data import DataLoader, IterableDataset
 
 from json2vec.data.datasets.base import (
-    DataFrameMap,
-    Dataset,
     InterprocessEncodingContext,
     NonNegativeInt,
     PositiveInt,
+    PreprocessorConfig,
+    RawObservation,
     SampleRate,
     StrataMap,
-    _dataframes_by_strata,
+    _is_assigned_to_worker,
+    _worker_identity,
     identity,
 )
 from json2vec.data.iterables import (
     JMESPathResolutionMonitor,
     batch,
     mask,
-    observe_polars,
     process,
     sample,
     shuffle,
@@ -45,6 +45,67 @@ from json2vec.structs.experiment import Hyperparameters
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
+else:
+    Model = "json2vec.architecture.root.Model"
+
+DataFrameMap: TypeAlias = Mapping[Strata | str, pl.DataFrame]
+
+
+def _dataframes_by_strata(dataframe: pl.DataFrame | DataFrameMap) -> dict[Strata, pl.DataFrame]:
+    if not isinstance(dataframe, Mapping):
+        return {strata: dataframe for strata in Strata}
+
+    normalized: dict[Strata, pl.DataFrame] = {}
+    for key, frame in dataframe.items():
+        if not isinstance(frame, pl.DataFrame):
+            raise TypeError(f"dataframe for strata '{key}' must be a polars DataFrame")
+        normalized[Strata.normalize(key)] = frame
+
+    if not normalized:
+        raise ValueError("dataframe mapping must include at least one strata")
+
+    return normalized
+
+
+@beartype
+def observe_polars(
+    dataframe: pl.DataFrame,
+    strata: Strata,
+    sharding: ShardingStrategy,
+    chunk_batch_size: int,
+    global_rank: int | None = None,
+    world_size: int | None = None,
+) -> Iterator[RawObservation]:
+    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
+
+    if sharding == ShardingStrategy.file:
+        if not _is_assigned_to_worker(
+            shard_key="dataframe:0",
+            worker_id=worker_id,
+            num_workers=num_workers,
+        ):
+            return
+
+    if sharding == ShardingStrategy.record:
+        for row_index, row in enumerate(dataframe.iter_rows(named=True)):
+            if _is_assigned_to_worker(
+                shard_key=f"dataframe:record:{row_index}",
+                worker_id=worker_id,
+                num_workers=num_workers,
+            ):
+                yield cast(RawObservation, row)
+        return
+
+    for chunk_index, offset in enumerate(range(0, dataframe.height, chunk_batch_size)):
+        if sharding == ShardingStrategy.chunk:
+            if not _is_assigned_to_worker(
+                shard_key=f"dataframe:chunk:{chunk_index}",
+                worker_id=worker_id,
+                num_workers=num_workers,
+            ):
+                continue
+
+        yield from cast(list[RawObservation], dataframe.slice(offset, chunk_batch_size).to_dicts())
 
 
 class PolarsBatchDataset(IterableDataset):
@@ -52,7 +113,8 @@ class PolarsBatchDataset(IterableDataset):
         self,
         hyperparameters: Hyperparameters,
         dataframe: pl.DataFrame,
-        dataset: Dataset,
+        preprocessor: PreprocessorConfig.Value,
+        preprocessor_kwargs: dict[str, Any],
         interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
@@ -67,7 +129,8 @@ class PolarsBatchDataset(IterableDataset):
 
         self.hyperparameters = hyperparameters
         self.dataframe = dataframe
-        self.dataset = dataset
+        self.preprocessor = preprocessor
+        self.preprocessor_kwargs = preprocessor_kwargs
         self.interprocess_encoding_context = interprocess_encoding_context
         self.global_rank = distributed_rank() if global_rank is None else global_rank
         self.world_size = distributed_world_size() if world_size is None else world_size
@@ -87,7 +150,8 @@ class PolarsBatchDataset(IterableDataset):
             Pipeline(
                 hyperparameters=self.hyperparameters,
                 dataframe=self.dataframe,
-                dataset=self.dataset,
+                preprocessor=self.preprocessor,
+                preprocessor_kwargs=self.preprocessor_kwargs,
                 strata=self.strata,
                 interprocess_encoding_context=self.interprocess_encoding_context,
                 jmespath_resolution_monitor=JMESPathResolutionMonitor(),
@@ -112,7 +176,8 @@ class PolarsBatchDataset(IterableDataset):
 def polars_dataloader(
     hyperparameters: Hyperparameters,
     dataframe: pl.DataFrame,
-    dataset: Dataset,
+    preprocessor: PreprocessorConfig.Value,
+    preprocessor_kwargs: dict[str, Any],
     interprocess_encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
@@ -136,7 +201,8 @@ def polars_dataloader(
         dataset=PolarsBatchDataset(
             hyperparameters=hyperparameters,
             dataframe=dataframe,
-            dataset=dataset,
+            preprocessor=preprocessor,
+            preprocessor_kwargs=preprocessor_kwargs,
             interprocess_encoding_context=interprocess_encoding_context,
             batch_size=batch_size,
             strata=strata,
@@ -157,20 +223,18 @@ def polars_dataloader(
 
 
 class PolarsDataModule(lit.LightningDataModule):
-    """Lightning data module for in-memory Polars DataFrames.
-
-    Use `PolarsDataModule.from_model(...)` for the common path where batch size
-    and encoding context come from a `Model`.
-    """
+    """Lightning data module for in-memory Polars DataFrames."""
 
     @beartype
     def __init__(
         self,
-        hyperparameters: Hyperparameters,
-        dataframe: pl.DataFrame | DataFrameMap,
-        interprocess_encoding_context: InterprocessEncodingContext,
-        batch_size: PositiveInt,
-        dataset: Dataset | None = None,
+        model: Model,
+        train: pl.DataFrame | None = None,
+        validate: pl.DataFrame | None = None,
+        test: pl.DataFrame | None = None,
+        predict: pl.DataFrame | None = None,
+        preprocessor: str | Callable[..., Any] | Preprocessor | None = None,
+        dataframe: pl.DataFrame | DataFrameMap | None = None,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
         pin_memory: bool | StrataMap[bool] = True,
@@ -178,58 +242,10 @@ class PolarsDataModule(lit.LightningDataModule):
         chunk_batch_size: PositiveInt | StrataMap[PositiveInt] = 4096,
         observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+        **kwargs: Any,
     ):
         super().__init__()
 
-        self.hyperparameters = hyperparameters
-        self.dataframes = _dataframes_by_strata(dataframe)
-        self.dataset = Dataset(root=None) if dataset is None else dataset
-        if self.dataset.root is not None:
-            raise ValueError("PolarsDataModule dataset must not define root; pass preprocessor configuration only")
-
-        self.interprocess_encoding_context = interprocess_encoding_context
-        self.batch_size = batch_size
-        self.num_workers = Strata.expand(num_workers, default=None)
-        self.persistent_workers = Strata.expand(persistent_workers, default=True)
-        self.pin_memory = Strata.expand(pin_memory, default=True)
-        self.sharding = ShardingStrategy.expand(sharding, default=ShardingStrategy.chunk)
-        self.chunk_batch_size = Strata.expand(chunk_batch_size, default=4096)
-        self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
-        self.sample_rate = {
-            strata: float(rate)
-            for strata, rate in Strata.expand(sample_rate, default=1.0).items()
-        }
-
-    @classmethod
-    def from_model(
-        cls,
-        model: Model,
-        train: pl.DataFrame | None = None,
-        validate: pl.DataFrame | None = None,
-        test: pl.DataFrame | None = None,
-        predict: pl.DataFrame | None = None,
-        dataset: Dataset | None = None,
-        preprocessor: str | Callable[..., Any] | Preprocessor | None = None,
-        dataframe: pl.DataFrame | DataFrameMap | None = None,
-        **kwargs: Any,
-    ) -> "PolarsDataModule":
-        """Construct a Polars data module from a model and DataFrame splits.
-
-        Args:
-            model: Source model that provides hyperparameters, batch size, and
-                interprocess encoding context.
-            train: Optional training split.
-            validate: Optional validation split.
-            test: Optional test split.
-            predict: Optional prediction split.
-            dataset: Optional dataset configuration. If omitted, a dataset with
-                no preprocessor is used.
-            preprocessor: Optional registered preprocessor name, callable, or
-                `Preprocessor` object.
-            dataframe: Optional mapping or single frame used instead of named
-                split arguments.
-            **kwargs: Additional constructor options.
-        """
         if dataframe is not None and any(frame is not None for frame in (train, validate, test, predict)):
             raise ValueError("pass either dataframe or named splits, not both")
 
@@ -249,26 +265,26 @@ class PolarsDataModule(lit.LightningDataModule):
         else:
             dataframes = _dataframes_by_strata(dataframe)
 
-        if dataset is None:
-            dataset = Dataset(root=None, preprocessor=preprocessor)
-
-        datamodule = cls(
-            hyperparameters=model.hyperparameters,
-            dataframe=dataframes,
-            dataset=dataset,
-            interprocess_encoding_context=model.interprocess_encoding_context,
-            batch_size=model.batch_size,
-            **kwargs,
-        )
-        datamodule._bind_model(model)
-
-        return datamodule
-
-    def _bind_model(self, model: Model) -> None:
+        self.hyperparameters = model.hyperparameters
+        self.dataframes = dataframes
+        self.preprocessor = PreprocessorConfig.normalize(preprocessor)
+        self.preprocessor_kwargs = dict(kwargs)
         try:
             self._model_ref = weakref.ref(model)
         except TypeError:
             self._model_ref = None
+        self._interprocess_encoding_context = model.interprocess_encoding_context
+        self.batch_size = model.batch_size
+        self.num_workers = Strata.expand(num_workers, default=None)
+        self.persistent_workers = Strata.expand(persistent_workers, default=True)
+        self.pin_memory = Strata.expand(pin_memory, default=True)
+        self.sharding = ShardingStrategy.expand(sharding, default=ShardingStrategy.chunk)
+        self.chunk_batch_size = Strata.expand(chunk_batch_size, default=4096)
+        self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
+        self.sample_rate = {
+            strata: float(rate)
+            for strata, rate in Strata.expand(sample_rate, default=1.0).items()
+        }
 
     @property
     def interprocess_encoding_context(self) -> InterprocessEncodingContext:
@@ -284,17 +300,21 @@ class PolarsDataModule(lit.LightningDataModule):
         self._model_ref = None
         self._interprocess_encoding_context = context
 
-    def dataloader(self, strata: Strata) -> DataLoader:
+    def dataloader(self, strata: Strata, required: bool = True) -> DataLoader | None:
+        strata = Strata.normalize(strata)
         trainer = getattr(self, "trainer", None)
         global_rank = getattr(trainer, "global_rank", None)
         world_size = getattr(trainer, "world_size", None)
         if strata not in self.dataframes:
+            if not required:
+                return None
             raise ValueError(f"no dataframe configured for strata: {strata}")
 
         return polars_dataloader(
             hyperparameters=self.hyperparameters,
             dataframe=self.dataframes[strata],
-            dataset=self.dataset,
+            preprocessor=self.preprocessor,
+            preprocessor_kwargs=self.preprocessor_kwargs,
             interprocess_encoding_context=self.interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,
@@ -309,19 +329,7 @@ class PolarsDataModule(lit.LightningDataModule):
             world_size=world_size,
         )
 
-    def _maybe_dataloader(self, strata: Strata) -> DataLoader | None:
-        if strata not in self.dataframes:
-            return None
-        return self.dataloader(strata=strata)
-
-    def train_dataloader(self) -> DataLoader | None:
-        return self._maybe_dataloader(strata=Strata.train)
-
-    def val_dataloader(self) -> DataLoader | None:
-        return self._maybe_dataloader(strata=Strata.validate)
-
-    def test_dataloader(self) -> DataLoader | None:
-        return self._maybe_dataloader(strata=Strata.test)
-
-    def predict_dataloader(self) -> DataLoader | None:
-        return self._maybe_dataloader(strata=Strata.predict)
+    train_dataloader = partialmethod(dataloader, strata=Strata.train, required=False)
+    val_dataloader = partialmethod(dataloader, strata=Strata.validate, required=False)
+    test_dataloader = partialmethod(dataloader, strata=Strata.test, required=False)
+    predict_dataloader = partialmethod(dataloader, strata=Strata.predict, required=False)

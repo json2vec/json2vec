@@ -7,7 +7,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Model.from_schema(...)` builds the model tree from field constructors and arrays.
 - `Array(...)` declares a repeated nested context.
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
-- `PolarsDataModule.from_model(...)` builds data loaders from a configured model.
+- `PolarsDataModule(...)` builds data loaders from a configured model.
 - `Model.predict(...)` returns configured target predictions.
 - `Model.embed(...)` returns embeddings from nodes configured with `embed=True`.
 - `Deployment` wraps a checkpoint or model instance for serving.
@@ -104,11 +104,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_full_path: false
 
 ## Data
-
-::: json2vec.Dataset
-    options:
-      show_root_heading: true
-      show_root_full_path: false
 
 ::: json2vec.PolarsDataModule
     options:

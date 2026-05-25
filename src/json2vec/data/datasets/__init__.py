@@ -1,10 +1,8 @@
-"""Dataset and Lightning data module public exports."""
+"""Lightning data module public exports."""
 
 from __future__ import annotations
 
 from json2vec.data.datasets.base import (
-    DataFrameMap,
-    Dataset,
     EncodedBatch,
     EncodedInput,
     InterprocessEncodingContext,
@@ -15,13 +13,12 @@ from json2vec.data.datasets.base import (
     SampleRate,
     StrataMap,
 )
-from json2vec.data.datasets.polars import PolarsBatchDataset, PolarsDataModule, polars_dataloader
+from json2vec.data.datasets.polars import DataFrameMap, PolarsBatchDataset, PolarsDataModule, polars_dataloader
 from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule, dataloader
 
 __all__ = [
     "BatchDataset",
     "DataFrameMap",
-    "Dataset",
     "EncodedBatch",
     "EncodedInput",
     "InterprocessEncodingContext",

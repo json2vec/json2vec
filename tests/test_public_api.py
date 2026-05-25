@@ -4,7 +4,7 @@ import json2vec
 def test_common_resources_are_available_from_package_root():
     assert json2vec.Model.__name__ == "Model"
     assert json2vec.AttentionMode.mha == "mha"
-    assert json2vec.Dataset.__name__ == "Dataset"
+    assert not hasattr(json2vec, "Dataset")
     assert json2vec.PolarsDataModule.__name__ == "PolarsDataModule"
     assert json2vec.StreamingDataModule.__name__ == "StreamingDataModule"
     assert json2vec.Hyperparameters.__name__ == "Hyperparameters"

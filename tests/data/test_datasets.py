@@ -1,6 +1,7 @@
 import enum
 import json
 import random
+import re
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,23 +13,12 @@ from beartype.roar import BeartypeCallHintParamViolation
 import json2vec as j2v
 from json2vec.data import iterables
 from json2vec.data.datasets import base, polars, streaming
-from json2vec.data.datasets.base import Dataset, _is_assigned_to_worker, _worker_identity, sha256
+from json2vec.data.datasets.base import _is_assigned_to_worker, _worker_identity, sha256
 from json2vec.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
 from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
 from json2vec.preprocessors.base import Preprocessor, PreprocessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Hyperparameters
-
-
-def _dataset_for_suffix(suffix: Suffix):
-    return SimpleNamespace(suffix=suffix)
-
-
-def _dataset_for_fetch(root: Path):
-    return SimpleNamespace(
-        root=str(root),
-        patterns={strata: r".*\.ndjson$" for strata in Strata},
-    )
 
 
 def _datamodule_hyperparameters():
@@ -45,8 +35,14 @@ def _datamodule_hyperparameters():
     )
 
 
-def _datamodule_dataset():
-    return Dataset(root=None, preprocessor=None)
+def _datamodule_model(batch_size: int = 2):
+    return j2v.Model.from_schema(
+        j2v.Category("id", max_vocab_size=16),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=batch_size,
+    )
 
 
 def test_sha256():
@@ -92,18 +88,17 @@ def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     records = [{"id": i} for i in range(5)]
     path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
 
-    monkeypatch.setattr(iterables, "_worker_identity", lambda **_: (0, 2))
+    monkeypatch.setattr(streaming, "_worker_identity", lambda **_: (0, 2))
 
     def assign_first_chunk_only(shard_key: str, worker_id: int, num_workers: int) -> bool:
         return int(shard_key.rsplit(":", 1)[1]) == 0
 
-    monkeypatch.setattr(iterables, "_is_assigned_to_worker", assign_first_chunk_only)
+    monkeypatch.setattr(streaming, "_is_assigned_to_worker", assign_first_chunk_only)
 
-    dataset = _dataset_for_suffix(Suffix.ndjson)
     output = list(
-        iterables.read.__wrapped__(
+        streaming.read.__wrapped__(
             [str(path)],
-            dataset=dataset,
+            suffix=Suffix.ndjson,
             sharding=ShardingStrategy.chunk,
             chunk_batch_size=2,
         )
@@ -116,18 +111,17 @@ def test_read_ndjson_record_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyP
     records = [{"id": i} for i in range(6)]
     path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
 
-    monkeypatch.setattr(iterables, "_worker_identity", lambda **_: (0, 2))
+    monkeypatch.setattr(streaming, "_worker_identity", lambda **_: (0, 2))
 
     def assign_even_records(shard_key: str, worker_id: int, num_workers: int) -> bool:
         return int(shard_key.rsplit(":", 1)[1]) % 2 == 0
 
-    monkeypatch.setattr(iterables, "_is_assigned_to_worker", assign_even_records)
+    monkeypatch.setattr(streaming, "_is_assigned_to_worker", assign_even_records)
 
-    dataset = _dataset_for_suffix(Suffix.ndjson)
     output = list(
-        iterables.read.__wrapped__(
+        streaming.read.__wrapped__(
             [str(path)],
-            dataset=dataset,
+            suffix=Suffix.ndjson,
             sharding=ShardingStrategy.record,
             chunk_batch_size=3,
         )
@@ -139,18 +133,17 @@ def test_fetch_file_sharding_filters_files(tmp_path: Path, monkeypatch: pytest.M
     (tmp_path / "keep.ndjson").write_text("", encoding="utf-8")
     (tmp_path / "skip.ndjson").write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(iterables, "_worker_identity", lambda **_: (0, 2))
+    monkeypatch.setattr(streaming, "_worker_identity", lambda **_: (0, 2))
 
     def assign_keep_only(shard_key: str, worker_id: int, num_workers: int) -> bool:
         return "keep.ndjson" in shard_key
 
-    monkeypatch.setattr(iterables, "_is_assigned_to_worker", assign_keep_only)
+    monkeypatch.setattr(streaming, "_is_assigned_to_worker", assign_keep_only)
 
-    dataset = _dataset_for_fetch(tmp_path)
     files = list(
-        iterables.fetch.__wrapped__(
-            dataset=dataset,
-            strata=Strata.predict,
+        streaming.fetch.__wrapped__(
+            root=tmp_path,
+            pattern=re.compile(r".*\.ndjson$"),
             sharding=ShardingStrategy.file,
         )
     )
@@ -162,89 +155,35 @@ def test_fetch_without_file_sharding_returns_all_matching_files(tmp_path: Path):
     (tmp_path / "second.ndjson").write_text("", encoding="utf-8")
     (tmp_path / "ignore.csv").write_text("", encoding="utf-8")
 
-    dataset = _dataset_for_fetch(tmp_path)
     files = list(
-        iterables.fetch.__wrapped__(
-            dataset=dataset,
-            strata=Strata.predict,
+        streaming.fetch.__wrapped__(
+            root=tmp_path,
+            pattern=re.compile(r".*\.ndjson$"),
             sharding=ShardingStrategy.chunk,
         )
     )
     assert {Path(path).name for path in files} == {"first.ndjson", "second.ndjson"}
 
 
-def test_fetch_without_patterns_returns_all_files(tmp_path: Path):
+def test_fetch_all_pattern_returns_all_files(tmp_path: Path):
     (tmp_path / "first.ndjson").write_text("", encoding="utf-8")
     (tmp_path / "second.csv").write_text("", encoding="utf-8")
 
-    dataset = SimpleNamespace(root=str(tmp_path), patterns=None)
     files = list(
-        iterables.fetch.__wrapped__(
-            dataset=dataset,
-            strata=Strata.validate,
+        streaming.fetch.__wrapped__(
+            root=tmp_path,
+            pattern=re.compile(r".*"),
             sharding=ShardingStrategy.chunk,
         )
     )
     assert {Path(path).name for path in files} == {"first.ndjson", "second.csv"}
 
 
-def test_observe_with_none_root_seeds_single_worker(monkeypatch: pytest.MonkeyPatch):
-    dataset = SimpleNamespace(
-        root=None,
-        suffix=Suffix.ndjson,
-        patterns={strata: r".*" for strata in Strata},
-    )
-
-    monkeypatch.setattr(iterables, "_worker_identity", lambda **_: (0, 2))
-    monkeypatch.setattr(
-        iterables,
-        "_is_assigned_to_worker",
-        lambda shard_key, worker_id, num_workers: worker_id == 0,
-    )
-
-    output = list(
-        iterables.observe.__wrapped__(
-            dataset=dataset,
-            strata=Strata.train,
-            sharding=ShardingStrategy.chunk,
-            chunk_batch_size=2,
-            file_buffer_size=4,
-        )
-    )
-    assert output == [{}]
-
-
-def test_observe_with_none_root_yields_nothing_for_unassigned_worker(monkeypatch: pytest.MonkeyPatch):
-    dataset = SimpleNamespace(
-        root=None,
-        suffix=Suffix.ndjson,
-        patterns={strata: r".*" for strata in Strata},
-    )
-
-    monkeypatch.setattr(iterables, "_worker_identity", lambda **_: (1, 2))
-    monkeypatch.setattr(
-        iterables,
-        "_is_assigned_to_worker",
-        lambda shard_key, worker_id, num_workers: worker_id == 0,
-    )
-
-    output = list(
-        iterables.observe.__wrapped__(
-            dataset=dataset,
-            strata=Strata.train,
-            sharding=ShardingStrategy.chunk,
-            chunk_batch_size=2,
-            file_buffer_size=4,
-        )
-    )
-    assert output == []
-
-
 def test_observe_polars_yields_dataframe_rows():
     frame = pl.DataFrame({"id": [1, 2], "name": ["alpha", "beta"]})
 
     output = list(
-        iterables.observe_polars.__wrapped__(
+        polars.observe_polars.__wrapped__(
             dataframe=frame,
             strata=Strata.train,
             sharding=ShardingStrategy.chunk,
@@ -261,7 +200,7 @@ def test_observe_polars_record_sharding_partitions_rows():
     frame = pl.DataFrame({"id": list(range(8))})
     rows_by_rank = [
         list(
-            iterables.observe_polars.__wrapped__(
+            polars.observe_polars.__wrapped__(
                 dataframe=frame,
                 strata=Strata.train,
                 sharding=ShardingStrategy.record,
@@ -284,12 +223,11 @@ def test_read_unsupported_suffix_raises_value_error():
     class UnknownSuffix(enum.StrEnum):
         bad = "bad"
 
-    dataset = _dataset_for_suffix(UnknownSuffix.bad)
     with pytest.raises(ValueError, match="Unsupported suffix: bad"):
         list(
-            iterables.read.__wrapped__(
+            streaming.read.__wrapped__(
                 [],
-                dataset=dataset,
+                suffix=UnknownSuffix.bad,
                 sharding=ShardingStrategy.chunk,
                 chunk_batch_size=2,
             )
@@ -297,8 +235,6 @@ def test_read_unsupported_suffix_raises_value_error():
 
 
 def test_process_transformation_preprocessor_wraps_dict_output(monkeypatch: pytest.MonkeyPatch):
-    dataset = SimpleNamespace(preprocessor="__test_transformation", kwargs={})
-
     def transformation(observation: dict):
         return {"id": observation["id"]}
 
@@ -308,7 +244,8 @@ def test_process_transformation_preprocessor_wraps_dict_output(monkeypatch: pyte
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
-            dataset=dataset,
+            preprocessor="__test_transformation",
+            preprocessor_kwargs=None,
             strata=Strata.train,
             interprocess_encoding_context={},
         )
@@ -317,8 +254,6 @@ def test_process_transformation_preprocessor_wraps_dict_output(monkeypatch: pyte
 
 
 def test_process_generator_preprocessor_wraps_list_outputs(monkeypatch: pytest.MonkeyPatch):
-    dataset = SimpleNamespace(preprocessor="__test_generator", kwargs={})
-
     def generator(observation: dict):
         return [{"id": observation["id"]}, {"id": observation["id"] + 100}]
 
@@ -328,7 +263,8 @@ def test_process_generator_preprocessor_wraps_list_outputs(monkeypatch: pytest.M
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}],
-            dataset=dataset,
+            preprocessor="__test_generator",
+            preprocessor_kwargs=None,
             strata=Strata.train,
             interprocess_encoding_context={},
         )
@@ -337,8 +273,6 @@ def test_process_generator_preprocessor_wraps_list_outputs(monkeypatch: pytest.M
 
 
 def test_process_generator_preprocessor_receives_strata_and_state(monkeypatch: pytest.MonkeyPatch):
-    dataset = SimpleNamespace(preprocessor="__test_generator_context", kwargs={})
-
     def generator(observation: dict, strata, interprocess_encoding_context):
         yield {"id": observation["id"], "strata": strata, "marker": interprocess_encoding_context["marker"]}
 
@@ -348,7 +282,8 @@ def test_process_generator_preprocessor_receives_strata_and_state(monkeypatch: p
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}],
-            dataset=dataset,
+            preprocessor="__test_generator_context",
+            preprocessor_kwargs=None,
             strata=Strata.validate,
             interprocess_encoding_context={"marker": "seen"},
         )
@@ -357,8 +292,6 @@ def test_process_generator_preprocessor_receives_strata_and_state(monkeypatch: p
 
 
 def test_process_transformation_preprocessor_rejects_non_dict(monkeypatch: pytest.MonkeyPatch):
-    dataset = SimpleNamespace(preprocessor="__test_invalid_transformation", kwargs={})
-
     def transformation(observation: dict):
         return observation["id"]
 
@@ -373,7 +306,8 @@ def test_process_transformation_preprocessor_rejects_non_dict(monkeypatch: pytes
         list(
             iterables.process.__wrapped__(
                 [{"id": 1}],
-                dataset=dataset,
+                preprocessor="__test_invalid_transformation",
+                preprocessor_kwargs=None,
                 strata=Strata.train,
                 interprocess_encoding_context={},
             )
@@ -381,12 +315,11 @@ def test_process_transformation_preprocessor_rejects_non_dict(monkeypatch: pytes
 
 
 def test_process_without_preprocessor_still_wraps_root_array():
-    dataset = SimpleNamespace(preprocessor=None, kwargs={})
-
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
-            dataset=dataset,
+            preprocessor=None,
+            preprocessor_kwargs=None,
             strata=Strata.train,
             interprocess_encoding_context={},
         )
@@ -481,10 +414,10 @@ def test_jmespath_resolution_monitor_accepts_nested_observed_value():
 
 def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     module = StreamingDataModule(
-        hyperparameters=_datamodule_hyperparameters(),
-        dataset=_datamodule_dataset(),
-        interprocess_encoding_context={},
-        batch_size=2,
+        model=_datamodule_model(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        train=re.compile(r".*\.ndjson$"),
         num_workers={Strata.train: 0},
         sharding={Strata.train: "record"},
         chunk_batch_size={Strata.train: 7},
@@ -505,33 +438,29 @@ def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     assert module.observation_buffer_size[Strata.validate] == 1
     assert module.sample_rate[Strata.train] == 0.5
     assert module.sample_rate[Strata.validate] == 1.0
+    assert module.val_dataloader() is None
 
 
 def test_streaming_datamodule_rejects_invalid_loader_configuration():
     kwargs = {
-        "hyperparameters": _datamodule_hyperparameters(),
-        "dataset": _datamodule_dataset(),
-        "state": {},
+        "model": _datamodule_model(),
+        "root": "/tmp/json2vec-test",
+        "suffix": Suffix.ndjson,
+        "train": re.compile(r".*\.ndjson$"),
     }
 
     with pytest.raises(BeartypeCallHintParamViolation):
-        StreamingDataModule(**kwargs, batch_size=0)
+        StreamingDataModule(**kwargs, num_workers={Strata.train: True})
 
     with pytest.raises(BeartypeCallHintParamViolation):
-        StreamingDataModule(**kwargs, batch_size=2, num_workers={Strata.train: True})
-
-    with pytest.raises(BeartypeCallHintParamViolation):
-        StreamingDataModule(**kwargs, batch_size=2, sample_rate={Strata.train: 0.0})
+        StreamingDataModule(**kwargs, sample_rate={Strata.train: 0.0})
 
 
 def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata():
     frame = pl.DataFrame({"id": [1, 2]})
     module = PolarsDataModule(
-        hyperparameters=_datamodule_hyperparameters(),
+        model=_datamodule_model(),
         dataframe=frame,
-        dataset=_datamodule_dataset(),
-        interprocess_encoding_context={},
-        batch_size=2,
         num_workers={Strata.train: 0},
         sharding={Strata.train: "record"},
         chunk_batch_size={Strata.train: 7},
@@ -553,17 +482,12 @@ def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata
     assert module.sample_rate[Strata.validate] == 1.0
 
 
-def test_polars_datamodule_from_model_accepts_named_splits():
+def test_polars_datamodule_accepts_named_splits():
     train = pl.DataFrame({"id": [1]})
     predict = pl.DataFrame({"id": [2]})
-    model = SimpleNamespace(
-        hyperparameters=_datamodule_hyperparameters(),
-        interprocess_encoding_context={},
-        batch_size=2,
-    )
 
-    module = PolarsDataModule.from_model(
-        model,
+    module = PolarsDataModule(
+        model=_datamodule_model(),
         train=train,
         predict=predict,
         preprocessor=None,
@@ -573,12 +497,12 @@ def test_polars_datamodule_from_model_accepts_named_splits():
     assert module.dataframes[Strata.train] is train
     assert module.dataframes[Strata.predict] is predict
     assert set(module.dataframes) == {Strata.train, Strata.predict}
-    assert module.dataset.root is None
-    assert module.dataset.preprocessor is None
+    assert module.preprocessor is None
+    assert module.preprocessor_kwargs == {}
     assert module.val_dataloader() is None
 
 
-def test_polars_datamodule_from_model_refreshes_context_after_model_reset():
+def test_polars_datamodule_refreshes_context_after_model_reset():
     model = j2v.Model.from_schema(
         j2v.Category("code", max_vocab_size=16),
         d_model=8,
@@ -586,8 +510,8 @@ def test_polars_datamodule_from_model_refreshes_context_after_model_reset():
         n_heads=4,
         batch_size=2,
     )
-    module = PolarsDataModule.from_model(
-        model,
+    module = PolarsDataModule(
+        model=model,
         train=pl.DataFrame({"code": ["a"]}),
         num_workers=0,
     )
@@ -602,24 +526,15 @@ def test_polars_datamodule_from_model_refreshes_context_after_model_reset():
     assert after is not before
 
 
-def test_polars_datamodule_from_model_requires_at_least_one_split():
-    model = SimpleNamespace(
-        hyperparameters=_datamodule_hyperparameters(),
-        interprocess_encoding_context={},
-        batch_size=2,
-    )
-
+def test_polars_datamodule_requires_at_least_one_split():
     with pytest.raises(ValueError, match="at least one dataframe split is required"):
-        PolarsDataModule.from_model(model)
+        PolarsDataModule(model=_datamodule_model())
 
 
 def test_polars_datamodule_accepts_partial_dataframe_mapping_until_loader_requested():
     module = PolarsDataModule(
-        hyperparameters=_datamodule_hyperparameters(),
+        model=_datamodule_model(),
         dataframe={Strata.train: pl.DataFrame({"id": [1]})},
-        dataset=_datamodule_dataset(),
-        interprocess_encoding_context={},
-        batch_size=2,
         num_workers=0,
     )
 
@@ -628,22 +543,6 @@ def test_polars_datamodule_accepts_partial_dataframe_mapping_until_loader_reques
 
     with pytest.raises(ValueError, match="no dataframe configured"):
         module.dataloader(strata=Strata.validate)
-
-
-def test_polars_datamodule_rejects_dataset_with_file_root(tmp_path: Path):
-    with pytest.raises(ValueError, match="must not define root"):
-        PolarsDataModule(
-            hyperparameters=_datamodule_hyperparameters(),
-            dataframe=pl.DataFrame({"id": [1]}),
-            dataset=Dataset(
-                root=str(tmp_path),
-                suffix=Suffix.ndjson,
-                patterns={strata: r".*" for strata in Strata},
-            ),
-            interprocess_encoding_context={},
-            batch_size=2,
-        )
-
 
 def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch: pytest.MonkeyPatch):
     def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
@@ -662,7 +561,8 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
     batch_dataset = PolarsBatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
         dataframe=pl.DataFrame({"id": [1, 2, 3]}),
-        dataset=Dataset(root=None, preprocessor=None),
+        preprocessor=None,
+        preprocessor_kwargs={},
         interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
@@ -681,10 +581,10 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
 def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.MonkeyPatch):
     seen = {}
 
-    def observe(dataset, strata, sharding, chunk_batch_size, file_buffer_size):
+    def observe(root, suffix, pattern, strata, sharding, chunk_batch_size, file_buffer_size):
         yield {"id": 1}
 
-    def process(pipe, dataset, strata, interprocess_encoding_context):
+    def process(pipe, preprocessor, preprocessor_kwargs, strata, interprocess_encoding_context):
         yield from ([item] for item in pipe)
 
     def sample(pipe, sample_rate, strata):
@@ -713,7 +613,11 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
 
     batch_dataset = BatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
-        dataset=SimpleNamespace(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        pattern=re.compile(r".*\.ndjson$"),
+        preprocessor=None,
+        preprocessor_kwargs={},
         interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
@@ -738,10 +642,10 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
 
     state = DistributedState()
 
-    def observe(dataset, strata, sharding, chunk_batch_size, file_buffer_size, global_rank, world_size):
+    def observe(root, suffix, pattern, strata, sharding, chunk_batch_size, file_buffer_size, global_rank, world_size):
         yield {"id": global_rank, "world_size": world_size}
 
-    def process(pipe, dataset, strata, interprocess_encoding_context):
+    def process(pipe, preprocessor, preprocessor_kwargs, strata, interprocess_encoding_context):
         yield from ([item] for item in pipe)
 
     def sample(pipe, sample_rate, strata):
@@ -769,7 +673,11 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
 
     batch_dataset = BatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
-        dataset=SimpleNamespace(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        pattern=re.compile(r".*\.ndjson$"),
+        preprocessor=None,
+        preprocessor_kwargs={},
         interprocess_encoding_context={"root/category": state},
         batch_size=2,
         strata=Strata.train,

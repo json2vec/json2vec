@@ -4,33 +4,26 @@ from __future__ import annotations
 
 import inspect
 import random
-import re
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from functools import cache
 from typing import Annotated, Any, TypeVar, cast
-from urllib.parse import urlparse
 
 import jmespath
-import polars as pl
-import pyarrow.dataset as ds
-import pyarrow.fs as pafs
 import pydantic
 from beartype import beartype
 from tensordict import TensorDict
 
 from json2vec.data.datasets.base import (
-    Dataset,
     EncodedBatch,
     EncodedInput,
     InterprocessEncodingContext,
+    PreprocessorConfig,
     ProcessedObservation,
     RawObservation,
-    _is_assigned_to_worker,
-    _worker_identity,
 )
 from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor, PreprocessorMode
-from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
+from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TENSORFIELDS, TensorFieldBase
@@ -39,256 +32,36 @@ T = TypeVar("T")
 
 
 @beartype
-def fetch(
-    dataset: Dataset,
-    strata: Strata,
-    sharding: ShardingStrategy,
-    global_rank: int | None = None,
-    world_size: int | None = None,
-) -> Iterator[str]:
-    if dataset.root is None:
-        return
-
-    pattern = None if dataset.patterns is None else dataset.patterns.get(strata)
-    regex: re.Pattern[str] | None = None if pattern is None else re.compile(pattern)
-    parsed = urlparse(dataset.root)
-
-    if parsed.scheme == "s3":
-        fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
-        path = f"{parsed.netloc}{parsed.path}"
-        uri_prefix = "s3://"
-    elif parsed.scheme in ("", "file"):
-        fs = pafs.LocalFileSystem()
-        path = parsed.path
-        uri_prefix = ""
-    else:
-        raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
-
-    selector = pafs.FileSelector(path, recursive=True)
-    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
-
-    for info in fs.get_file_info(selector):
-        if info.is_file:
-            uri_path = f"{uri_prefix}{info.path}" if uri_prefix else info.path
-            if regex is None or regex.search(uri_path):
-                if sharding == ShardingStrategy.file:
-                    if not _is_assigned_to_worker(
-                        shard_key=f"file:{uri_path}",
-                        worker_id=worker_id,
-                        num_workers=num_workers,
-                    ):
-                        continue
-
-                yield uri_path
-
-
-@beartype
-def observe(
-    dataset: Dataset,
-    strata: Strata,
-    sharding: ShardingStrategy,
-    chunk_batch_size: int,
-    file_buffer_size: int,
-    global_rank: int | None = None,
-    world_size: int | None = None,
-) -> Iterator[RawObservation]:
-    if dataset.root is None:
-        worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
-        if _is_assigned_to_worker(
-            shard_key="synthetic:seed",
-            worker_id=worker_id,
-            num_workers=num_workers,
-        ):
-            yield {}
-        return
-
-    paths = fetch(
-        dataset=dataset,
-        strata=strata,
-        sharding=sharding,
-        global_rank=global_rank,
-        world_size=world_size,
-    )
-    shuffled_paths = shuffle(paths, size=file_buffer_size, strata=strata)
-    yield from read(
-        shuffled_paths,
-        dataset=dataset,
-        sharding=sharding,
-        chunk_batch_size=chunk_batch_size,
-        global_rank=global_rank,
-        world_size=world_size,
-    )
-
-
-@beartype
-def observe_polars(
-    dataframe: pl.DataFrame,
-    strata: Strata,
-    sharding: ShardingStrategy,
-    chunk_batch_size: int,
-    global_rank: int | None = None,
-    world_size: int | None = None,
-) -> Iterator[RawObservation]:
-    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
-
-    if sharding == ShardingStrategy.file:
-        if not _is_assigned_to_worker(
-            shard_key="dataframe:0",
-            worker_id=worker_id,
-            num_workers=num_workers,
-        ):
-            return
-
-    if sharding == ShardingStrategy.record:
-        for row_index, row in enumerate(dataframe.iter_rows(named=True)):
-            if _is_assigned_to_worker(
-                shard_key=f"dataframe:record:{row_index}",
-                worker_id=worker_id,
-                num_workers=num_workers,
-            ):
-                yield cast(RawObservation, row)
-        return
-
-    for chunk_index, offset in enumerate(range(0, dataframe.height, chunk_batch_size)):
-        if sharding == ShardingStrategy.chunk:
-            if not _is_assigned_to_worker(
-                shard_key=f"dataframe:chunk:{chunk_index}",
-                worker_id=worker_id,
-                num_workers=num_workers,
-            ):
-                continue
-
-        yield from cast(list[RawObservation], dataframe.slice(offset, chunk_batch_size).to_dicts())
-
-
-@beartype
-def read(
-    pipe: Iterable[str],
-    dataset: Dataset,
-    sharding: ShardingStrategy,
-    chunk_batch_size: int,
-    global_rank: int | None = None,
-    world_size: int | None = None,
-) -> Iterator[RawObservation]:
-    worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
-
-    match dataset.suffix:
-        case Suffix.ndjson:
-            import json
-
-            for uri_path in pipe:
-                record_index = 0
-
-                with open(uri_path, "r") as file:
-                    for line in file:
-                        if not line.strip():
-                            continue
-
-                        if sharding == ShardingStrategy.chunk:
-                            chunk_index = record_index // chunk_batch_size
-                            if not _is_assigned_to_worker(
-                                shard_key=f"chunk:{uri_path}:{chunk_index}",
-                                worker_id=worker_id,
-                                num_workers=num_workers,
-                            ):
-                                record_index += 1
-                                continue
-
-                        elif sharding == ShardingStrategy.record:
-                            if not _is_assigned_to_worker(
-                                shard_key=f"record:{uri_path}:{record_index}",
-                                worker_id=worker_id,
-                                num_workers=num_workers,
-                            ):
-                                record_index += 1
-                                continue
-
-                        record_index += 1
-                        yield json.loads(line)
-
-        case Suffix.feather | Suffix.parquet | Suffix.avro | Suffix.csv | Suffix.orc | Suffix.json:
-            for uri_path in pipe:
-                parsed = urlparse(uri_path)
-
-                if parsed.scheme == "s3":
-                    fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
-                    path = f"{parsed.netloc}{parsed.path}"
-                elif parsed.scheme in ("", "file"):
-                    fs = pafs.LocalFileSystem()
-                    path = parsed.path
-                else:
-                    raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
-
-                bucket = parsed.netloc
-                key = parsed.path.lstrip("/")
-
-                try:
-                    arrow_dataset = ds.dataset(
-                        f"{bucket}/{key}",
-                        format=dataset.suffix.value,
-                        filesystem=fs,
-                    )
-
-                    for chunk_index, batch in enumerate(arrow_dataset.to_batches(batch_size=chunk_batch_size)):
-                        if sharding == ShardingStrategy.chunk:
-                            if not _is_assigned_to_worker(
-                                shard_key=f"chunk:{uri_path}:{chunk_index}",
-                                worker_id=worker_id,
-                                num_workers=num_workers,
-                            ):
-                                continue
-
-                            yield from cast(list[RawObservation], batch.to_pylist())
-                            continue
-
-                        rows = cast(list[RawObservation], batch.to_pylist())
-
-                        if sharding == ShardingStrategy.record:
-                            for row_index, row in enumerate(rows):
-                                if _is_assigned_to_worker(
-                                    shard_key=f"record:{uri_path}:{chunk_index}:{row_index}",
-                                    worker_id=worker_id,
-                                    num_workers=num_workers,
-                                ):
-                                    yield row
-                            continue
-
-                        yield from rows
-                except Exception:
-                    print(f"Error reading {path}, skipping.")
-                    continue
-
-        case _:
-            raise ValueError(f"Unsupported suffix: {dataset.suffix}")
-
-
-@beartype
 def process(
     pipe: Iterable[RawObservation],
-    dataset: Dataset,
+    preprocessor: PreprocessorConfig.Value,
+    preprocessor_kwargs: dict[str, Any] | None,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
 ) -> Iterator[ProcessedObservation]:
-    if dataset.preprocessor is None:
+    preprocessor = PreprocessorConfig.normalize(preprocessor)
+    kwargs = {} if preprocessor_kwargs is None else preprocessor_kwargs
+
+    if preprocessor is None:
         for item in pipe:
             yield [item]
         return
 
-    if isinstance(dataset.preprocessor, str):
-        preprocessor = PREPROCESSORS[dataset.preprocessor]
-    elif isinstance(dataset.preprocessor, Preprocessor):
-        preprocessor = dataset.preprocessor
+    if isinstance(preprocessor, str):
+        resolved = PREPROCESSORS[preprocessor]
+    elif isinstance(preprocessor, Preprocessor):
+        resolved = preprocessor
     else:
-        preprocessor = Preprocessor(
-            name=getattr(dataset.preprocessor, "__name__", type(dataset.preprocessor).__name__),
-            func=dataset.preprocessor,
+        resolved = Preprocessor(
+            name=getattr(preprocessor, "__name__", type(preprocessor).__name__),
+            func=preprocessor,
             mode=PreprocessorMode.transformation,
         )
 
     for item in pipe:
-        yield from preprocessor.outputs(
+        yield from resolved.outputs(
             item,
-            **dataset.kwargs,
+            **kwargs,
             strata=strata,
             interprocess_encoding_context=interprocess_encoding_context,
         )
@@ -365,24 +138,6 @@ def query(expression: str) -> jmespath.parser.ParsedResult:
     return jmespath.compile(expression=f"[*]{expression}")
 
 
-def _contains_observed_value(result: Any) -> bool:
-    stack = [result]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, list):
-            stack.extend(item)
-        elif isinstance(item, dict):
-            stack.extend(item.values())
-        elif item is None:
-            continue
-        elif isinstance(item, str) and item == "":
-            continue
-        else:
-            return True
-
-    return False
-
-
 class JMESPathResolutionMonitor(pydantic.BaseModel):
     every: Annotated[int, pydantic.Field(gt=0)] = 1000
 
@@ -395,15 +150,21 @@ class JMESPathResolutionMonitor(pydantic.BaseModel):
         if count % self.every != 0:
             return
 
-        if _contains_observed_value(result):
-            return
+        stack = [result]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, dict):
+                stack.extend(item.values())
+            elif item is None:
+                continue
+            elif isinstance(item, str) and item == "":
+                continue
+            else:
+                return
 
         raise ValueError(f"JMESPath query returned empty result for address '{address}': {expression}")
-
-
-@cache
-def _accepts_interprocess_encoding_context(TensorField: type[TensorFieldBase]) -> bool:
-    return "interprocess_encoding_context" in inspect.signature(TensorField.new).parameters
 
 
 def encode(
@@ -443,7 +204,7 @@ def encode(
             hyperparameters=hyperparameters,
             strata=strata,
         )
-        if _accepts_interprocess_encoding_context(TensorField):
+        if "interprocess_encoding_context" in inspect.signature(TensorField.new).parameters:
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
 
         out[address] = TensorField.new(**kwargs)

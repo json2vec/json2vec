@@ -1,14 +1,11 @@
-"""Shared dataset configuration models and type aliases."""
+"""Shared data module type aliases and helpers."""
 
 from __future__ import annotations
 
 import hashlib
-import warnings
 from collections.abc import Callable, Mapping
 from typing import Annotated, Any, TypeAlias, TypeVar
 
-import polars as pl
-import pydantic
 from beartype import beartype
 from beartype.vale import Is
 from tensordict import TensorDict
@@ -17,13 +14,12 @@ from torch.utils.data import get_worker_info
 from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
 from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor
-from json2vec.structs.enums import Strata, Suffix
+from json2vec.structs.enums import Strata
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
 
 T = TypeVar("T")
 StrataMap: TypeAlias = Mapping[Strata | str, T]
-DataFrameMap: TypeAlias = Mapping[Strata | str, pl.DataFrame]
 NonNegativeInt: TypeAlias = Annotated[int, Is[lambda value: not isinstance(value, bool) and value >= 0]]
 PositiveInt: TypeAlias = Annotated[int, Is[lambda value: not isinstance(value, bool) and value >= 1]]
 SampleRate: TypeAlias = Annotated[int | float, Is[lambda value: not isinstance(value, bool) and 0.0 < value <= 1.0]]
@@ -38,72 +34,29 @@ InterprocessEncodingContext: TypeAlias = dict[Address, Any]
 # list; the encoder prepends the outer batch selector before JMESPath search.
 
 
-class Dataset(pydantic.BaseModel):
-    """Input dataset configuration for streaming or in-memory records.
+class PreprocessorConfig:
+    Value: TypeAlias = str | Callable[..., Any] | Preprocessor | None
 
-    A dataset may point at a file root for streaming reads, or it may only carry
-    an optional preprocessor for in-memory data modules. When `preprocessor` is
-    `None`, observations pass through unchanged.
-    """
-
-    model_config = pydantic.ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-
-    root: str | None = None
-    preprocessor: Annotated[str | Callable[..., Any] | Preprocessor | None, pydantic.Field(default=None)] = None
-    kwargs: dict[str, Any] = pydantic.Field(default_factory=dict)
-    suffix: Suffix | None = None
-    patterns: dict[Strata, str] | None = None
-
-    @pydantic.field_validator("preprocessor", mode="before")
     @classmethod
-    def normalize_preprocessor(cls, value: Any):
-        if value is None or isinstance(value, str):
-            return value
+    def normalize(cls, preprocessor: Value) -> Value:
+        if preprocessor is None:
+            return None
 
-        if isinstance(value, Preprocessor):
-            return value
+        if isinstance(preprocessor, str):
+            if preprocessor not in PREPROCESSORS:
+                raise ValueError(f"you haven't registered preprocessor {preprocessor}")
+            return preprocessor
 
-        if callable(value):
-            name = getattr(value, "__name__", None)
+        if isinstance(preprocessor, Preprocessor):
+            return preprocessor
+
+        if callable(preprocessor):
+            name = getattr(preprocessor, "__name__", None)
             if isinstance(name, str) and name in PREPROCESSORS:
                 return name
-            return value
+            return preprocessor
 
-        return value
-
-    @pydantic.model_validator(mode="after")
-    def check_dataset_configuration(self):
-        if isinstance(self.preprocessor, str) and self.preprocessor not in PREPROCESSORS:
-            raise ValueError(f"you haven't registered preprocessor {self.preprocessor}")
-
-        if self.root is not None and self.suffix is None:
-            raise ValueError("suffix is required when root is specified")
-
-        if self.root is not None and self.patterns is None:
-            warnings.warn(
-                "dataset patterns are not configured; all strata will read the same files, "
-                "so training data may be used for validation",
-                UserWarning,
-                stacklevel=2,
-            )
-
-        return self
-
-
-def _dataframes_by_strata(dataframe: pl.DataFrame | DataFrameMap) -> dict[Strata, pl.DataFrame]:
-    if not isinstance(dataframe, Mapping):
-        return {strata: dataframe for strata in Strata}
-
-    normalized: dict[Strata, pl.DataFrame] = {}
-    for key, frame in dataframe.items():
-        if not isinstance(frame, pl.DataFrame):
-            raise TypeError(f"dataframe for strata '{key}' must be a polars DataFrame")
-        normalized[Strata.normalize(key)] = frame
-
-    if not normalized:
-        raise ValueError("dataframe mapping must include at least one strata")
-
-    return normalized
+        return preprocessor
 
 
 @beartype

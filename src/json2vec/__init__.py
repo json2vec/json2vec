@@ -13,7 +13,7 @@ from json2vec.architecture.root import (
     RuntimePlacementCallback,
     SchedulerConfig,
 )
-from json2vec.data.datasets import Dataset, PolarsDataModule, StreamingDataModule
+from json2vec.data.datasets import PolarsDataModule, StreamingDataModule
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
 from json2vec.structs.enums import AttentionMode, Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
 from json2vec.structs.experiment import (
@@ -43,7 +43,6 @@ __all__ = [
     "Category",
     "Component",
     "DateParts",
-    "Dataset",
     "DecoderBase",
     "EmbedderBase",
     "Entity",
