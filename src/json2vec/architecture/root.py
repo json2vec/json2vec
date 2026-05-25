@@ -475,6 +475,16 @@ class Model(lit.LightningModule):
                 if type(callback) not in attached_callback_types:
                     callbacks.append(callback)
 
+        # Callbacks may perform distributed work, so register them in a
+        # deterministic order on every rank. Use class paths instead of Python's
+        # salted hash or schema traversal order.
+        callbacks.sort(
+            key=lambda callback: (
+                type(callback).__module__,
+                type(callback).__qualname__,
+            )
+        )
+
         return callbacks
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:

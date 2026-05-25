@@ -167,11 +167,19 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
     model = Model(hyperparameters=_hyperparameters(), batch_size=2)
 
     callbacks = model.configure_callbacks()
+    callback_types = [type(callback) for callback in callbacks]
 
     assert any(isinstance(callback, RuntimePlacementCallback) for callback in callbacks)
     assert any(isinstance(callback, MutationLockCallback) for callback in callbacks)
     assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
     assert any(isinstance(callback, CounterUpdateCallback) for callback in callbacks)
+    assert callback_types == sorted(
+        callback_types,
+        key=lambda callback_type: (
+            callback_type.__module__,
+            callback_type.__qualname__,
+        ),
+    )
 
 
 def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
@@ -228,6 +236,9 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     assert len(mutation_lock_callbacks) == 1
     assert len(vocabulary_callbacks) == 1
     assert len(counter_callbacks) == 1
+
+    callback_types = [type(callback) for callback in model.configure_callbacks()]
+    assert callback_types.index(CounterUpdateCallback) < callback_types.index(VocabularySyncCallback)
 
 
 def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> None:
