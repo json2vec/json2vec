@@ -15,6 +15,7 @@ def test_common_resources_are_available_from_package_root():
     assert json2vec.Preprocessor.__name__ == "Preprocessor"
     assert json2vec.OptimizerConfig is not None
     assert json2vec.SchedulerConfig is not None
+    assert json2vec.RollbackCheckpoint.__name__ == "RollbackCheckpoint"
     assert json2vec.SchemaField is not None
     assert json2vec.Category.model_fields["type"].default == "category"
     assert json2vec.Number.model_fields["type"].default == "number"

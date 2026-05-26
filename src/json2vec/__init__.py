@@ -10,6 +10,7 @@ from json2vec.architecture.root import (
     Model,
     MutationLockCallback,
     OptimizerConfig,
+    RollbackCheckpoint,
     RuntimePlacementCallback,
     SchedulerConfig,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "Preprocessor",
     "PreprocessorMode",
     "RequestBase",
+    "RollbackCheckpoint",
     "RuntimePlacementCallback",
     "Set",
     "SchedulerConfig",

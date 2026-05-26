@@ -12,6 +12,7 @@ import lightning.pytorch as lit
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
+from lightning.pytorch.callbacks import ModelCheckpoint
 from loguru import logger
 from tensordict import TensorDict
 
@@ -112,6 +113,40 @@ class RuntimePlacementCallback(Callback):
     on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
     on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
     on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
+
+
+class RollbackCheckpoint(ModelCheckpoint):
+    """Checkpoint the best model during fit and restore it into the module at fit end."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self.save_weights_only:
+            raise ValueError("RollbackCheckpoint requires full checkpoints; set save_weights_only=False")
+        if self.save_top_k == 0:
+            raise ValueError("RollbackCheckpoint requires at least one saved checkpoint; set save_top_k != 0")
+
+    def on_fit_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule) -> None:
+        super().on_fit_end(trainer=trainer, pl_module=pl_module)
+        if not isinstance(pl_module, Model):
+            raise TypeError("RollbackCheckpoint can only restore json2vec Model instances")
+
+        best_model_path = self.best_model_path
+        if not best_model_path:
+            raise RuntimeError("RollbackCheckpoint did not find a best checkpoint to restore")
+
+        strategy = getattr(trainer, "strategy", None)
+        if strategy is not None:
+            strategy.barrier("rollback_checkpoint_load")
+            checkpoint = strategy.checkpoint_io.load_checkpoint(best_model_path, map_location=pl_module.device)
+        else:
+            checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
+
+        pl_module.restore_checkpoint_state(checkpoint)
+        logger.bind(
+            component="checkpoint",
+            checkpoint=best_model_path,
+            score=self.best_model_score,
+        ).info("rolled back Model to best checkpoint")
 
 
 @beartype
@@ -619,6 +654,23 @@ class Model(lit.LightningModule):
         checkpoint["hyperparameters"] = self.hyperparameters.model_dump(mode="python")
         checkpoint["batch_size"] = self.batch_size
 
+    def restore_checkpoint_state(self, checkpoint: dict[str, Any]) -> None:
+        """Restore this model in place from a JSON2Vec checkpoint dictionary."""
+        missing = {"state_dict", "hyperparameters", "batch_size"} - set(checkpoint)
+        if missing:
+            fields = ", ".join(sorted(missing))
+            raise ValueError(f"missing checkpoint fields: {fields}")
+
+        device = self.device
+        was_training = self.training
+        self.hyperparameters = Hyperparameters.model_validate(checkpoint["hyperparameters"])
+        self.batch_size = checkpoint["batch_size"]
+        self._build()
+        if isinstance(device, torch.device):
+            self.to(device=device)
+        self.load_state_dict(state_dict=checkpoint["state_dict"])
+        self.train(was_training)
+
     @classmethod
     def load(cls, checkpoint: str | Path) -> Self:
         """Load a `Model` checkpoint written by `Model.save(...)`."""
@@ -632,7 +684,7 @@ class Model(lit.LightningModule):
             hyperparameters=Hyperparameters.model_validate(state["hyperparameters"]),
             batch_size=state["batch_size"],
         )
-        model.load_state_dict(state_dict=state["state_dict"])
+        model.restore_checkpoint_state(state)
         logger.bind(component="model_factory", checkpoint=str(path)).info("restored model state from checkpoint")
 
         return model

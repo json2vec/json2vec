@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
+import pytest
 import torch
 
-from json2vec.architecture.root import Model, MutationLockCallback, RuntimePlacementCallback
+from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
@@ -134,6 +136,69 @@ def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
 
     assert model.batch_size == 2
     assert model.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+
+
+def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    best_path = tmp_path / "best.ckpt"
+    model.save(best_path)
+    best_state = {
+        key: value.detach().clone() if isinstance(value, torch.Tensor) else deepcopy(value)
+        for key, value in model.state_dict().items()
+    }
+    best_hyperparameters = model.hyperparameters.model_dump(mode="python")
+    address = Address("root", "label")
+
+    model.update(lambda node: node.address == address, weight=3.0)
+    mutated_node = model.nodes[address]
+    with torch.no_grad():
+        next(model.parameters()).add_(1.0)
+
+    class CheckpointIOStub:
+        def __init__(self) -> None:
+            self.loaded: list[tuple[str, torch.device]] = []
+
+        def load_checkpoint(self, path: str, map_location: torch.device):
+            self.loaded.append((path, map_location))
+            return torch.load(path, weights_only=False, map_location=map_location)
+
+    class StrategyStub:
+        def __init__(self) -> None:
+            self.checkpoint_io = CheckpointIOStub()
+            self.barriers: list[str] = []
+
+        def barrier(self, name: str) -> None:
+            self.barriers.append(name)
+
+    strategy = StrategyStub()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    callback = RollbackCheckpoint(dirpath=tmp_path)
+    callback.best_model_path = str(best_path)
+    callback.best_model_score = torch.tensor(0.25)
+
+    callback.on_fit_end(trainer=trainer, pl_module=model)
+
+    assert strategy.barriers == ["rollback_checkpoint_load"]
+    assert strategy.checkpoint_io.loaded == [(str(best_path), torch.device("cpu"))]
+    assert model.batch_size == 2
+    assert model.hyperparameters.model_dump(mode="python") == best_hyperparameters
+    assert model.nodes[address] is not mutated_node
+    for key, value in best_state.items():
+        restored = model.state_dict()[key]
+        if isinstance(value, torch.Tensor):
+            assert torch.equal(restored, value)
+        else:
+            assert restored == value
+
+
+def test_rollback_checkpoint_requires_full_saved_checkpoint() -> None:
+    with pytest.raises(ValueError, match="full checkpoints"):
+        RollbackCheckpoint(save_weights_only=True)
+
+
+def test_rollback_checkpoint_requires_a_saved_checkpoint() -> None:
+    with pytest.raises(ValueError, match="at least one saved checkpoint"):
+        RollbackCheckpoint(save_top_k=0)
 
 
 def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> None:
