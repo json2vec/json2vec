@@ -106,10 +106,11 @@ def observe(
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> Iterator[RawObservation]:
+    fetch_sharding = ShardingStrategy.chunk if replacement else sharding
     paths = fetch(
         root=root,
         pattern=pattern,
-        sharding=sharding,
+        sharding=fetch_sharding,
         global_rank=global_rank,
         world_size=world_size,
     )
@@ -117,8 +118,8 @@ def observe(
         sampled_paths = list(paths)
         if not sampled_paths:
             raise ValueError(
-                "no files assigned to this streaming worker; "
-                "use fewer distributed workers, add more files, or disable replacement sampling"
+                "no matching files available for replacement sampling; "
+                "check the streaming root and split pattern"
             )
 
         def choices() -> Iterator[str]:

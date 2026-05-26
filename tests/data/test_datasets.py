@@ -206,13 +206,17 @@ def test_fetch_all_pattern_returns_all_files(tmp_path: Path):
     assert {Path(path).name for path in files} == {"first.ndjson", "second.csv"}
 
 
-def test_observe_replacement_repeats_sampled_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_observe_replacement_allows_workers_to_share_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     first = tmp_path / "first.ndjson"
     second = tmp_path / "second.ndjson"
     first.write_text(json.dumps({"id": 1}), encoding="utf-8")
     second.write_text(json.dumps({"id": 2}), encoding="utf-8")
 
-    monkeypatch.setattr(streaming.random, "choice", lambda paths: str(first))
+    def assign_first_file_only(shard_key: str, worker_id: int, num_workers: int) -> bool:
+        return "first.ndjson" in shard_key
+
+    monkeypatch.setattr(streaming, "_is_assigned_to_worker", assign_first_file_only)
+    monkeypatch.setattr(streaming.random, "choice", lambda paths: str(second))
 
     output = list(
         islice(
@@ -232,7 +236,7 @@ def test_observe_replacement_repeats_sampled_files(tmp_path: Path, monkeypatch: 
         )
     )
 
-    assert output == [{"id": 1}, {"id": 1}, {"id": 1}]
+    assert output == [{"id": 2}, {"id": 2}, {"id": 2}]
 
 
 def test_observe_polars_yields_dataframe_rows():
