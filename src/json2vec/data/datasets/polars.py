@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import weakref
 from collections.abc import Callable, Iterator, Mapping
 from functools import partial, partialmethod
@@ -73,9 +74,18 @@ def observe_polars(
     strata: Strata,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
+    replacement: bool = False,
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> Iterator[RawObservation]:
+    if replacement:
+        rows = cast(list[RawObservation], dataframe.to_dicts())
+        if not rows:
+            raise ValueError("no dataframe rows available for replacement sampling")
+
+        while True:
+            yield dict(random.choice(rows))
+
     worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
 
     if sharding == ShardingStrategy.file:
@@ -122,6 +132,7 @@ class PolarsBatchDataset(IterableDataset):
         chunk_batch_size: int,
         observation_buffer_size: int,
         sample_rate: float,
+        replacement: bool = False,
         global_rank: int | None = None,
         world_size: int | None = None,
     ):
@@ -140,6 +151,7 @@ class PolarsBatchDataset(IterableDataset):
         self.chunk_batch_size = chunk_batch_size
         self.observation_buffer_size = observation_buffer_size
         self.sample_rate = sample_rate
+        self.replacement = replacement
 
     def __iter__(self):
         for field_context in self.interprocess_encoding_context.values():
@@ -158,6 +170,7 @@ class PolarsBatchDataset(IterableDataset):
                 sharding=self.sharding,
                 chunk_batch_size=self.chunk_batch_size,
                 sample_rate=self.sample_rate,
+                replacement=self.replacement,
                 batch_size=self.batch_size,
                 global_rank=self.global_rank,
                 world_size=self.world_size,
@@ -188,6 +201,7 @@ def polars_dataloader(
     chunk_batch_size: int,
     observation_buffer_size: int,
     sample_rate: float,
+    replacement: bool = False,
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> DataLoader:
@@ -210,6 +224,7 @@ def polars_dataloader(
             chunk_batch_size=chunk_batch_size,
             observation_buffer_size=observation_buffer_size,
             sample_rate=sample_rate,
+            replacement=replacement,
             global_rank=global_rank,
             world_size=world_size,
         ),
@@ -242,6 +257,7 @@ class PolarsDataModule(lit.LightningDataModule):
         chunk_batch_size: PositiveInt | StrataMap[PositiveInt] = 4096,
         observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+        replacement: bool | StrataMap[bool] = False,
         **kwargs: Any,
     ):
         super().__init__()
@@ -285,6 +301,7 @@ class PolarsDataModule(lit.LightningDataModule):
             strata: float(rate)
             for strata, rate in Strata.expand(sample_rate, default=1.0).items()
         }
+        self.replacement = Strata.expand(replacement, default=False)
 
     @property
     def interprocess_encoding_context(self) -> InterprocessEncodingContext:
@@ -325,6 +342,7 @@ class PolarsDataModule(lit.LightningDataModule):
             chunk_batch_size=self.chunk_batch_size[strata],
             observation_buffer_size=self.observation_buffer_size[strata],
             sample_rate=self.sample_rate[strata],
+            replacement=self.replacement[strata],
             global_rank=global_rank,
             world_size=world_size,
         )

@@ -279,6 +279,49 @@ def test_observe_polars_record_sharding_partitions_rows():
     assert first | second == set(range(8))
 
 
+def test_observe_polars_replacement_samples_full_dataframe_without_sharding(monkeypatch: pytest.MonkeyPatch):
+    frame = pl.DataFrame({"id": [1, 2], "name": ["alpha", "beta"]})
+
+    monkeypatch.setattr(polars, "_is_assigned_to_worker", lambda **_: False)
+    monkeypatch.setattr(polars.random, "choice", lambda rows: rows[1])
+
+    output = list(
+        islice(
+            polars.observe_polars.__wrapped__(
+                dataframe=frame,
+                strata=Strata.train,
+                sharding=ShardingStrategy.file,
+                chunk_batch_size=1,
+                replacement=True,
+                global_rank=0,
+                world_size=2,
+            ),
+            3,
+        )
+    )
+
+    assert output == [
+        {"id": 2, "name": "beta"},
+        {"id": 2, "name": "beta"},
+        {"id": 2, "name": "beta"},
+    ]
+
+
+def test_observe_polars_replacement_rejects_empty_dataframe():
+    with pytest.raises(ValueError, match="no dataframe rows available"):
+        next(
+            polars.observe_polars.__wrapped__(
+                dataframe=pl.DataFrame({"id": []}),
+                strata=Strata.train,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=1,
+                replacement=True,
+                global_rank=0,
+                world_size=1,
+            )
+        )
+
+
 def test_read_unsupported_suffix_raises_value_error():
     class UnknownSuffix(enum.StrEnum):
         bad = "bad"
@@ -568,6 +611,8 @@ def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata
     assert module.observation_buffer_size[Strata.validate] == 1
     assert module.sample_rate[Strata.train] == 0.5
     assert module.sample_rate[Strata.validate] == 1.0
+    assert module.replacement[Strata.train] is False
+    assert module.replacement[Strata.validate] is False
 
 
 def test_polars_datamodule_accepts_named_splits():
@@ -631,6 +676,34 @@ def test_polars_datamodule_accepts_partial_dataframe_mapping_until_loader_reques
 
     with pytest.raises(ValueError, match="no dataframe configured"):
         module.dataloader(strata=Strata.validate)
+
+
+def test_polars_datamodule_accepts_replacement_configuration_per_strata():
+    module = PolarsDataModule(
+        model=_datamodule_model(),
+        train=pl.DataFrame({"id": [1]}),
+        validate=pl.DataFrame({"id": [2]}),
+        replacement={Strata.train: False, Strata.validate: True},
+    )
+
+    assert module.replacement[Strata.train] is False
+    assert module.replacement[Strata.validate] is True
+    assert module.replacement[Strata.test] is False
+
+
+def test_polars_datamodule_passes_replacement_to_dataset():
+    module = PolarsDataModule(
+        model=_datamodule_model(),
+        train=pl.DataFrame({"id": [1]}),
+        num_workers=0,
+        replacement=True,
+    )
+
+    loader = module.train_dataloader()
+
+    assert loader is not None
+    assert loader.dataset.replacement is True
+
 
 def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch: pytest.MonkeyPatch):
     def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
