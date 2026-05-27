@@ -137,7 +137,11 @@ class RollbackCheckpoint(ModelCheckpoint):
         strategy = getattr(trainer, "strategy", None)
         if strategy is not None:
             strategy.barrier("rollback_checkpoint_load")
-            checkpoint = strategy.checkpoint_io.load_checkpoint(best_model_path, map_location=pl_module.device)
+            checkpoint = strategy.checkpoint_io.load_checkpoint(
+                best_model_path,
+                map_location=pl_module.device,
+                weights_only=False,
+            )
         else:
             checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
 

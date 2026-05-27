@@ -8,7 +8,7 @@ import torch
 
 from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from json2vec.data.iterables import encode
-from json2vec.structs.enums import Strata, TensorKey, Tokens
+from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.shared.counter import CounterUpdateCallback
@@ -156,11 +156,11 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
 
     class CheckpointIOStub:
         def __init__(self) -> None:
-            self.loaded: list[tuple[str, torch.device]] = []
+            self.loaded: list[tuple[str, torch.device, bool | None]] = []
 
-        def load_checkpoint(self, path: str, map_location: torch.device):
-            self.loaded.append((path, map_location))
-            return torch.load(path, weights_only=False, map_location=map_location)
+        def load_checkpoint(self, path: str, map_location: torch.device, weights_only: bool | None = None):
+            self.loaded.append((path, map_location, weights_only))
+            return torch.load(path, weights_only=weights_only, map_location=map_location)
 
     class StrategyStub:
         def __init__(self) -> None:
@@ -179,7 +179,7 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
     callback.on_fit_end(trainer=trainer, pl_module=model)
 
     assert strategy.barriers == ["rollback_checkpoint_load"]
-    assert strategy.checkpoint_io.loaded == [(str(best_path), torch.device("cpu"))]
+    assert strategy.checkpoint_io.loaded == [(str(best_path), torch.device("cpu"), False)]
     assert model.batch_size == 2
     assert model.hyperparameters.model_dump(mode="python") == best_hyperparameters
     assert model.nodes[address] is not mutated_node
@@ -189,6 +189,41 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
             assert torch.equal(restored, value)
         else:
             assert restored == value
+
+
+def test_rollback_checkpoint_loads_schema_metadata_with_weights_only_disabled(tmp_path: Path) -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    best_path = tmp_path / "best.ckpt"
+    model.save(best_path)
+    checkpoint = torch.load(best_path, weights_only=False, map_location="cpu")
+    assert checkpoint["hyperparameters"]["fields"]["attention"] == AttentionMode.mha
+
+    with torch.no_grad():
+        next(model.parameters()).add_(1.0)
+
+    class CheckpointIOStub:
+        def __init__(self) -> None:
+            self.weights_only: bool | None = None
+
+        def load_checkpoint(self, path: str, map_location: torch.device, weights_only: bool | None = None):
+            self.weights_only = weights_only
+            return torch.load(path, weights_only=weights_only, map_location=map_location)
+
+    class StrategyStub:
+        def __init__(self) -> None:
+            self.checkpoint_io = CheckpointIOStub()
+
+        def barrier(self, name: str) -> None:
+            pass
+
+    strategy = StrategyStub()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    callback = RollbackCheckpoint(dirpath=tmp_path)
+    callback.best_model_path = str(best_path)
+
+    callback.on_fit_end(trainer=trainer, pl_module=model)
+
+    assert strategy.checkpoint_io.weights_only is False
 
 
 def test_rollback_checkpoint_requires_full_saved_checkpoint() -> None:
