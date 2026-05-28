@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/diagrams/json2vec.png" alt="JSON2Vec logo" width="180">
+  <img src="https://json2vec.github.io/json2vec/diagrams/json2vec.png" alt="JSON2Vec logo" width="180">
 </p>
 
 <h1 align="center">JSON2Vec</h1>
@@ -7,51 +7,44 @@
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&amp;logoColor=white" />
   <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2E8B57" /></a>
+  <a href="https://json2vec.github.io/json2vec/"><img alt="Documentation" src="https://img.shields.io/badge/docs-MkDocs-526CFE?logo=materialformkdocs&amp;logoColor=white" /></a>
   <!-- discord-invite:start -->
   <a href="https://discord.gg/DVyZUkvTFA"><img alt="Discord channel invite" src="https://img.shields.io/badge/discord-join%20the%20channel-5865F2?logo=discord&amp;logoColor=white" /></a>
   <!-- discord-invite:end -->
 </p>
 
-`json2vec` is a schema-driven framework for learning embeddings and task
-heads directly from nested, semi-structured records without flattening them
-into a fixed feature table first.
+`json2vec` is a schema-driven framework for predictive modeling over nested,
+structured records without flattening them into a fixed feature table first.
 
-The central idea is that the schema is the encoder. A declared tree of
-arrays and typed fields becomes an addressable neural graph: leaf tensorfield
-plugins encode raw values, array nodes aggregate child embeddings with
-rotary self-attention and learned-query cross-attention pooling, and
-datatype-specific decoders reconstruct masked, targeted, or supervised targets
+The schema becomes the encoder: leaf tensorfield plugins encode raw values,
+array nodes aggregate child embeddings with transformer layers, and
+datatype-specific decoders reconstruct masked, targeted, or supervised fields
 from the surrounding hierarchy.
 
-This makes `json2vec` a factory for structure-aware encoders rather than a
-single domain model. Customer/account/transaction data, flight itineraries,
-order fulfillment events, clickstream sessions, and other nested records can
-all use the same machinery while keeping their proprietary data, schemas, and
-trained checkpoints private.
+This supports self-supervised pretraining, supervised targets, embeddings, and
+schema evolution in one model surface. Customer/account/transaction data,
+flight itineraries, order fulfillment events, clickstream sessions, and other
+nested records can use the same machinery while keeping proprietary data,
+schemas, and checkpoints private.
 
 ## What Makes This Different
 
-- **Attributed-distance embeddings.** The model can emit embeddings at any
-  configured field or array, not only at the root. That means two observations
-  can be similar overall while still exposing which branch of the hierarchy
-  accounts for the difference: customer profile, monthly statement, login
-  session, transaction history, or any other declared array.
-- **Target-trained counterfactuals.** Training can periodically remove whole
-  fields, not just mask individual values. At inference time, the
-  same mechanism supports zero-shot ablation questions such as "what changes if
-  device data is unavailable?" without retraining a separate model for every
-  feature-removal scenario.
-- **One path for self-supervised and supervised learning.** Masked values,
+- **Attributed embeddings.** The model can emit embeddings from any configured
+  field or array, not only from the root. That makes branch-level similarity and
+  retrieval workflows possible without flattening the record.
+- **Extensible data types for predictive modeling.** Masked values,
   targeted fields, and explicit supervised targets all flow through the same
-  datatype-specific heads. A new tensorfield type brings its own embedding,
+  datatype-specific heads. A new
+  [tensorfield type](https://json2vec.github.io/json2vec/guides/tensorfields/) brings its own embedding,
   decoding, loss, and writing logic, so the framework stays reusable as schemas
   grow.
-- **Schema evolution is a first-class workflow.** Because modules are addressed
-  by the schema tree, fields can be added or removed and selected fields can be
-  targeted through programmatic hyperparameters without rebuilding a separate
-  feature pipeline.
-- **Production semantics for missingness.** `null`, `padded`, `masked`,
-  and `valued` are distinct states in the tensorfield type system.
+- **Schema evolution is a first-class workflow.** Between training loops
+  (pretraining, finetuning, refitting, and task adaptation), the model can be
+  mutated. Fields can be added (`model.extend`), removed (`model.delete`),
+  updated (`model.update` / `with model.override`), and reset (`model.reset`).
+  See the [model update guide](https://json2vec.github.io/json2vec/guides/model-update/).
+- **Production semantics for missingness.** `null`, `padded`, `masked`, and
+  `valued` are distinct states in the tensorfield type system.
   They are not collapsed into one generic missing-value bucket.
 - **Online state lives with the model.** Stateful components such as category
   vocabularies, counters, and numeric normalization state are learned during
@@ -59,12 +52,11 @@ trained checkpoints private.
   depend on a parallel tokenizer or normalizer artifact.
 - **Training-serving parity.** The same configured graph is used for fitting,
   validation, testing, batch prediction, and LitServe-backed online inference.
-
-The attributed embeddings and target-trained ablations are model-level
-explanation primitives. They help answer where two records differ and how a
-prediction changes when an information source is withheld. They are not a
-complete compliance story by themselves, but they make governance and audit
-layers easier to build on top of the representation layer.
+- **Target-trained counterfactuals.** Training can periodically remove whole
+  field instances with `target=True` or `p_prune`, not just mask individual
+  values. At inference time, schema overrides support ablation questions such
+  as "what changes if device data is unavailable?" without retraining a separate
+  model for every feature-removal scenario.
 
 ## Where It Fits
 
@@ -76,6 +68,9 @@ Use `json2vec` when the hierarchy is part of the signal:
 - entities with repeated sub-objects, evolving schemas, and mixed datatypes
 - embedding retrieval, anomaly detection, counterfactual ablation, and
   multi-target prediction over nested records
+
+For more context on the modeling problem, read
+[Why JSON2Vec](https://json2vec.github.io/json2vec/motivation/).
 
 ## What It Does Not Do
 
@@ -98,9 +93,9 @@ This repository currently contains:
 - tensorfield plugins for `number`, `category`, `set`, `dateparts`, `entity`, `vector`, and `text`
 - a preprocessor registry for dataset-specific preprocessing
 - a LitServe deployment entrypoint for serving from checkpoints
-- rendered tutorial and guide notebooks under `docs/`
 - tests covering structure loading, data processing, tensorfields, training helpers, logging, and inference
-- diagrams plus longer design docs in `docs/`
+- rendered tutorial and guide notebooks under [`docs/`](https://json2vec.github.io/json2vec/)
+- diagrams plus whitepaper in [`docs/`](https://json2vec.github.io/json2vec/)
 
 ## Install
 
@@ -110,19 +105,14 @@ For local development:
 uv sync
 ```
 
-If you want an editable install:
-
-```bash
-pip install -e .
-```
-
 The package requires Python `>=3.12`.
 
 ## Hello World Notebook
 
-`docs/tutorials/hello-world.ipynb` trains a tiny model from the bundled
-Iris JSONL buffer. It demonstrates the full loop: create a Polars DataFrame, declare a
-schema, train a supervised category target, then call `predict` and `embed`.
+The [hello world notebook](https://json2vec.github.io/json2vec/tutorials/hello-world/) trains a tiny model
+from the bundled Iris JSONL buffer. It demonstrates the full loop: create a
+Polars DataFrame, declare a schema, train a supervised category target, then
+call `predict` and `embed`.
 
 ```python
 import lightning.pytorch as lit
@@ -182,21 +172,36 @@ call returns the configured `record` embedding for each input observation.
 
 ## Documentation
 
-The documentation site can be built locally with:
+The tutorial examples live as self-contained notebooks under `docs/` and are
+rendered in the documentation site. Build the site locally with:
 
 ```bash
 uv run --extra docs mkdocs build --strict
 ```
 
-The tutorial examples live as self-contained notebooks under `docs/` and are
-rendered in the documentation site.
+Useful entry points:
+
+- [Getting Started](https://json2vec.github.io/json2vec/getting-started/)
+- [Why JSON2Vec](https://json2vec.github.io/json2vec/motivation/)
+- [Schemas & Queries](https://json2vec.github.io/json2vec/guides/model-schemas/)
+- [Model Updates](https://json2vec.github.io/json2vec/guides/model-update/)
+- [Hello World](https://json2vec.github.io/json2vec/tutorials/hello-world/)
+- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
+- [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/)
+- [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/)
+- [Field Ablation](https://json2vec.github.io/json2vec/guides/field-ablation/)
+- [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/)
+- [Tensorfield Extensions](https://json2vec.github.io/json2vec/guides/tensorfields/)
+- [Serving](https://json2vec.github.io/json2vec/tutorials/serving/)
+- [API Reference](https://json2vec.github.io/json2vec/reference/api/)
+- [Whitepaper](https://json2vec.github.io/json2vec/whitepaper.pdf)
 
 ## Core Concepts
 
 - `Model.from_schema(...)` builds the model tree plus masking, targeting, and embedding controls.
 - `Array` nodes describe hierarchical grouping and aggregation.
 - Field `Request` nodes declare a `type`, a `query`, and type-specific options.
-- `Address` values are stable paths such as `root/account/transaction/amount`.
+- `Address` values are stable paths such as `record/account/transaction/amount`.
 - `jmespath` queries extract values from each observation.
 - `TensorField` instances preserve typed content plus state tokens such as
   `valued`, `null`, `padded`, and `masked`.
@@ -205,7 +210,8 @@ rendered in the documentation site.
 - `heritage` is the path from a leaf to the root; decoders use that path when
   reconstructing masked, targeted, or supervised targets.
 
-Supported dataset suffixes are:
+For large local or cloud-hosted datasets, `StreamingDataModule` supports these
+dataset suffixes:
 
 - `ndjson`
 - `parquet`
@@ -215,31 +221,30 @@ Supported dataset suffixes are:
 - `orc`
 - `json`
 
-Supported dataset roots are local paths and `s3://...` URIs. If `dataset.root` is `null`, the pipeline seeds an empty observation that an optional preprocessor may expand.
+Supported dataset roots are local paths and `s3://...` URIs.
 
 ## How The Graph Runs
 
 For each batch:
 
 1. Each field request extracts values with its `jmespath` query.
-2. The matching tensorfield plugin tensorizes those values, updates any online
-   state allowed for the current split, and records trainable targets when
-   masking or targeting occurs.
+2. The matching tensorfield plugin tensorizes values, updates online state when
+   allowed for the current split, and records trainable targets when masking or
+   targeting occurs.
 3. Leaf embedders emit parcels to their parent arrays.
-4. Array nodes run bottom-up. Each array concatenates available child
-   parcels, optionally applies rotary transformer layers, compresses with
-   learned-query cross-attention, and emits a new parcel to its parent.
-5. Leaf decoders consume the parcel sequence along their heritage path to
-   reconstruct trainable targets.
+4. Array nodes run bottom-up, aggregate child parcels, and emit parent context.
+5. Leaf decoders consume their context path to reconstruct trainable targets.
 
 Random `p_mask` corrupts individual values. Random `p_prune` removes whole
-field instances across an observation. Hyperparameter-level `target` fields are always
-withheld and become supervised targets; `embed` addresses are
-serialized as embeddings during prediction.
+field instances across an observation. `target=True` is shorthand for
+`p_prune=1.0`; `embed=True` exposes embeddings during prediction.
 
 ## Preprocessor Model
 
-Preprocessors are optional registered Python callables. If no preprocessor is configured, each observation is used as-is without calling a default function.
+Preprocessors are optional registered Python callables. See the
+[preprocessor guide](https://json2vec.github.io/json2vec/guides/preprocessors/) for examples. If no
+preprocessor is configured, each observation is used as-is without calling a
+default function.
 
 Custom preprocessors are registered with `@preprocess(yields=False)` for single-object transformations or `@preprocess(yields=True)` for generators.
 
@@ -253,9 +258,10 @@ Configured `dataset.kwargs` are passed into the preprocessor, with unsupported k
 
 Each tensorfield plugin provides a request schema plus the model components
 needed to encode values, decode predictions, compute losses, and optionally
-serialize outputs. Built-in tensorfields share the base leaf options `name`,
-`query`, `pooling`, `weight`, `n_heads`, `n_linear`, `dropout`, `p_mask`, and
-`p_prune`.
+serialize outputs. See [Tensorfield Extensions](https://json2vec.github.io/json2vec/guides/tensorfields/)
+for a custom plugin walkthrough. Built-in tensorfields share the base leaf
+options `name`, `query`, `pooling`, `weight`, `n_heads`, `n_linear`, `dropout`,
+`p_mask`, and `p_prune`.
 
 | Type | Use It For | Key Options |
 | --- | --- | --- |
@@ -289,7 +295,7 @@ Join the Discord channel for questions, design discussion, and release notes:
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in field types
 - `tests/`: package test suite
-- `docs/whitepaper.typ`: longer written documentation
+- [`docs/whitepaper.typ`](https://json2vec.github.io/json2vec/whitepaper.pdf): longer written documentation
 
 ## Development
 

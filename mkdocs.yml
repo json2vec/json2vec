@@ -1,7 +1,12 @@
 site_name: JSON2Vec
+site_url: https://json2vec.github.io/json2vec/
 repo_url: https://github.com/json2vec/json2vec
 extra:
   generator: false
+  social:
+    - icon: fontawesome/brands/discord
+      link: https://discord.gg/DVyZUkvTFA
+      name: JSON2Vec Discord
 theme:
   name: material
   palette:

@@ -49,3 +49,8 @@ The tutorials are ordered by workflow:
 - **Nested Supervised Training** uses repeated measurement objects plus a root target.
 - **Supervised Tabular Training** shows a compact flat classifier for comparison.
 - **Serving** turns a saved schema into a deployment wrapper.
+
+## Community
+
+Join the [JSON2Vec Discord](https://discord.gg/DVyZUkvTFA) for questions,
+design discussion, and release notes.
