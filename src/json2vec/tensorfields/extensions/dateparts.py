@@ -1,3 +1,4 @@
+# ty: ignore[invalid-argument-type,invalid-assignment,unknown-argument,unresolved-attribute]
 from __future__ import annotations
 
 import enum

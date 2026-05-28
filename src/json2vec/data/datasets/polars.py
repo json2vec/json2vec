@@ -57,7 +57,7 @@ def _dataframes_by_strata(dataframe: pl.DataFrame | DataFrameMap) -> dict[Strata
         return {strata: dataframe for strata in Strata}
 
     normalized: dict[Strata, pl.DataFrame] = {}
-    for key, frame in dataframe.items():
+    for key, frame in cast(DataFrameMap, dataframe).items():
         if not isinstance(frame, pl.DataFrame):
             raise TypeError(f"dataframe for strata '{key}' must be a polars DataFrame")
         normalized[Strata.normalize(key)] = frame
@@ -79,7 +79,7 @@ def observe_polars(
     world_size: int | None = None,
 ) -> Iterator[RawObservation]:
     if replacement:
-        rows = cast(list[RawObservation], dataframe.to_dicts())
+        rows = dataframe.to_dicts()
         if not rows:
             raise ValueError("no dataframe rows available for replacement sampling")
 
@@ -103,7 +103,7 @@ def observe_polars(
                 worker_id=worker_id,
                 num_workers=num_workers,
             ):
-                yield cast(RawObservation, row)
+                yield row
         return
 
     for chunk_index, offset in enumerate(range(0, dataframe.height, chunk_batch_size)):
@@ -115,7 +115,7 @@ def observe_polars(
             ):
                 continue
 
-        yield from cast(list[RawObservation], dataframe.slice(offset, chunk_batch_size).to_dicts())
+        yield from dataframe.slice(offset, chunk_batch_size).to_dicts()
 
 
 class PolarsBatchDataset(IterableDataset):

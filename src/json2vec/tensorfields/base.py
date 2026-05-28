@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import warnings
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Callable, Type, TypeAlias
+from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overload
 
 import pluggy
 import torch
@@ -29,6 +29,8 @@ pm.add_hookspecs(module_or_class=PluginSpec)
 
 RequestBase: TypeAlias = Leaf
 CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
+ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
+RegisterT = TypeVar("RegisterT", bound=ComponentValue)
 
 
 def default_plot(
@@ -155,7 +157,7 @@ class Plugin:
             raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
 
         self.name: str = name
-        self.components: dict[Component, Callable | Type | None] = {}
+        self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
 
         if name in TENSORFIELDS:
@@ -167,7 +169,17 @@ class Plugin:
 
         TENSORFIELDS[name] = self
 
-    def register(self, obj: Type | Callable | None, component: Component | str | None = None) -> Type | Callable | None:
+    @overload
+    def register(self, obj: None, component: Component | str) -> None: ...
+
+    @overload
+    def register(self, obj: RegisterT, component: Component | str | None = None) -> RegisterT: ...
+
+    def register(
+        self,
+        obj: RegisterT | None,
+        component: Component | str | None = None,
+    ) -> RegisterT | None:
         """Register one tensorfield component with this plugin."""
         if obj is None:
             if component is None:
@@ -187,11 +199,15 @@ class Plugin:
             raise NameError(f"Object {obj} does not have a name")
 
         name: str = str(obj.__name__)
+        try:
+            key = Component(name)
+        except ValueError:
+            raise ValueError(f"Component '{name}' is not a valid Component enum value") from None
 
-        if name in self.components:
-            raise ValueError(f"Component '{name}' already registered in plugin '{self.name}'")
+        if key in self.components:
+            raise ValueError(f"Component '{key}' already registered in plugin '{self.name}'")
 
-        match name:
+        match key:
             case Component.Request:
                 if not isinstance(obj, type):
                     raise TypeError("Request must be a class type")
@@ -266,7 +282,7 @@ class Plugin:
                         f"Plot function must accept the following parameters: {expected_params}, got {func_params}"
                     )
 
-        self.components[name] = obj
+        self.components[key] = obj
 
         return obj
 
@@ -283,12 +299,8 @@ class Plugin:
         """Instantiate all registered callback factories."""
         return [factory() for factory in self.callback_factories]
 
-    def __getattr__(self, key: Component) -> Callable | Type:
-        try:
-            component = Component(key)
-        except ValueError:
-            raise ValueError(f"Component '{key}' is not a valid Component enum value")
-
+    def _component(self, component: Component) -> ComponentValue:
+        """Return a registered component, falling back to optional defaults."""
         if component in self.components:
             value = self.components[component]
             if value is not None:
@@ -301,3 +313,39 @@ class Plugin:
             return default_write
 
         raise AttributeError(f"Plugin '{self.name}' has no component '{component}'")
+
+    @property
+    def Request(self) -> type[RequestBase]:
+        return cast(type[RequestBase], self._component(Component.Request))
+
+    @property
+    def TensorField(self) -> type[TensorFieldBase]:
+        return cast(type[TensorFieldBase], self._component(Component.TensorField))
+
+    @property
+    def Embedder(self) -> type[EmbedderBase]:
+        return cast(type[EmbedderBase], self._component(Component.Embedder))
+
+    @property
+    def Decoder(self) -> type[DecoderBase]:
+        return cast(type[DecoderBase], self._component(Component.Decoder))
+
+    @property
+    def loss(self) -> Callable[..., Any]:
+        return cast(Callable[..., Any], self._component(Component.loss))
+
+    @property
+    def write(self) -> Callable[..., Any]:
+        return cast(Callable[..., Any], self._component(Component.write))
+
+    @property
+    def plot(self) -> Callable[..., Any]:
+        return cast(Callable[..., Any], self._component(Component.plot))
+
+    def __getattr__(self, key: str) -> ComponentValue:
+        try:
+            component = Component(key)
+        except ValueError:
+            raise ValueError(f"Component '{key}' is not a valid Component enum value") from None
+
+        return self._component(component)

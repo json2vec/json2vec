@@ -1,3 +1,4 @@
+# ty: ignore[unknown-argument]
 from __future__ import annotations
 
 import enum
@@ -322,7 +323,7 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     address: Address = prediction.address
-    request: RequestBase = module.hyperparameters.requests[prediction.address]
+    request: Request = module.hyperparameters.requests[prediction.address]
 
     embedder: Embedder = module.nodes[address].embedder
     normalizer: GlobalOnlineNormalizer = embedder.normalizer

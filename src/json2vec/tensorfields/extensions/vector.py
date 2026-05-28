@@ -1,3 +1,4 @@
+# ty: ignore[unknown-argument]
 from __future__ import annotations
 
 import enum

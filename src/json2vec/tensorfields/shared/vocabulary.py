@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from multiprocessing import Manager
 from multiprocessing.managers import ListProxy, SyncManager
-from multiprocessing.synchronize import Lock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from lightning.pytorch import Callback, Trainer
@@ -21,15 +20,15 @@ class Vocabulary:
     def __init__(
         self,
         master: ListProxy,
-        lock: Lock,
+        lock: Any,
         proposals: ListProxy,
-        proposal_lock: Lock,
+        proposal_lock: Any,
         max_vocab_size: int,
     ):
         self.master: ListProxy[str] = master
-        self.lock: Lock = lock
+        self.lock: Any = lock
         self.proposals: ListProxy[str] = proposals
-        self.proposal_lock: Lock = proposal_lock
+        self.proposal_lock: Any = proposal_lock
         self.max_vocab_size: int = max_vocab_size
         self.vocab: OrderedSet[str] = OrderedSet(list(master))
         self.global_rank: int = 0
@@ -54,12 +53,12 @@ class Vocabulary:
             return None
 
         if word in self.vocab:
-            return self.vocab.index(word)
+            return cast(int, self.vocab.index(word))
 
         if not update:
             self.refresh()
             if word in self.vocab:
-                return self.vocab.index(word)
+                return cast(int, self.vocab.index(word))
 
             # Validation/test/inference should preserve "field exists" semantics even when
             # the label was never seen during training.
@@ -77,7 +76,7 @@ class Vocabulary:
             self.refresh(force=True)
 
             if word in self.vocab:
-                return self.vocab.index(word)
+                return cast(int, self.vocab.index(word))
 
             if len(self.vocab) >= self.max_vocab_size:
                 # Once the learned vocabulary is full, new labels also fall back to the
@@ -88,7 +87,7 @@ class Vocabulary:
                 self.vocab.add(word)
                 self.master.append(word)
 
-        return self.vocab.index(word)
+        return cast(int, self.vocab.index(word))
 
     def __len__(self) -> int:
         self.refresh()
@@ -102,13 +101,13 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.max_vocab_size: int = max_vocab_size
         self.manager: SyncManager = Manager()
         self.master: ListProxy[str] = self.manager.list()
-        self.lock: Lock = self.manager.Lock()
+        self.lock: Any = self.manager.Lock()
         self.proposals: ListProxy[str] = self.manager.list()
-        self.proposal_lock: Lock = self.manager.Lock()
+        self.proposal_lock: Any = self.manager.Lock()
         self._snapshot_cache: list[str] | None = None
         self._snapshot_size: int = -1
 
-    def _save_to_state_dict(self, state_dict, prefix, keep_vars):
+    def _save_to_state_dict(self, state_dict, prefix, keep_vars):  # ty:ignore[invalid-method-override]
         super()._save_to_state_dict(state_dict, prefix, keep_vars)
         state_dict[prefix + "vocabulary"] = list(self.master)
 
@@ -269,10 +268,10 @@ class VocabularySyncCallback(Callback):
                         max=stats["max"],
                     ).warning("vocabulary is near capacity")
 
-    def on_fit_start(self, trainer: Trainer, pl_module: Model) -> None:
+    def on_fit_start(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
         self._sync(trainer=trainer, pl_module=pl_module, reason="fit_start")
 
-    def on_train_epoch_end(self, trainer: Trainer, pl_module: Model) -> None:
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
         self._sync(trainer=trainer, pl_module=pl_module, reason="train_epoch_end")
 
 

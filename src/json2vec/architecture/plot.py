@@ -412,8 +412,9 @@ def format_compact_number(value: Any) -> str:
 
 def resolve_node(hyperparameters: "Hyperparameters", address: Address | str) -> Node:
     key = Address(str(address))
-    leaves = {node.address: node for node in hyperparameters.descendants if isinstance(node, Leaf)}
-    nodes: dict[Address, Node] = hyperparameters.arrays | leaves
+    leaves: dict[Address, Node] = {node.address: node for node in hyperparameters.descendants if isinstance(node, Leaf)}
+    nodes: dict[Address, Node] = dict(hyperparameters.arrays)
+    nodes.update(leaves)
 
     if key not in nodes:
         raise ValueError(f"address '{address}' was not found in the hyperparameters")

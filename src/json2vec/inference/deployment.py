@@ -4,7 +4,7 @@ import functools
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 import litserve as ls
 import pydantic
@@ -42,7 +42,7 @@ class Accelerator(StrEnum):
         if normalized == "":
             raise ValueError("accelerator must not be blank")
 
-        return cls._value2member_map_.get(normalized)
+        return cast(Accelerator | None, cls._value2member_map_.get(normalized))
 
 
 class ErrorItem(pydantic.BaseModel):
@@ -114,7 +114,7 @@ class API(ls.LitAPI):
         self,
         request: dict[str, Any] | pydantic.BaseModel,
         context: dict[str, Any] | None = None,
-    ) -> Input | ErrorItem:
+    ) -> Input | ErrorItem:  # ty:ignore[invalid-method-override]
         if isinstance(request, pydantic.BaseModel):
             request = request.model_dump()
 
@@ -174,13 +174,13 @@ class API(ls.LitAPI):
         return BatchItem(data=data, valid_indices=valid_indices, items=inputs)
 
     @beartype
-    def unbatch(self, outputs: list[Any]) -> list[Any]:
+    def unbatch(self, outputs: list[Any]) -> list[Any]:  # ty:ignore[invalid-method-override]
         return list(outputs)
 
     @beartype
     def predict(
         self, data: BatchItem | Input | ErrorItem
-    ) -> list[list[Prediction] | ErrorItem] | list[Prediction] | ErrorItem:
+    ) -> list[list[Prediction] | ErrorItem] | list[Prediction] | ErrorItem:  # ty:ignore[invalid-method-override]
         if isinstance(data, ErrorItem):
             return data
 
@@ -208,7 +208,7 @@ class API(ls.LitAPI):
         self,
         response: list[Prediction] | ErrorItem,
         context: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | pydantic.BaseModel:
+    ) -> dict[str, Any] | pydantic.BaseModel:  # ty:ignore[invalid-method-override]
         if isinstance(response, ErrorItem):
             return {
                 "predictions": {},

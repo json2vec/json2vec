@@ -141,7 +141,7 @@ class Pipeline:
         return self
 
     def __repr__(self):
-        return f"Pipeline({repr(self.source)}, {repr(self.arguments)})"
+        return f"Pipeline(steps={len(self.steps)}, arguments={self.arguments!r})"
 
     def __iter__(self):
         stream = self.steps[0]()

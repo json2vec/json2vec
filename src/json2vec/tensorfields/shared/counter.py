@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 from lightning.pytorch import Callback
@@ -24,6 +25,8 @@ class Counter(torch.nn.Module):
 
         # init with ones to avoid division by zero
         # it doesn't matter much since we will normalize over time
+        self.counts: torch.Tensor
+        self._pending_counts: torch.Tensor
         self.register_buffer("counts", torch.ones(size, dtype=torch.int64))
         self.register_buffer("_pending_counts", torch.zeros(size, dtype=torch.int64), persistent=False)
         self.is_full: bool = False
@@ -100,7 +103,7 @@ class CounterUpdateCallback(Callback):
         pl_module: Model,
         batch: TensorDict,
         batch_idx: int,
-    ) -> None:
+    ) -> None:  # ty:ignore[invalid-method-override]
         for address in pl_module.hyperparameters.active_requests:
             field = batch[address]
             embedder = pl_module.nodes[address].embedder
@@ -114,7 +117,7 @@ class CounterUpdateCallback(Callback):
                 value = getattr(field, key.name, None)
                 return value if isinstance(value, torch.Tensor) else None
 
-            def observe(counter: torch.nn.Module, values: torch.Tensor) -> None:
+            def observe(counter: Callable[[torch.Tensor], Any], values: torch.Tensor) -> None:
                 identity = id(counter)
                 if identity in observed:
                     return
@@ -124,15 +127,18 @@ class CounterUpdateCallback(Callback):
 
             state = values_for(TensorKey.state)
 
-            if state is not None and hasattr(embedder, "counter"):
-                observe(counter=embedder.counter, values=state)
+            counter = getattr(embedder, "counter", None)
+            if state is not None and callable(counter):
+                observe(counter=counter, values=state)
 
             counters = getattr(embedder, "counters", None)
             if counters is None:
                 continue
 
             if state is not None and TensorKey.state.name in counters:
-                observe(counter=counters[TensorKey.state.name], values=state)
+                state_counter = counters[TensorKey.state.name]
+                if callable(state_counter):
+                    observe(counter=state_counter, values=state)
 
             if state is None or TensorKey.content.name not in counters:
                 continue
@@ -142,14 +148,16 @@ class CounterUpdateCallback(Callback):
                 continue
 
             values = content.masked_select(state.eq(Tokens.valued.value))
-            observe(counter=counters[TensorKey.content.name], values=values)
+            content_counter = counters[TensorKey.content.name]
+            if callable(content_counter):
+                observe(counter=content_counter, values=values)
 
     @torch.no_grad()
     def on_train_epoch_end(
         self,
         trainer: Trainer,
         pl_module: Model,
-    ) -> None:
+    ) -> None:  # ty:ignore[invalid-method-override]
         resources: dict[tuple[Address, str], Counter] = {}
 
         for address, node in pl_module.nodes.items():

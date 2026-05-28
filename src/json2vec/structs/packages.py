@@ -71,7 +71,7 @@ class Prediction(TensorClass):
         return value
 
     @staticmethod
-    def squeeze(value: Any, *, preserve_first_dimension: bool = False) -> Any:
+    def squeeze(value: Any, *, preserve_first_dimension: bool = False) -> Any:  # ty:ignore[invalid-method-override]
         if isinstance(value, dict):
             return {
                 key: Prediction.squeeze(item, preserve_first_dimension=preserve_first_dimension)

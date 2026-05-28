@@ -1,6 +1,6 @@
 """Structured schema nodes that group tensorfield requests."""
 
-from typing import Annotated, Literal, Self, TypeAlias, Union
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias, Union
 
 import pydantic
 
@@ -9,10 +9,13 @@ from json2vec.structs.tree import Leaf, Node, Rate
 from json2vec.tensorfields import extensions as _extensions  # noqa: F401
 from json2vec.tensorfields.base import TENSORFIELDS
 
-RequestTypes: TypeAlias = Annotated[
-    Union[tuple([tensorfield.Request for tensorfield in TENSORFIELDS.values()])],
-    pydantic.Field(discriminator="type"),
-]
+if TYPE_CHECKING:
+    RequestTypes: TypeAlias = Any
+else:
+    RequestTypes: TypeAlias = Annotated[
+        Union[tuple([tensorfield.Request for tensorfield in TENSORFIELDS.values()])],
+        pydantic.Field(discriminator="type"),
+    ]
 
 
 Dropout: TypeAlias = Rate

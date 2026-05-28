@@ -1,3 +1,4 @@
+# ty: ignore[unknown-argument]
 from __future__ import annotations
 
 import math
@@ -207,7 +208,7 @@ class Embedder(EmbedderBase):
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
         N: int
-        dims: tuple[int, ...]
+        dims: list[int]
 
         N, *dims = inputs.state.shape
         state = inputs.state.reshape(-1)

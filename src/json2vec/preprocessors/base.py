@@ -65,7 +65,8 @@ class Preprocessor(pydantic.BaseModel):
 
     @classmethod
     def register(cls, func: Callable[..., Any], *, mode: PreprocessorMode) -> Callable[..., Any]:
-        PREPROCESSORS[func.__name__] = cls(name=func.__name__, func=func, mode=mode)
+        name = getattr(func, "__name__", type(func).__name__)
+        PREPROCESSORS[name] = cls(name=name, func=func, mode=mode)
         return func
 
     def __call__(self, observation: dict, **kwargs) -> Any:

@@ -1,7 +1,8 @@
+# ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import numpy as np
 import pydantic
@@ -221,7 +222,7 @@ class Embedder(EmbedderBase):
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
         N: int
-        dims: tuple[int, ...]
+        dims: list[int]
 
         N, *dims = inputs.state.shape
         state = inputs.state.reshape(-1)
@@ -255,7 +256,7 @@ class Decoder(DecoderBase):
     def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__(hyperparameters=hyperparameters, address=address)
 
-        request: RequestBase = hyperparameters.requests[address]
+        request: Request = hyperparameters.requests[address]
 
         self.linears = torch.nn.ModuleDict(
             {
@@ -300,7 +301,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
                 target=state_targets,
-                weight=embedder.counters[TensorKey.state.name].weight,
+                weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
                 reduction="none",
             )
             .masked_select(trainable)
@@ -326,7 +327,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=content_inputs,
                 target=content_targets,
-                weight=embedder.counters[TensorKey.content.name].weight,
+                weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
                 reduction="none",
             )
             .masked_select(valued)

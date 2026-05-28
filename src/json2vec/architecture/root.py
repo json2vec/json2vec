@@ -18,6 +18,7 @@ from tensordict import TensorDict
 
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
+from json2vec.architecture.plot import PlotMode
 from json2vec.data.datasets.base import EncodedBatch
 from json2vec.data.iterables import encode, mock
 from json2vec.structs.enums import AttentionMode, Metric, Strata, TensorKey
@@ -562,7 +563,7 @@ class Model(lit.LightningModule):
         address: Address | str | None = None,
         detail: bool = False,
         out: str | Path | None = None,
-        mode: str = "schema",
+        mode: PlotMode = "schema",
     ) -> None:
         """Print a Rich model visualization.
 
@@ -601,7 +602,8 @@ class Model(lit.LightningModule):
 
             embedder: EmbedderBase = self.nodes[address].embedder
             embedding: Parcel = embedder(tensorfield)
-            processed[embedding.destination].append(embedding)
+            if embedding.destination is not None:
+                processed[embedding.destination].append(embedding)
             outgoing[embedding.origin] = embedding
 
             if address in self.hyperparameters.embed:
@@ -616,7 +618,8 @@ class Model(lit.LightningModule):
 
                 encoder: ArrayEncoder = self.nodes[address].encoder
                 encoding: Parcel = encoder(processed[address])
-                processed[encoding.destination].append(encoding)
+                if encoding.destination is not None:
+                    processed[encoding.destination].append(encoding)
                 outgoing[encoding.origin] = encoding
 
                 if address in self.hyperparameters.embed:
@@ -736,17 +739,21 @@ class Model(lit.LightningModule):
 
         if preprocess is not None:
             observations: EncodedBatch = []
-            for request in batch:
+            for request in cast(list[dict[str, Any]], batch):
                 observation = preprocess(request)
                 if not isinstance(observation, dict):
                     raise TypeError(f"preprocessor must return a dict object, got {type(observation).__name__}")
 
                 observations.append([observation])
 
-            batch = observations
+            encoded_batch = observations
+        elif batch and isinstance(batch[0], dict):
+            encoded_batch = [[request] for request in cast(list[dict[str, Any]], batch)]
+        else:
+            encoded_batch = cast(EncodedBatch, batch)
 
         inputs = encode(
-            batch=batch,
+            batch=encoded_batch,
             hyperparameters=self.hyperparameters,
             strata=Strata.predict,
             interprocess_encoding_context=self.interprocess_encoding_context,

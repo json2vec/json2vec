@@ -62,7 +62,7 @@ class Writer(callbacks.BasePredictionWriter):
         batch: TensorDict[Address, TensorFieldBase],
         batch_idx: int,
         dataloader_idx: int,
-    ) -> None:
+    ) -> None:  # ty:ignore[invalid-method-override]
         num_rows = len(batch["metadata"])
 
         supervised: dict[Address, dict[str, Any]]

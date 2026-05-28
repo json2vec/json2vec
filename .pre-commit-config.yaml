@@ -15,10 +15,9 @@ repos:
         pass_filenames: false
         always_run: true
 
-      # Report-only until the existing ty baseline is cleaned up.
       - id: ty-check
         name: Run Ty
-        entry: uv run ty check src/json2vec --exit-zero --output-format concise
+        entry: uv run ty check src/json2vec --output-format concise
         language: system
         pass_filenames: false
         always_run: true

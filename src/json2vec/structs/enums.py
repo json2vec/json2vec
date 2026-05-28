@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import enum
 from collections.abc import Mapping
-from typing import TypeVar
+from typing import TypeVar, cast
 
 T = TypeVar("T")
+DefaultT = TypeVar("DefaultT")
 
 
 class Tokens(enum.IntEnum):
@@ -27,10 +30,10 @@ class Strata(enum.StrEnum):
         return cls(str(value).strip().lower())
 
     @classmethod
-    def expand(cls, value: T | Mapping["Strata | str", T], *, default: T) -> dict["Strata", T]:
+    def expand(cls, value: T | Mapping[Strata | str, T], *, default: DefaultT) -> dict[Strata, T | DefaultT]:
         if isinstance(value, Mapping):
-            normalized = {strata: default for strata in cls}
-            for key, item in value.items():
+            normalized: dict[Strata, T | DefaultT] = {strata: default for strata in cls}
+            for key, item in cast(Mapping[Strata | str, T], value).items():
                 normalized[cls.normalize(key)] = item
             return normalized
 

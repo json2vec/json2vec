@@ -1,10 +1,11 @@
+# ty: ignore[unknown-argument]
 from __future__ import annotations
 
 import enum
 import math
 import warnings
 from functools import cache
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import pydantic
 import torch
@@ -56,7 +57,7 @@ class Objective(enum.StrEnum):
 
 def _import_transformers():
     try:
-        from transformers import AutoModel, AutoTokenizer
+        from transformers import AutoModel, AutoTokenizer  # ty:ignore[unresolved-import]
     except ImportError as error:
         message = (
             "text tensorfield requires the optional dependency `transformers`. "
@@ -432,7 +433,7 @@ class Embedder(EmbedderBase):
         D = math.prod((N, *dims))
 
         if TensorKey.content in inputs.targets.keys() and TensorKey.state in inputs.targets.keys():
-            self.target_embeddings(inputs)
+            self.target_embeddings(cast(TensorField, inputs))
 
         state = inputs.state.reshape(D)
         valued = state.eq(Tokens.valued.value).unsqueeze(-1)

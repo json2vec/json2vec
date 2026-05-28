@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -25,7 +25,7 @@ class NodeModule(torch.nn.Module):
         if address in hyperparameters.requests:
             request: Node = hyperparameters.requests[address]
             plugin: Plugin = TENSORFIELDS[request.type]
-            embedder_kwargs = dict(hyperparameters=hyperparameters, address=address)
+            embedder_kwargs: dict[str, Any] = dict(hyperparameters=hyperparameters, address=address)
             if "batch_size" in inspect.signature(plugin.Embedder.__init__).parameters:
                 embedder_kwargs["batch_size"] = batch_size
 

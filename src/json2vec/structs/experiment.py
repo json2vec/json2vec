@@ -211,13 +211,13 @@ class NodeAttribute(pydantic.BaseModel):
             key=("is_not_null", self.name),
         )
 
-    def __eq__(self, other: Any) -> NodePredicate:  # type: ignore[override]
+    def __eq__(self, other: Any) -> NodePredicate:  # type: ignore[override]  # ty:ignore[invalid-method-override]
         return NodePredicate(
             func=lambda node: self.get(node) == other,
             key=("eq", self.name, _cache_value(other)),
         )
 
-    def __ne__(self, other: Any) -> NodePredicate:  # type: ignore[override]
+    def __ne__(self, other: Any) -> NodePredicate:  # type: ignore[override]  # ty:ignore[invalid-method-override]
         return NodePredicate(
             func=lambda node: self.get(node) != other,
             key=("ne", self.name, _cache_value(other)),
@@ -261,9 +261,9 @@ class Hyperparameters(Node):
     fields: Array
 
     embed: ClassVar[None] = None
-    p_prune: ClassVar[None] = None
-    dropout: ClassVar[None] = None
-    p_mask: ClassVar[None] = None
+    p_prune: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
+    dropout: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
+    p_mask: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
 
     _selection_cache: dict[SelectionKey, SelectionCacheEntry] = pydantic.PrivateAttr(default_factory=dict)
 

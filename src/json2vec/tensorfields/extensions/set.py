@@ -1,7 +1,8 @@
+# ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
 import pydantic
@@ -256,7 +257,7 @@ class Embedder(EmbedderBase):
         content = inputs.content.reshape(-1, n_tokens)
         valued = state.eq(Tokens.valued.value)
 
-        weights = self.embeddings[TensorKey.content.name].weight
+        weights = cast(torch.nn.Embedding, self.embeddings[TensorKey.content.name]).weight
         counts = content.sum(dim=-1, keepdim=True).clamp_min(1.0)
         content_embedding = content.to(dtype=weights.dtype).matmul(weights) / counts
 
@@ -326,7 +327,7 @@ def loss(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
                 target=state_targets,
-                weight=embedder.counters[TensorKey.state.name].weight,
+                weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
                 reduction="none",
             )
             .masked_select(trainable)
