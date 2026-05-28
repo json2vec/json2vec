@@ -16,6 +16,7 @@ from loguru import logger
 from tensordict import TensorDict
 
 from json2vec.architecture.checkpoint import CheckpointState
+from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
 from json2vec.architecture.plot import PlotMode
 from json2vec.architecture.runtime import EvaluationResult, ModelRuntime, Postprocessor, PreprocessFn, step
@@ -252,6 +253,8 @@ class Model(lit.LightningModule):
         self.locks: Counter[str | Strata] = Counter()
         self.nodes: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self.schema: SchemaEditor = SchemaEditor(self)
+        self._contract_generation: int = 0
+        self._contract_scheduler: ContractScheduler = ContractScheduler()
 
         self._build()
 
@@ -268,6 +271,11 @@ class Model(lit.LightningModule):
 
     def _rebuild(self) -> None:
         ModelGraph.rebuild(self)
+        self._reset_contracts()
+
+    def _reset_contracts(self) -> None:
+        self._contract_generation += 1
+        self._contract_scheduler.reset()
 
     def select(
         self,
@@ -469,8 +477,14 @@ class Model(lit.LightningModule):
 
     @immutable("forward")
     @beartype
-    def forward(self, inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
-        return ModelRuntime.forward(self, inputs)
+    def forward(
+        self,
+        inputs: TensorDict[Address, TensorFieldBase],
+        *,
+        strata: Strata | str,
+        dataloader_idx: int = 0,
+    ) -> list[Prediction]:
+        return ModelRuntime.forward(self, inputs, strata=strata, dataloader_idx=dataloader_idx)
 
     @beartype
     def configure_optimizers(self):

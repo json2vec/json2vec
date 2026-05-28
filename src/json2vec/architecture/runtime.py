@@ -11,6 +11,7 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 
+from json2vec.architecture.contracts import sanitize
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch
@@ -57,7 +58,15 @@ class ModelRuntime:
     """Own runtime behavior that depends on an already-built model graph."""
 
     @staticmethod
-    def forward(module: "Model", inputs: TensorDict[Address, TensorFieldBase]) -> list[Prediction]:
+    def forward(
+        module: "Model",
+        inputs: TensorDict[Address, TensorFieldBase],
+        *,
+        strata: Strata | str,
+        dataloader_idx: int = 0,
+    ) -> list[Prediction]:
+        sanitize(module, inputs, strata=strata, dataloader_idx=dataloader_idx)
+
         processed: dict[Address, list[Parcel]] = defaultdict(list)
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
@@ -114,9 +123,11 @@ class ModelRuntime:
         module: "Model",
         batch: TensorDict[Address, TensorFieldBase],
         batch_idx: int,
+        dataloader_idx: int = 0,
+        *,
         strata: Strata,
     ) -> Output:
-        predictions: list[Prediction] = module.forward(batch)
+        predictions: list[Prediction] = module.forward(batch, strata=strata, dataloader_idx=dataloader_idx)
 
         if strata == Strata.predict:
             return Output(predictions=predictions)
@@ -205,7 +216,7 @@ class ModelRuntime:
         module.eval()
         try:
             with torch.inference_mode():
-                raw_predictions = module(inputs)
+                raw_predictions = module(inputs, strata=Strata.predict)
         finally:
             if was_training:
                 module.train()
@@ -217,7 +228,7 @@ class ModelRuntime:
                 "batch": raw_batch,
                 "observations": batch,
                 "input": inputs,
-                "metadata": inputs["metadata"],
+                TensorKey.metadata: inputs[TensorKey.metadata],
             }
             processed = postprocess(context, supervised, embeddings)
 

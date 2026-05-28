@@ -186,7 +186,7 @@ class API(ls.LitAPI):
 
         if isinstance(data, TensorDict):
             with torch.inference_mode():
-                return self.model(data.to(self.device))
+                return self.model(data.to(self.device), strata=Strata.predict)
 
         outputs: list[Any] = list(data.items)
 
@@ -194,7 +194,7 @@ class API(ls.LitAPI):
             return outputs
 
         with torch.inference_mode():
-            predictions = self.model(data.data.to(self.device))
+            predictions = self.model(data.data.to(self.device), strata=Strata.predict)
 
         unbatched = Prediction.unbatch(predictions=predictions)
 

@@ -116,7 +116,7 @@ def _primed_prediction_model() -> Model:
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
-    model(inputs)
+    model(inputs, strata=Strata.train)
     return model
 
 
@@ -553,7 +553,7 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
-    predictions = model(inputs)
+    predictions = model(inputs, strata=Strata.train)
 
     assert Address("root", "ignored") not in inputs.keys()
     assert Address("root", "ignored") in model.nodes
@@ -576,14 +576,14 @@ def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
 
     assert model.training
     assert Address("root", "label") in supervised
-    content = supervised[Address("root", "label")]["content"]
-    state = supervised[Address("root", "label")]["state"]
+    content = supervised[Address("root", "label")][TensorKey.content.name]
+    state = supervised[Address("root", "label")][TensorKey.state.name]
 
-    assert len(content["value"]) == 2
-    assert all(not isinstance(value, list) for value in content["value"])
-    assert all(not isinstance(probability, list) for probability in content["probability"])
-    assert len(content["topk"]) == 2
-    assert all(row and isinstance(row[0], dict) for row in content["topk"])
+    assert len(content[TensorKey.value.name]) == 2
+    assert all(not isinstance(value, list) for value in content[TensorKey.value.name])
+    assert all(not isinstance(probability, list) for probability in content[TensorKey.probability.name])
+    assert len(content[TensorKey.topk.name]) == 2
+    assert all(row and isinstance(row[0], dict) for row in content[TensorKey.topk.name])
     assert all(
         len(probabilities) == 2 and all(not isinstance(probability, list) for probability in probabilities)
         for probabilities in state.values()
@@ -601,7 +601,7 @@ def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
     )
 
     assert Address("root") in embeddings
-    embedding = embeddings[Address("root")]["embedding"]
+    embedding = embeddings[Address("root")][TensorKey.embedding.name]
     assert len(embedding) == 2
     assert all(not isinstance(row[0], list) for row in embedding)
 
@@ -628,12 +628,12 @@ def test_inference_helpers_accept_postprocess() -> None:
 
     assert len(calls) == 3
     assert calls[0][0]["batch"] is batch
-    assert "metadata" in calls[0][0]["input"].keys()
-    assert list(calls[0][0]["metadata"]) == batch
+    assert TensorKey.metadata in calls[0][0]["input"].keys()
+    assert list(calls[0][0][TensorKey.metadata]) == batch
     assert Address("root", "label") in calls[0][1]
     assert Address("root") in calls[1][2]
-    assert supervised[Address("root", "label")]["value"] == ["postprocessed"]
-    assert embeddings[Address("root")]["embedding"] == [[1.0, 2.0]]
+    assert supervised[Address("root", "label")][TensorKey.value.name] == ["postprocessed"]
+    assert embeddings[Address("root")][TensorKey.embedding.name] == [[1.0, 2.0]]
     assert evaluated_supervised == supervised
     assert evaluated_embeddings == embeddings
 

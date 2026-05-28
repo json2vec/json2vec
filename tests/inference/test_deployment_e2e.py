@@ -174,7 +174,7 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
-    model.forward(inputs)
+    model.forward(inputs, strata=Strata.train)
 
     checkpoint_path = tmp_path / "fake_model.ckpt"
     model.save(checkpoint_path)

@@ -23,7 +23,7 @@ from json2vec.data.datasets.base import (
     RawObservation,
 )
 from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor, PreprocessorMode
-from json2vec.structs.enums import Strata
+from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TENSORFIELDS, TensorFieldBase
@@ -215,7 +215,7 @@ def encode(
     inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
 
     if strata == Strata.predict:
-        inputs["metadata"] = batch
+        inputs[TensorKey.metadata] = batch
 
     return inputs
 

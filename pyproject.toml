@@ -1,6 +1,6 @@
 [project]
 name = "json2vec"
-version = "0.4.3"
+version = "0.4.4"
 description = "{...} -> [*]"
 readme = "README.md"
 license = "Apache-2.0"

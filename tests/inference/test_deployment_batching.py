@@ -10,7 +10,7 @@ from tensordict import TensorDict
 import json2vec.inference.deployment as deployment_module
 from json2vec import Model, Number, where
 from json2vec.inference.deployment import API, Deployment, ErrorItem
-from json2vec.structs.enums import TensorKey
+from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.packages import Prediction
 
 
@@ -22,7 +22,8 @@ class _DummyModel:
     def __init__(self):
         self.calls = 0
 
-    def __call__(self, data: TensorDict) -> list[Prediction]:
+    def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
+        assert Strata.normalize(strata) == Strata.predict
         self.calls += 1
         batch_size = int(data.batch_size[0])
         return [
@@ -208,7 +209,7 @@ def test_deployment_launcher_configures_litserve_api(monkeypatch):
 
 def test_deployment_launcher_accepts_model_instance(monkeypatch):
     model = Model.from_schema(
-        Number("amount"),
+        Number(name="amount"),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -238,7 +239,7 @@ def test_deployment_launcher_accepts_model_instance(monkeypatch):
 
 
 def test_deployment_rejects_explicit_checkpoint_and_model():
-    model = Model.from_schema(Number("amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
 
     with pytest.raises(ValueError, match="pass either checkpoint or model"):
         Deployment(checkpoint="model.ckpt", model=model)
@@ -281,7 +282,7 @@ def test_deployment_api_applies_queued_update_operations(monkeypatch):
 
 
 def test_deployment_api_setup_uses_model_instance(monkeypatch):
-    model = Model.from_schema(Number("amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
     monkeypatch.setattr(
         deployment_module.Model,
         "load",

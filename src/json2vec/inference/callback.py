@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 from lightning.pytorch import callbacks
 from tensordict import TensorDict
 
+from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
@@ -63,7 +64,7 @@ class Writer(callbacks.BasePredictionWriter):
         batch_idx: int,
         dataloader_idx: int,
     ) -> None:  # ty:ignore[invalid-method-override]
-        num_rows = len(batch["metadata"])
+        num_rows = len(batch[TensorKey.metadata])
 
         supervised: dict[Address, dict[str, Any]]
         embeddings: dict[Address, dict[str, Any]]
@@ -75,7 +76,7 @@ class Writer(callbacks.BasePredictionWriter):
             context = {
                 "input": batch,
                 "batch": batch,
-                "metadata": batch["metadata"],
+                TensorKey.metadata: batch[TensorKey.metadata],
                 "batch_indices": batch_indices,
                 "batch_idx": batch_idx,
                 "dataloader_idx": dataloader_idx,
@@ -86,7 +87,7 @@ class Writer(callbacks.BasePredictionWriter):
                 supervised, embeddings = processed
 
         items = [
-            pl.from_records(data=batch["metadata"], schema=["inputs"], orient="row"),
+            pl.from_records(data=batch[TensorKey.metadata], schema=["inputs"], orient="row"),
             self._as_struct_frame(values_by_address=supervised, alias="predictions", num_rows=num_rows),
         ]
 

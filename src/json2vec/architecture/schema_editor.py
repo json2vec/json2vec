@@ -53,6 +53,7 @@ class SchemaEditor:
             **values,
         )
         ModelGraph.rebuild(self.module)
+        self.module._reset_contracts()
 
     def extend(
         self,
@@ -63,6 +64,7 @@ class SchemaEditor:
         self.module._assert_mutation_allowed("extend")
         self.module.hyperparameters.extend(*args, include_root=include_root, use_cache=use_cache)
         ModelGraph.rebuild(self.module)
+        self.module._reset_contracts()
 
     def delete(
         self,
@@ -73,6 +75,7 @@ class SchemaEditor:
         self.module._assert_mutation_allowed("delete")
         self.module.hyperparameters.delete(*predicates, include_root=include_root, use_cache=use_cache)
         ModelGraph.rebuild(self.module)
+        self.module._reset_contracts()
 
     def reset(
         self,
@@ -91,6 +94,7 @@ class SchemaEditor:
             raise ValueError("reset matched no nodes")
 
         ModelGraph.reset_selected(self.module, selected, descendants=descendants)
+        self.module._reset_contracts()
 
     @contextmanager
     def override(
@@ -115,6 +119,8 @@ class SchemaEditor:
                 **values,
             ):
                 ModelGraph.rebuild(self.module)
+                self.module._reset_contracts()
                 yield
         finally:
             ModelGraph.rebuild(self.module)
+            self.module._reset_contracts()
