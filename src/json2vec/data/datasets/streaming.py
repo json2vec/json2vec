@@ -404,7 +404,6 @@ class StreamingDataModule(lit.LightningDataModule):
     ):
         super().__init__()
 
-        self.hyperparameters = model.hyperparameters
         self.root = root
         self.suffix = Suffix(suffix)
         self.train = train
@@ -417,8 +416,9 @@ class StreamingDataModule(lit.LightningDataModule):
             self._model_ref = weakref.ref(model)
         except TypeError:
             self._model_ref = None
+        self._hyperparameters = model.hyperparameters
         self._interprocess_encoding_context = model.interprocess_encoding_context
-        self.batch_size = model.batch_size
+        self._batch_size = model.batch_size
         self.num_workers = Strata.expand(num_workers, default=None)
         self.persistent_workers = Strata.expand(persistent_workers, default=True)
         self.pin_memory = Strata.expand(pin_memory, default=True)
@@ -433,12 +433,43 @@ class StreamingDataModule(lit.LightningDataModule):
             else Strata.expand(replacement, default=False)
         )
 
+    def _model(self) -> Model | None:
+        if self._model_ref is None:
+            return None
+
+        return self._model_ref()
+
+    @property
+    def hyperparameters(self) -> Hyperparameters:
+        model = self._model()
+        if model is not None:
+            return model.hyperparameters
+
+        return self._hyperparameters
+
+    @hyperparameters.setter
+    def hyperparameters(self, hyperparameters: Hyperparameters) -> None:
+        self._model_ref = None
+        self._hyperparameters = hyperparameters
+
+    @property
+    def batch_size(self) -> int:
+        model = self._model()
+        if model is not None:
+            return model.batch_size
+
+        return self._batch_size
+
+    @batch_size.setter
+    def batch_size(self, batch_size: int) -> None:
+        self._model_ref = None
+        self._batch_size = batch_size
+
     @property
     def interprocess_encoding_context(self) -> InterprocessEncodingContext:
-        if self._model_ref is not None:
-            model = self._model_ref()
-            if model is not None:
-                return model.interprocess_encoding_context
+        model = self._model()
+        if model is not None:
+            return model.interprocess_encoding_context
 
         return self._interprocess_encoding_context
 

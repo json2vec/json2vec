@@ -527,6 +527,7 @@ class Hyperparameters(Node):
         allow_extra: bool = False,
         include_root: bool = True,
         validate: bool = True,
+        use_cache: bool = False,
         **values: Any,
     ) -> None:
         """Mutate matching schema nodes.
@@ -538,7 +539,7 @@ class Hyperparameters(Node):
         if not values:
             raise ValueError("update requires at least one field value")
 
-        nodes = self.select(*predicates, include_root=include_root)
+        nodes = self.select(*predicates, include_root=include_root, use_cache=use_cache)
         for node in nodes:
             can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
             missing = [name for name in values if not _has_model_attribute(node, name) and not can_apply_extra]
@@ -553,7 +554,8 @@ class Hyperparameters(Node):
             if validate and applicable_values:
                 payload = node.model_dump(mode="python", round_trip=True)
                 payload.update(applicable_values)
-                type(node).model_validate(payload)
+                validated = type(node).model_validate(payload)
+                applicable_values = {name: getattr(validated, name) for name in applicable_values}
 
             for name, value in applicable_values.items():
                 setattr(node, name, value)
@@ -698,9 +700,10 @@ class Hyperparameters(Node):
         allow_extra: bool = False,
         include_root: bool = True,
         validate: bool = True,
+        use_cache: bool = False,
         **values: Any,
     ) -> Iterator[None]:
-        nodes = self.select(*predicates, include_root=include_root)
+        nodes = self.select(*predicates, include_root=include_root, use_cache=use_cache)
         normalized_values = self.update_values(values)
         snapshot = [
             (node, name, getattr(node, name, _MISSING), name in getattr(node, "model_fields_set", set()))
@@ -716,6 +719,7 @@ class Hyperparameters(Node):
             allow_extra=allow_extra,
             include_root=include_root,
             validate=validate,
+            use_cache=use_cache,
             **normalized_values,
         )
 

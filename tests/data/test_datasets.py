@@ -46,6 +46,14 @@ def _datamodule_model(batch_size: int = 2):
     )
 
 
+def _checkpoint_payload(model: j2v.Model) -> dict:
+    return {
+        "state_dict": model.state_dict(),
+        "hyperparameters": model.hyperparameters.model_dump(mode="python"),
+        "batch_size": model.batch_size,
+    }
+
+
 def test_sha256():
     assert sha256("test", 32) == 2676412545
     assert sha256("test", 64) == 11495104353665842533
@@ -583,6 +591,41 @@ def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
     assert module.replacement[Strata.test] is False
 
 
+def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp_path: Path):
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    module = StreamingDataModule(
+        model=model,
+        root=tmp_path,
+        suffix=Suffix.ndjson,
+        train=re.compile(r".*\.ndjson$"),
+        num_workers=0,
+    )
+    restored = j2v.Model.from_schema(
+        j2v.Number("risk_score"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=5,
+    )
+
+    model.restore_checkpoint_state(_checkpoint_payload(restored))
+
+    loader = module.train_dataloader()
+    assert loader is not None
+    assert module.hyperparameters is model.hyperparameters
+    assert module.batch_size == 5
+    assert loader.dataset.hyperparameters is model.hyperparameters
+    assert loader.dataset.batch_size == 5
+    assert "record/risk_score" in loader.dataset.hyperparameters.requests
+    assert "record/amount" not in loader.dataset.hyperparameters.requests
+
+
 def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata():
     frame = pl.DataFrame({"id": [1, 2]})
     module = PolarsDataModule(
@@ -653,6 +696,39 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
     assert after.master._id == current.master._id
     assert after.master._id != before.master._id
     assert after is not before
+
+
+def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    module = PolarsDataModule(
+        model=model,
+        train=pl.DataFrame({"amount": [1.0], "risk_score": [2.0]}),
+        num_workers=0,
+    )
+    restored = j2v.Model.from_schema(
+        j2v.Number("risk_score"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=5,
+    )
+
+    model.restore_checkpoint_state(_checkpoint_payload(restored))
+
+    loader = module.train_dataloader()
+    assert loader is not None
+    assert module.hyperparameters is model.hyperparameters
+    assert module.batch_size == 5
+    assert loader.dataset.hyperparameters is model.hyperparameters
+    assert loader.dataset.batch_size == 5
+    assert "record/risk_score" in loader.dataset.hyperparameters.requests
+    assert "record/amount" not in loader.dataset.hyperparameters.requests
 
 
 def test_polars_datamodule_requires_at_least_one_split():

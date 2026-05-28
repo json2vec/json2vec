@@ -330,11 +330,16 @@ class Model(lit.LightningModule):
         self.example_input_array = mock(hyperparameters=self.hyperparameters, batch_size=self.batch_size)
 
     def _rebuild(self) -> None:
+        self.hyperparameters._clear_tree_caches()
+        was_training = self.training
+        device = self.device
         previous = {
             name: value.detach().clone() if isinstance(value, torch.Tensor) else deepcopy(value)
             for name, value in self.state_dict().items()
         }
         self._build()
+        if isinstance(device, torch.device):
+            self.to(device=device)
         current = self.state_dict()
         compatible = {}
         for name, value in previous.items():
@@ -351,6 +356,7 @@ class Model(lit.LightningModule):
             compatible[name] = value
 
         self.load_state_dict(compatible, strict=False)
+        self.train(was_training)
 
     def select(
         self,
@@ -372,6 +378,7 @@ class Model(lit.LightningModule):
         allow_extra: bool = False,
         include_root: bool = True,
         validate: bool = True,
+        use_cache: bool = False,
         **values: Any,
     ) -> None:
         """Mutate selected schema nodes and rebuild compatible modules.
@@ -386,6 +393,8 @@ class Model(lit.LightningModule):
                 allow unknown fields.
             include_root: Include the root node in predicate matching.
             validate: Validate each node after applying candidate values.
+            use_cache: Permit cached selector results. Mutations default this to
+                `False` so updates always evaluate against current schema state.
             **values: Schema attributes to update.
         """
         self._assert_mutation_allowed("update")
@@ -395,6 +404,7 @@ class Model(lit.LightningModule):
             allow_extra=allow_extra,
             include_root=include_root,
             validate=validate,
+            use_cache=use_cache,
             **values,
         )
         self._rebuild()
@@ -468,6 +478,7 @@ class Model(lit.LightningModule):
         allow_extra: bool = False,
         include_root: bool = True,
         validate: bool = True,
+        use_cache: bool = False,
         **values: Any,
     ) -> Iterator[None]:
         """Temporarily mutate selected schema nodes and keep runtime modules synchronized."""
@@ -479,6 +490,7 @@ class Model(lit.LightningModule):
                 allow_extra=allow_extra,
                 include_root=include_root,
                 validate=validate,
+                use_cache=use_cache,
                 **values,
             ):
                 self._rebuild()

@@ -1,6 +1,7 @@
 import pytest
 
 import json2vec as j2v
+from json2vec.structs.enums import TensorKey
 
 
 def test_model_from_schema_builds_record_array_and_infers_queries():
@@ -222,6 +223,49 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
     assert "record/memo" in params.active_requests
     assert "record/memo" in model.nodes
     assert params.embed == ["record/memo"]
+
+
+def test_model_update_applies_validated_values_before_rebuilding_modules():
+    model = j2v.Model.from_schema(
+        j2v.Category("label", max_vocab_size=8, topk=[2]),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    address = "record/label"
+    before = model.nodes[address]
+
+    model.update(j2v.where("name") == "label", max_vocab_size=16, topk=[3, 2])
+
+    request = model.hyperparameters.requests[address]
+    assert request.max_vocab_size == 16
+    assert request.topk == [2, 3]
+    assert model.nodes[address] is not before
+    assert model.nodes[address].embedder.max_vocab_size == 16
+    assert model.nodes[address].embedder.embeddings[TensorKey.content.name].num_embeddings == 17
+
+
+def test_model_update_uses_current_schema_when_selection_cache_is_stale():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    predicate = j2v.where("name") == "amount"
+
+    assert model.select(predicate) == [model.hyperparameters.requests["record/amount"]]
+
+    request = model.hyperparameters.requests["record/amount"]
+    request.name = "renamed"
+
+    model.update(predicate, weight=2.0)
+
+    assert request.weight == 1.0
+    assert "record/amount" not in model.hyperparameters.requests
+    assert "record/renamed" in model.hyperparameters.requests
+    assert "record/amount" not in model.nodes
+    assert "record/renamed" in model.nodes
 
 
 def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modules():
