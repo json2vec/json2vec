@@ -65,7 +65,7 @@ class Hyperparameters(Node):
     @classmethod
     def update_values(cls, values: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(values)
-        target = normalized.pop("target", None)
+        target = normalized.get("target", None)
 
         if target is None:
             return normalized
@@ -76,11 +76,9 @@ class Hyperparameters(Node):
         if target:
             if normalized.get("p_prune") not in (None, 1.0):
                 raise ValueError("target=True is shorthand for p_prune=1.0")
-            normalized["p_prune"] = 1.0
         else:
-            if normalized.get("p_prune") is not None:
+            if "p_prune" in normalized and normalized["p_prune"] is not None:
                 raise ValueError("target=False is shorthand for p_prune=None")
-            normalized["p_prune"] = None
 
         return normalized
 
@@ -215,7 +213,7 @@ class Hyperparameters(Node):
     @property
     def target(self) -> list[Address]:
         role = NodePredicate(
-            func=lambda node: isinstance(node, Leaf) and node.active and getattr(node, "p_prune", 0.0) == 1.0,
+            func=lambda node: isinstance(node, Leaf) and node.active and node.target,
             key=("role", "target"),
         )
         return [Address(str(node.address)) for node in self.select(role)]
@@ -348,6 +346,8 @@ class Hyperparameters(Node):
 
             if validate and applicable_values:
                 payload = node.model_dump(mode="python", round_trip=True)
+                if "target" in applicable_values and "p_prune" not in applicable_values:
+                    payload.pop("p_prune", None)
                 payload.update(applicable_values)
                 validated = type(node).model_validate(payload)
                 applicable_values = {name: getattr(validated, name) for name in applicable_values}
@@ -501,7 +501,12 @@ class Hyperparameters(Node):
         nodes = self.select(*predicates, include_root=include_root, use_cache=use_cache)
         normalized_values = self.update_values(values)
         snapshot = [
-            (node, name, getattr(node, name, _MISSING), name in getattr(node, "model_fields_set", set()))
+            (
+                node,
+                "p_prune" if name == "target" else name,
+                getattr(node, "p_prune" if name == "target" else name, _MISSING),
+                ("p_prune" if name == "target" else name) in getattr(node, "model_fields_set", set()),
+            )
             for node in nodes
             for name in normalized_values
             if _has_model_attribute(node, name)

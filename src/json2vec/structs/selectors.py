@@ -140,7 +140,7 @@ class NodeAttribute(pydantic.BaseModel):
         if self.name == "descendants":
             return tuple(str(child.address) for child in getattr(node, "descendants", ()))
         if self.name == "target":
-            return isinstance(node, Leaf) and node.active and getattr(node, "p_prune", None) == 1.0
+            return isinstance(node, Leaf) and node.active and node.target
 
         extra = getattr(node, "model_extra", None) or {}
         if self.name in extra:

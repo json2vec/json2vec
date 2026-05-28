@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from lightning.pytorch.utilities.model_summary.model_summary import summarize
+from loguru import logger
 
 import json2vec as j2v
 from json2vec.architecture.checkpoint import CheckpointState
@@ -26,6 +27,39 @@ def test_model_uses_mutation_facade() -> None:
 
     assert isinstance(model.schema, SchemaEditor)
     assert model.schema.select(j2v.where("name") == "amount") == model.select(j2v.where("name") == "amount")
+
+
+def test_model_mutations_emit_structured_logs() -> None:
+    model = _model()
+    events: list[dict[str, object]] = []
+    sink_id = logger.add(lambda message: events.append(dict(message.record["extra"])))
+
+    try:
+        model.update(j2v.where("name") == "amount", weight=2.0)
+        model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+        model.update(j2v.where("name") == "amount", target=True)
+        model.extend(j2v.where("name") == "record", j2v.Category(name="extra", max_vocab_size=4))
+        model.reset(j2v.where("name") == "amount")
+        with model.override(j2v.where("name") == "amount", weight=3.0):
+            pass
+        model.delete(j2v.where("name") == "extra")
+    finally:
+        logger.remove(sink_id)
+
+    mutation_events = [event for event in events if event.get("component") == "schema_mutation"]
+    actions = {event["action"] for event in mutation_events}
+
+    assert {"update", "extend", "reset", "override", "override_restore", "delete"} <= actions
+    assert any(
+        event.get("attribute") == "weight" and event.get("definition_attribute") is True for event in mutation_events
+    )
+    assert any(
+        event.get("attribute") == "benchmark" and event.get("definition_attribute") is False
+        for event in mutation_events
+    )
+    assert any(
+        event.get("attribute") == "target" and event.get("definition_attribute") is False for event in mutation_events
+    )
 
 
 def test_model_graph_rebuild_preserves_compatible_state() -> None:

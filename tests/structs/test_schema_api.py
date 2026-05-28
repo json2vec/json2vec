@@ -172,7 +172,7 @@ def test_schema_helper_classmethods_back_public_dsl():
 
     assert j2v.predicate("amount-name", lambda node: node.name == "amount").key == predicate.key
     assert j2v.where("name") == attribute
-    assert j2v.Hyperparameters.update_values({"target": True}) == {"p_prune": 1.0}
+    assert j2v.Hyperparameters.update_values({"target": True}) == {"target": True}
 
 
 def test_hyperparameters_select_returns_nodes_and_accepts_boolean_predicates():
@@ -379,6 +379,23 @@ def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
         assert model.nodes["record/amount"] is not before
 
     assert "record/amount" in model.hyperparameters.active_requests
+
+
+def test_model_override_target_restores_original_prune_rate():
+    model = j2v.Model.from_schema(
+        j2v.Number(name="amount", p_prune=0.25),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+    request = model.hyperparameters.requests["record/amount"]
+
+    with model.override(j2v.where("name") == "amount", target=True):
+        assert request.p_prune == 1.0
+        assert request.target is True
+
+    assert request.p_prune == 0.25
+    assert request.target is False
 
 
 def test_model_mutations_are_blocked_inside_training_loop_lock():
