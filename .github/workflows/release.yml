@@ -1,4 +1,4 @@
-name: PyPI Release on Version Bump
+name: Release
 
 on:
   push:
@@ -10,6 +10,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   detect_version:
@@ -116,10 +120,40 @@ jobs:
           name: python-package-distributions-${{ needs.detect_version.outputs.version }}
           path: dist/
 
+  release:
+    needs:
+      - detect_version
+      - build
+    if: needs.detect_version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions-${{ needs.detect_version.outputs.version }}
+          path: dist/
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect_version.outputs.version }}
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" dist/* --clobber
+          else
+            gh release create "v${VERSION}" dist/* \
+              --target "${GITHUB_SHA}" \
+              --title "json2vec ${VERSION}" \
+              --generate-notes
+          fi
+
   publish:
     needs:
       - detect_version
       - build
+      - release
     if: needs.detect_version.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     environment:
