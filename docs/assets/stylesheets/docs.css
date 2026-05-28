@@ -101,7 +101,9 @@
 }
 
 .md-typeset .jupyter-wrapper .jp-Cell-outputWrapper {
-  margin-top: 0.25em;
+  margin-top: 0.45em;
+  padding-left: 0.45rem;
+  border-left: 0.2rem solid var(--md-primary-fg-color);
 }
 
 .md-typeset .jupyter-wrapper .jp-OutputArea-child {
