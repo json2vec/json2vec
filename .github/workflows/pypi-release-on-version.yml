@@ -1,0 +1,139 @@
+name: PyPI Release on Version Bump
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect_version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.version.outputs.should_publish }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Detect new package version
+        id: version
+        shell: python
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          from pathlib import Path
+          import os
+          import subprocess
+          import sys
+          import tomllib
+          from urllib.error import HTTPError
+          from urllib.request import urlopen
+
+          def project_version(pyproject: str) -> str:
+              return tomllib.loads(pyproject)["project"]["version"]
+
+          def set_output(name: str, value: str) -> None:
+              with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+                  output.write(f"{name}={value}\n")
+
+          current_version = project_version(Path("pyproject.toml").read_text())
+          previous_version = None
+          before_sha = os.environ.get("BEFORE_SHA", "")
+
+          if os.environ.get("EVENT_NAME") == "push" and before_sha:
+              check = subprocess.run(
+                  ["git", "cat-file", "-e", f"{before_sha}:pyproject.toml"],
+                  check=False,
+              )
+              if check.returncode == 0:
+                  previous_pyproject = subprocess.check_output(
+                      ["git", "show", f"{before_sha}:pyproject.toml"],
+                      text=True,
+                  )
+                  previous_version = project_version(previous_pyproject)
+
+          set_output("version", current_version)
+
+          if current_version == previous_version:
+              set_output("should_publish", "false")
+              print(f"pyproject.toml changed, but project.version is still {current_version}")
+              sys.exit(0)
+
+          try:
+              url = f"https://pypi.org/pypi/json2vec/{current_version}/json"
+              with urlopen(url, timeout=10) as response:
+                  already_published = response.status == 200
+          except HTTPError as error:
+              if error.code != 404:
+                  raise
+              already_published = False
+
+          if already_published:
+              set_output("should_publish", "false")
+              print(f"json2vec {current_version} already exists on PyPI")
+              sys.exit(0)
+
+          set_output("should_publish", "true")
+          print(f"json2vec {current_version} is new and will be published")
+
+  build:
+    needs: detect_version
+    if: needs.detect_version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions-${{ needs.detect_version.outputs.version }}
+          path: dist/
+
+  publish:
+    needs:
+      - detect_version
+      - build
+    if: needs.detect_version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/json2vec
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions-${{ needs.detect_version.outputs.version }}
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
