@@ -86,8 +86,10 @@ def test_plot_renders_full_model_and_writes_output(tmp_path: Path, capsys) -> No
     assert written
     assert "<!DOCTYPE html>" not in written
     assert ".json2vec" not in written
-    assert "JSON2Vec" in captured.out
-    assert "Model" in captured.out
+    assert "Schema" in captured.out
+    assert "Model" not in captured.out
+    assert "d_model=8" in captured.out
+    assert "batch_size=2" in captured.out
     assert f"{sum(parameter.numel() for parameter in model.parameters()):,}" in captured.out
     assert "root [array]" in captured.out
     assert "amount [number]" in captured.out

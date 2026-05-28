@@ -88,15 +88,13 @@ def render_schema_plot(
 ) -> RenderableType:
     hyperparameters = module.hyperparameters
     root = hyperparameters.fields if address is None else resolve_node(hyperparameters=hyperparameters, address=address)
-    title = "Model" if address is None else str(root.address)
-    subtitle = "State diagnostics" if state_focus else "Schema map"
+    title = "State" if state_focus else "Schema"
 
     tree = Tree(render_node_label(module=module, node=root, state_focus=state_focus), guide_style="dim")
     append_schema_children(tree=tree, module=module, node=root, detail=detail or state_focus, state_focus=state_focus)
 
     return Group(
-        render_header(module=module, title=title, subtitle=subtitle),
-        Text("Schema", style="bold dim"),
+        Text(title, style="bold dim"),
         tree,
     )
 
@@ -118,41 +116,7 @@ def render_flow_plot(module: "Model", address: Address | str | None) -> Renderab
     table.add_row("Targets", "Target fields produce supervised predictions.", str(target_count))
     table.add_row("Embeddings", "Selected nodes expose reusable embeddings.", str(embed_count))
 
-    return Group(
-        render_header(module=module, title="Model Flow", subtitle=f"Pipeline from {root.address or root.name}"),
-        table,
-    )
-
-
-def render_header(module: "Model", title: str, subtitle: str) -> Panel:
-    hyperparameters = module.hyperparameters
-    metrics = Table.grid(padding=(0, 2))
-    metrics.add_column(style="dim", justify="right")
-    metrics.add_column(style="bold")
-    for key, value in {
-        "d_model": hyperparameters.d_model,
-        "params": parameter_count(module),
-        "arrays": len(hyperparameters.arrays),
-        "fields": len(hyperparameters.active_requests),
-        "targets": len(hyperparameters.target),
-        "embeds": len(hyperparameters.embed),
-        "batch": module.batch_size,
-        "heads": hyperparameters.fields.n_heads,
-    }.items():
-        metrics.add_row(key, format_compact_number(value))
-
-    layout = Table.grid(expand=True)
-    layout.add_column(ratio=3)
-    layout.add_column(ratio=2)
-    layout.add_row(
-        Group(
-            Text("JSON2Vec", style="dim bold"),
-            Text(title, style="bold"),
-            Text(subtitle, style="dim"),
-        ),
-        metrics,
-    )
-    return Panel(layout, box=rich.box.ROUNDED, padding=(1, 2))
+    return Group(Text(f"Flow from {root.address or root.name}", style="bold dim"), table)
 
 
 def append_schema_children(
@@ -180,12 +144,12 @@ def render_node_label(module: "Model", node: Node, state_focus: bool) -> Rendera
         heading.append(" ")
         heading.append(role, style=role_style(role))
 
-    if node.address in module.nodes:
+    if node.address in module.nodes and node is not module.hyperparameters.fields:
         heading.append(" ")
         heading.append(f"{format_compact_number(parameter_count(module.nodes[node.address]))} params", style="dim")
 
     address = str(node.address) or node.name
-    meta = render_metadata_line(node=node, state_focus=state_focus)
+    meta = render_metadata_line(module=module, node=node, state_focus=state_focus)
     lines: list[RenderableType] = [heading, Text(address, style="dim")]
     if meta.plain:
         lines.append(meta)
@@ -193,8 +157,8 @@ def render_node_label(module: "Model", node: Node, state_focus: bool) -> Rendera
     return Group(*lines)
 
 
-def render_metadata_line(node: Node, state_focus: bool) -> Text:
-    values = node.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
+def render_metadata_line(module: "Model", node: Node, state_focus: bool) -> Text:
+    values = schema_node_values(module=module, node=node)
     keys = node_metadata_keys(node=node, values=values, state_focus=state_focus)
     text = Text(style="dim")
     first = True
@@ -209,6 +173,25 @@ def render_metadata_line(node: Node, state_focus: bool) -> Text:
         first = False
 
     return text
+
+
+def schema_node_values(module: "Model", node: Node) -> dict[str, Any]:
+    values = node.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
+
+    if node is not module.hyperparameters.fields:
+        return values
+
+    hyperparameters = module.hyperparameters
+    return {
+        "d_model": hyperparameters.d_model,
+        **values,
+        "batch_size": module.batch_size,
+        "parameters": parameter_count(module),
+        "arrays": len(hyperparameters.arrays),
+        "fields": len(hyperparameters.active_requests),
+        "targets": len(hyperparameters.target),
+        "embeds": len(hyperparameters.embed),
+    }
 
 
 def append_detail_sections(tree: Tree, module: "Model", node: Node) -> None:
@@ -262,7 +245,22 @@ def role_style(role: str) -> str:
 
 
 def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) -> list[str]:
-    if state_focus:
+    if "d_model" in values and not isinstance(node, Leaf):
+        preferred = [
+            "d_model",
+            "attention",
+            "max_length",
+            "n_outputs",
+            "n_layers",
+            "n_heads",
+            "batch_size",
+            "parameters",
+            "arrays",
+            "fields",
+            "targets",
+            "embeds",
+        ]
+    elif state_focus:
         preferred = ["query", "max_vocab_size", "topk", "p_mask", "p_prune", "weight"]
     elif isinstance(node, Leaf):
         preferred = ["query", "pooling", "max_vocab_size", "topk", "objective", "weight"]
@@ -282,6 +280,9 @@ def should_hide_metadata(key: str, value: Any) -> bool:
 
 
 def format_metadata_value(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return format_compact_number(value)
+
     rendered = format_value(value)
     return truncate(rendered.replace("\n", " "), width=82)
 
@@ -362,8 +363,8 @@ def render_debug_plot(
         if node.address and node.address != node.name:
             values["address"] = node.address
 
-        values |= node.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
-        if node.address in module.nodes:
+        values |= schema_node_values(module=module, node=node)
+        if node.address in module.nodes and node is not hyperparameters.fields:
             values |= parameter_counts(module.nodes[node.address])
 
         pane = Pane(
@@ -381,13 +382,7 @@ def render_debug_plot(
         return pane
 
     if address is None:
-        values = hyperparameters.model_dump(mode="python", exclude={"fields", "type", "name"}, exclude_none=True)
-        values |= parameter_counts(module)
-        pane = Pane(
-            title="Model",
-            values=values,
-            children=[build(hyperparameters.fields)],
-        )
+        pane = build(hyperparameters.fields)
     else:
         pane = build(resolve_node(hyperparameters=hyperparameters, address=address))
 

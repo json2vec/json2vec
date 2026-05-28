@@ -1,8 +1,10 @@
 # Schemas & Queries
 
-A schema does two jobs at once. It describes where JSON2Vec should read values from a record, and it defines the model modules built for those values. Arrays become context encoders. Leaf fields become typed tensorfields such as `Number`, `Category`, `Set`, or `DateParts`.
+A schema does two jobs at once. It describes where the pipeline should read values from a record (via `JMESPath`), and it defines the model modules built for those values.
 
-Every leaf field has `active=True` by default. Set `active=False` when you want to keep a field in the schema tree but ignore it during encoding, forward passes, losses, and prediction. Reactivating the same field later rebuilds the compatible modules.
+Arrays become context encoders with pooling mechanisms, and leaf fields become typed tensorfields such as `Number`, `Category`, `Set`, `DateParts`, etc.
+
+Every leaf field has `active=True` by default. Set `active=False` when you want to keep a field in the schema tree but ignore it during encoding, forward passes, losses, and prediction. Reactivating the same field later rebuilds the compatible modules. Deactivating a leaf field is like deleting it, but it is a reversible operation.
 
 ## Top-Level Fields
 
@@ -26,7 +28,7 @@ model = j2v.Model.from_schema(
 )
 ```
 
-The active inferred request queries are `[*].alcohol`, `[*].malic_acid`, and `[*].cultivar`. The inactive `ash` field remains selectable for later updates, but it is not encoded or trained.
+The active inferred request queries are `[*].alcohol`, `[*].malic_acid`, and `[*].cultivar`. The inactive `ash` field remains selectable for later updates, but it is not encoded or trained while inactive.
 
 ## Nested Arrays
 
@@ -56,6 +58,9 @@ model = j2v.Model.from_schema(
 ```
 
 The inferred child queries are `[*].measurements[*].name` and `[*].measurements[*].value`. The resulting schema addresses are `record/measurements/name` and `record/measurements/value`.
+
+!!! Note
+    The above schema is just an example. It is inefficient to use this melted version of what could be a flattened dataframe.
 
 ## Explicit Queries
 

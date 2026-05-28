@@ -122,11 +122,15 @@ class OnlineVocabularyModel(torch.nn.Module):
         unexpected_keys,
         error_msgs,
     ):
-        vocab: list[str] = state_dict.pop(prefix + "vocabulary")
-        self.master: ListProxy[str] = self.manager.list(vocab)
-        self.proposals: ListProxy[str] = self.manager.list()
-        self._snapshot_cache = None
-        self._snapshot_size = -1
+        key = prefix + "vocabulary"
+        if key in state_dict:
+            vocab: list[str] = state_dict.pop(key)
+            self.master: ListProxy[str] = self.manager.list(vocab)
+            self.proposals: ListProxy[str] = self.manager.list()
+            self._snapshot_cache = None
+            self._snapshot_size = -1
+        else:
+            missing_keys.append(key)
 
         super()._load_from_state_dict(
             state_dict,

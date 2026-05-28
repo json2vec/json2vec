@@ -146,14 +146,23 @@ def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
     model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
     assert model.select(j2v.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
 
+    target = j2v.where("target")
+    assert model.select(target, include_root=False) == [params.requests["record/label"]]
+
     model.update(j2v.where("name") == "amount", target=True)
     assert params.requests["record/amount"].p_prune == 1.0
+    assert model.select(target, include_root=False) == [
+        params.requests["record/amount"],
+        params.requests["record/label"],
+    ]
 
     model.update(j2v.where("name") == "amount", target=False)
     assert params.requests["record/amount"].p_prune is None
+    assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
     model.update(j2v.where("name") == "amount", p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25
+    assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
 
 def test_schema_helper_classmethods_back_public_dsl():
@@ -181,6 +190,10 @@ def test_hyperparameters_select_returns_nodes_and_accepts_boolean_predicates():
     assert isinstance(active, list)
     assert active == [params.requests["record/amount"]]
     assert inactive == [params.requests["record/memo"]]
+
+    model.update(j2v.where("name") == "memo", target=True)
+    assert params.requests["record/memo"].p_prune == 1.0
+    assert params.select(j2v.where("target"), include_root=False) == []
 
     with pytest.raises(TypeError, match="Python 'not where"):
         not j2v.where("active")
@@ -229,6 +242,26 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
     assert "record/transactions/risk_score" in params.requests
     assert "record/transactions/risk_score" in model.nodes
     assert params.requests["record/transactions/risk_score"].query == "[*].transactions[*].risk_score"
+
+
+def test_model_extend_appends_category_field_and_preserves_existing_vocabulary():
+    model = j2v.Model.from_schema(
+        j2v.Category("label", max_vocab_size=10),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    label_vocab = model.nodes["record/label"].embedder.vocab
+    label_vocab.extend(["alpha", "beta"])
+
+    model.extend(j2v.where("name") == "record", j2v.Category("caretaker", max_vocab_size=10))
+
+    assert "record/caretaker" in model.hyperparameters.requests
+    assert "record/caretaker" in model.nodes
+    assert model.hyperparameters.requests["record/caretaker"].query == "[*].caretaker"
+    assert model.nodes["record/label"].embedder.vocab.snapshot() == ["alpha", "beta"]
+    assert model.nodes["record/caretaker"].embedder.vocab.snapshot() == []
 
 
 def test_model_extend_defaults_to_root_when_only_one_array_matches():
