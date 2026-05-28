@@ -18,9 +18,9 @@ from tensordict import TensorDict
 from json2vec.architecture.checkpoint import CheckpointState
 from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
+from json2vec.architecture.mutations import SchemaEditor
 from json2vec.architecture.plot import PlotMode
 from json2vec.architecture.runtime import EvaluationResult, ModelRuntime, Postprocessor, PreprocessFn, step
-from json2vec.architecture.schema_editor import SchemaEditor
 from json2vec.data.datasets.base import EncodedBatch
 from json2vec.structs.enums import AttentionMode, Strata
 from json2vec.structs.experiment import (

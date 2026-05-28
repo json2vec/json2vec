@@ -5,22 +5,22 @@ import torch
 import json2vec as j2v
 from json2vec.architecture.checkpoint import CheckpointState
 from json2vec.architecture.graph import ModelGraph
+from json2vec.architecture.mutations import SchemaEditor
 from json2vec.architecture.runtime import EvaluationResult
-from json2vec.architecture.schema_editor import SchemaEditor
 from json2vec.structs import experiment, selectors
 
 
 def _model() -> j2v.Model:
     return j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Category("label", target=True, max_vocab_size=4),
+        j2v.Number(name="amount"),
+        j2v.Category(name="label", target=True, max_vocab_size=4),
         d_model=8,
         n_layers=1,
         n_heads=2,
     )
 
 
-def test_model_uses_schema_editor_facade() -> None:
+def test_model_uses_mutation_facade() -> None:
     model = _model()
 
     assert isinstance(model.schema, SchemaEditor)
