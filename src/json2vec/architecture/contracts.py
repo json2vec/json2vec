@@ -93,7 +93,7 @@ def sanitize(
         require_core_tensors(module, address, tensorfield)
         require_tensor_devices(module, address, tensorfield)
         require_target_contract(module, address, tensorfield, strata=normalized)
-        require_mask_contract(module, address, tensorfield)
+        require_mask_contract(module, address, tensorfield, strata=normalized)
 
 
 def is_backoff_index(index: int, *, periodic_interval: int) -> bool:
@@ -292,7 +292,7 @@ def require_tensor_devices(module: "Model", address: Address, tensorfield: Tenso
         )
 
 
-def require_mask_contract(module: "Model", address: Address, tensorfield: TensorFieldBase) -> None:
+def require_mask_contract(module: "Model", address: Address, tensorfield: TensorFieldBase, *, strata: Strata) -> None:
     state = tensorfield.state
     trainable = tensorfield.trainable
     is_masked = state.eq(Tokens.masked.value)
@@ -301,7 +301,7 @@ def require_mask_contract(module: "Model", address: Address, tensorfield: Tensor
     if trainable.any() and not state.masked_select(trainable).eq(Tokens.masked.value).all():
         raise ForwardContractError(f"forward input '{address}' trainable positions must have masked state")
 
-    if not is_target and (is_masked & ~trainable).any():
+    if strata != Strata.predict and not is_target and (is_masked & ~trainable).any():
         raise ForwardContractError(f"forward input '{address}' has masked state where trainable is false")
 
     if not trainable.any():

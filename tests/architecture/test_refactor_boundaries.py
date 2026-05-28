@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+from lightning.pytorch.utilities.model_summary.model_summary import summarize
 
 import json2vec as j2v
 from json2vec.architecture.checkpoint import CheckpointState
@@ -34,6 +35,14 @@ def test_model_graph_rebuild_preserves_compatible_state() -> None:
     ModelGraph.rebuild(model)
 
     assert torch.equal(model.state_dict()[name], before)
+
+
+def test_model_summary_uses_forward_kwargs_example_input() -> None:
+    model = _model()
+
+    summary = summarize(model, max_depth=1)
+
+    assert summary.total_parameters > 0
 
 
 def test_checkpoint_state_round_trip(tmp_path) -> None:
