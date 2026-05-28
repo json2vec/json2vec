@@ -8,6 +8,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from json2vec.architecture.plot import Pane
@@ -95,7 +96,9 @@ class TensorField(TensorFieldBase):
         tokens = apply(values, partial(interprocess_encoding_context, update=(strata == Strata.train)))
 
         if len(interprocess_encoding_context) > (max_vocab_size := hyperparameters.requests[address].max_vocab_size):
-            print(f"Vocab in address {address} exceeds max vocab size of {max_vocab_size}")
+            logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
+                "vocabulary exceeds max_vocab_size={}", max_vocab_size
+            )
 
         data, states = pad(
             nested=tokens,

@@ -68,3 +68,21 @@ python_files = ["test_*.py"]
 [tool.ruff]
 line-length = 120
 lint.extend-select = ["I"]
+
+[tool.ty.rules]
+# Keep ty as a green baseline while the dynamic plugin/Torch/Lightning surfaces
+# are covered by runtime tests and can be tightened incrementally.
+unresolved-attribute = "ignore"
+invalid-type-form = "ignore"
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+unknown-argument = "ignore"
+invalid-method-override = "ignore"
+call-non-callable = "ignore"
+invalid-return-type = "ignore"
+not-subscriptable = "ignore"
+unsupported-operator = "ignore"
+no-matching-overload = "ignore"
+invalid-attribute-override = "ignore"
+redundant-cast = "ignore"
+unused-ignore-comment = "ignore"

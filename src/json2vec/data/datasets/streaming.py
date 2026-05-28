@@ -17,6 +17,7 @@ import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import torch
 from beartype import beartype
+from loguru import logger
 from torch.utils.data import DataLoader, IterableDataset
 
 from json2vec.data.datasets.base import (
@@ -231,8 +232,10 @@ def read(
                             continue
 
                         yield from rows
-                except Exception:
-                    print(f"Error reading {path}, skipping.")
+                except Exception as error:
+                    logger.bind(component="data", path=path, suffix=suffix.value).warning(
+                        "error reading streaming dataset file, skipping: {}", error
+                    )
                     continue
 
         case _:

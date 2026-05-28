@@ -88,7 +88,7 @@ def render_schema_plot(
 ) -> RenderableType:
     hyperparameters = module.hyperparameters
     root = hyperparameters.fields if address is None else resolve_node(hyperparameters=hyperparameters, address=address)
-    title = "State" if state_focus else "Schema"
+    title = "JSON2Vec State" if state_focus else "JSON2Vec Schema"
 
     tree = Tree(render_node_label(module=module, node=root, state_focus=state_focus), guide_style="dim")
     append_schema_children(tree=tree, module=module, node=root, detail=detail or state_focus, state_focus=state_focus)
