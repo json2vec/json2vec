@@ -115,7 +115,6 @@ class API(ls.LitAPI):
         request: dict[str, Any] | pydantic.BaseModel,
         context: dict[str, Any] | None = None,
     ) -> Input | ErrorItem:
-
         if isinstance(request, pydantic.BaseModel):
             request = request.model_dump()
 

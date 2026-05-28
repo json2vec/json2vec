@@ -118,8 +118,7 @@ def observe(
         sampled_paths = list(paths)
         if not sampled_paths:
             raise ValueError(
-                "no matching files available for replacement sampling; "
-                "check the streaming root and split pattern"
+                "no matching files available for replacement sampling; check the streaming root and split pattern"
             )
 
         def choices() -> Iterator[str]:
@@ -427,10 +426,7 @@ class StreamingDataModule(lit.LightningDataModule):
         self.chunk_batch_size = Strata.expand(chunk_batch_size, default=4096)
         self.file_buffer_size = Strata.expand(file_buffer_size, default=1)
         self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
-        self.sample_rate = {
-            strata: float(rate)
-            for strata, rate in Strata.expand(sample_rate, default=1.0).items()
-        }
+        self.sample_rate = {strata: float(rate) for strata, rate in Strata.expand(sample_rate, default=1.0).items()}
         self.replacement = (
             {strata: strata == Strata.train for strata in Strata}
             if replacement is None

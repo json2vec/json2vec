@@ -12,13 +12,16 @@ def _repo_root() -> Path:
 
 def _execute_notebook(path: str) -> nbformat.NotebookNode:
     root = _repo_root()
+    run_dirs = {
+        "docs/guides/tensorfields.ipynb": root / "docs/guides",
+    }
     notebook = nbformat.read(root / path, as_version=4)
     client = NotebookClient(
         notebook,
         timeout=300,
         kernel_name="python3",
         allow_errors=False,
-        resources={"metadata": {"path": str(root)}},
+        resources={"metadata": {"path": str(run_dirs.get(path, root))}},
     )
     client.execute()
     return notebook
@@ -46,7 +49,7 @@ def test_custom_tensorfield_example_runs() -> None:
     notebook = _execute_notebook("docs/guides/tensorfields.ipynb")
     source = "\n".join(cell.source for cell in notebook.cells)
 
-    assert "Plugin(name=\"bucket\")" in source
+    assert 'Plugin(name="bucket")' in source
     assert "Boolean" not in source
     assert _plot_output(notebook)
 
@@ -67,9 +70,17 @@ def test_examples_live_under_docs() -> None:
 
 def _plot_output(notebook: nbformat.NotebookNode) -> str:
     for cell in notebook.cells:
-        if cell.cell_type != "code" or "plot(detail=True)" not in cell.source:
+        if cell.cell_type != "code" or "model.plot(" not in cell.source:
             continue
-        text = "\n".join(output.get("text", "") for output in cell.get("outputs", []))
-        if "JSON2Vec" in text:
+        text = "\n".join(_output_text(output) for output in cell.get("outputs", []))
+        if "Schema" in text:
             return text
     return ""
+
+
+def _output_text(output: nbformat.NotebookNode) -> str:
+    if "text" in output:
+        return output.text
+
+    data = output.get("data", {})
+    return "\n".join(str(data.get(mime, "")) for mime in ("text/plain", "text/html"))

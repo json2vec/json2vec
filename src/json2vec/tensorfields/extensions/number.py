@@ -39,7 +39,6 @@ def jitter(inputs: torch.Tensor, jitter_amount: torch.Tensor) -> torch.Tensor:
 
 
 class Objective(enum.StrEnum):
-
     mae = "mae"
     mse = "mse"
     huber = "huber"
@@ -53,6 +52,7 @@ class Objective(enum.StrEnum):
             case Objective.huber:
                 return torch.nn.functional.huber_loss(input=input, target=target, reduction=reduction)
 
+
 @number.register
 class Request(RequestBase):
     """Numeric scalar tensorfield request."""
@@ -61,7 +61,7 @@ class Request(RequestBase):
     jitter: Annotated[float, pydantic.Field(ge=0.0, lt=1.0, default=0.0)] = 0.0
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
     offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
-    alpha: Annotated[float|None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
+    alpha: Annotated[float | None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
     objective: Objective = Objective.mae
 
 
@@ -163,22 +163,18 @@ class TensorField(TensorFieldBase):
 
 
 class GlobalOnlineNormalizer(torch.nn.Module):
-
-    def __init__(self, alpha: float | None=None, epsilon: float = 1e-5):
-
+    def __init__(self, alpha: float | None = None, epsilon: float = 1e-5):
         super().__init__()
 
         self.epsilon: float = epsilon
-        self.alpha: float|None = alpha
+        self.alpha: float | None = alpha
 
         self.register_buffer("mean", torch.zeros(1))
         self.register_buffer("var", torch.ones(1))
         self.register_buffer("count", torch.zeros(1))
 
-
     @torch.no_grad()
     def update(self, values: torch.Tensor):
-
         numel = values.numel()
         if numel == 0:
             return
@@ -187,7 +183,6 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         batch_var = values.var(unbiased=False)
 
         if self.alpha is not None:
-
             alpha: float = self.alpha
             new_mean = (1 - alpha) * self.mean + alpha * batch_mean
             new_var = (1 - alpha) * self.var + alpha * batch_var
@@ -217,9 +212,7 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         self.var = new_var
         self.count = new_count
 
-
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor, update=True) -> torch.Tensor:
-
         if self.training and update:
             self.update(inputs[mask])
 
@@ -268,10 +261,8 @@ class Embedder(EmbedderBase):
 
         self.normalizer: GlobalOnlineNormalizer = GlobalOnlineNormalizer(alpha=request.alpha)
 
-
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-
         N, *dims = inputs.state.shape
         D = math.prod(tuple([N, *dims]))
 
@@ -304,6 +295,7 @@ class Embedder(EmbedderBase):
             batch_size=N,
         )
 
+
 @number.register
 class Decoder(DecoderBase):
     def __init__(self, hyperparameters: Hyperparameters, address: Address):
@@ -329,7 +321,6 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-
     address: Address = prediction.address
     request: RequestBase = module.hyperparameters.requests[prediction.address]
 
@@ -352,7 +343,7 @@ def loss(
             )
             .masked_select(trainable)
             .mean()
-        )
+        ),
     )
 
     target: torch.Tensor = batch.targets[TensorKey.content].reshape(N)
@@ -365,9 +356,10 @@ def loss(
             input=diff / normalizer.var.sqrt().clamp_min(normalizer.epsilon),
             target=torch.zeros_like(diff),
             reduction="none",
-        ).masked_select(trainable).mean(),
+        )
+        .masked_select(trainable)
+        .mean(),
     )
-
 
     module.track(
         (address, strata, Metric.mae, TensorKey.content),
@@ -384,16 +376,12 @@ def loss(
 
 @number.register
 def write(module: Model, prediction: Prediction):
-
     content: np.ndarray = prediction.payload[TensorKey.content].detach().double().cpu().numpy()
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     tokens: np.ndarray = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
     state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
     state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {
-        token: state_distribution[..., index]
-        for index, token in enumerate(tokens.tolist())
-    }
+    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
     output: dict[str, Iterable] = {
         TensorKey.state.name: state_payload,

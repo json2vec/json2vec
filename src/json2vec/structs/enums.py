@@ -87,10 +87,7 @@ class ShardingStrategy(enum.StrEnum):
         *,
         default: "ShardingStrategy",
     ) -> dict[Strata, "ShardingStrategy"]:
-        return {
-            strata: cls.normalize(strategy)
-            for strata, strategy in Strata.expand(value, default=default).items()
-        }
+        return {strata: cls.normalize(strategy) for strata, strategy in Strata.expand(value, default=default).items()}
 
 
 class AttentionMode(enum.StrEnum):

@@ -172,4 +172,5 @@ class CounterUpdateCallback(Callback):
         for _, counter in sorted(resources.items(), key=lambda item: (str(item[0][0]), item[0][1])):
             counter.sync()
 
+
 __all__ = ["Counter", "CounterUpdateCallback"]

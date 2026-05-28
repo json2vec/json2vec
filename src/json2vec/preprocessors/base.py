@@ -50,8 +50,7 @@ class Preprocessor(pydantic.BaseModel):
     def accepted_kwargs(func: Callable[..., Any]) -> tuple[bool, frozenset[str]]:
         signature = inspect.signature(func)
         accepts_variadic_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in signature.parameters.values()
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
         )
         accepted = frozenset(signature.parameters.keys())
         return accepts_variadic_kwargs, accepted
@@ -99,9 +98,7 @@ class Preprocessor(pydantic.BaseModel):
 
     def require_object(self, output: Any, *, mode: PreprocessorMode) -> dict[str, Any]:
         if not isinstance(output, dict):
-            raise TypeError(
-                f"{mode} preprocessor '{self.name}' must produce dict objects, got {type(output).__name__}"
-            )
+            raise TypeError(f"{mode} preprocessor '{self.name}' must produce dict objects, got {type(output).__name__}")
 
         return output
 

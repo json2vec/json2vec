@@ -296,7 +296,6 @@ class Model(lit.LightningModule):
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
     ):
-
         super().__init__()
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0")
@@ -696,7 +695,6 @@ class Model(lit.LightningModule):
     def write(
         self, predictions: list[Prediction]
     ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
-
         supervised: dict[Address, dict[str, Any]] = {}
         embeddings: dict[Address, dict[str, Any]] = {}
 

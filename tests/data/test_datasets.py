@@ -54,11 +54,7 @@ def test_sha256():
 
 def test_is_assigned_to_worker_partitions_shards():
     key = "chunk:s3://bucket/path/file.parquet:7"
-    owners = [
-        worker_id
-        for worker_id in range(4)
-        if _is_assigned_to_worker(key, worker_id=worker_id, num_workers=4)
-    ]
+    owners = [worker_id for worker_id in range(4) if _is_assigned_to_worker(key, worker_id=worker_id, num_workers=4)]
     assert len(owners) == 1
 
 

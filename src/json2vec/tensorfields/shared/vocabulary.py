@@ -209,8 +209,7 @@ def vocabularies(module: Model) -> dict[Address, Any]:
         embedder = getattr(node, "embedder", None)
         vocabulary = getattr(embedder, "vocab", None)
         if vocabulary is not None and all(
-            hasattr(vocabulary, method)
-            for method in ("drain_proposals", "extend", "snapshot", "load_snapshot")
+            hasattr(vocabulary, method) for method in ("drain_proposals", "extend", "snapshot", "load_snapshot")
         ):
             resources[address] = vocabulary
 
@@ -262,7 +261,6 @@ class VocabularySyncCallback(Callback):
 
         if is_rank_zero():
             for address, stats in payload["stats"].items():
-
                 if stats["max"] > 0 and stats["size"] / stats["max"] >= 0.95:
                     logger.bind(
                         component="vocabulary",

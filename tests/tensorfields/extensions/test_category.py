@@ -293,9 +293,7 @@ def test_category_write_excludes_unavailable_when_it_has_highest_logit():
 
     assert content_payload[TensorKey.value.name].tolist() == [["EPS"]]
     assert all(
-        candidate["label"] != UNAVAILABLE_LABEL
-        for row in content_payload[TensorKey.topk.name]
-        for candidate in row[0]
+        candidate["label"] != UNAVAILABLE_LABEL for row in content_payload[TensorKey.topk.name] for candidate in row[0]
     )
 
 

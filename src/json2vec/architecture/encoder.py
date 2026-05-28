@@ -13,6 +13,7 @@ from json2vec.structs.tree import Address
 if TYPE_CHECKING:
     from json2vec.structs.experiment import Hyperparameters
 
+
 class RotaryTransformerEncoderLayer(torch.nn.Module):
     def __init__(
         self,

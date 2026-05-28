@@ -60,7 +60,6 @@ class Request(RequestBase):
 
     @pydantic.model_validator(mode="after")
     def check_topk(self):
-
         if self.topk is None:
             self.topk = []
 
@@ -101,7 +100,6 @@ class TensorField(TensorFieldBase):
         hyperparameters: Hyperparameters,
         strata: Strata,
     ) -> TensorFieldBase:
-
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
         data, states = pad(
@@ -221,8 +219,8 @@ class Embedder(EmbedderBase):
 
         safe_content = content.masked_fill(~valued, 0)
         embeddings: torch.Tensor = (
-            self.embeddings[TensorKey.state.name](state) +
-            self.embeddings[TensorKey.content.name](safe_content) * valued.unsqueeze(-1)
+            self.embeddings[TensorKey.state.name](state)
+            + self.embeddings[TensorKey.content.name](safe_content) * valued.unsqueeze(-1)
         ).reshape(N, *dims, -1)
 
         return Parcel(
@@ -273,7 +271,7 @@ def loss(
             )
             .masked_select(trainable)
             .mean()
-        )
+        ),
     )
 
     module.track(
@@ -302,7 +300,7 @@ def loss(
             )
             .masked_select(valued)
             .mean()
-        )
+        ),
     )
 
     for topk in module.hyperparameters.requests[prediction.address].topk:
@@ -312,12 +310,13 @@ def loss(
         module.track(
             (prediction.address, strata, Metric.accuracy, f"top{topk}"),
             value=(
-                inputs
-                .topk(k=topk, dim=1)
+                inputs.topk(k=topk, dim=1)
                 .indices.eq(targets.unsqueeze(1))
                 .any(dim=1)
-                .masked_select(valued).float().mean()
-            )
+                .masked_select(valued)
+                .float()
+                .mean()
+            ),
         )
 
     module.track(

@@ -67,7 +67,10 @@ def test_preprocessor_normalization_accepts_configured_callable():
     def _unregistered_dataset_callable_preprocessor(observation: dict):
         return observation
 
-    assert PreprocessorConfig.normalize(_unregistered_dataset_callable_preprocessor) is _unregistered_dataset_callable_preprocessor
+    assert (
+        PreprocessorConfig.normalize(_unregistered_dataset_callable_preprocessor)
+        is _unregistered_dataset_callable_preprocessor
+    )
 
 
 def test_preprocessor_normalization_is_optional():

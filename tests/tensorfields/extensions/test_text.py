@@ -146,7 +146,10 @@ def test_text_warns_when_transformers_is_missing(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    with pytest.warns(RuntimeWarning, match="not installed by default"), pytest.raises(ImportError, match="not installed by default"):
+    with (
+        pytest.warns(RuntimeWarning, match="not installed by default"),
+        pytest.raises(ImportError, match="not installed by default"),
+    ):
         text_extension._import_transformers()
 
 

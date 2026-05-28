@@ -94,7 +94,7 @@ def _pad_sets(
         if not isinstance(node, list):
             return
 
-        for position, child in enumerate(node[:shape[depth]]):
+        for position, child in enumerate(node[: shape[depth]]):
             walk(child, depth + 1, (*index, position))
 
     walk(values, 0, ())
@@ -378,17 +378,11 @@ def write(module: Model, prediction: Prediction):
     tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
     state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
     state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {
-        token: state_distribution[..., index]
-        for index, token in enumerate(tokens.tolist())
-    }
+    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
     vocab = node.embedder.vocab.snapshot()
     probabilities = content_logits[..., : len(vocab)].sigmoid().detach().float().cpu().numpy()
-    content_payload = {
-        str(label): probabilities[..., index]
-        for index, label in enumerate(vocab)
-    }
+    content_payload = {str(label): probabilities[..., index] for index, label in enumerate(vocab)}
 
     return {
         TensorKey.state.name: state_payload,

@@ -108,6 +108,28 @@ def test_plot_renders_full_model_and_writes_output(tmp_path: Path, capsys) -> No
     assert "children" not in written
 
 
+def test_plot_uses_rich_environment_detection_for_display(tmp_path: Path, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class ConsoleStub:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+
+        def print(self, renderable) -> None:
+            self.renderable = renderable
+
+        def export_text(self, clear: bool = False) -> str:
+            return "recorded"
+
+    monkeypatch.setattr("json2vec.architecture.plot.Console", ConsoleStub)
+
+    model = _model(tmp_path)
+    model.plot(out=tmp_path / "model-tree.txt")
+
+    assert "force_jupyter" not in calls[0]
+    assert calls[1]["force_jupyter"] is False
+
+
 def test_plot_address_limits_output_to_selected_branch(tmp_path: Path, capsys) -> None:
     model = _model(tmp_path)
     capsys.readouterr()

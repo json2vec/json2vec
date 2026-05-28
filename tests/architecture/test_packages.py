@@ -72,10 +72,14 @@ def test_prediction_denest_collapses_only_singleton_lists():
     value = {
         "content": [["ALPHA"]],
         "probability": [[0.9]],
-        "topk": [[[
-            {"label": "ALPHA", "probability": 0.9},
-            {"label": "BETA", "probability": 0.1},
-        ]]],
+        "topk": [
+            [
+                [
+                    {"label": "ALPHA", "probability": 0.9},
+                    {"label": "BETA", "probability": 0.1},
+                ]
+            ]
+        ],
         "keep_list": [[1, 2]],
     }
 
@@ -92,9 +96,13 @@ def test_prediction_denest_collapses_only_singleton_lists():
 
 def test_prediction_denest_preserves_single_candidate_lists():
     value = {
-        "topk": [[[
-            {"label": "ALPHA", "probability": 0.9},
-        ]]],
+        "topk": [
+            [
+                [
+                    {"label": "ALPHA", "probability": 0.9},
+                ]
+            ]
+        ],
     }
 
     output = Prediction.denest(value)

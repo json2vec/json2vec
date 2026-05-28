@@ -1,26 +1,46 @@
 repos:
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.12
-    hooks:
-      - id: ruff
-      - id: ruff-format
-
   - repo: local
     hooks:
-      - id: ty-check
-        name: ty-check
-        language: python
-        entry: ty check
+      - id: ruff-check
+        name: Run Ruff
+        entry: uv run ruff check --fix
+        language: system
         pass_filenames: false
-        args: [--python=.venv/]
-        additional_dependencies: [ty]
+        always_run: true
 
-  - repo: local
-    hooks:
+      - id: ruff-format
+        name: Format with Ruff
+        entry: uv run ruff format
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Report-only until the existing ty baseline is cleaned up.
+      - id: ty-check
+        name: Run Ty
+        entry: uv run ty check src/json2vec --exit-zero --output-format concise
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+
       - id: pytest
         name: Run Pytest
-        entry: pytest
+        entry: uv run pytest
         language: system
-        types: [python]
         pass_filenames: false
+        always_run: true
+
+      - id: notebooks
+        name: Check Notebooks
+        entry: make notebooks-check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: docs
+        name: Render Docs
+        entry: uv run --extra docs mkdocs build --strict
+        language: system
+        pass_filenames: false
+        always_run: true

@@ -50,7 +50,6 @@ class DatePart(enum.StrEnum):
             cls.DEPTH: dict[DatePart, int] = {}
 
         def decorator(func: Callable[..., Any]):
-
             if self in cls.REGISTRY:
                 raise ValueError(f"{self.name} already has a registered function.")
 
@@ -327,9 +326,7 @@ class Decoder(DecoderBase):
 
         for datepart in hyperparameters.requests[address].dateparts:
             dim = len(Tokens) + DatePart.depth(datepart) + 1
-            self.dateparts[datepart] = torch.nn.Linear(
-                in_features=hyperparameters.d_model, out_features=dim
-            )
+            self.dateparts[datepart] = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=dim)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -352,7 +349,6 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-
     numel: int = batch.targets[TensorKey.state].numel()
 
     trainable = batch.trainable.reshape(numel)
@@ -380,7 +376,6 @@ def loss(
     losses: list[torch.Tensor] = []
 
     for datepart in request.dateparts:
-
         losses.append(
             module.track(
                 (prediction.address, strata, Metric.loss, TensorKey.content, datepart),
@@ -392,7 +387,7 @@ def loss(
                     )
                     .masked_select(trainable)
                     .mean()
-                )
+                ),
             )
         )
 

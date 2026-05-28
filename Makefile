@@ -1,4 +1,4 @@
-.PHONY: notebooks
+.PHONY: notebooks notebooks-check
 
 NOTEBOOKS := $(shell find docs -type f -name '*.ipynb' | sort)
 export NOTEBOOKS
@@ -12,6 +12,7 @@ from nbclient import NotebookClient
 
 root = Path.cwd()
 notebooks = [root / notebook for notebook in os.environ["NOTEBOOKS"].split()]
+write_notebooks = os.environ.get("WRITE_NOTEBOOKS") == "1"
 run_dirs = {
     Path("docs/guides/tensorfields.ipynb"): Path("docs/guides"),
 }
@@ -29,10 +30,16 @@ for path in notebooks:
         resources={"metadata": {"path": str(cwd)}},
     )
     client.execute()
-    nbformat.write(notebook, path)
-    print(f"wrote {notebook_path}", flush=True)
+    if write_notebooks:
+        nbformat.write(notebook, path)
+        print(f"wrote {notebook_path}", flush=True)
+    else:
+        print(f"passed {notebook_path}", flush=True)
 endef
 export RUN_NOTEBOOKS
 
 notebooks:
+	WRITE_NOTEBOOKS=1 uv run python -c "$$RUN_NOTEBOOKS"
+
+notebooks-check:
 	uv run python -c "$$RUN_NOTEBOOKS"

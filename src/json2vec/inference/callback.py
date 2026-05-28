@@ -41,9 +41,7 @@ class Writer(callbacks.BasePredictionWriter):
         self.writer: pq.ParquetWriter | None = None
 
     @staticmethod
-    def _as_struct_frame(
-        values_by_address: dict[Address, dict[str, Any]], alias: str, num_rows: int
-    ) -> pl.DataFrame:
+    def _as_struct_frame(values_by_address: dict[Address, dict[str, Any]], alias: str, num_rows: int) -> pl.DataFrame:
         if len(values_by_address) == 0:
             return pl.DataFrame({alias: [None] * num_rows})
 

@@ -49,7 +49,7 @@ def plot(
 ) -> None:
     """Print a Rich model visualization and optionally write it as text."""
     renderable = build_plot(module=module, address=address, detail=detail, mode=mode)
-    Console(width=PLOT_WIDTH, force_jupyter=False).print(renderable)
+    Console(width=PLOT_WIDTH).print(renderable)
 
     if out is None:
         return
@@ -112,7 +112,9 @@ def render_flow_plot(module: "Model", address: Address | str | None) -> Renderab
     table.add_column("Count", justify="right")
     table.add_row("JSON", "Raw nested records enter with the shape described by the schema.", "")
     table.add_row("Tensorfields", "Typed requests read values with JMESPath queries.", str(len(fields)))
-    table.add_row("Encoders", "Array nodes pool child embeddings into parent contexts.", str(len(hyperparameters.arrays)))
+    table.add_row(
+        "Encoders", "Array nodes pool child embeddings into parent contexts.", str(len(hyperparameters.arrays))
+    )
     table.add_row("Targets", "Target fields produce supervised predictions.", str(target_count))
     table.add_row("Embeddings", "Selected nodes expose reusable embeddings.", str(embed_count))
 
@@ -272,11 +274,7 @@ def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) ->
 
 
 def should_hide_metadata(key: str, value: Any) -> bool:
-    return (
-        (key == "active" and value is True)
-        or (key == "embed" and value is False)
-        or key == "description"
-    )
+    return (key == "active" and value is True) or (key == "embed" and value is False) or key == "description"
 
 
 def format_metadata_value(value: Any) -> str:
@@ -317,7 +315,9 @@ def format_detail_inline(value: Any) -> str:
         return truncate(value, width=100)
 
     if isinstance(value, list):
-        return truncate(format_inline_sequence(value) or pformat(value, compact=True, sort_dicts=False, width=88), width=100)
+        return truncate(
+            format_inline_sequence(value) or pformat(value, compact=True, sort_dicts=False, width=88), width=100
+        )
 
     return truncate(pformat(value, compact=True, sort_dicts=False, width=88), width=100)
 
@@ -332,7 +332,9 @@ def summarize_value(value: Any, max_items: int = 8) -> Any:
     if isinstance(value, list):
         if len(value) <= max_items:
             return [summarize_value(item, max_items=max_items) for item in value]
-        return [summarize_value(item, max_items=max_items) for item in value[:max_items]] + [f"... {len(value) - max_items} more"]
+        return [summarize_value(item, max_items=max_items) for item in value[:max_items]] + [
+            f"... {len(value) - max_items} more"
+        ]
 
     return value
 

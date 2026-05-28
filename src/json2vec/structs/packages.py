@@ -41,7 +41,7 @@ class Prediction(TensorClass):
             [
                 type(prediction)(
                     address=prediction.address,
-                    payload=prediction.payload[index:index + 1],
+                    payload=prediction.payload[index : index + 1],
                 )
                 for prediction in predictions
             ]
@@ -87,9 +87,7 @@ class Prediction(TensorClass):
 
         if isinstance(value, np.ndarray):
             axes = tuple(
-                dim
-                for dim, size in enumerate(value.shape)
-                if size == 1 and (dim > 0 or not preserve_first_dimension)
+                dim for dim, size in enumerate(value.shape) if size == 1 and (dim > 0 or not preserve_first_dimension)
             )
             return np.squeeze(value, axis=axes) if axes else value
 
@@ -119,7 +117,6 @@ class Prediction(TensorClass):
 
 
 class Embedding(Prediction):
-
     @classmethod
     def from_parcel(cls, parcel: Parcel) -> "Embedding":
         return cls(
@@ -127,7 +124,7 @@ class Embedding(Prediction):
             payload=TensorDict(
                 {TensorKey.embedding: parcel.payload},
                 batch_size=parcel.payload.shape[0],
-            )
+            ),
         )
 
     @staticmethod
@@ -138,9 +135,7 @@ class Embedding(Prediction):
     @classmethod
     def write(cls, prediction: "Embedding") -> dict[str, Any]:
         return {
-            TensorKey.embedding.name: cls.normalize(
-                prediction.payload[TensorKey.embedding]
-                .detach()
-                .float()
-            ).cpu().tolist()
+            TensorKey.embedding.name: cls.normalize(prediction.payload[TensorKey.embedding].detach().float())
+            .cpu()
+            .tolist()
         }

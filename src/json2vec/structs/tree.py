@@ -91,7 +91,6 @@ class Node(NodeMixin, pydantic.BaseModel):
 
     @pydantic.model_validator(mode="after")
     def check_node_name(self):
-
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("name must be a non-empty string")
 
@@ -102,7 +101,6 @@ class Node(NodeMixin, pydantic.BaseModel):
 
     @pydantic.model_validator(mode="after")
     def check_n_heads_is_even(self):
-
         if not isinstance(self.n_heads, int):
             raise ValueError("n_heads must be an integer")
 

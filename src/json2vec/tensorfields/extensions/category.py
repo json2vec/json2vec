@@ -37,6 +37,7 @@ UNAVAILABLE_LABEL = "<unavailable>"
 category.callback(VocabularySyncCallback)
 category.callback(CounterUpdateCallback)
 
+
 @category.register
 class Request(RequestBase):
     """Categorical scalar tensorfield request backed by an online vocabulary."""
@@ -49,7 +50,6 @@ class Request(RequestBase):
 
     @pydantic.model_validator(mode="after")
     def check_topk(self):
-
         if self.topk is None:
             self.topk = []
 
@@ -71,7 +71,6 @@ class Request(RequestBase):
 
         return self
 
-    
 
 @category.register
 @tensorclass
@@ -90,7 +89,6 @@ class TensorField(TensorFieldBase):
         strata: Strata,
         interprocess_encoding_context: Vocabulary,
     ) -> TensorFieldBase:
-
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
         tokens = apply(values, partial(interprocess_encoding_context, update=(strata == Strata.train)))
@@ -236,10 +234,9 @@ class Embedder(EmbedderBase):
         safe_content = content.masked_fill(~valued, 0)
 
         embeddings: torch.Tensor = (
-            self.embeddings[TensorKey.state.name](state) +
-            self.embeddings[TensorKey.content.name](safe_content) * valued.unsqueeze(-1)
+            self.embeddings[TensorKey.state.name](state)
+            + self.embeddings[TensorKey.content.name](safe_content) * valued.unsqueeze(-1)
         ).reshape(N, *dims, -1)
-
 
         return Parcel(
             payload=embeddings,
@@ -251,7 +248,6 @@ class Embedder(EmbedderBase):
     @property
     def interprocess_encoding_context(self) -> Vocabulary:
         return self.vocab.state
-
 
 
 @category.register
@@ -309,7 +305,7 @@ def loss(
             )
             .masked_select(trainable)
             .mean()
-        )
+        ),
     )
 
     module.track(
@@ -335,19 +331,20 @@ def loss(
             )
             .masked_select(valued)
             .mean()
-        )
+        ),
     )
 
     for topk in module.hyperparameters.requests[prediction.address].topk:
         module.track(
             (prediction.address, strata, Metric.accuracy, f"top{topk}"),
             value=(
-                content_inputs
-                .topk(k=topk, dim=1)
+                content_inputs.topk(k=topk, dim=1)
                 .indices.eq(content_targets.unsqueeze(1))
                 .any(dim=1)
-                .masked_select(valued).float().mean()
-            )
+                .masked_select(valued)
+                .float()
+                .mean()
+            ),
         )
 
     module.track(
@@ -360,7 +357,6 @@ def loss(
 
 @category.register
 def write(module: Model, prediction: Prediction):
-
     node = module.nodes[prediction.address]
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     content_logits: torch.Tensor = prediction.payload[TensorKey.content]
@@ -368,10 +364,7 @@ def write(module: Model, prediction: Prediction):
     tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
     state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
     state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {
-        token: state_distribution[..., index]
-        for index, token in enumerate(tokens.tolist())
-    }
+    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
     vocab = np.array(node.embedder.vocab.snapshot(), dtype=object)
     labels = vocab

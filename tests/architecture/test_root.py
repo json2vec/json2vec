@@ -311,25 +311,17 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     model = Model(hyperparameters=hyperparameters, batch_size=2)
 
     vocabulary_callbacks = [
-        callback
-        for callback in model.configure_callbacks()
-        if isinstance(callback, VocabularySyncCallback)
+        callback for callback in model.configure_callbacks() if isinstance(callback, VocabularySyncCallback)
     ]
     counter_callbacks = [
-        callback
-        for callback in model.configure_callbacks()
-        if isinstance(callback, CounterUpdateCallback)
+        callback for callback in model.configure_callbacks() if isinstance(callback, CounterUpdateCallback)
     ]
 
     mutation_lock_callbacks = [
-        callback
-        for callback in model.configure_callbacks()
-        if isinstance(callback, MutationLockCallback)
+        callback for callback in model.configure_callbacks() if isinstance(callback, MutationLockCallback)
     ]
     runtime_placement_callbacks = [
-        callback
-        for callback in model.configure_callbacks()
-        if isinstance(callback, RuntimePlacementCallback)
+        callback for callback in model.configure_callbacks() if isinstance(callback, RuntimePlacementCallback)
     ]
 
     assert len(runtime_placement_callbacks) == 1
@@ -346,7 +338,14 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
     model._trainer = type(  # noqa: SLF001
         "TrainerStub",
         (),
-        {"callbacks": [RuntimePlacementCallback(), MutationLockCallback(), VocabularySyncCallback(), CounterUpdateCallback()]},
+        {
+            "callbacks": [
+                RuntimePlacementCallback(),
+                MutationLockCallback(),
+                VocabularySyncCallback(),
+                CounterUpdateCallback(),
+            ]
+        },
     )()
 
     assert model.configure_callbacks() == []
