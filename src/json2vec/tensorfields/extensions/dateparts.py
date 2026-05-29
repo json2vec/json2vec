@@ -1,6 +1,7 @@
 # ty: ignore[invalid-argument-type,invalid-assignment,unknown-argument,unresolved-attribute]
 from __future__ import annotations
 
+import difflib
 import enum
 import math
 import re
@@ -74,6 +75,22 @@ class DatePart(enum.StrEnum):
         return cls.DEPTH[datepart]
 
 
+def _normalize_datepart_key(value: str) -> str:
+    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
+    value = re.sub(r"[^0-9A-Za-z]+", "_", value)
+    return value.strip("_").casefold()
+
+
+def _datepart_lookup() -> dict[str, DatePart]:
+    lookup: dict[str, DatePart] = {}
+    for datepart in DatePart:
+        normalized = _normalize_datepart_key(datepart.value)
+        lookup[normalized] = datepart
+        lookup[normalized.replace("_", "")] = datepart
+
+    return lookup
+
+
 @DatePart.day_of_month.register(depth=31)
 def _(arr: np.ndarray) -> np.ndarray:
     month_start = arr.astype("datetime64[M]")
@@ -132,6 +149,35 @@ class Request(RequestBase):
     type: Literal["dateparts"] = "dateparts"
     dateparts: list[DatePart]
     pattern: Annotated[str | None, pydantic.Field(default=None)] = None
+
+    @pydantic.field_validator("dateparts", mode="before", check_fields=False)
+    @classmethod
+    def _coerce_dateparts(cls, value: Any) -> Any:
+        if not isinstance(value, (list, tuple)):
+            return value
+
+        lookup = _datepart_lookup()
+        canonical = [datepart.value for datepart in DatePart]
+        dateparts: list[DatePart] = []
+        for item in value:
+            if isinstance(item, DatePart):
+                dateparts.append(item)
+                continue
+
+            if not isinstance(item, str):
+                raise ValueError(f"datepart values must be strings, got {type(item).__name__}")
+
+            key = _normalize_datepart_key(item)
+            match = lookup.get(key) or lookup.get(key.replace("_", ""))
+            if match is not None:
+                dateparts.append(match)
+                continue
+
+            suggestions = difflib.get_close_matches(key, canonical, n=1)
+            suggestion = f"; did you mean '{suggestions[0]}'?" if suggestions else ""
+            raise ValueError(f"unknown datepart '{item}'{suggestion}")
+
+        return dateparts
 
     @pydantic.field_validator("dateparts", check_fields=False)
     @classmethod

@@ -1,0 +1,118 @@
+# Category
+
+Use `Category` for a single label from a bounded vocabulary: class labels,
+country codes, product families, merchant IDs, and similar discrete values.
+
+```json
+{
+  "merchant": "ACME_MARKET",
+  "merchant_id": "12345"
+}
+```
+
+```python
+import json2vec as j2v
+
+merchant = j2v.Category(
+    "merchant",
+    max_vocab_size=4096,
+    topk=[3, 10],
+    p_unavailable=0.02,
+)
+```
+
+Use `Category` when exactly one label is present. Use `Set` when the field can
+contain multiple labels, and use `Entity` when the goal is local equality
+matching inside repeated records rather than a persistent vocabulary.
+
+## Input Values
+
+`Category` expects scalar labels. Strings are the normal input; use a
+preprocessor if upstream identifiers need to be converted into stable label
+strings. `None` is encoded as a null state, and missing array positions are
+encoded as padded state.
+
+## Examples
+
+Common category fields include:
+
+- A supervised class label such as `fraud`, `churn`, `species`, or `diagnosis`.
+- A bounded business label such as customer tier, region, product family, or channel.
+- A stable categorical code such as country, currency, device type, or merchant category.
+- A high-value identifier only when it should be learned as a persistent global label.
+
+## Configuration
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `max_vocab_size` | `10000` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
+| `p_unavailable` | `0.01` | During training, randomly routes known labels to the unavailable bucket so the decoder learns that case. |
+| `topk` | `[]` | Optional top-k accuracy metrics and prediction candidates. Values must be positive, not `1`, and less than `max_vocab_size`. |
+
+## Shared Preprocessing State
+
+`Category` maintains an online vocabulary shared by encoding workers and saved
+with the model. Training data can add new labels until `max_vocab_size` is full.
+Validation, test, and prediction data do not expand the vocabulary.
+
+Labels that are not in the learned vocabulary keep state `valued`, but their
+content is routed to a reserved unavailable bucket at index `max_vocab_size`.
+This preserves the fact that the field existed while avoiding unstable
+vocabulary growth after training.
+
+`p_unavailable` deliberately complicates training by randomly routing some known
+training labels into that unavailable bucket. This gives the decoder examples of
+valued-but-unavailable content before it sees truly unseen labels during
+validation or inference.
+
+## Target Behavior
+
+When a `Category` is masked or used as a target, the decoder predicts:
+
+- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `content`: a categorical distribution over learned vocabulary labels plus the internal unavailable bucket.
+
+Top-k metrics are tracked for each configured value in `topk`.
+
+## Top-K Nuances
+
+`topk` serves two roles:
+
+- During training and evaluation, JSON2Vec tracks a separate top-k accuracy
+  metric for each configured value.
+- During prediction, the output contains one candidate list sized to
+  `max(topk)`, capped by the current learned vocabulary size.
+
+`topk=1` is disallowed because top-1 is already represented by the primary
+`content.value` and `content.probability` fields. Values must be less than
+`max_vocab_size` so the requested candidates stay inside the learned label
+space. Duplicate values are normalized away.
+
+The reserved unavailable bucket can affect training loss and metrics, but it is
+not emitted as a prediction candidate.
+
+## Prediction Output
+
+`Model.predict(...)` returns the most likely known label, its probability, and
+the candidate list requested by `topk`:
+
+```python
+{
+    "record/merchant": {
+        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "content": {
+            "value": ...,
+            "probability": ...,
+            "topk": ...,
+        },
+    }
+}
+```
+
+The internal unavailable bucket is not emitted as a predicted label.
+
+## Notes
+
+Use `Set` when a field can contain multiple labels. Use `Entity` when the goal
+is local identity matching inside repeated records rather than a persistent
+global vocabulary.

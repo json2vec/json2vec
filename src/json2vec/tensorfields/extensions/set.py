@@ -43,6 +43,7 @@ class Request(RequestBase):
     type: Literal["set"] = "set"
     max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10_000
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
+    threshold: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
 
 
 def _items(value: Any) -> Iterable[Any]:
@@ -373,6 +374,7 @@ def loss(
 @sets.register
 def write(module: Model, prediction: Prediction):
     node = module.nodes[prediction.address]
+    request: Request = module.hyperparameters.requests[prediction.address]
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     content_logits: torch.Tensor = prediction.payload[TensorKey.content]
 
@@ -383,7 +385,22 @@ def write(module: Model, prediction: Prediction):
 
     vocab = node.embedder.vocab.snapshot()
     probabilities = content_logits[..., : len(vocab)].sigmoid().detach().float().cpu().numpy()
-    content_payload = {str(label): probabilities[..., index] for index, label in enumerate(vocab)}
+    if request.threshold is None:
+        content_payload = {str(label): probabilities[..., index] for index, label in enumerate(vocab)}
+    else:
+        labels = np.asarray(vocab, dtype=object)
+
+        def pack_thresholded(values: np.ndarray) -> dict[str, float] | list:
+            if values.ndim == 1:
+                keep = values >= request.threshold
+                return {
+                    str(label): float(probability)
+                    for label, probability in zip(labels[keep].tolist(), values[keep].tolist())
+                }
+
+            return [pack_thresholded(values[index]) for index in range(values.shape[0])]
+
+        content_payload = pack_thresholded(probabilities)
 
     return {
         TensorKey.state.name: state_payload,

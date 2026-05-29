@@ -226,7 +226,11 @@ class Decoder(DecoderBase):
 
         request: Request = hyperparameters.requests[address]
 
-        self.linear = torch.nn.Linear(
+        self.classification = torch.nn.Linear(
+            in_features=hyperparameters.d_model,
+            out_features=len(Tokens),
+        )
+        self.regression = torch.nn.Linear(
             in_features=hyperparameters.d_model,
             out_features=request.n_dim,
         )
@@ -235,7 +239,8 @@ class Decoder(DecoderBase):
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
         return TensorDict(
             source={
-                TensorKey.content: self.linear(pooled),
+                TensorKey.state: self.classification(pooled),
+                TensorKey.content: self.regression(pooled),
             }
         )
 
@@ -251,30 +256,67 @@ def loss(
     request: Request = module.hyperparameters.requests[address]
 
     trainable = batch.trainable.reshape(-1)
+    state_targets = batch.targets[TensorKey.state].reshape(-1)
+    state_inputs = prediction.payload[TensorKey.state].reshape(-1, len(Tokens))
+
+    output: torch.Tensor = module.track(
+        (address, strata, Metric.loss, TensorKey.state),
+        value=(
+            torch.nn.functional.cross_entropy(
+                input=state_inputs,
+                target=state_targets,
+                reduction="none",
+            )
+            .masked_select(trainable)
+            .mean()
+        ),
+    )
+
+    module.track(
+        (address, strata, Metric.accuracy, TensorKey.state),
+        value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
+    )
+
+    valued = trainable & state_targets.eq(Tokens.valued.value)
+    if not valued.any():
+        return output
+
     inputs = prediction.payload[TensorKey.content].reshape(-1, request.n_dim)
     targets = batch.targets[TensorKey.content].reshape(-1, request.n_dim)
     diff = inputs.subtract(targets)
 
-    loss: torch.Tensor = module.track(
+    output += module.track(
         (address, strata, Metric.loss, TensorKey.content),
-        value=request.objective.loss(inputs=inputs, targets=targets).masked_select(trainable).mean(),
+        value=request.objective.loss(inputs=inputs, targets=targets).masked_select(valued).mean(),
     )
 
     module.track(
         (address, strata, Metric.mae, TensorKey.content),
-        value=diff.absolute().mean(dim=1).masked_select(trainable).mean(),
+        value=diff.absolute().mean(dim=1).masked_select(valued).mean(),
     )
 
     module.track(
         (address, strata, Metric.rmse, TensorKey.content),
-        value=diff.square().mean(dim=1).sqrt().masked_select(trainable).mean(),
+        value=diff.square().mean(dim=1).sqrt().masked_select(valued).mean(),
     )
 
-    return loss
+    return output
 
 
 @vector.register
 def write(module: Model, prediction: Prediction):
+    content: np.ndarray = prediction.payload[TensorKey.content].detach().float().cpu().numpy()
+    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
+    tokens: np.ndarray = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
+    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
+    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
+    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
+
+    non_valued = state_logits.argmax(dim=-1).ne(Tokens.valued.value).detach().cpu().numpy()
+    content = content.copy()
+    content[non_valued] = 0.0
+
     return {
-        TensorKey.content.name: prediction.payload[TensorKey.content].detach().float().cpu().numpy(),
+        TensorKey.state.name: state_payload,
+        TensorKey.content.name: content,
     }

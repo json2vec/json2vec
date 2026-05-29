@@ -1,0 +1,84 @@
+# Vector
+
+Use `Vector` for fixed-width numeric vectors supplied by another system:
+precomputed embeddings, dense descriptors, sensor windows, or model features.
+
+```json
+{
+  "embedding": [0.12, -0.03, 0.44, 0.08]
+}
+```
+
+```python
+import json2vec as j2v
+
+embedding = j2v.Vector(
+    "embedding",
+    n_dim=4,
+    objective="l2",
+)
+```
+
+Use `Vector` when embeddings or dense features are already present in the input
+record. Use `Text` when JSON2Vec should compute embeddings from strings. Use an
+`Array` when repeated measurements have item structure.
+
+## Input Values
+
+`Vector` accepts:
+
+- Python lists or tuples.
+- 1D NumPy arrays.
+- 1D PyTorch tensors.
+
+Every valued input must have exactly `n_dim` numeric elements. `None` is encoded
+as a null state, and missing array positions are encoded as padded state.
+
+## Examples
+
+Common vector fields include:
+
+- Precomputed text, image, audio, or product embeddings.
+- Dense features emitted by a fraud, ranking, search, or recommendation model.
+- Sensor windows or compact numerical descriptors.
+- External representation vectors that should be joined with structured fields.
+
+## Configuration
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `n_dim` | required | Vector width. Must be positive. |
+| `objective` | `"l2"` | Content reconstruction objective: `"l1"` or `"l2"`. |
+
+## Target Behavior
+
+When a `Vector` is masked or used as a target, the decoder predicts:
+
+- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `content`: the reconstructed vector.
+
+For non-valued predicted states, public output uses a zero vector for `content`
+so API consumers get a stable shape without treating zeros as observed values.
+
+Tracked metrics include vector reconstruction loss, mean absolute error, and
+root mean squared error.
+
+## Prediction Output
+
+`Model.predict(...)` returns state probabilities and reconstructed vector
+content:
+
+```python
+{
+    "record/embedding": {
+        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "content": ...,
+    }
+}
+```
+
+## Notes
+
+Use `Text` when JSON2Vec should compute text embeddings from strings. Use
+`Vector` when embeddings or dense features are already present in the input
+record.

@@ -59,7 +59,7 @@ class Request(RequestBase):
     """Numeric scalar tensorfield request."""
 
     type: Literal["number"] = "number"
-    jitter: Annotated[float, pydantic.Field(ge=0.0, lt=1.0, default=0.0)] = 0.0
+    jitter: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
     offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     alpha: Annotated[float | None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None

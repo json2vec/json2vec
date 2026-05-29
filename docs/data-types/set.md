@@ -1,0 +1,115 @@
+# Set
+
+Use `Set` for zero or more labels from a bounded vocabulary: tags, permissions,
+flags, detected concepts, applicable categories, and similar multi-label fields.
+
+```json
+{
+  "tags": ["vip", "international", "vip"]
+}
+```
+
+```python
+import json2vec as j2v
+
+tags = j2v.Set(
+    "tags",
+    max_vocab_size=2048,
+    p_unavailable=0.02,
+    threshold=0.75,
+)
+```
+
+Use `Set("tags")` for unordered labels with no per-label attributes. Use an
+`Array` when each label has its own fields, such as
+`Array(Category("tag"), Number("score"))`.
+
+## Input Values
+
+`Set` accepts common multi-label shapes:
+
+- `None` becomes a null field state.
+- A string becomes a single-item set.
+- An iterable becomes a multi-item set.
+- A non-iterable scalar becomes a single-item set.
+- An empty iterable becomes a valued field with no active labels.
+
+Repeated labels collapse into one active vocabulary entry. The vocabulary is
+learned online from training data and saved with the model.
+
+## Examples
+
+Common set fields include:
+
+- Product tags, content topics, user interests, or applicable policies.
+- Permissions, feature flags, alert codes, or rule hits.
+- Detected entities or concepts from an upstream parser.
+- Multi-label outcomes where more than one class can be true at once.
+
+## Configuration
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `max_vocab_size` | `10000` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
+| `p_unavailable` | `0.01` | During training, randomly routes known labels to the unavailable bucket so the decoder learns that case. |
+| `threshold` | `None` | Optional prediction-time probability threshold. When set, prediction output only includes labels at or above the threshold. |
+
+## Shared Preprocessing State
+
+`Set` maintains an online vocabulary shared by encoding workers and saved with
+the model. Training data can add new labels until `max_vocab_size` is full.
+Validation, test, and prediction data do not expand the vocabulary.
+
+Unknown labels after training are represented internally by a reserved
+unavailable slot at index `max_vocab_size`. Prediction output only includes
+probabilities for labels in the learned vocabulary.
+
+`p_unavailable` randomly removes some known training labels from their normal
+vocabulary slots and marks the unavailable slot for that set value. This teaches
+the model that a valued set can contain labels that are not individually known.
+
+## Target Behavior
+
+When a `Set` is masked or used as a target, the decoder predicts:
+
+- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `content`: independent logits for each learned vocabulary item.
+
+Content loss uses binary cross entropy because each label is independently
+present or absent.
+
+## Prediction Output
+
+Without `threshold`, `Model.predict(...)` returns state probabilities
+and one probability array per known label:
+
+```python
+{
+    "record/tags": {
+        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "content": {
+            "vip": ...,
+            "international": ...,
+        },
+    }
+}
+```
+
+With `threshold=0.75`, `content` is a nested JSON-like structure that
+only includes labels whose probabilities meet the threshold:
+
+```python
+{
+    "record/tags": {
+        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "content": {"vip": 0.91},
+    }
+}
+```
+
+## Notes
+
+Unknown labels at validation, test, or inference time are represented internally
+with the reserved unavailable bucket. Prediction output only includes labels in
+the learned vocabulary. Thresholding is an inference-output filter; it does not
+change training loss.
