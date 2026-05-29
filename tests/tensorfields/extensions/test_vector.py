@@ -2,7 +2,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from json2vec.structs.enums import Strata, TensorKey
+from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.vector import Decoder, Embedder, TensorField, loss, write
@@ -83,6 +83,7 @@ def test_vector_embedder_and_decoder_shapes():
 
     decoder = Decoder(hyperparameters=structure, address="root/embedding")
     prediction = decoder([parcel])
+    assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 3)
 
 
@@ -109,10 +110,18 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
     )
     field.mask(1.0)
 
+    state_logits = torch.full((*field.state.shape, len(Tokens)), -50.0)
+    state_logits.scatter_(-1, field.targets[TensorKey.state].unsqueeze(-1), 50.0)
     prediction_tensor = field.targets[TensorKey.content] + 2.0
     prediction = Prediction(
         address="root/embedding",
-        payload=TensorDict({TensorKey.content: prediction_tensor}, batch_size=[2]),
+        payload=TensorDict(
+            {
+                TensorKey.state: state_logits,
+                TensorKey.content: prediction_tensor,
+            },
+            batch_size=[2],
+        ),
     )
 
     module = _DummyModule(structure)
@@ -122,11 +131,24 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
 
 def test_vector_write_returns_content_payload():
     structure = Hyperparameters.model_validate(_structure_payload())
+    state_logits = torch.full((2, 2, len(Tokens)), -50.0)
+    state_logits[0, :, Tokens.valued.value] = 50.0
+    state_logits[1, :, Tokens.null.value] = 50.0
     prediction = Prediction(
         address="root/embedding",
-        payload=TensorDict({TensorKey.content: torch.zeros(2, 2, 3)}, batch_size=[2]),
+        payload=TensorDict(
+            {
+                TensorKey.state: state_logits,
+                TensorKey.content: torch.ones(2, 2, 3),
+            },
+            batch_size=[2],
+        ),
     )
 
     output = write(module=_DummyModule(structure), prediction=prediction)
+    assert TensorKey.state.name in output
+    assert set(output[TensorKey.state.name].keys()) == set(Tokens.__members__.keys())
     assert TensorKey.content.name in output
     assert output[TensorKey.content.name].shape == (2, 2, 3)
+    assert output[TensorKey.content.name][0].sum() == 6.0
+    assert output[TensorKey.content.name][1].sum() == 0.0

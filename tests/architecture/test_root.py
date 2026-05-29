@@ -590,6 +590,71 @@ def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
     )
 
 
+def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
+    model = _primed_prediction_model()
+
+    inputs = model.encode(
+        batch=[
+            {"color": "red"},
+            {"color": "blue"},
+        ]
+    )
+
+    color = inputs[Address("root", "color")]
+    label = inputs[Address("root", "label")]
+
+    assert TensorKey.metadata in inputs.keys()
+    assert inputs[TensorKey.metadata] == [[{"color": "red"}], [{"color": "blue"}]]
+    assert torch.equal(
+        color.state,
+        torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
+    )
+    assert torch.equal(label.state, torch.full((2, 1), Tokens.masked.value))
+
+
+def test_encode_accepts_preprocess() -> None:
+    def __root_helper_preprocess(observation: dict):
+        return {"color": observation["hue"]}
+
+    model = _primed_prediction_model()
+
+    inputs = model.encode(
+        batch=[
+            {"hue": "red"},
+            {"hue": "blue"},
+        ],
+        preprocess=__root_helper_preprocess,
+    )
+
+    assert inputs[TensorKey.metadata] == [[{"color": "red"}], [{"color": "blue"}]]
+    assert torch.equal(
+        inputs[Address("root", "color")].state,
+        torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
+    )
+
+
+def test_encode_accepts_strata_for_testing_training_inputs() -> None:
+    model = _primed_prediction_model()
+
+    inputs = model.encode(
+        batch=[
+            {"color": "red", "label": "warm"},
+            {"color": "blue", "label": "cool"},
+        ],
+        strata=Strata.train,
+    )
+
+    assert TensorKey.metadata not in inputs.keys()
+    assert torch.equal(
+        inputs[Address("root", "label")].targets[TensorKey.state],
+        torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
+    )
+    assert torch.equal(
+        inputs[Address("root", "label")].state,
+        torch.full((2, 1), Tokens.masked.value),
+    )
+
+
 def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
     model = _primed_prediction_model()
 
@@ -624,7 +689,7 @@ def test_inference_helpers_accept_postprocess() -> None:
 
     supervised = model.predict(batch=batch, postprocess=postprocess)
     embeddings = model.embed(batch=batch, postprocess=postprocess)
-    evaluated_supervised, evaluated_embeddings = model.evaluate(batch=batch, postprocess=postprocess)
+    evaluated = model.evaluate(batch=batch, postprocess=postprocess)
 
     assert len(calls) == 3
     assert calls[0][0]["batch"] is batch
@@ -634,8 +699,8 @@ def test_inference_helpers_accept_postprocess() -> None:
     assert Address("root") in calls[1][2]
     assert supervised[Address("root", "label")][TensorKey.value.name] == ["postprocessed"]
     assert embeddings[Address("root")][TensorKey.embedding.name] == [[1.0, 2.0]]
-    assert evaluated_supervised == supervised
-    assert evaluated_embeddings == embeddings
+    assert evaluated.predictions == supervised
+    assert evaluated.embeddings == embeddings
 
 
 def test_inference_helpers_accept_preprocess() -> None:

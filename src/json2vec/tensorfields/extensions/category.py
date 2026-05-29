@@ -1,8 +1,9 @@
 # ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
 import pydantic
@@ -46,9 +47,16 @@ class Request(RequestBase):
 
     type: Literal["category"] = "category"
     max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10000
-    n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
     topk: list[int] | None = None
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def reject_removed_options(cls, data: Any) -> Any:
+        if isinstance(data, Mapping) and "n_bands" in data:
+            raise ValueError("Category does not support n_bands")
+
+        return data
 
     @pydantic.model_validator(mode="after")
     def check_topk(self):

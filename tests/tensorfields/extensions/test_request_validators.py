@@ -45,6 +45,33 @@ def test_category_topk_rejects_values_at_or_above_vocab():
         Hyperparameters.model_validate(payload)
 
 
+def test_category_rejects_removed_n_bands_option():
+    payload = _structure_with_field(
+        {
+            "name": "cat",
+            "type": "category",
+            "query": "[*].code",
+            "max_vocab_size": 64,
+            "n_bands": 8,
+        }
+    )
+    with pytest.raises(ValueError, match="Category does not support n_bands"):
+        Hyperparameters.model_validate(payload)
+
+
+def test_set_threshold_rejects_values_above_one():
+    payload = _structure_with_field(
+        {
+            "name": "tags",
+            "type": "set",
+            "query": "[*].tags",
+            "threshold": 1.1,
+        }
+    )
+    with pytest.raises(ValueError, match="less than or equal to 1"):
+        Hyperparameters.model_validate(payload)
+
+
 def test_dateparts_dateparts_reject_duplicates():
     payload = _structure_with_field(
         {
@@ -55,6 +82,38 @@ def test_dateparts_dateparts_reject_duplicates():
         }
     )
     with pytest.raises(ValueError, match="dateparts must be unique"):
+        Hyperparameters.model_validate(payload)
+
+
+def test_dateparts_normalizes_friendly_datepart_names():
+    payload = _structure_with_field(
+        {
+            "name": "ts",
+            "type": "dateparts",
+            "query": "[*].created_at",
+            "dateparts": ["Day Of Week", "month-of-year", "HourOfDay"],
+        }
+    )
+    structure = Hyperparameters.model_validate(payload)
+    request = structure.requests["root/ts"]
+
+    assert [datepart.value for datepart in request.dateparts] == [
+        "day_of_week",
+        "month_of_year",
+        "hour_of_day",
+    ]
+
+
+def test_dateparts_unknown_name_suggests_canonical_value():
+    payload = _structure_with_field(
+        {
+            "name": "ts",
+            "type": "dateparts",
+            "query": "[*].created_at",
+            "dateparts": ["day of wek"],
+        }
+    )
+    with pytest.raises(ValueError, match="did you mean 'day_of_week'"):
         Hyperparameters.model_validate(payload)
 
 

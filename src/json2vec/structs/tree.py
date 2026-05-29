@@ -51,6 +51,17 @@ class Node(NodeMixin, pydantic.BaseModel):
     p_mask: Rate | None = None
     p_prune: PruneRate | None = None
 
+    @property
+    def target(self) -> bool:
+        return self.p_prune == 1.0
+
+    @target.setter
+    def target(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise ValueError("target must be a boolean")
+
+        self.p_prune = 1.0 if value else None
+
     @classmethod
     def sanitize_name(cls, value: str) -> str:
         sanitized = re.sub(r"[^0-9A-Za-z_-]+", "_", value).strip("_")
@@ -78,6 +89,10 @@ class Node(NodeMixin, pydantic.BaseModel):
             if values.get("p_prune") not in (None, 1.0):
                 raise ValueError("target=True is shorthand for p_prune=1.0")
             values["p_prune"] = 1.0
+        else:
+            if values.get("p_prune") is not None:
+                raise ValueError("target=False is shorthand for p_prune=None")
+            values["p_prune"] = None
 
         return values
 

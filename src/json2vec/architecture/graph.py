@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from json2vec.architecture.node import NodeModule
+from json2vec.data.datasets.base import EncodedInput
+from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address, Node
 
@@ -19,9 +21,19 @@ class ModelGraph:
     """Build and rebuild runtime modules from schema hyperparameters."""
 
     @staticmethod
-    def build(hyperparameters: Hyperparameters, batch_size: int) -> tuple[torch.nn.ModuleDict, torch.Tensor]:
+    def example_forward_kwargs(hyperparameters: Hyperparameters, batch_size: int) -> dict[str, EncodedInput | Strata]:
         from json2vec.data.iterables import mock
 
+        return {
+            "inputs": mock(hyperparameters=hyperparameters, batch_size=batch_size),
+            "strata": Strata.predict,
+        }
+
+    @staticmethod
+    def build(
+        hyperparameters: Hyperparameters,
+        batch_size: int,
+    ) -> tuple[torch.nn.ModuleDict, dict[str, EncodedInput | Strata]]:
         nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
         for address in hyperparameters.requests | hyperparameters.arrays:
@@ -31,7 +43,7 @@ class ModelGraph:
                 batch_size=batch_size,
             )
 
-        return nodes, mock(hyperparameters=hyperparameters, batch_size=batch_size)
+        return nodes, ModelGraph.example_forward_kwargs(hyperparameters=hyperparameters, batch_size=batch_size)
 
     @staticmethod
     def install(module: "Model") -> None:
@@ -72,8 +84,6 @@ class ModelGraph:
 
     @staticmethod
     def reset_selected(module: "Model", selected: list[Node], *, descendants: bool = False) -> None:
-        from json2vec.data.iterables import mock
-
         selected_by_address: dict[Address, Node] = {}
         for node in selected:
             if node.address in module.nodes:
@@ -94,7 +104,10 @@ class ModelGraph:
                 batch_size=module.batch_size,
             )
 
-        module.example_input_array = mock(hyperparameters=module.hyperparameters, batch_size=module.batch_size)
+        module.example_input_array = ModelGraph.example_forward_kwargs(
+            hyperparameters=module.hyperparameters,
+            batch_size=module.batch_size,
+        )
         device = module.device
         if isinstance(device, torch.device):
             module.to(device=device)

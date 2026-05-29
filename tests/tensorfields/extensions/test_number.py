@@ -29,6 +29,15 @@ def _structure_payload() -> dict:
     }
 
 
+def test_number_request_allows_jitter_above_one():
+    payload = _structure_payload()
+    payload["fields"]["fields"][0]["jitter"] = 1.5
+
+    structure = Hyperparameters.model_validate(payload)
+
+    assert structure.requests["root/amount"].jitter == 1.5
+
+
 class _TrackingModule:
     def __init__(self, hyperparameters: Hyperparameters, embedder: Embedder, decoder: Decoder):
         self.hyperparameters = hyperparameters

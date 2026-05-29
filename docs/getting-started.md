@@ -66,4 +66,5 @@ For source data whose keys do not match the schema names, add explicit `query=..
 
 - Continue with **Hello World** for the complete supervised loop.
 - Jump to **Masked Pretraining** if you want a nested self-supervised example.
+- Review [Built-In Data Types](data-types/index.md) when choosing between `Array`, `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text`.
 - Use [Model Updates](guides/model-update.ipynb) when you need to add, delete, reset, or temporarily override schema nodes after creating a model.

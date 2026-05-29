@@ -2,7 +2,7 @@
 
 A schema does two jobs at once. It describes where the pipeline should read values from a record (via `JMESPath`), and it defines the model modules built for those values.
 
-Arrays become context encoders with pooling mechanisms, and leaf fields become typed tensorfields such as `Number`, `Category`, `Set`, `DateParts`, etc.
+Arrays become context encoders with pooling mechanisms, and leaf fields become typed tensorfields such as `Number`, `Category`, `Set`, `DateParts`, etc. See [Built-In Data Types](../data-types/index.md) for the behavior and configuration of each schema node.
 
 Every leaf field has `active=True` by default. Set `active=False` when you want to keep a field in the schema tree but ignore it during encoding, forward passes, losses, and prediction. Reactivating the same field later rebuilds the compatible modules. Deactivating a leaf field is like deleting it, but it is a reversible operation.
 

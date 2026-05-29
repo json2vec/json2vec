@@ -14,7 +14,8 @@ from tensordict import TensorDict
 from json2vec.architecture.contracts import sanitize
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
-from json2vec.data.datasets.base import EncodedBatch
+from json2vec.data.datasets.base import EncodedBatch, EncodedInput
+from json2vec.data.iterables import encode
 from json2vec.structs.enums import Metric, Strata, TensorKey
 from json2vec.structs.packages import Embedding, Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -49,9 +50,6 @@ class EvaluationResult:
 
     predictions: dict[Address, dict[str, Any]]
     embeddings: dict[Address, dict[str, Any]]
-
-    def as_tuple(self) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
-        return self.predictions, self.embeddings
 
 
 class ModelRuntime:
@@ -182,16 +180,13 @@ class ModelRuntime:
         return supervised, embeddings
 
     @staticmethod
-    def evaluate(
+    def encode(
         module: "Model",
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: PreprocessFn | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> EvaluationResult:
-        from json2vec.data.iterables import encode
-
-        was_training = module.training
-        raw_batch = batch
+        strata: Strata | str = Strata.predict,
+    ) -> EncodedInput:
+        strata = Strata.normalize(strata)
 
         if preprocess is not None:
             observations: EncodedBatch = []
@@ -206,12 +201,23 @@ class ModelRuntime:
         elif batch and isinstance(batch[0], dict):
             batch = [[request] for request in cast(list[dict[str, Any]], batch)]
 
-        inputs = encode(
+        return encode(
             batch=cast(EncodedBatch, batch),
             hyperparameters=module.hyperparameters,
-            strata=Strata.predict,
+            strata=strata,
             interprocess_encoding_context=module.interprocess_encoding_context,
         )
+
+    @staticmethod
+    def evaluate(
+        module: "Model",
+        batch: EncodedBatch | list[dict[str, Any]],
+        preprocess: PreprocessFn | None = None,
+        postprocess: Postprocessor | None = None,
+    ) -> EvaluationResult:
+        was_training = module.training
+        raw_batch = batch
+        inputs = ModelRuntime.encode(module=module, batch=batch, preprocess=preprocess, strata=Strata.predict)
 
         module.eval()
         try:
@@ -226,7 +232,7 @@ class ModelRuntime:
         if postprocess is not None:
             context = {
                 "batch": raw_batch,
-                "observations": batch,
+                "observations": inputs[TensorKey.metadata],
                 "input": inputs,
                 TensorKey.metadata: inputs[TensorKey.metadata],
             }

@@ -1,0 +1,100 @@
+# DateParts
+
+Use `DateParts` when calendar position matters more than timestamp magnitude:
+hour of day, day of week, month of year, and related cyclical buckets.
+
+```json
+{
+  "created_at": "2026-05-28T14:30:00"
+}
+```
+
+```python
+import json2vec as j2v
+
+created_at = j2v.DateParts(
+    "created_at",
+    dateparts=["day of week", "HourOfDay"],
+    pattern="%Y-%m-%dT%H:%M:%S",
+)
+```
+
+Use `DateParts` for recurrence and seasonality: hour of day, day of week,
+month, business cycles, and operational schedules. Use a derived `Number` for
+elapsed time, age, recency, duration, or ordering. For example, compute
+`days_since_transaction` before inference when the signal is the difference
+between inference time and transaction time.
+
+Avoid raw timestamps as features by default. They can encourage the model to
+learn dataset-specific time boundaries, rollout dates, policy changes, or
+train/test split artifacts instead of general patterns.
+
+## Input Values
+
+`DateParts` accepts datetime-like values that NumPy can coerce to
+`datetime64[m]`. If `pattern` is provided, source values are parsed with
+`datetime.strptime` first. `None` is encoded as a null state, and missing array
+positions are encoded as padded state.
+
+Internal precision is minutes. Seconds can be parsed, but no built-in date part
+uses second-level precision.
+
+## Examples
+
+Common date-part fields include:
+
+- Transaction time, login time, request time, or event time.
+- Seasonal features such as month of year or day of year.
+- Operational cycles such as hour of day, day of week, or minute of hour.
+- Calendar-position signals where exact elapsed time is less important than recurrence.
+
+## Configuration
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `dateparts` | required | Non-empty, unique list of date parts to extract. Friendly casing and separators are normalized. |
+| `pattern` | `None` | Optional `datetime.strptime` pattern for string inputs. |
+
+Available date parts:
+
+| Date part | Buckets |
+| --- | --- |
+| `Day Of Year` | 366 |
+| `Week Of Year` | 53 |
+| `Month Of Year` | 12 |
+| `Day Of Month` | 31 |
+| `Week Of Month` | 6 |
+| `Day Of Week` | 7 |
+| `Hour Of Day` | 24 |
+| `Minute Of Hour` | 60 |
+
+`dateparts` accepts common spellings such as `"day_of_week"`, `"day of week"`,
+`"Day-Of-Week"`, `"DAY_OF_WEEK"`, and `"DayOfWeek"`. Serialized schemas use the
+canonical lower-case values.
+
+## Target Behavior
+
+When `DateParts` is masked or used as a target, the decoder predicts:
+
+- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `content`: one categorical distribution for each configured date part.
+
+The loss averages the configured date-part classification losses after the
+state loss.
+
+## Prediction Output
+
+`DateParts` currently trains and reports losses and accuracies, but it does not
+emit user-facing `Model.predict(...)` payloads. Configure it as an input feature
+or reconstruction target when the model should learn timestamp structure, not
+when you need decoded timestamp values.
+
+## Notes
+
+Use `Number` for monotonic timestamps, ages, intervals, or durations where
+numeric distance matters. `DateParts` discards that continuous distance and
+keeps only the requested calendar buckets.
+
+Preprocess timestamps to a consistent timezone before encoding. JSON2Vec stores
+dateparts at minute precision and does not apply an application-specific
+timezone policy.

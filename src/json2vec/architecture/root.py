@@ -18,10 +18,10 @@ from tensordict import TensorDict
 from json2vec.architecture.checkpoint import CheckpointState
 from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
+from json2vec.architecture.mutations import SchemaEditor
 from json2vec.architecture.plot import PlotMode
 from json2vec.architecture.runtime import EvaluationResult, ModelRuntime, Postprocessor, PreprocessFn, step
-from json2vec.architecture.schema_editor import SchemaEditor
-from json2vec.data.datasets.base import EncodedBatch
+from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.structs.enums import AttentionMode, Strata
 from json2vec.structs.experiment import (
     Hyperparameters,
@@ -521,23 +521,37 @@ class Model(lit.LightningModule):
         return ModelRuntime.write(self, predictions)
 
     @immutable("inference")
+    def encode(
+        self,
+        batch: EncodedBatch | list[dict[str, Any]],
+        preprocess: PreprocessFn | None = None,
+        strata: Strata | str = Strata.predict,
+    ) -> EncodedInput:
+        """Return encoded tensorfield inputs for raw or processed observations."""
+        return ModelRuntime.encode(
+            self,
+            batch=batch,
+            preprocess=preprocess,
+            strata=strata,
+        )
+
+    @immutable("inference")
     def evaluate(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: PreprocessFn | None = None,
         postprocess: Postprocessor | None = None,
-    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
+    ) -> EvaluationResult:
         """Run prediction and embedding for encoded or raw observations.
 
         If `preprocess` is omitted, raw records are encoded unchanged.
         """
-        result: EvaluationResult = ModelRuntime.evaluate(
+        return ModelRuntime.evaluate(
             self,
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
         )
-        return result.as_tuple()
 
     def predict(
         self,
@@ -546,12 +560,14 @@ class Model(lit.LightningModule):
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
         """Return typed predictions for a raw or encoded batch."""
-        supervised, _ = self.evaluate(
+
+        result = self.evaluate(
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
         )
-        return supervised
+
+        return result.predictions
 
     def embed(
         self,
@@ -560,12 +576,12 @@ class Model(lit.LightningModule):
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
         """Return configured embeddings for a raw or encoded batch."""
-        _, embeddings = self.evaluate(
+        result = self.evaluate(
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
         )
-        return embeddings
+        return result.embeddings
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

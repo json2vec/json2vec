@@ -61,6 +61,17 @@ nav:
       - Why JSON2Vec: motivation.md
       - Schemas & Queries: guides/model-schemas.md
       - Model Updates: guides/model-update.ipynb
+  - Data Types:
+      - Overview: data-types/index.md
+      - Array: data-types/array.md
+      - Number: data-types/number.md
+      - Category: data-types/category.md
+      - Set: data-types/set.md
+      - DateParts: data-types/dateparts.md
+      - Entity: data-types/entity.md
+      - Vector: data-types/vector.md
+      - Text: data-types/text.md
+      - Custom Data Types: guides/tensorfields.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
       - Masked Pretraining: tutorials/pretraining.ipynb

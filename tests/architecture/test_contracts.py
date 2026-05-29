@@ -136,6 +136,15 @@ def test_forward_contract_rejects_masked_non_trainable_input() -> None:
         model(inputs, strata=Strata.train)
 
 
+def test_forward_contract_allows_masked_non_trainable_predict_input() -> None:
+    model = _model(j2v.Category(name="color", max_vocab_size=16))
+    inputs = _inputs(model, strata=Strata.predict)
+    field = inputs[Address("record/color")]
+    field.state[0, 0] = Tokens.masked.value
+
+    model(inputs, strata=Strata.predict)
+
+
 def test_forward_contract_rejects_trainable_input_without_targets() -> None:
     model = _model(j2v.Category(name="color", max_vocab_size=16))
     inputs = _inputs(model)
