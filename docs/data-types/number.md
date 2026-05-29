@@ -1,7 +1,7 @@
 # Number
 
 Use `Number` for continuous scalar values: prices, counts, measurements,
-scores, durations, and other numeric features.
+scores, datetime durations, and other numeric features.
 
 ```json
 {
@@ -56,7 +56,7 @@ Common number fields include:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `jitter` | `0.0` | Adds training-time uniform noise after normalization. Must be `>= 0.0`. |
+| `jitter` | `0.0` | Adds training-time uniform noise after normalization to prevent overfitting. Must be `>= 0.0`. |
 | `n_bands` | `8` | Advanced: negative exponent bound for log-spaced Fourier frequencies. Must be positive. |
 | `offset` | `4` | Advanced: positive exponent bound for log-spaced Fourier frequencies. Must be positive. |
 | `alpha` | `None` | Optional exponential update rate for the online normalizer. `None` uses cumulative statistics. |
@@ -103,3 +103,6 @@ The content loss is computed in normalized units, while tracked `mae` and
 
 Use `Category` for numeric-looking identifiers or class labels. `Number` assumes
 the magnitude and distance between values are meaningful.
+
+There are some cases in which users may wish to use binned numerical data or CDFs of input values.
+Both can be implemented as a custom data type, or using custom preprocessors.

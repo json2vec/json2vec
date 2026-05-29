@@ -75,6 +75,8 @@ representation for learning identity relationships.
 
 ## Notes
 
-Use `Category` when identifiers should map to a persistent global vocabulary and
-be emitted as labels. Use `Entity` when only equality relationships within the
-current repeated context matter.
+Use `j2v.Category` when identifiers should map to a persistent global vocabulary and
+be emitted as labels. Use `j2v.Entity` when only equality relationships within the
+current repeated context matter, or there are simply too many unique global values to track.
+
+Users may also consider defining a "superbloom" style custom extension to maintain a larger set of unique categorical values without the linear memory costs associated with `j2v.Category`.

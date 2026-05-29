@@ -29,7 +29,7 @@ matching inside repeated records rather than a persistent vocabulary.
 
 `Category` expects scalar labels. Strings are the normal input; use a
 preprocessor if upstream identifiers need to be converted into stable label
-strings. `None` is encoded as a null state, and missing array positions are
+strings, or cleaned otherwise. `None` is encoded as a null state, and missing array positions are
 encoded as padded state.
 
 ## Examples
@@ -64,6 +64,8 @@ vocabulary growth after training.
 training labels into that unavailable bucket. This gives the decoder examples of
 valued-but-unavailable content before it sees truly unseen labels during
 validation or inference.
+
+`p_unavailable` is a necessary, but unfortunate, requirement for the following reason: the model has no other way to represent valued content of categories labels during inference time that were not observed during training time. Introducing new vocabulary outside of training time will have no effect on the model's parameters.
 
 ## Target Behavior
 
@@ -109,10 +111,10 @@ the candidate list requested by `topk`:
 }
 ```
 
-The internal unavailable bucket is not emitted as a predicted label.
+The special `<unavailable>` token is not emitted as a predicted label.
 
 ## Notes
 
-Use `Set` when a field can contain multiple labels. Use `Entity` when the goal
-is local identity matching inside repeated records rather than a persistent
-global vocabulary.
+Use `Set` when a field can contain multiple labels (such that categories are not mutually exclusive).
+Use `Entity` when the goal is local identity matching inside repeated records rather than a persistent global vocabulary.
+Use `Text` if you want to break category labels down into word pieces.

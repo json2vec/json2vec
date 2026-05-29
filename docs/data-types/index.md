@@ -8,6 +8,9 @@ requested.
 Use constructor names from the package root in Python. Serialized schemas use
 the lower-case `type` value.
 
+The pages in this section cover built-in data types. To define a new data type,
+see [Custom Data Types](../guides/tensorfields.ipynb).
+
 ## Choose A Data Type
 
 | Source value | Recommended type | Use a different type when |

@@ -1,6 +1,6 @@
 # Set
 
-Use `Set` for zero or more labels from a bounded vocabulary: tags, permissions,
+Use `Set` for multi-label discrete targets from a bounded, learned vocabulary: tags, permissions,
 flags, detected concepts, applicable categories, and similar multi-label fields.
 
 ```json
@@ -20,9 +20,7 @@ tags = j2v.Set(
 )
 ```
 
-Use `Set("tags")` for unordered labels with no per-label attributes. Use an
-`Array` when each label has its own fields, such as
-`Array(Category("tag"), Number("score"))`.
+The input to a `Set` and an `Array` of `Category` values look similar, but developers should use `Set("tags")` for unordered labels. An `Array` of `Category` expected that the values are ordered.
 
 ## Input Values
 

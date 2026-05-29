@@ -71,6 +71,7 @@ nav:
       - Entity: data-types/entity.md
       - Vector: data-types/vector.md
       - Text: data-types/text.md
+      - Custom Data Types: guides/tensorfields.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
       - Masked Pretraining: tutorials/pretraining.ipynb

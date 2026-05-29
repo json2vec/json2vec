@@ -59,31 +59,18 @@ Available date parts:
 
 | Date part | Buckets |
 | --- | --- |
-| `day_of_year` | 366 |
-| `week_of_year` | 53 |
-| `month_of_year` | 12 |
-| `day_of_month` | 31 |
-| `week_of_month` | 6 |
-| `day_of_week` | 7 |
-| `hour_of_day` | 24 |
-| `minute_of_hour` | 60 |
+| `Day Of Year` | 366 |
+| `Week Of Year` | 53 |
+| `Month Of Year` | 12 |
+| `Day Of Month` | 31 |
+| `Week Of Month` | 6 |
+| `Day Of Week` | 7 |
+| `Hour Of Day` | 24 |
+| `Minute Of Hour` | 60 |
 
 `dateparts` accepts common spellings such as `"day_of_week"`, `"day of week"`,
 `"Day-Of-Week"`, `"DAY_OF_WEEK"`, and `"DayOfWeek"`. Serialized schemas use the
 canonical lower-case values.
-
-Bucket conventions:
-
-| Date part | Values |
-| --- | --- |
-| `day_of_year` | `1` to `366` |
-| `week_of_year` | `1` to `53`; derived from NumPy week buckets, not an ISO-week contract. |
-| `month_of_year` | `1` to `12` |
-| `day_of_month` | `1` to `31` |
-| `week_of_month` | `1` to `6` |
-| `day_of_week` | `0` to `6` |
-| `hour_of_day` | `0` to `23` |
-| `minute_of_hour` | `0` to `59` |
 
 ## Target Behavior
 

@@ -81,4 +81,4 @@ content:
 
 Use `Text` when JSON2Vec should compute text embeddings from strings. Use
 `Vector` when embeddings or dense features are already present in the input
-record.
+record. This may be used for encoding media. At this point in time, `json2vec` does not support arbitrary media (images, videos, audio).
