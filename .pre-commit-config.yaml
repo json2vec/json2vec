@@ -1,16 +1,18 @@
+fail_fast: true
+
 repos:
   - repo: local
     hooks:
-      - id: ruff-check
-        name: Run Ruff
-        entry: uv run ruff check --fix
+      - id: ruff-format
+        name: Format with Ruff
+        entry: uv run ruff format
         language: system
         pass_filenames: false
         always_run: true
 
-      - id: ruff-format
-        name: Format with Ruff
-        entry: uv run ruff format
+      - id: ruff-check
+        name: Run Ruff
+        entry: uv run ruff check --fix
         language: system
         pass_filenames: false
         always_run: true
