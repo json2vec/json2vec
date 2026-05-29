@@ -90,10 +90,11 @@ def test_checkpoint_state_round_trip(tmp_path) -> None:
     assert restored.batch_size == model.batch_size
 
 
-def test_runtime_evaluation_result_keeps_tuple_shape() -> None:
+def test_runtime_evaluation_result_exposes_predictions_and_embeddings() -> None:
     result = EvaluationResult(predictions={"record/label": {"value": [1]}}, embeddings={})
 
-    assert result.as_tuple() == (result.predictions, result.embeddings)
+    assert result.predictions == {"record/label": {"value": [1]}}
+    assert result.embeddings == {}
 
 
 def test_experiment_reexports_selector_api() -> None:
