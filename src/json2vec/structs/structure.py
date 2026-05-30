@@ -31,7 +31,6 @@ class Array(Node):
     type: Annotated[Literal["array"], pydantic.Field(default="array")] = "array"
     attention: AttentionMode = AttentionMode.mha
     max_length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
-    n_outputs: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)

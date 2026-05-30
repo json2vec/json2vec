@@ -14,14 +14,12 @@ def _payload() -> dict:
             "description": "root array docs",
             "dropout": 0.1,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [
                 {
                     "name": "branch",
                     "type": "array",
                     "description": "branch docs",
                     "max_length": 4,
-                    "n_outputs": 1,
                     "fields": [
                         {
                             "name": "category_leaf",
@@ -38,7 +36,7 @@ def _payload() -> dict:
 
 def test_array_accepts_positional_children():
     array = Array(
-        Category("category_leaf", query="[*].code"),
+        Category(name="category_leaf", query="[*].code"),
         name="branch",
     )
 
@@ -48,7 +46,7 @@ def test_array_accepts_positional_children():
 def test_array_rejects_positional_and_keyword_children():
     with pytest.raises(TypeError, match="both positionally and by keyword"):
         Array(
-            Category("category_leaf", query="[*].code"),
+            Category(name="category_leaf", query="[*].code"),
             name="branch",
             fields=[],
         )
@@ -74,7 +72,7 @@ def test_hyperparameters_converts_leaf_instances_nested_in_arrays():
                     "name": "branch",
                     "type": "array",
                     "fields": [
-                        Category("category_leaf", query="[*].code"),
+                        Category(name="category_leaf", query="[*].code"),
                     ],
                 }
             ],

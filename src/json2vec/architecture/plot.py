@@ -252,7 +252,6 @@ def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) ->
             "d_model",
             "attention",
             "max_length",
-            "n_outputs",
             "n_layers",
             "n_heads",
             "batch_size",
@@ -267,7 +266,7 @@ def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) ->
     elif isinstance(node, Leaf):
         preferred = ["query", "pooling", "max_vocab_size", "topk", "objective", "weight"]
     else:
-        preferred = ["attention", "max_length", "n_outputs", "n_layers", "n_heads"]
+        preferred = ["attention", "max_length", "n_layers", "n_heads"]
 
     remaining = [key for key in values if key not in preferred]
     return preferred + remaining

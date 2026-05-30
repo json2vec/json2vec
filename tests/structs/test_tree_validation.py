@@ -15,6 +15,11 @@ def test_address_can_be_initialized_from_path_parts():
     assert isinstance(address, str)
 
 
+def test_address_accepts_slash_delimited_or_path_parts():
+    assert Address("record/label") == Address("record", "label")
+    assert Address("record/metrics/sepal_length") == Address("record", "metrics", "sepal_length")
+
+
 def test_address_can_be_pydantic_coerced_from_string():
     payload = AddressPayload.model_validate({"address": "record/label"})
 

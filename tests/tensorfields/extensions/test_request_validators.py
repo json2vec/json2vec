@@ -11,7 +11,6 @@ def _structure_with_field(field: dict) -> dict:
             "type": "array",
             "dropout": 0.1,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [field],
         },
     }

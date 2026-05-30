@@ -3,7 +3,7 @@ import torch
 from tensordict import TensorDict
 
 from json2vec.structs.enums import TensorKey
-from json2vec.structs.packages import Embedding, Parcel, Prediction
+from json2vec.structs.packages import Parcel, Prediction
 
 
 def test_parcel():
@@ -40,7 +40,7 @@ def test_prediction():
     assert prediction.payload[TensorKey.state].shape == (2, 3)
 
 
-def test_embedding_from_parcel_copies_payload_and_origin():
+def test_prediction_can_carry_embedding_payload():
     parcel = Parcel(
         payload=torch.randn(2, 3, 4),
         origin="source",
@@ -48,24 +48,13 @@ def test_embedding_from_parcel_copies_payload_and_origin():
         batch_size=[2],
     )
 
-    embedding = Embedding.from_parcel(parcel)
-    assert embedding.address == "source"
-    assert embedding.payload[TensorKey.embedding].shape == parcel.payload.shape
-
-
-def test_embedding_normalize_l2_normalizes_last_dimension():
-    values = torch.tensor([[[3.0, 4.0], [0.0, 5.0]]], dtype=torch.float32)
-    normalized = Embedding.normalize(values)
-
-    norms = torch.linalg.norm(normalized, ord=2, dim=-1)
-    assert torch.allclose(norms, torch.ones_like(norms))
-
-
-def test_embedding_normalize_preserves_zero_vectors():
-    values = torch.zeros(2, 3, 4, dtype=torch.float32)
-    normalized = Embedding.normalize(values)
-
-    assert torch.equal(normalized, values)
+    prediction = Prediction(
+        address=parcel.origin,
+        payload=TensorDict({TensorKey.embedding: parcel.payload}, batch_size=[2]),
+        batch_size=[2],
+    )
+    assert prediction.address == "source"
+    assert prediction.payload[TensorKey.embedding].shape == parcel.payload.shape
 
 
 def test_prediction_denest_collapses_only_singleton_lists():
@@ -134,7 +123,7 @@ def test_prediction_squeeze_preserves_batch_dimension():
     ]
 
 
-def test_prediction_unbatch_preserves_prediction_types_and_singleton_batch_dims():
+def test_prediction_unbatch_preserves_singleton_batch_dims():
     outputs = [
         Prediction(
             address="record/brand",
@@ -145,7 +134,7 @@ def test_prediction_unbatch_preserves_prediction_types_and_singleton_batch_dims(
                 batch_size=[2],
             ),
         ),
-        Embedding(
+        Prediction(
             address="root/label",
             payload=TensorDict(
                 {
@@ -161,7 +150,7 @@ def test_prediction_unbatch_preserves_prediction_types_and_singleton_batch_dims(
     assert len(unbatched) == 2
     assert all(len(item) == 2 for item in unbatched)
     assert isinstance(unbatched[0][0], Prediction)
-    assert isinstance(unbatched[0][1], Embedding)
+    assert isinstance(unbatched[0][1], Prediction)
     assert len(unbatched[0][0].payload) == 1
     assert len(unbatched[0][1].payload) == 1
     assert unbatched[0][0].payload[TensorKey.content].shape == (1, 2)

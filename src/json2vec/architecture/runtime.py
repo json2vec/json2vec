@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NotRequired, TypeAlias, TypedDict, cast
 
 import torch
@@ -17,7 +16,7 @@ from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import Metric, Strata, TensorKey
-from json2vec.structs.packages import Embedding, Parcel, Prediction
+from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import (
     TENSORFIELDS,
@@ -37,19 +36,11 @@ class Output(TypedDict):
     predictions: NotRequired[list[Prediction]]
 
 
-PreprocessFn: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
+Preprocessor: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
 Postprocessor: TypeAlias = Callable[
-    [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
-    tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
+    [dict[str, Any], dict[Address, dict[str, Any]]],
+    dict[Address, dict[str, Any]] | None,
 ]
-
-
-@dataclass(frozen=True)
-class EvaluationResult:
-    """Typed inference result before public convenience methods split it."""
-
-    predictions: dict[Address, dict[str, Any]]
-    embeddings: dict[Address, dict[str, Any]]
 
 
 class ModelRuntime:
@@ -82,9 +73,6 @@ class ModelRuntime:
             processed[embedding.destination].append(embedding)
             outgoing[embedding.origin] = embedding
 
-            if address in module.hyperparameters.embed:
-                predictions.append(Embedding.from_parcel(embedding))
-
         for depth in reversed(module.hyperparameters.depthwise):
             for address in depth:
                 if len(processed[address]) == 0:
@@ -99,10 +87,23 @@ class ModelRuntime:
                 outgoing[encoding.origin] = encoding
 
                 if address in module.hyperparameters.embed:
-                    predictions.append(Embedding.from_parcel(encoding))
+                    predictions.append(
+                        Prediction(
+                            address=encoding.origin,
+                            payload=TensorDict(
+                                {TensorKey.embedding: encoding.payload},
+                                batch_size=encoding.payload.shape[0],
+                            ),
+                            batch_size=encoding.payload.shape[0],
+                        )
+                    )
 
         for address in module.hyperparameters.active_requests.keys():
-            if (torch.any(inputs[address].trainable)) or (address in module.hyperparameters.target):
+            if (
+                torch.any(inputs[address].trainable)
+                or (address in module.hyperparameters.target)
+                or (address in module.hyperparameters.embed)
+            ):
                 heritage: list[Address] = module.hyperparameters.requests[address].heritage
                 parcels: list[Parcel] = [
                     outgoing[address]
@@ -112,7 +113,7 @@ class ModelRuntime:
 
                 node_module = cast(NodeModule, module.nodes[address])
                 decoder: DecoderBase = node_module.decoder
-                predictions.append(decoder(parcels))
+                predictions.append(decoder(parcels, embed=address in module.hyperparameters.embed))
 
         return predictions
 
@@ -133,7 +134,10 @@ class ModelRuntime:
         losses: list[torch.Tensor] = []
 
         for prediction in predictions:
-            if isinstance(prediction, Embedding):
+            if prediction.address not in module.hyperparameters.requests:
+                continue
+
+            if set(prediction.payload.keys()) <= {TensorKey.embedding}:
                 continue
 
             address: Address = prediction.address
@@ -156,34 +160,38 @@ class ModelRuntime:
     def write(
         module: "Model",
         predictions: list[Prediction],
-    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
-        supervised: dict[Address, dict[str, Any]] = {}
-        embeddings: dict[Address, dict[str, Any]] = {}
+    ) -> dict[Address, dict[str, Any]]:
+        outputs: dict[Address, dict[str, Any]] = {}
 
         for prediction in predictions:
-            if isinstance(prediction, Embedding):
-                embeddings[prediction.address] = Prediction.serialize(
-                    Prediction.squeeze(Embedding.write(prediction), preserve_first_dimension=True)
-                )
-                continue
+            scribed: dict[Any, Any] = {}
 
-            request: RequestBase = module.hyperparameters.requests[prediction.address]
-            extension: Plugin = TENSORFIELDS[request.type]
-            write_fn = cast(Callable[..., dict[TensorKey, Any] | None], getattr(extension, "write"))
+            if prediction.address in module.hyperparameters.requests:
+                request: RequestBase = module.hyperparameters.requests[prediction.address]
+                extension: Plugin = TENSORFIELDS[request.type]
+                write_fn = cast(Callable[..., dict[TensorKey, Any] | None], getattr(extension, "write"))
 
-            scribed: dict[TensorKey, Any] | None = write_fn(module=module, prediction=prediction)
-            if scribed is not None:
-                supervised[prediction.address] = Prediction.serialize(
+                written: dict[TensorKey, Any] | None = write_fn(module=module, prediction=prediction)
+                if written is not None:
+                    scribed.update(written)
+
+            if TensorKey.embedding in prediction.payload.keys():
+                values = prediction.payload[TensorKey.embedding].detach().float()
+                embedding = torch.nn.functional.normalize(values, p=2, dim=-1, eps=1e-12)
+                scribed[TensorKey.embedding.name] = embedding.cpu().tolist()
+
+            if scribed:
+                outputs[prediction.address] = Prediction.serialize(
                     Prediction.squeeze(scribed, preserve_first_dimension=True)
                 )
 
-        return supervised, embeddings
+        return outputs
 
     @staticmethod
     def encode(
         module: "Model",
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
+        preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
     ) -> EncodedInput:
         strata = Strata.normalize(strata)
@@ -209,12 +217,12 @@ class ModelRuntime:
         )
 
     @staticmethod
-    def evaluate(
+    def predict(
         module: "Model",
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
+        preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-    ) -> EvaluationResult:
+    ) -> dict[Address, dict[str, Any]]:
         was_training = module.training
         raw_batch = batch
         inputs = ModelRuntime.encode(module=module, batch=batch, preprocess=preprocess, strata=Strata.predict)
@@ -227,7 +235,7 @@ class ModelRuntime:
             if was_training:
                 module.train()
 
-        supervised, embeddings = module.write(raw_predictions)
+        predictions = module.write(raw_predictions)
 
         if postprocess is not None:
             context = {
@@ -236,12 +244,12 @@ class ModelRuntime:
                 "input": inputs,
                 TensorKey.metadata: inputs[TensorKey.metadata],
             }
-            processed = postprocess(context, supervised, embeddings)
+            processed = postprocess(context, predictions)
 
             if processed is not None:
-                supervised, embeddings = processed
+                predictions = processed
 
-        return EvaluationResult(predictions=supervised, embeddings=embeddings)
+        return predictions
 
 
 step = ModelRuntime.step

@@ -24,7 +24,6 @@ def _hyperparameters() -> Hyperparameters:
                 "type": "array",
                 "dropout": 0.1,
                 "max_length": 1,
-                "n_outputs": 1,
                 "fields": [
                     {
                         "name": "label",
@@ -79,7 +78,6 @@ def _prediction_hyperparameters() -> Hyperparameters:
             "type": "array",
             "embed": True,
             "max_length": 1,
-            "n_outputs": 1,
             "attention": "none",
             "fields": [
                 {
@@ -290,7 +288,6 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
                 "name": "root",
                 "type": "array",
                 "max_length": 1,
-                "n_outputs": 1,
                 "fields": [
                     {
                         "name": "label",
@@ -520,7 +517,6 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
                 "type": "array",
                 "embed": True,
                 "max_length": 1,
-                "n_outputs": 1,
                 "attention": "none",
                 "fields": [
                     {
@@ -655,52 +651,87 @@ def test_encode_accepts_strata_for_testing_training_inputs() -> None:
     )
 
 
-def test_embed_encodes_batch_and_returns_embedding_outputs() -> None:
+def test_predict_encodes_batch_and_returns_embedding_outputs() -> None:
     model = _primed_prediction_model()
 
-    embeddings = model.embed(
+    predictions = model.predict(
         batch=[
             [{"color": "red"}],
             [{"color": "blue"}],
         ]
     )
 
-    assert Address("root") in embeddings
-    embedding = embeddings[Address("root")][TensorKey.embedding.name]
+    assert Address("root") in predictions
+    embedding = predictions[Address("root")][TensorKey.embedding.name]
     assert len(embedding) == 2
     assert all(not isinstance(row[0], list) for row in embedding)
+
+
+def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
+    class ConstantPool(torch.nn.Module):
+        def forward(self, memory: torch.Tensor) -> torch.Tensor:
+            return torch.ones(memory.shape[0], 1, memory.shape[-1], device=memory.device)
+
+    hyperparameters = Hyperparameters.model_validate(
+        {
+            "d_model": 8,
+            "fields": {
+                "name": "root",
+                "type": "array",
+                "max_length": 1,
+                "fields": [
+                    {
+                        "name": "color",
+                        "type": "category",
+                        "query": "[*].color",
+                        "embed": True,
+                        "max_vocab_size": 16,
+                    }
+                ],
+            },
+        }
+    )
+    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    model.nodes[Address("root", "color")].decoder.pool = ConstantPool()
+
+    inputs = model.encode(
+        batch=[
+            [{"color": "red"}],
+            [{"color": "blue"}],
+        ]
+    )
+    predictions = model(inputs, strata=Strata.predict)
+    prediction = next(item for item in predictions if item.address == Address("root", "color"))
+
+    assert TensorKey.embedding in prediction.payload.keys()
+    assert torch.equal(prediction.payload[TensorKey.embedding], torch.ones(2, 1, 8))
 
 
 def test_inference_helpers_accept_postprocess() -> None:
     model = _primed_prediction_model()
     calls = []
 
-    def postprocess(context, supervised, embeddings):
-        calls.append((context, supervised, embeddings))
-        return (
-            {Address("root", "label"): {"value": ["postprocessed"]}},
-            {Address("root"): {"embedding": [[1.0, 2.0]]}},
-        )
+    def postprocess(context, predictions):
+        calls.append((context, predictions))
+        return {
+            Address("root", "label"): {"value": ["postprocessed"]},
+            Address("root"): {"embedding": [[1.0, 2.0]]},
+        }
 
     batch = [
         [{"color": "red"}],
         [{"color": "blue"}],
     ]
 
-    supervised = model.predict(batch=batch, postprocess=postprocess)
-    embeddings = model.embed(batch=batch, postprocess=postprocess)
-    evaluated = model.evaluate(batch=batch, postprocess=postprocess)
+    predictions = model.predict(batch=batch, postprocess=postprocess)
 
-    assert len(calls) == 3
+    assert len(calls) == 1
     assert calls[0][0]["batch"] is batch
     assert TensorKey.metadata in calls[0][0]["input"].keys()
     assert list(calls[0][0][TensorKey.metadata]) == batch
     assert Address("root", "label") in calls[0][1]
-    assert Address("root") in calls[1][2]
-    assert supervised[Address("root", "label")][TensorKey.value.name] == ["postprocessed"]
-    assert embeddings[Address("root")][TensorKey.embedding.name] == [[1.0, 2.0]]
-    assert evaluated.predictions == supervised
-    assert evaluated.embeddings == embeddings
+    assert predictions[Address("root", "label")][TensorKey.value.name] == ["postprocessed"]
+    assert predictions[Address("root")][TensorKey.embedding.name] == [[1.0, 2.0]]
 
 
 def test_inference_helpers_accept_preprocess() -> None:

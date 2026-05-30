@@ -17,7 +17,6 @@ def _payload(*, attention: str = "mha", pooling: str = "query") -> dict:
             "attention": attention,
             "dropout": 0.0,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [
                 {
                     "name": "category",

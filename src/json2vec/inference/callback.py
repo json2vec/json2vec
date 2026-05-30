@@ -21,8 +21,8 @@ if TYPE_CHECKING:
     from json2vec.architecture.root import Model
 
 Postprocessor: TypeAlias = Callable[
-    [dict[str, Any], dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]],
-    tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]] | None,
+    [dict[str, Any], dict[Address, dict[str, Any]]],
+    dict[Address, dict[str, Any]] | None,
 ]
 
 
@@ -41,19 +41,6 @@ class Writer(callbacks.BasePredictionWriter):
         self.schema: pa.Schema | None = None
         self.writer: pq.ParquetWriter | None = None
 
-    @staticmethod
-    def _as_struct_frame(values_by_address: dict[Address, dict[str, Any]], alias: str, num_rows: int) -> pl.DataFrame:
-        if len(values_by_address) == 0:
-            return pl.DataFrame({alias: [None] * num_rows})
-
-        columns: list[pl.DataFrame] = []
-        for address, values in values_by_address.items():
-            field_frame = pl.DataFrame(data=values)
-            columns.append(field_frame.select(pl.struct(pl.all()).alias(name=address)))
-
-        nested: pl.DataFrame = pl.concat(items=columns, how="horizontal")
-        return nested.select(pl.struct(pl.all()).alias(name=alias))
-
     def write_on_batch_end(
         self,
         trainer: lit.Trainer,
@@ -66,10 +53,7 @@ class Writer(callbacks.BasePredictionWriter):
     ) -> None:  # ty:ignore[invalid-method-override]
         num_rows = len(batch[TensorKey.metadata])
 
-        supervised: dict[Address, dict[str, Any]]
-        embeddings: dict[Address, dict[str, Any]]
-
-        supervised, embeddings = pl_module.write(predictions=output["predictions"])
+        predictions: dict[Address, dict[str, Any]] = pl_module.write(predictions=output["predictions"])
         postprocessor = self.postprocessor
 
         if postprocessor is not None:
@@ -81,18 +65,26 @@ class Writer(callbacks.BasePredictionWriter):
                 "batch_idx": batch_idx,
                 "dataloader_idx": dataloader_idx,
             }
-            processed = postprocessor(context, supervised, embeddings)
+            processed = postprocessor(context, predictions)
 
             if processed is not None:
-                supervised, embeddings = processed
+                predictions = processed
+
+        if len(predictions) == 0:
+            predictions_frame = pl.DataFrame({"predictions": [None] * num_rows})
+        else:
+            columns: list[pl.DataFrame] = []
+            for address, values in predictions.items():
+                field_frame = pl.DataFrame(data=values)
+                columns.append(field_frame.select(pl.struct(pl.all()).alias(name=address)))
+
+            nested: pl.DataFrame = pl.concat(items=columns, how="horizontal")
+            predictions_frame = nested.select(pl.struct(pl.all()).alias(name="predictions"))
 
         items = [
             pl.from_records(data=batch[TensorKey.metadata], schema=["inputs"], orient="row"),
-            self._as_struct_frame(values_by_address=supervised, alias="predictions", num_rows=num_rows),
+            predictions_frame,
         ]
-
-        if embeddings:
-            items.append(self._as_struct_frame(values_by_address=embeddings, alias="embeddings", num_rows=num_rows))
 
         table: pa.Table = pl.concat(items=items, how="horizontal").to_arrow()
 

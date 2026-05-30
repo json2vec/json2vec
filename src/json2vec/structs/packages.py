@@ -114,28 +114,3 @@ class Prediction(TensorClass):
     @staticmethod
     def denest(value: Any) -> Any:
         return Prediction.squeeze(value)
-
-
-class Embedding(Prediction):
-    @classmethod
-    def from_parcel(cls, parcel: Parcel) -> "Embedding":
-        return cls(
-            address=parcel.origin,
-            payload=TensorDict(
-                {TensorKey.embedding: parcel.payload},
-                batch_size=parcel.payload.shape[0],
-            ),
-        )
-
-    @staticmethod
-    def normalize(values: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
-        # L2-normalize each embedding vector for consistent similarity distance scales.
-        return torch.nn.functional.normalize(values, p=2, dim=-1, eps=eps)
-
-    @classmethod
-    def write(cls, prediction: "Embedding") -> dict[str, Any]:
-        return {
-            TensorKey.embedding.name: cls.normalize(prediction.payload[TensorKey.embedding].detach().float())
-            .cpu()
-            .tolist()
-        }

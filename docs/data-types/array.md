@@ -100,14 +100,13 @@ Common array fields include:
 | `fields` | `[]` | Child arrays or tensorfields. Positional constructor arguments become `fields`. |
 | `max_length` | `1` | Number of repeated slots retained per observation. Must be positive. |
 | `attention` | `"mha"` | Attention implementation for the array encoder. |
-| `n_outputs` | `1` | Number of output context tokens produced by the array encoder. |
 | `n_layers` | `1` | Number of encoder layers for this array. |
 | `n_heads` | `4` | Attention heads for this array. Must be even. |
 | `n_linear` | `1` | Number of feed-forward linear layers in this array. |
 | `dropout` | `None` | Optional dropout rate. |
 | `p_mask` | `None` | Stored on the array node. Runtime masking is applied to active child tensorfields. |
 | `p_prune` | `None` | Stored on the array node. Runtime pruning is applied to active child tensorfields. |
-| `embed` | `False` | Includes this array node in `Model.embed(...)` outputs. |
+| `embed` | `False` | Includes this array node in `Model.predict(...)` outputs under `embedding`. |
 | `description` | `None` | Optional schema metadata. |
 
 ## Nesting
@@ -133,9 +132,9 @@ be more efficient.
 
 ## Target And Prediction Behavior
 
-`Array` itself is not a supervised target and does not emit `Model.predict(...)`
-payloads. Its child tensorfields can be targets, and the array context is used
-to encode those children and route information through the model.
+`Array` itself is not a supervised target. Its child tensorfields can be
+targets, and the array context is used to encode those children and route
+information through the model.
 
-Configure `embed=True` on an array when you want `Model.embed(...)` to return a
-representation for the grouped context.
+Configure `embed=True` on an array when you want `Model.predict(...)` to return
+a representation for the grouped context under that array address.

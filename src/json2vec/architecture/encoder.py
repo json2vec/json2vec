@@ -76,7 +76,7 @@ class ArrayEncoder(torch.nn.Module):
         self.encoder = torch.nn.ModuleList(layers)
 
         self.pool = LearnedQueryCrossAttention(
-            n_context=array.n_outputs,
+            n_context=1,
             d_model=hyperparameters.d_model,
             nhead=array.n_heads,
             dropout=dropout,

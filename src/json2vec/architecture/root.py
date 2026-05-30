@@ -20,7 +20,7 @@ from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
 from json2vec.architecture.mutations import SchemaEditor
 from json2vec.architecture.plot import PlotMode
-from json2vec.architecture.runtime import EvaluationResult, ModelRuntime, Postprocessor, PreprocessFn, step
+from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.structs.enums import AttentionMode, Strata
 from json2vec.structs.experiment import (
@@ -141,8 +141,8 @@ class Model(lit.LightningModule):
     """Neural model generated from a JSON2Vec schema tree.
 
     `Model` owns the schema hyperparameters, tensorfield embedders, array
-    encoders, decoders, and convenience methods for prediction, embedding,
-    checkpointing, plotting, and schema mutation.
+    encoders, decoders, and convenience methods for prediction, checkpointing,
+    plotting, and schema mutation.
 
     Example:
         ```python
@@ -174,7 +174,6 @@ class Model(lit.LightningModule):
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
         max_length: int = 1,
-        n_outputs: int = 1,
         n_linear: int = 1,
         dropout: Rate | None = None,
         p_mask: Rate | None = None,
@@ -198,7 +197,6 @@ class Model(lit.LightningModule):
             embed: Configure the generated root array as an embedding output.
             attention: Attention mode for the generated root array.
             max_length: Maximum number of records per observation at the root.
-            n_outputs: Number of pooled outputs emitted by the generated root array.
             n_linear: Feed-forward block count on the generated root array.
             dropout: Optional dropout rate on the generated root array.
             p_mask: Optional mask rate on the generated root array.
@@ -220,7 +218,6 @@ class Model(lit.LightningModule):
             embed=embed,
             attention=attention,
             max_length=max_length,
-            n_outputs=n_outputs,
             n_linear=n_linear,
             dropout=dropout,
             p_mask=p_mask,
@@ -515,16 +512,14 @@ class Model(lit.LightningModule):
         """Load a `Model` checkpoint written by `Model.save(...)`."""
         return cast(Self, CheckpointState.load(cls, checkpoint))
 
-    def write(
-        self, predictions: list[Prediction]
-    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
+    def write(self, predictions: list[Prediction]) -> dict[Address, dict[str, Any]]:
         return ModelRuntime.write(self, predictions)
 
     @immutable("inference")
     def encode(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
+        preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
     ) -> EncodedInput:
         """Return encoded tensorfield inputs for raw or processed observations."""
@@ -536,52 +531,19 @@ class Model(lit.LightningModule):
         )
 
     @immutable("inference")
-    def evaluate(
+    def predict(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
+        preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-    ) -> EvaluationResult:
-        """Run prediction and embedding for encoded or raw observations.
-
-        If `preprocess` is omitted, raw records are encoded unchanged.
-        """
-        return ModelRuntime.evaluate(
+    ) -> dict[Address, dict[str, Any]]:
+        """Return typed predictions and configured embeddings for a raw or encoded batch."""
+        return ModelRuntime.predict(
             self,
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
         )
-
-    def predict(
-        self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> dict[Address, dict[str, Any]]:
-        """Return typed predictions for a raw or encoded batch."""
-
-        result = self.evaluate(
-            batch=batch,
-            preprocess=preprocess,
-            postprocess=postprocess,
-        )
-
-        return result.predictions
-
-    def embed(
-        self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> dict[Address, dict[str, Any]]:
-        """Return configured embeddings for a raw or encoded batch."""
-        result = self.evaluate(
-            batch=batch,
-            preprocess=preprocess,
-            postprocess=postprocess,
-        )
-        return result.embeddings
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

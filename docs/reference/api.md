@@ -8,8 +8,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Array(...)` declares a repeated nested context.
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
 - `PolarsDataModule(...)` builds data loaders from a configured model.
-- `Model.predict(...)` returns configured target predictions.
-- `Model.embed(...)` returns embeddings from nodes configured with `embed=True`.
+- `Model.predict(...)` returns configured target predictions and embeddings.
 - `Deployment` wraps a checkpoint or model instance for serving.
 
 ## Package
@@ -36,9 +35,7 @@ This page is generated from public docstrings and is meant as a lookup companion
         - plot
         - save
         - load
-        - evaluate
         - predict
-        - embed
 
 ## Schema
 

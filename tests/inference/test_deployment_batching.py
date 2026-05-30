@@ -37,10 +37,7 @@ class _DummyModel:
         ]
 
     def write(self, predictions: list[Prediction]):
-        return (
-            {"root/label": {"value": ["ok"]}},
-            {},
-        )
+        return {"root/label": {"value": ["ok"]}}
 
 
 def _api(**kwargs) -> tuple[API, _DummyModel]:
@@ -80,14 +77,13 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
 
     context = {"request": {"color": "r"}, "input": _input(7)}
 
-    def processor(context, predictions, embeddings):
+    def processor(context, predictions):
         seen["context"] = context
         seen["predictions"] = predictions
-        seen["embeddings"] = embeddings
-        return (
-            {"root/label": {"value": ["rewritten"]}},
-            {"root/vector": {"embedding": [[1.0, 2.0]]}},
-        )
+        return {
+            "root/label": {"value": ["rewritten"]},
+            "root/vector": {"embedding": [[1.0, 2.0]]},
+        }
 
     deployment, _ = _api(postprocessor=processor)
 
@@ -96,9 +92,8 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
     assert seen["context"] is context
     assert seen["context"]["request"] == {"color": "r"}
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
-    assert seen["embeddings"] == {}
     assert encoded["predictions"]["root/label"]["value"] == "rewritten"
-    assert encoded["embeddings"]["root/vector"]["embedding"] == [1.0, 2.0]
+    assert encoded["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
 
 
 def test_deployment_preprocesses_decode_request(monkeypatch):

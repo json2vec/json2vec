@@ -218,21 +218,16 @@ class API(ls.LitAPI):
                 },
             }
 
-        predictions, embeddings = self.model.write(predictions=response)
+        predictions = self.model.write(predictions=response)
         postprocessor = self.postprocessor
 
         if postprocessor is not None:
-            processed = postprocessor({} if context is None else context, predictions, embeddings)
+            processed = postprocessor({} if context is None else context, predictions)
 
             if processed is not None:
-                predictions, embeddings = processed
+                predictions = processed
 
-        payload = dict(predictions=predictions)
-
-        if embeddings:
-            payload["embeddings"] = embeddings
-
-        return Prediction.denest(payload)
+        return Prediction.denest(dict(predictions=predictions))
 
 
 _DEFAULT_DECODE_REQUEST_ANNOTATIONS = dict(API.decode_request.__annotations__)

@@ -17,7 +17,6 @@ def _structure_payload() -> dict:
             "type": "array",
             "dropout": 0.1,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [
                 {
                     "name": "amount",

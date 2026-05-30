@@ -108,7 +108,6 @@ def test_model_from_schema_accepts_root_array_options():
         embed=True,
         attention="none",
         max_length=3,
-        n_outputs=2,
         n_linear=2,
         dropout=0.2,
         p_mask=0.1,
@@ -120,7 +119,6 @@ def test_model_from_schema_accepts_root_array_options():
     assert params.fields.embed is True
     assert params.fields.attention == "none"
     assert params.fields.max_length == 3
-    assert params.fields.n_outputs == 2
     assert params.fields.n_linear == 2
     assert params.fields.dropout == 0.2
     assert params.fields.p_mask == 0.1

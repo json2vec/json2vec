@@ -74,7 +74,7 @@ groups children instead of reading one source value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `embed` | `False` | Includes this node in `Model.embed(...)` outputs. It does not make the field a target. |
+| `embed` | `False` | Includes this node in `Model.predict(...)` outputs under `embedding`. It does not make the field a target. |
 | `pooling` | `"query"` | Target decoder pooling: `"query"` or `"mean"`. |
 | `n_heads` | `4` | Attention heads used by query pooling. Must be even. |
 | `dropout` | `None` | Optional dropout rate for query pooling. |
