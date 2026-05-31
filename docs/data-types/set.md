@@ -1,7 +1,8 @@
 # Set
 
-Use `Set` for multi-label discrete targets from a bounded, learned vocabulary: tags, permissions,
-flags, detected concepts, applicable categories, and similar multi-label fields.
+Use `Set` for multi-label discrete values or targets from a bounded, learned
+vocabulary: tags, permissions, flags, detected concepts, applicable categories,
+and similar multi-label fields.
 
 ```json
 {
@@ -20,7 +21,9 @@ tags = j2v.Set(
 )
 ```
 
-The input to a `Set` and an `Array` of `Category` values look similar, but developers should use `Set("tags")` for unordered labels. An `Array` of `Category` expected that the values are ordered.
+The input to a `Set` and an `Array` of `Category` values can look similar, but
+use `Set("tags")` for unordered labels. An `Array` of `Category` expects order
+or item-level structure to matter.
 
 ## Input Values
 
@@ -43,6 +46,9 @@ Common set fields include:
 - Permissions, feature flags, alert codes, or rule hits.
 - Detected entities or concepts from an upstream parser.
 - Multi-label outcomes where more than one class can be true at once.
+
+Use `Array(Category("tag"))` instead when repeated labels need positions,
+attributes, or their own local context.
 
 ## Configuration
 

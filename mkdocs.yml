@@ -1,4 +1,4 @@
-site_name: JSON2Vec
+site_name: json2vec
 site_url: https://json2vec.github.io/json2vec/
 repo_url: https://github.com/json2vec/json2vec
 extra:
@@ -8,9 +8,14 @@ theme:
   name: material
   custom_dir: docs/overrides
   palette:
-    scheme: slate
-    primary: teal
-    accent: deep orange
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: deep orange
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: deep orange
   features:
     - navigation.sections
     - navigation.indexes
@@ -56,13 +61,16 @@ plugins:
             show_symbol_type_toc: true
 nav:
   - Home: index.md
+  - Motivation: motivation.md
   - Getting Started: getting-started.md
+  - AI / Expert Quickstart: ai-quickstart.md
   - Core Concepts:
-      - Why JSON2Vec: motivation.md
-      - Schemas & Queries: guides/model-schemas.md
-      - Model Updates: guides/model-update.ipynb
+      - Model Tree: core-concepts/model-tree.md
+      - Query Paths: core-concepts/querypaths.md
+      - Data Types: core-concepts/data-types.md
+      - Learning Modes & Embeddings: core-concepts/embeddings.md
+      - Mutations: core-concepts/mutations.ipynb
   - Data Types:
-      - Overview: data-types/index.md
       - Array: data-types/array.md
       - Number: data-types/number.md
       - Category: data-types/category.md
@@ -71,16 +79,19 @@ nav:
       - Entity: data-types/entity.md
       - Vector: data-types/vector.md
       - Text: data-types/text.md
-      - Custom Data Types: guides/tensorfields.ipynb
+      - Custom Data Types: data-types/tensorfields.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
-      - Masked Pretraining: tutorials/pretraining.ipynb
       - Nested Supervised Training: tutorials/nested-supervised-training.ipynb
+      - Masked Pretraining: tutorials/pretraining.ipynb
       - Supervised Tabular Training: tutorials/supervised-tabular-training.ipynb
       - Serving: tutorials/serving.ipynb
   - Guides:
-      - Field Ablation: guides/field-ablation.ipynb
+      - Field Importance: guides/field-importance.ipynb
       - Preprocessors: guides/preprocessors.ipynb
-      - Tensorfield Extensions: guides/tensorfields.ipynb
+      - Postprocessors: guides/postprocessors.md
+      - Field Stacking: guides/field-stacking.md
+  - Case Studies:
+      - Device Tenure: case-studies/device-tenure.md
   - Reference:
       - API: reference/api.md

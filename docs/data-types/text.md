@@ -1,7 +1,7 @@
 # Text
 
 Use `Text` for string fields encoded by a frozen Hugging Face model. The text
-encoder produces a dense representation that JSON2Vec projects into the model
+encoder produces a dense representation that `json2vec` projects into the model
 dimension.
 
 ```json
@@ -33,8 +33,12 @@ The text tensorfield requires the optional `transformers` dependency.
 uv sync --extra text
 ```
 
-Without that extra, using `type: text` raises an import error when JSON2Vec
+Without that extra, using `type: text` raises an import error when `json2vec`
 tries to load the tokenizer or encoder.
+
+Hugging Face may download model assets the first time a model is used. Use a
+local path or `local_files_only=True` when documentation, training, or serving
+must run from cached files only.
 
 ## Input Values
 
@@ -53,6 +57,17 @@ Common text fields include:
 - Merchant names, product names, search queries, or support subjects.
 - Short explanations or free-form metadata attached to structured events.
 - Text that should be encoded as a semantic feature rather than generated as output.
+
+Text can be nested like any other leaf:
+
+```python
+ticket_events = j2v.Array(
+    j2v.Text("message", model_name="bert-base-uncased", max_length=128),
+    j2v.Category("event_type", max_vocab_size=64),
+    name="ticket_events",
+    max_length=32,
+)
+```
 
 ## Configuration
 
@@ -82,11 +97,12 @@ embedding used as the target representation.
 ## Prediction Output
 
 `Text` currently trains and reports losses and metrics, but it does not emit
-user-facing `Model.predict(...)` payloads. Configure it as an input feature or
-embedding-reconstruction target, not as a generated-text output.
+generated text in `Model.predict(...)`. Configure it as an input feature or
+embedding-reconstruction target, not as a generated-text output. Configure
+`embed=True` when you want the field address to emit an `embedding` payload.
 
 ## Notes
 
 The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
-by JSON2Vec. Use `encoder_batch_size` to manage memory when many text values are
+by `json2vec`. Use `encoder_batch_size` to manage memory when many text values are
 flattened from nested arrays.

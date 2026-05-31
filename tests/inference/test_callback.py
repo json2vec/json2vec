@@ -10,19 +10,15 @@ from json2vec.inference.callback import Writer
 
 class _DummyModule:
     def write(self, predictions):
-        return (
-            {"root/label": {"value": ["ok"]}},
-            {},
-        )
+        return {"root/label": {"value": ["ok"]}}
 
 
 def test_writer_postprocess_receives_batch_context(tmp_path):
     seen = {}
 
-    def processor(context, predictions, embeddings):
+    def processor(context, predictions):
         seen["context"] = context
         seen["predictions"] = predictions
-        seen["embeddings"] = embeddings
 
     batch = TensorDict(
         {
@@ -51,4 +47,3 @@ def test_writer_postprocess_receives_batch_context(tmp_path):
     assert seen["context"]["batch_idx"] == 3
     assert seen["context"]["dataloader_idx"] == 4
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
-    assert seen["embeddings"] == {}

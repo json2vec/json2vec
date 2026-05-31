@@ -8,9 +8,19 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Array(...)` declares a repeated nested context.
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
 - `PolarsDataModule(...)` builds data loaders from a configured model.
-- `Model.predict(...)` returns configured target predictions.
-- `Model.embed(...)` returns embeddings from nodes configured with `embed=True`.
-- `Deployment` wraps a checkpoint or model instance for serving.
+- `Model.predict(...)` returns configured target predictions and embeddings.
+- `Postprocessor` reshapes predictions after decoding; see
+  [Postprocessors](../guides/postprocessors.md).
+- `Deployment` wraps a checkpoint or model instance for serving; install the
+  `serving` extra for LitServe-backed deployment paths.
+
+Learning-oriented entry points:
+
+- [Getting Started](../getting-started.md)
+- [Model Tree](../core-concepts/model-tree.md)
+- [Query Paths](../core-concepts/querypaths.md)
+- [Built-In Data Types](../core-concepts/data-types.md)
+- [Serving](../tutorials/serving.ipynb)
 
 ## Package
 
@@ -36,9 +46,7 @@ This page is generated from public docstrings and is meant as a lookup companion
         - plot
         - save
         - load
-        - evaluate
         - predict
-        - embed
 
 ## Schema
 
@@ -110,7 +118,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_heading: true
       show_root_full_path: false
       members:
-        - from_model
         - dataloader
         - train_dataloader
         - val_dataloader
@@ -122,7 +129,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_heading: true
       show_root_full_path: false
       members:
-        - from_model
         - dataloader
         - train_dataloader
         - val_dataloader
@@ -145,7 +151,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 
 ## Serving
 
-::: json2vec.inference.deployment.Deployment
+::: json2vec.Deployment
     options:
       show_root_heading: true
       show_root_full_path: false
@@ -155,6 +161,11 @@ This page is generated from public docstrings and is meant as a lookup companion
         - postprocess
         - update
         - serve
+
+::: json2vec.Writer
+    options:
+      show_root_heading: true
+      show_root_full_path: false
 
 ## Tensorfield Extension API
 

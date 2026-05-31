@@ -88,7 +88,7 @@ def render_schema_plot(
 ) -> RenderableType:
     hyperparameters = module.hyperparameters
     root = hyperparameters.fields if address is None else resolve_node(hyperparameters=hyperparameters, address=address)
-    title = "JSON2Vec State" if state_focus else "JSON2Vec Schema"
+    title = "json2vec State" if state_focus else "json2vec Schema"
 
     tree = Tree(render_node_label(module=module, node=root, state_focus=state_focus), guide_style="dim")
     append_schema_children(tree=tree, module=module, node=root, detail=detail or state_focus, state_focus=state_focus)
@@ -252,7 +252,6 @@ def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) ->
             "d_model",
             "attention",
             "max_length",
-            "n_outputs",
             "n_layers",
             "n_heads",
             "batch_size",
@@ -267,7 +266,7 @@ def node_metadata_keys(node: Node, values: dict[str, Any], state_focus: bool) ->
     elif isinstance(node, Leaf):
         preferred = ["query", "pooling", "max_vocab_size", "topk", "objective", "weight"]
     else:
-        preferred = ["attention", "max_length", "n_outputs", "n_layers", "n_heads"]
+        preferred = ["attention", "max_length", "n_layers", "n_heads"]
 
     remaining = [key for key in values if key not in preferred]
     return preferred + remaining

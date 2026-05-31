@@ -27,10 +27,10 @@ matching inside repeated records rather than a persistent vocabulary.
 
 ## Input Values
 
-`Category` expects scalar labels. Strings are the normal input; use a
+`Category` expects scalar labels. Strings are the normal input. Use a
 preprocessor if upstream identifiers need to be converted into stable label
-strings, or cleaned otherwise. `None` is encoded as a null state, and missing array positions are
-encoded as padded state.
+strings or otherwise cleaned. `None` is encoded as a null state, and missing
+array positions are encoded as padded state.
 
 ## Examples
 
@@ -40,6 +40,10 @@ Common category fields include:
 - A bounded business label such as customer tier, region, product family, or channel.
 - A stable categorical code such as country, currency, device type, or merchant category.
 - A high-value identifier only when it should be learned as a persistent global label.
+
+```python
+target = j2v.Category("fraud", target=True, max_vocab_size=2, topk=[2])
+```
 
 ## Configuration
 
@@ -65,7 +69,9 @@ training labels into that unavailable bucket. This gives the decoder examples of
 valued-but-unavailable content before it sees truly unseen labels during
 validation or inference.
 
-`p_unavailable` is a necessary, but unfortunate, requirement for the following reason: the model has no other way to represent valued content of categories labels during inference time that were not observed during training time. Introducing new vocabulary outside of training time will have no effect on the model's parameters.
+`p_unavailable` gives the decoder training examples for labels that are present
+but outside the learned vocabulary, which is the serving-time behavior for
+unseen labels.
 
 ## Target Behavior
 
@@ -80,7 +86,7 @@ Top-k metrics are tracked for each configured value in `topk`.
 
 `topk` serves two roles:
 
-- During training and evaluation, JSON2Vec tracks a separate top-k accuracy
+- During training and evaluation, `json2vec` tracks a separate top-k accuracy
   metric for each configured value.
 - During prediction, the output contains one candidate list sized to
   `max(topk)`, capped by the current learned vocabulary size.
@@ -94,6 +100,9 @@ The reserved unavailable bucket can affect training loss and metrics, but it is
 not emitted as a prediction candidate.
 
 ## Prediction Output
+
+Rendered examples use string paths for readability. The Python dictionary
+returned by `Model.predict(...)` is keyed by `j2v.Address` objects.
 
 `Model.predict(...)` returns the most likely known label, its probability, and
 the candidate list requested by `topk`:

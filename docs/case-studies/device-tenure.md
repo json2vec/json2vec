@@ -1,0 +1,247 @@
+# Device Tenure
+
+Device tenure is the age of a customer-device relationship. In account-risk
+systems, a familiar device can mean something very different from a device first
+seen minutes ago.
+
+Traditional tabular systems often materialize device tenure as one engineered
+feature: for each customer-device pair, store the earliest observed timestamp,
+then compute the age of that pair during scoring. That can work, but it is
+expensive to maintain at scale and compresses a rich behavior history into one
+number.
+
+`json2vec` lets you model the history directly. Instead of serving one handcrafted
+tenure scalar, include login sessions, transactions, device identifiers,
+timestamps, and related context in the observation.
+
+## Baseline Feature Store Shape
+
+A feature-store implementation might produce a row like:
+
+```json
+{
+  "customer_id": "customer_123",
+  "current_device_id": "device_a",
+  "device_tenure_days": 742,
+  "account_takeover": "false"
+}
+```
+
+The model sees the final tenure value, but not how often the device appeared,
+whether it was used in normal sessions, whether recent transactions came from
+that device, or what else happened around the login.
+
+## Nested Observation Shape
+
+A structured observation can preserve those relationships:
+
+```json
+{
+  "customer_id": "customer_123",
+  "login_sessions": [
+    {
+      "device_id": "device_a",
+      "event_type": "password_login",
+      "days_since_event": 1,
+      "ip_country": "US"
+    },
+    {
+      "device_id": "device_a",
+      "event_type": "password_login",
+      "days_since_event": 30,
+      "ip_country": "US"
+    },
+    {
+      "device_id": "device_b",
+      "event_type": "password_reset",
+      "days_since_event": 0,
+      "ip_country": "US"
+    }
+  ],
+  "transactions": [
+    {
+      "device_id": "device_b",
+      "amount": 950.0,
+      "merchant_category": "money_transfer",
+      "days_since_event": 0
+    }
+  ],
+  "account_takeover": "true"
+}
+```
+
+The model can see recurrence, recency, event types, country changes, and
+transaction context around each device.
+
+## Schema Sketch
+
+This is a documentation sketch, not a full training script.
+
+```python
+import json2vec as j2v
+
+model = j2v.Model.from_schema(
+    j2v.Category("customer_id", active=False, max_vocab_size=100_000),
+    j2v.Array(
+        j2v.Entity("device_id", embed=True),
+        j2v.Category("event_type", max_vocab_size=128),
+        j2v.Number("days_since_event"),
+        j2v.Category("ip_country", max_vocab_size=256),
+        name="login_sessions",
+        max_length=32,
+        embed=True,
+    ),
+    j2v.Array(
+        j2v.Entity("device_id"),
+        j2v.Number("amount"),
+        j2v.Category("merchant_category", max_vocab_size=1024),
+        j2v.Number("days_since_event"),
+        name="transactions",
+        max_length=128,
+    ),
+    j2v.Category("account_takeover", target=True, max_vocab_size=2),
+    name="customer",
+    d_model=128,
+    n_layers=2,
+    n_heads=4,
+    embed=True,
+)
+```
+
+The `Entity("device_id")` fields let the model learn repeated local identity
+relationships within the customer observation. `days_since_event` gives it
+recency. The login-session array and root node request embeddings so offline
+analysis can inspect both customer-level and login-history representations.
+
+`customer_id` is marked `active=False` so the schema can retain the field as
+metadata without feeding a high-cardinality identifier into the model. Use an
+active `Category` only when a persistent global identity vocabulary is intended
+and appropriate for the decision.
+
+`Entity` encodes local sameness within the tensorfield values it reads. If a
+use case requires matching the same identifier across sibling branches, such as
+`login_sessions` and `transactions`, validate that behavior explicitly or
+preprocess the data into a shared repeated context.
+
+## From Histories To Observations
+
+Real account histories usually need windowing before they become model
+observations. A preprocessor can make the `as_of` time, trailing windows, and
+derived recency fields explicit:
+
+```python
+def customer_window(customer: dict, as_of) -> dict:
+    return {
+        "customer_id": customer["customer_id"],
+        "login_sessions": [
+            {
+                "device_id": event["device_id"],
+                "event_type": event["event_type"],
+                "days_since_event": (as_of - event["timestamp"]).days,
+                "ip_country": event["ip_country"],
+            }
+            for event in recent_logins(customer, as_of=as_of)
+        ],
+        "transactions": [
+            {
+                "device_id": txn["device_id"],
+                "amount": txn["amount"],
+                "merchant_category": txn["merchant_category"],
+                "days_since_event": (as_of - txn["timestamp"]).days,
+            }
+            for txn in recent_transactions(customer, as_of=as_of)
+        ],
+        "account_takeover": customer.get("account_takeover"),
+    }
+```
+
+The schema remains the model-facing contract. The preprocessor only prepares a
+raw customer history into the shape the schema can query.
+
+## Training Setup
+
+Use the same data path as other supervised `json2vec` models:
+
+```python
+datamodule = j2v.PolarsDataModule(
+    model=model,
+    train=train_records,
+    validate=validate_records,
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+)
+```
+
+For a real account-risk dataset, split by stable customer or account identity
+instead of random event rows. Random row splits can leak history from the same
+customer into both training and validation.
+
+## Prediction And Embedding Output
+
+After training, prediction can include both the supervised target and configured
+embeddings:
+
+```python
+predictions = model.predict(customer_records)
+
+risk = predictions[j2v.Address("customer", "account_takeover")]
+customer_embedding = predictions[j2v.Address("customer")]["embedding"]
+login_embedding = predictions[j2v.Address("customer", "login_sessions")]["embedding"]
+```
+
+Use a [postprocessor](../guides/postprocessors.md) to return only the public
+risk response from a serving endpoint, or to write embeddings and metadata for
+offline clustering.
+
+## What The Model Can Learn Beyond Tenure
+
+A tenure scalar can answer only "how old is this customer-device pair?" A nested
+schema can expose more questions to the model:
+
+- Has this device appeared in multiple login sessions?
+- Did the device appear in both login and transaction context?
+- Is the device new but otherwise surrounded by normal behavior?
+- Is a familiar device now paired with unusual event types or merchant
+  categories?
+- Are there many recent device changes, password resets, or high-value
+  transactions?
+
+These are still learned patterns, not automatic explanations. Validate them with
+held-out data and targeted diagnostics.
+
+## Validation Strategy
+
+Compare the nested model against the handcrafted tenure baseline. Keep the
+baseline strong so the comparison is meaningful.
+
+Useful experiments include:
+
+- Train with and without device fields.
+- Train with and without timestamp or recency fields.
+- Train with and without transaction context.
+- Compare against a tabular model that includes the original tenure feature.
+- Inspect login-session embeddings for known risky or benign device clusters.
+- Run what-if examples by replacing a new device with an established device and
+  comparing prediction changes.
+
+## Caveats
+
+Device identifiers can be noisy, privacy-sensitive, and unstable. Fraud labels
+can be delayed or policy-dependent. A nested model does not remove the need for
+leakage controls, governance, monitoring, or domain review.
+
+Do not use device history when policy says it is inappropriate for the decision.
+Do not split data in a way that lets the same entity history appear on both
+sides of evaluation. Do not assume a learned embedding is a causal explanation.
+
+## Where Next
+
+- Use [Learning Modes & Embeddings](../core-concepts/embeddings.md) to export
+  customer and login-session representations.
+- Use [Field Stacking](../guides/field-stacking.md) for repeated roles such as
+  source and target accounts.
+- Use [Query Paths](../core-concepts/querypaths.md) to bind event histories to
+  the schema.
+- Use [Preprocessors](../guides/preprocessors.ipynb) for time-windowing and
+  deriving `days_since_event`.

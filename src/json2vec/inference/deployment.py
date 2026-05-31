@@ -1,4 +1,4 @@
-"""LitServe deployment wrappers for JSON2Vec checkpoints."""
+"""LitServe deployment wrappers for `json2vec` checkpoints."""
 
 import functools
 from collections.abc import Callable
@@ -218,21 +218,16 @@ class API(ls.LitAPI):
                 },
             }
 
-        predictions, embeddings = self.model.write(predictions=response)
+        predictions = self.model.write(predictions=response)
         postprocessor = self.postprocessor
 
         if postprocessor is not None:
-            processed = postprocessor({} if context is None else context, predictions, embeddings)
+            processed = postprocessor({} if context is None else context, predictions)
 
             if processed is not None:
-                predictions, embeddings = processed
+                predictions = processed
 
-        payload = dict(predictions=predictions)
-
-        if embeddings:
-            payload["embeddings"] = embeddings
-
-        return Prediction.denest(payload)
+        return Prediction.denest(dict(predictions=predictions))
 
 
 _DEFAULT_DECODE_REQUEST_ANNOTATIONS = dict(API.decode_request.__annotations__)
@@ -240,7 +235,7 @@ _DEFAULT_ENCODE_RESPONSE_ANNOTATIONS = dict(API.encode_response.__annotations__)
 
 
 class Deployment(BaseSettings):
-    """Serving configuration for a JSON2Vec checkpoint or model instance.
+    """Serving configuration for a `json2vec` checkpoint or model instance.
 
     `Deployment` queues request/response schemas, optional preprocessors,
     optional postprocessors, and `update(...)` mutations before the model is

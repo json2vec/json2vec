@@ -955,7 +955,7 @@ wheels = [
 
 [[package]]
 name = "json2vec"
-version = "0.4.5"
+version = "0.4.6"
 source = { editable = "." }
 dependencies = [
     { name = "anytree" },
@@ -976,9 +976,11 @@ dependencies = [
 
 [package.optional-dependencies]
 docs = [
+    { name = "litserve" },
     { name = "mkdocs-jupyter" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
+    { name = "pydantic-settings" },
 ]
 serving = [
     { name = "litserve" },
@@ -1008,6 +1010,7 @@ requires-dist = [
     { name = "beartype", specifier = ">=0.21.0" },
     { name = "jmespath", specifier = ">=1.0.1" },
     { name = "lightning", specifier = ">=2.6.4" },
+    { name = "litserve", marker = "extra == 'docs'", specifier = ">=0.2.13" },
     { name = "litserve", marker = "extra == 'serving'", specifier = ">=0.2.13" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mkdocs-jupyter", marker = "extra == 'docs'", specifier = ">=0.26.3" },
@@ -1019,6 +1022,7 @@ requires-dist = [
     { name = "polars", specifier = ">=1.35.2" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "pydantic-settings", marker = "extra == 'docs'", specifier = ">=2.10.1" },
     { name = "pydantic-settings", marker = "extra == 'serving'", specifier = ">=2.10.1" },
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tensordict", specifier = ">=0.10.0" },

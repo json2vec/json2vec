@@ -1030,7 +1030,7 @@ The idea is simple: the same datatype-specific losses are used for self-supervis
 
 During pretraining, all masked values are imputed regardless of their dimensionality. During supervised learning, all targeted values are predicted regardless of their dimensionality.
 The difference is that masking happens value-by-value according to the masking rate. Targeting removes a field from the input and trains the model to reconstruct it.
-`dropout`, `p_mask`, and `p_prune` can be configured explicitly on arrays or fields. These rates do not inherit down the schema tree; broad updates are made deliberately with schema selections.
+`dropout` can be configured on arrays or fields. `p_mask` and `p_prune` are configured explicitly on leaf fields. These rates do not inherit down the schema tree; broad updates are made deliberately with schema selections.
 
 This means that the control flow is the same for pretraining and finetuning. The difference between pretraining and finetuning is configuration, not a separate model architecture.
 

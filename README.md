@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="https://json2vec.github.io/json2vec/diagrams/json2vec.png" alt="JSON2Vec logo" width="180">
+  <img src="https://json2vec.github.io/json2vec/diagrams/json2vec.png" alt="json2vec logo" width="180">
 </p>
 
-<h1 align="center">JSON2Vec</h1>
+<h1 align="center"><code>json2vec</code></h1>
 
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&amp;logoColor=white" />
@@ -35,14 +35,14 @@ schemas, and checkpoints private.
 - **Extensible data types for predictive modeling.** Masked values,
   targeted fields, and explicit supervised targets all flow through the same
   datatype-specific heads. A new
-  [tensorfield type](https://json2vec.github.io/json2vec/guides/tensorfields/) brings its own embedding,
+  [tensorfield type](https://json2vec.github.io/json2vec/data-types/tensorfields/) brings its own embedding,
   decoding, loss, and writing logic, so the framework stays reusable as schemas
   grow.
 - **Schema evolution is a first-class workflow.** Between training loops
   (pretraining, finetuning, refitting, and task adaptation), the model can be
   mutated. Fields can be added (`model.extend`), removed (`model.delete`),
   updated (`model.update` / `with model.override`), and reset (`model.reset`).
-  See the [model update guide](https://json2vec.github.io/json2vec/guides/model-update/).
+  See the [mutations guide](https://json2vec.github.io/json2vec/core-concepts/mutations/).
 - **Production semantics for missingness.** `null`, `padded`, `masked`, and
   `valued` are distinct states in the tensorfield type system.
   They are not collapsed into one generic missing-value bucket.
@@ -70,7 +70,7 @@ Use `json2vec` when the hierarchy is part of the signal:
   multi-target prediction over nested records
 
 For more context on the modeling problem, read
-[Why JSON2Vec](https://json2vec.github.io/json2vec/motivation/).
+[Why `json2vec`](https://json2vec.github.io/json2vec/motivation/).
 
 ## What It Does Not Do
 
@@ -137,8 +137,8 @@ model = j2v.Model.from_schema(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
 
-datamodule = j2v.PolarsDataModule.from_model(
-    model,
+datamodule = j2v.PolarsDataModule(
+    model=model,
     train=records,
     validate=records,
     num_workers=0,
@@ -161,14 +161,11 @@ trainer = lit.Trainer(
 
 trainer.fit(model=model, datamodule=datamodule)
 
-batch = [[record] for record in records.to_dicts()[:3]]
-
-pprint(model.predict(batch))
-pprint(model.embed(batch))
+pprint(model.predict(records.to_dicts()[:3]))
 ```
 
-The prediction call returns a typed result for `record/species`. The embedding
-call returns the configured `record` embedding for each input observation.
+The prediction call returns a typed result for `record/species` and the
+configured `record` embedding for each input observation.
 
 ## Documentation
 
@@ -182,16 +179,20 @@ uv run --extra docs mkdocs build --strict
 Useful entry points:
 
 - [Getting Started](https://json2vec.github.io/json2vec/getting-started/)
-- [Why JSON2Vec](https://json2vec.github.io/json2vec/motivation/)
-- [Schemas & Queries](https://json2vec.github.io/json2vec/guides/model-schemas/)
-- [Model Updates](https://json2vec.github.io/json2vec/guides/model-update/)
+- [AI Quickstart](https://json2vec.github.io/json2vec/ai-quickstart/)
+- [Why `json2vec`](https://json2vec.github.io/json2vec/motivation/)
+- [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths/)
+- [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types/)
+- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings/)
+- [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree/)
+- [Mutations](https://json2vec.github.io/json2vec/core-concepts/mutations/)
 - [Hello World](https://json2vec.github.io/json2vec/tutorials/hello-world/)
-- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
 - [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/)
+- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
 - [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/)
-- [Field Ablation](https://json2vec.github.io/json2vec/guides/field-ablation/)
+- [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance/)
 - [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/)
-- [Tensorfield Extensions](https://json2vec.github.io/json2vec/guides/tensorfields/)
+- [Custom Data Types](https://json2vec.github.io/json2vec/data-types/tensorfields/)
 - [Serving](https://json2vec.github.io/json2vec/tutorials/serving/)
 - [API Reference](https://json2vec.github.io/json2vec/reference/api/)
 - [Whitepaper](https://json2vec.github.io/json2vec/whitepaper.pdf)
@@ -258,7 +259,7 @@ Configured `dataset.kwargs` are passed into the preprocessor, with unsupported k
 
 Each tensorfield plugin provides a request schema plus the model components
 needed to encode values, decode predictions, compute losses, and optionally
-serialize outputs. See [Tensorfield Extensions](https://json2vec.github.io/json2vec/guides/tensorfields/)
+serialize outputs. See [Custom Data Types](https://json2vec.github.io/json2vec/data-types/tensorfields/)
 for a custom plugin walkthrough. Built-in tensorfields share the base leaf
 options `name`, `query`, `pooling`, `weight`, `n_heads`, `n_linear`, `dropout`,
 `p_mask`, and `p_prune`.

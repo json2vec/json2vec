@@ -1,4 +1,4 @@
-"""Public Lightning model facade for JSON2Vec schemas."""
+"""Public Lightning model facade for `json2vec` schemas."""
 
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
@@ -20,7 +20,7 @@ from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
 from json2vec.architecture.mutations import SchemaEditor
 from json2vec.architecture.plot import PlotMode
-from json2vec.architecture.runtime import EvaluationResult, ModelRuntime, Postprocessor, PreprocessFn, step
+from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.structs.enums import AttentionMode, Strata
 from json2vec.structs.experiment import (
@@ -30,7 +30,7 @@ from json2vec.structs.experiment import (
     SchemaField,
 )
 from json2vec.structs.packages import Prediction
-from json2vec.structs.tree import Address, Node, PruneRate, Rate
+from json2vec.structs.tree import Address, Node, Rate
 from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
@@ -138,11 +138,11 @@ class RollbackCheckpoint(ModelCheckpoint):
 
 
 class Model(lit.LightningModule):
-    """Neural model generated from a JSON2Vec schema tree.
+    """Neural model generated from a `json2vec` schema tree.
 
     `Model` owns the schema hyperparameters, tensorfield embedders, array
-    encoders, decoders, and convenience methods for prediction, embedding,
-    checkpointing, plotting, and schema mutation.
+    encoders, decoders, and convenience methods for prediction, checkpointing,
+    plotting, and schema mutation.
 
     Example:
         ```python
@@ -169,16 +169,13 @@ class Model(lit.LightningModule):
         n_heads: int,
         batch_size: int = 1,
         fields: Sequence[SchemaField] | None = None,
-        root: str = "record",
+        name: str = "record",
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
         max_length: int = 1,
-        n_outputs: int = 1,
         n_linear: int = 1,
         dropout: Rate | None = None,
-        p_mask: Rate | None = None,
-        p_prune: PruneRate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
     ) -> Self:
@@ -193,16 +190,13 @@ class Model(lit.LightningModule):
             batch_size: Batch size used by data modules, examples, and mocked
                 Lightning input arrays.
             fields: Optional sequence form of `field_args`.
-            root: Root array name. Defaults to `record`.
+            name: Root array name. Defaults to `record`.
             description: Optional description on the generated root array.
             embed: Configure the generated root array as an embedding output.
             attention: Attention mode for the generated root array.
             max_length: Maximum number of records per observation at the root.
-            n_outputs: Number of pooled outputs emitted by the generated root array.
             n_linear: Feed-forward block count on the generated root array.
             dropout: Optional dropout rate on the generated root array.
-            p_mask: Optional mask rate on the generated root array.
-            p_prune: Optional prune rate on the generated root array.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
 
@@ -215,16 +209,13 @@ class Model(lit.LightningModule):
             n_layers=n_layers,
             n_heads=n_heads,
             fields=fields,
-            root=root,
+            name=name,
             description=description,
             embed=embed,
             attention=attention,
             max_length=max_length,
-            n_outputs=n_outputs,
             n_linear=n_linear,
             dropout=dropout,
-            p_mask=p_mask,
-            p_prune=p_prune,
         )
         return cls(
             hyperparameters=hyperparameters,
@@ -299,7 +290,7 @@ class Model(lit.LightningModule):
         """Mutate selected schema nodes and rebuild compatible modules.
 
         `target=True` is shorthand for `p_prune=1.0`; `target=False` clears
-        target behavior by setting `p_prune=None`.
+        target behavior by setting `p_prune=0.0`.
 
         Args:
             *predicates: Predicates used to select nodes.
@@ -507,7 +498,7 @@ class Model(lit.LightningModule):
         CheckpointState.dump(self, checkpoint)
 
     def restore_checkpoint_state(self, checkpoint: dict[str, Any]) -> None:
-        """Restore this model in place from a JSON2Vec checkpoint dictionary."""
+        """Restore this model in place from a `json2vec` checkpoint dictionary."""
         CheckpointState.restore(self, checkpoint)
 
     @classmethod
@@ -515,16 +506,14 @@ class Model(lit.LightningModule):
         """Load a `Model` checkpoint written by `Model.save(...)`."""
         return cast(Self, CheckpointState.load(cls, checkpoint))
 
-    def write(
-        self, predictions: list[Prediction]
-    ) -> tuple[dict[Address, dict[str, Any]], dict[Address, dict[str, Any]]]:
+    def write(self, predictions: list[Prediction]) -> dict[Address, dict[str, Any]]:
         return ModelRuntime.write(self, predictions)
 
     @immutable("inference")
     def encode(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
+        preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
     ) -> EncodedInput:
         """Return encoded tensorfield inputs for raw or processed observations."""
@@ -536,52 +525,19 @@ class Model(lit.LightningModule):
         )
 
     @immutable("inference")
-    def evaluate(
+    def predict(
         self,
         batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
+        preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-    ) -> EvaluationResult:
-        """Run prediction and embedding for encoded or raw observations.
-
-        If `preprocess` is omitted, raw records are encoded unchanged.
-        """
-        return ModelRuntime.evaluate(
+    ) -> dict[Address, dict[str, Any]]:
+        """Return typed predictions and configured embeddings for a raw or encoded batch."""
+        return ModelRuntime.predict(
             self,
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
         )
-
-    def predict(
-        self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> dict[Address, dict[str, Any]]:
-        """Return typed predictions for a raw or encoded batch."""
-
-        result = self.evaluate(
-            batch=batch,
-            preprocess=preprocess,
-            postprocess=postprocess,
-        )
-
-        return result.predictions
-
-    def embed(
-        self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: PreprocessFn | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> dict[Address, dict[str, Any]]:
-        """Return configured embeddings for a raw or encoded batch."""
-        result = self.evaluate(
-            batch=batch,
-            preprocess=preprocess,
-            postprocess=postprocess,
-        )
-        return result.embeddings
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

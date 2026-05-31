@@ -22,7 +22,6 @@ def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) ->
             "type": "array",
             "dropout": 0.1,
             "max_length": max_length,
-            "n_outputs": 1,
             "fields": [field],
         },
     }

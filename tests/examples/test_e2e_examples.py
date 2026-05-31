@@ -13,7 +13,7 @@ def _repo_root() -> Path:
 def _execute_notebook(path: str) -> nbformat.NotebookNode:
     root = _repo_root()
     run_dirs = {
-        "docs/guides/tensorfields.ipynb": root / "docs/guides",
+        "docs/data-types/tensorfields.ipynb": root / "docs/data-types",
     }
     notebook = nbformat.read(root / path, as_version=4)
     client = NotebookClient(
@@ -46,7 +46,7 @@ def test_serving_example_configures_without_starting_server() -> None:
 
 
 def test_custom_tensorfield_example_runs() -> None:
-    notebook = _execute_notebook("docs/guides/tensorfields.ipynb")
+    notebook = _execute_notebook("docs/data-types/tensorfields.ipynb")
     source = "\n".join(cell.source for cell in notebook.cells)
 
     assert 'Plugin(name="bucket")' in source
@@ -54,18 +54,16 @@ def test_custom_tensorfield_example_runs() -> None:
     assert _plot_output(notebook)
 
 
-def test_field_ablation_example_runs() -> None:
-    notebook = _execute_notebook("docs/guides/field-ablation.ipynb")
+def test_field_importance_example_runs() -> None:
+    notebook = _execute_notebook("docs/guides/field-importance.ipynb")
     source = "\n".join(cell.source for cell in notebook.cells)
 
     assert "active=False" in source
     assert "trainer.test" in source
 
 
-def test_examples_live_under_docs() -> None:
-    examples_path = _repo_root() / "examples"
-
-    assert not examples_path.exists()
+def test_standalone_examples_directory_is_absent() -> None:
+    assert not (_repo_root() / "examples").exists()
 
 
 def _plot_output(notebook: nbformat.NotebookNode) -> str:

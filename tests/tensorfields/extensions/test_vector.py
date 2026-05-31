@@ -16,7 +16,6 @@ def _structure_payload(*, n_dim: int = 3, objective: str = "l2") -> dict:
             "type": "array",
             "dropout": 0.1,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [
                 {
                     "name": "embedding",

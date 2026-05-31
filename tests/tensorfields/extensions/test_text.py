@@ -28,7 +28,6 @@ def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", e
             "type": "array",
             "dropout": 0.1,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [
                 {
                     "name": "body",

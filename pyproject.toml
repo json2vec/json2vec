@@ -1,6 +1,6 @@
 [project]
 name = "json2vec"
-version = "0.4.5"
+version = "0.4.6"
 description = "{...} -> [*]"
 readme = "README.md"
 license = "Apache-2.0"
@@ -31,9 +31,11 @@ text = [
     "transformers>=4.55.0",
 ]
 docs = [
+    "litserve>=0.2.13",
     "mkdocs-material>=9.6",
     "mkdocs-jupyter>=0.26.3",
     "mkdocstrings[python]>=0.27",
+    "pydantic-settings>=2.10.1",
 ]
 
 [dependency-groups]

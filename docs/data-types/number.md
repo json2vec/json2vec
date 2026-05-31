@@ -36,7 +36,9 @@ computed, so models do not require pre-normalized inputs.
 
 Date-derived numbers are appropriate when elapsed time is the signal. For
 example, compute `days_since_transaction` in preprocessing when risk depends on
-the difference between inference time and transaction time.
+the difference between inference time and transaction time. The
+[Device Tenure](../case-studies/device-tenure.md) case study uses this pattern
+for account-risk histories.
 
 Avoid raw timestamps unless absolute time is truly the intended signal. Raw
 timestamps can let the model memorize collection windows, rollout dates, policy
@@ -88,6 +90,9 @@ The content loss is computed in normalized units, while tracked `mae` and
 
 ## Prediction Output
 
+Rendered examples use string paths for readability. The Python dictionary
+returned by `Model.predict(...)` is keyed by `j2v.Address` objects.
+
 `Model.predict(...)` returns a state probability map plus numeric content:
 
 ```python
@@ -104,5 +109,6 @@ The content loss is computed in normalized units, while tracked `mae` and
 Use `Category` for numeric-looking identifiers or class labels. `Number` assumes
 the magnitude and distance between values are meaningful.
 
-There are some cases in which users may wish to use binned numerical data or CDFs of input values.
-Both can be implemented as a custom data type, or using custom preprocessors.
+When a continuous scalar is not the right representation, binned numerical data
+or CDF-style transforms can be implemented with a custom data type or a
+preprocessor.

@@ -83,7 +83,7 @@ class DecoderBase(torch.nn.Module):
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
         raise NotImplementedError("decoder must implement decode(pooled)")
 
-    def forward(self, parcels: list[Parcel]) -> Prediction:
+    def forward(self, parcels: list[Parcel], *, embed: bool = False) -> Prediction:
         if len(parcels) == 0:
             raise ValueError("decoder requires at least one parcel")
 
@@ -92,6 +92,9 @@ class DecoderBase(torch.nn.Module):
         pooled = self.pool(stacked)
 
         payload = self.decode(pooled)
+        if embed:
+            payload[TensorKey.embedding] = pooled
+
         return Prediction(
             payload=payload,
             address=self.address,

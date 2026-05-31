@@ -38,7 +38,6 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
             "type": "array",
             "dropout": 0.1,
             "max_length": 2,
-            "n_outputs": 1,
             "fields": [field],
         },
     }

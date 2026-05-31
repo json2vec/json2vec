@@ -141,7 +141,6 @@ def _hyperparameters() -> Hyperparameters:
                 "type": "array",
                 "dropout": 0.1,
                 "max_length": 1,
-                "n_outputs": 1,
                 "fields": [
                     {
                         "name": "label",
@@ -209,11 +208,9 @@ def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) 
         _stop_process(process)
 
     assert status == 200
-    assert payload["predictions"] == {}
-    assert "embeddings" in payload
-    assert "root/label" in payload["embeddings"]
+    assert "root/label" in payload["predictions"]
 
-    embedding = payload["embeddings"]["root/label"]["embedding"]
+    embedding = payload["predictions"]["root/label"]["embedding"]
     assert len(embedding) == hyperparameters.d_model
     assert all(isinstance(value, float) for value in embedding)
 
@@ -233,10 +230,9 @@ def test_deployment_accepts_unseen_category_values_at_runtime(tmp_path: Path) ->
         _stop_process(process)
 
     assert status == 200
-    assert alpha_payload["predictions"] == {}
-    assert gamma_payload["predictions"] == {}
-    assert "root/label" in alpha_payload["embeddings"]
-    assert "root/label" in gamma_payload["embeddings"]
+    assert "root/label" in alpha_payload["predictions"]
+    assert "root/label" in gamma_payload["predictions"]
     assert (
-        alpha_payload["embeddings"]["root/label"]["embedding"] != gamma_payload["embeddings"]["root/label"]["embedding"]
+        alpha_payload["predictions"]["root/label"]["embedding"]
+        != gamma_payload["predictions"]["root/label"]["embedding"]
     )

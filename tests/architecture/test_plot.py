@@ -18,7 +18,6 @@ def _hyperparameters() -> Hyperparameters:
                 "type": "array",
                 "dropout": 0.1,
                 "max_length": 1,
-                "n_outputs": 1,
                 "fields": [
                     {
                         "name": "amount",
@@ -29,7 +28,6 @@ def _hyperparameters() -> Hyperparameters:
                         "name": "items",
                         "type": "array",
                         "max_length": 2,
-                        "n_outputs": 1,
                         "fields": [
                             {
                                 "name": "label",

@@ -25,6 +25,12 @@ elapsed time, age, recency, duration, or ordering. For example, compute
 `days_since_transaction` before inference when the signal is the difference
 between inference time and transaction time.
 
+| Need | Prefer |
+| --- | --- |
+| Hour, weekday, month, or seasonal recurrence | `DateParts` |
+| Age, duration, recency, or ordering | derived `Number` |
+| Request-time-dependent windows | preprocessor plus `Number` |
+
 Avoid raw timestamps as features by default. They can encourage the model to
 learn dataset-specific time boundaries, rollout dates, policy changes, or
 train/test split artifacts instead of general patterns.
@@ -85,9 +91,11 @@ state loss.
 ## Prediction Output
 
 `DateParts` currently trains and reports losses and accuracies, but it does not
-emit user-facing `Model.predict(...)` payloads. Configure it as an input feature
-or reconstruction target when the model should learn timestamp structure, not
-when you need decoded timestamp values.
+emit decoded timestamp values in `Model.predict(...)`. Configure it as an input
+feature or reconstruction target when the model should learn timestamp
+structure, not when you need decoded timestamp values. It can still contribute
+to model context and reconstruction losses. Configure `embed=True` when you want
+the field address to emit an `embedding` payload.
 
 ## Notes
 
@@ -95,6 +103,6 @@ Use `Number` for monotonic timestamps, ages, intervals, or durations where
 numeric distance matters. `DateParts` discards that continuous distance and
 keeps only the requested calendar buckets.
 
-Preprocess timestamps to a consistent timezone before encoding. JSON2Vec stores
+Preprocess timestamps to a consistent timezone before encoding. `json2vec` stores
 dateparts at minute precision and does not apply an application-specific
 timezone policy.

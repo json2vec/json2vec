@@ -40,7 +40,7 @@ class Address(str):
 class Node(NodeMixin, pydantic.BaseModel):
     """Base schema tree node shared by arrays and tensorfield requests."""
 
-    model_config = pydantic.ConfigDict(extra="allow")
+    model_config = pydantic.ConfigDict(extra="forbid")
 
     name: str
     type: str
@@ -48,53 +48,11 @@ class Node(NodeMixin, pydantic.BaseModel):
     embed: bool = False
     n_heads: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     dropout: Rate | None = None
-    p_mask: Rate | None = None
-    p_prune: PruneRate | None = None
-
-    @property
-    def target(self) -> bool:
-        return self.p_prune == 1.0
-
-    @target.setter
-    def target(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise ValueError("target must be a boolean")
-
-        self.p_prune = 1.0 if value else None
 
     @classmethod
     def sanitize_name(cls, value: str) -> str:
         sanitized = re.sub(r"[^0-9A-Za-z_-]+", "_", value).strip("_")
         return sanitized or "field"
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def resolve_role_shorthands(cls, data: Any) -> Any:
-        if not isinstance(data, Mapping):
-            return data
-
-        if "p_prune" not in cls.model_fields:
-            return data
-
-        values = dict(data)
-        target = values.pop("target", None)
-
-        if target is None:
-            return values
-
-        if not isinstance(target, bool):
-            raise ValueError("target must be a boolean")
-
-        if target:
-            if values.get("p_prune") not in (None, 1.0):
-                raise ValueError("target=True is shorthand for p_prune=1.0")
-            values["p_prune"] = 1.0
-        else:
-            if values.get("p_prune") is not None:
-                raise ValueError("target=False is shorthand for p_prune=None")
-            values["p_prune"] = None
-
-        return values
 
     @functools.cached_property
     def address(self) -> Address:
@@ -147,6 +105,8 @@ class Leaf(Node):
     from this class through their registered request models.
     """
 
+    model_config = pydantic.ConfigDict(extra="allow")
+
     active: bool = True
     embed: bool = False
     name: str
@@ -154,6 +114,8 @@ class Leaf(Node):
     query: str | None = None
     pooling: Literal["query", "mean"] = "query"
     weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
+    p_mask: Rate = 0.0
+    p_prune: PruneRate = 0.0
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
 
     def __init__(self, name: str | None = None, **data: Any):
@@ -162,6 +124,44 @@ class Leaf(Node):
                 raise TypeError("name was provided both positionally and by keyword")
             data["name"] = name
         super().__init__(**data)
+
+    @property
+    def target(self) -> bool:
+        return self.p_prune == 1.0
+
+    @target.setter
+    def target(self, value: bool) -> None:
+        if not isinstance(value, bool):
+            raise ValueError("target must be a boolean")
+
+        self.p_prune = 1.0 if value else 0.0
+        self.model_fields_set.add("p_prune")
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def resolve_role_shorthands(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+
+        values = dict(data)
+        target = values.pop("target", None)
+
+        if target is None:
+            return values
+
+        if not isinstance(target, bool):
+            raise ValueError("target must be a boolean")
+
+        if target:
+            if values.get("p_prune") not in (None, 1.0):
+                raise ValueError("target=True is shorthand for p_prune=1.0")
+            values["p_prune"] = 1.0
+        else:
+            if values.get("p_prune") not in (None, 0.0):
+                raise ValueError("target=False is shorthand for p_prune=0.0")
+            values["p_prune"] = 0.0
+
+        return values
 
     @pydantic.model_validator(mode="before")
     @classmethod
