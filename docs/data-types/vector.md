@@ -20,7 +20,7 @@ embedding = j2v.Vector(
 ```
 
 Use `Vector` when embeddings or dense features are already present in the input
-record. Use `Text` when JSON2Vec should compute embeddings from strings. Use an
+record. Use `Text` when `json2vec` should compute embeddings from strings. Use an
 `Array` when repeated measurements have item structure.
 
 ## Input Values
@@ -79,6 +79,6 @@ content:
 
 ## Notes
 
-Use `Text` when JSON2Vec should compute text embeddings from strings. Use
+Use `Text` when `json2vec` should compute text embeddings from strings. Use
 `Vector` when embeddings or dense features are already present in the input
 record. This may be used for encoding media. At this point in time, `json2vec` does not support arbitrary media (images, videos, audio).

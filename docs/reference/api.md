@@ -9,6 +9,8 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
 - `PolarsDataModule(...)` builds data loaders from a configured model.
 - `Model.predict(...)` returns configured target predictions and embeddings.
+- `Postprocessor` reshapes predictions after decoding; see
+  [Postprocessors](../guides/postprocessors.md).
 - `Deployment` wraps a checkpoint or model instance for serving.
 
 ## Package
@@ -107,7 +109,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_heading: true
       show_root_full_path: false
       members:
-        - from_model
         - dataloader
         - train_dataloader
         - val_dataloader
@@ -119,7 +120,6 @@ This page is generated from public docstrings and is meant as a lookup companion
       show_root_heading: true
       show_root_full_path: false
       members:
-        - from_model
         - dataloader
         - train_dataloader
         - val_dataloader
@@ -142,7 +142,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 
 ## Serving
 
-::: json2vec.inference.deployment.Deployment
+::: json2vec.Deployment
     options:
       show_root_heading: true
       show_root_full_path: false
@@ -152,6 +152,11 @@ This page is generated from public docstrings and is meant as a lookup companion
         - postprocess
         - update
         - serve
+
+::: json2vec.Writer
+    options:
+      show_root_heading: true
+      show_root_full_path: false
 
 ## Tensorfield Extension API
 

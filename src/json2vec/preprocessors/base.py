@@ -113,7 +113,7 @@ def preprocess(
     yields: bool | None = None,
     **kwargs: Any,
 ) -> Callable[..., Any]:
-    """Register a callable as a JSON2Vec preprocessor.
+    """Register a callable as a `json2vec` preprocessor.
 
     Args:
         func: Callable to register when used as `@preprocess`.

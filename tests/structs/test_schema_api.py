@@ -103,7 +103,7 @@ def test_model_from_schema_accepts_root_array_options():
         d_model=16,
         n_layers=2,
         n_heads=4,
-        root="events",
+        name="events",
         description="event records",
         embed=True,
         attention="none",

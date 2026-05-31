@@ -1,10 +1,12 @@
-"""Public JSON2Vec SDK surface.
+"""Public `json2vec` SDK surface.
 
 The top-level package exports the constructors and helpers used by most
 applications: `Model.from_schema(...)` for model construction, tensorfield
 request constructors such as `Category` and `Number`, data modules, schema
 mutation predicates, and the `@preprocess` decorator.
 """
+
+from typing import TYPE_CHECKING, Any
 
 from json2vec.architecture.root import (
     Model,
@@ -15,6 +17,7 @@ from json2vec.architecture.root import (
     SchedulerConfig,
 )
 from json2vec.data.datasets import PolarsDataModule, StreamingDataModule
+from json2vec.inference.callback import Postprocessor, Writer
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
 from json2vec.structs.enums import AttentionMode, Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
 from json2vec.structs.experiment import (
@@ -37,20 +40,73 @@ from json2vec.tensorfields.extensions.text import Request as Text
 from json2vec.tensorfields.extensions.vector import Request as Vector
 from json2vec.tensorfields.shared.vocabulary import VocabularySyncCallback
 
+if TYPE_CHECKING:
+    from json2vec.inference.deployment import (
+        API,
+        Accelerator,
+        BatchItem,
+        Deployment,
+        ErrorItem,
+        Input,
+        ModelSource,
+        UpdateOperation,
+    )
+
+_SERVING_EXPORTS = {
+    "API",
+    "Accelerator",
+    "BatchItem",
+    "Deployment",
+    "ErrorItem",
+    "Input",
+    "ModelSource",
+    "UpdateOperation",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _SERVING_EXPORTS:
+        raise AttributeError(f"module 'json2vec' has no attribute {name!r}")
+
+    try:
+        from json2vec.inference import deployment
+    except ModuleNotFoundError as error:
+        if error.name in {"litserve", "pydantic_settings"}:
+            raise ModuleNotFoundError(
+                f"json2vec.{name} requires the serving extra; install with `pip install json2vec[serving]`."
+            ) from error
+        raise
+
+    value = getattr(deployment, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted([*globals(), *_SERVING_EXPORTS])
+
+
 __all__ = [
     "Address",
+    "API",
+    "Accelerator",
     "Array",
     "AttentionMode",
+    "BatchItem",
     "Category",
     "Component",
     "DateParts",
     "DecoderBase",
+    "Deployment",
     "EmbedderBase",
     "Entity",
+    "ErrorItem",
     "Hyperparameters",
+    "Input",
     "Leaf",
     "Metric",
     "Model",
+    "ModelSource",
     "MutationLockCallback",
     "NodeAttribute",
     "NodePredicate",
@@ -59,6 +115,7 @@ __all__ = [
     "PREPROCESSORS",
     "Plugin",
     "PolarsDataModule",
+    "Postprocessor",
     "Preprocessor",
     "PreprocessorMode",
     "RequestBase",
@@ -76,8 +133,10 @@ __all__ = [
     "TensorKey",
     "Text",
     "Tokens",
+    "UpdateOperation",
     "Vector",
     "VocabularySyncCallback",
+    "Writer",
     "predicate",
     "preprocess",
     "where",

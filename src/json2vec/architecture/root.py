@@ -1,4 +1,4 @@
-"""Public Lightning model facade for JSON2Vec schemas."""
+"""Public Lightning model facade for `json2vec` schemas."""
 
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
@@ -138,7 +138,7 @@ class RollbackCheckpoint(ModelCheckpoint):
 
 
 class Model(lit.LightningModule):
-    """Neural model generated from a JSON2Vec schema tree.
+    """Neural model generated from a `json2vec` schema tree.
 
     `Model` owns the schema hyperparameters, tensorfield embedders, array
     encoders, decoders, and convenience methods for prediction, checkpointing,
@@ -169,7 +169,7 @@ class Model(lit.LightningModule):
         n_heads: int,
         batch_size: int = 1,
         fields: Sequence[SchemaField] | None = None,
-        root: str = "record",
+        name: str = "record",
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
@@ -192,7 +192,7 @@ class Model(lit.LightningModule):
             batch_size: Batch size used by data modules, examples, and mocked
                 Lightning input arrays.
             fields: Optional sequence form of `field_args`.
-            root: Root array name. Defaults to `record`.
+            name: Root array name. Defaults to `record`.
             description: Optional description on the generated root array.
             embed: Configure the generated root array as an embedding output.
             attention: Attention mode for the generated root array.
@@ -213,7 +213,7 @@ class Model(lit.LightningModule):
             n_layers=n_layers,
             n_heads=n_heads,
             fields=fields,
-            root=root,
+            name=name,
             description=description,
             embed=embed,
             attention=attention,
@@ -504,7 +504,7 @@ class Model(lit.LightningModule):
         CheckpointState.dump(self, checkpoint)
 
     def restore_checkpoint_state(self, checkpoint: dict[str, Any]) -> None:
-        """Restore this model in place from a JSON2Vec checkpoint dictionary."""
+        """Restore this model in place from a `json2vec` checkpoint dictionary."""
         CheckpointState.restore(self, checkpoint)
 
     @classmethod

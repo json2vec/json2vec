@@ -1,7 +1,7 @@
 # Text
 
 Use `Text` for string fields encoded by a frozen Hugging Face model. The text
-encoder produces a dense representation that JSON2Vec projects into the model
+encoder produces a dense representation that `json2vec` projects into the model
 dimension.
 
 ```json
@@ -33,7 +33,7 @@ The text tensorfield requires the optional `transformers` dependency.
 uv sync --extra text
 ```
 
-Without that extra, using `type: text` raises an import error when JSON2Vec
+Without that extra, using `type: text` raises an import error when `json2vec`
 tries to load the tokenizer or encoder.
 
 ## Input Values
@@ -82,11 +82,12 @@ embedding used as the target representation.
 ## Prediction Output
 
 `Text` currently trains and reports losses and metrics, but it does not emit
-user-facing `Model.predict(...)` payloads. Configure it as an input feature or
-embedding-reconstruction target, not as a generated-text output.
+generated text in `Model.predict(...)`. Configure it as an input feature or
+embedding-reconstruction target, not as a generated-text output. Configure
+`embed=True` when you want the field address to emit an `embedding` payload.
 
 ## Notes
 
 The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
-by JSON2Vec. Use `encoder_batch_size` to manage memory when many text values are
+by `json2vec`. Use `encoder_batch_size` to manage memory when many text values are
 flattened from nested arrays.

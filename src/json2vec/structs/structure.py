@@ -22,7 +22,7 @@ Dropout: TypeAlias = Rate
 
 
 class Array(Node):
-    """Repeated nested object group in a JSON2Vec schema.
+    """Repeated nested object group in a `json2vec` schema.
 
     Positional children are treated as fields inside the array.
     """

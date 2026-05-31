@@ -70,8 +70,9 @@ Top-k metrics compare the predicted vector against the local codebook. Large
 ## Prediction Output
 
 `Entity` currently trains and reports losses and accuracies, but it does not
-emit user-facing `Model.predict(...)` payloads. It is primarily an internal
-representation for learning identity relationships.
+emit decoded identity labels in `Model.predict(...)`. It is primarily an
+internal representation for learning identity relationships. Configure
+`embed=True` when you want the field address to emit an `embedding` payload.
 
 ## Notes
 

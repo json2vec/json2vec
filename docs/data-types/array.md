@@ -64,12 +64,12 @@ model = j2v.Model.from_schema(
 )
 ```
 
-JSON2Vec infers child queries like `[*].measurements[*].name` and
+`json2vec` infers child queries like `[*].measurements[*].name` and
 `[*].measurements[*].value`.
 
 !!! Note
     Field `name` controls the public schema name. `query` controls where values
-    are read. When omitted, JSON2Vec infers the request query from the field and
+    are read. When omitted, `json2vec` infers the request query from the field and
     parent array names.
 
 Use explicit queries when the source keys do not match the public schema names:
@@ -82,6 +82,9 @@ items = j2v.Array(
     max_length=32,
 )
 ```
+
+Explicit queries can also stack repeated semantic roles, such as origin and
+destination, into one shared field. See [Field Stacking](../guides/field-stacking.md).
 
 ## Examples
 
@@ -106,7 +109,7 @@ Common array fields include:
 | `dropout` | `None` | Optional dropout rate. |
 | `p_mask` | `None` | Stored on the array node. Runtime masking is applied to active child tensorfields. |
 | `p_prune` | `None` | Stored on the array node. Runtime pruning is applied to active child tensorfields. |
-| `embed` | `False` | Includes this array node in `Model.predict(...)` outputs under `embedding`. |
+| `embed` | `False` | Includes this array node in `Model.predict(...)` outputs under `embedding`. See [Embeddings & Self-Supervised Learning](../core-concepts/embeddings.md). |
 | `description` | `None` | Optional schema metadata. |
 
 ## Nesting
@@ -137,4 +140,6 @@ targets, and the array context is used to encode those children and route
 information through the model.
 
 Configure `embed=True` on an array when you want `Model.predict(...)` to return
-a representation for the grouped context under that array address.
+a representation for the grouped context under that array address. See
+[Embeddings & Self-Supervised Learning](../core-concepts/embeddings.md) for root,
+array, and leaf embedding patterns.

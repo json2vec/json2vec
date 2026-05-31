@@ -1,4 +1,4 @@
-"""LitServe deployment wrappers for JSON2Vec checkpoints."""
+"""LitServe deployment wrappers for `json2vec` checkpoints."""
 
 import functools
 from collections.abc import Callable
@@ -235,7 +235,7 @@ _DEFAULT_ENCODE_RESPONSE_ANNOTATIONS = dict(API.encode_response.__annotations__)
 
 
 class Deployment(BaseSettings):
-    """Serving configuration for a JSON2Vec checkpoint or model instance.
+    """Serving configuration for a `json2vec` checkpoint or model instance.
 
     `Deployment` queues request/response schemas, optional preprocessors,
     optional postprocessors, and `update(...)` mutations before the model is

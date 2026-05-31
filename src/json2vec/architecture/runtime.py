@@ -1,4 +1,4 @@
-"""Forward, loss, writing, and inference runtime for JSON2Vec models."""
+"""Forward, loss, writing, and inference runtime for `json2vec` models."""
 
 from __future__ import annotations
 

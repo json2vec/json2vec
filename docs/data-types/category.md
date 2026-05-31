@@ -80,7 +80,7 @@ Top-k metrics are tracked for each configured value in `topk`.
 
 `topk` serves two roles:
 
-- During training and evaluation, JSON2Vec tracks a separate top-k accuracy
+- During training and evaluation, `json2vec` tracks a separate top-k accuracy
   metric for each configured value.
 - During prediction, the output contains one candidate list sized to
   `max(topk)`, capped by the current learned vocabulary size.

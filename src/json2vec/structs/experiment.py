@@ -139,7 +139,7 @@ class Hyperparameters(Node):
         n_layers: int,
         n_heads: int,
         fields: Sequence[SchemaField] | None = None,
-        root: str = "record",
+        name: str = "record",
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
@@ -169,7 +169,7 @@ class Hyperparameters(Node):
             root_fields.append(cls.from_schema_node(field))
 
         array = Array(
-            name=root,
+            name=name,
             description=description,
             embed=embed,
             attention=attention,

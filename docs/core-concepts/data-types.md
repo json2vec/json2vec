@@ -1,6 +1,6 @@
 # Built-In Data Types
 
-Data types are the structural and typed nodes in a JSON2Vec schema. `Array`
+Data types are the structural and typed nodes in a `json2vec` schema. `Array`
 groups repeated nested objects. Tensorfields are typed leaves that read values,
 encode them into tensors, hide values during training, and decode targets when
 requested.
@@ -8,21 +8,21 @@ requested.
 Use constructor names from the package root in Python. Serialized schemas use
 the lower-case `type` value.
 
-The pages in this section cover built-in data types. To define a new data type,
-see [Custom Data Types](../guides/tensorfields.ipynb).
+The individual data type pages cover built-in data types. To define a new data
+type, see [Custom Data Types](../data-types/tensorfields.ipynb).
 
 ## Choose A Data Type
 
 | Source value | Recommended type | Use a different type when |
 | --- | --- | --- |
-| Continuous scalar | [`Number`](number.md) | Numeric value is an ID, code, or class label. |
-| One label | [`Category`](category.md) | The label only needs equality matching within a repeated context; use `Entity`. |
-| Zero or more labels | [`Set`](set.md) | Labels have attributes or order; use `Array`. |
-| Repeated objects | [`Array`](array.md) | Repetition is only an upstream storage artifact; preprocess or flatten. |
-| Timestamp/calendar value | [`DateParts`](dateparts.md) | Elapsed time or recency matters; derive a `Number`. |
-| Local repeated identity | [`Entity`](entity.md) | The ID must be stable across training and prediction; use `Category`. |
-| Precomputed dense vector | [`Vector`](vector.md) | JSON2Vec should compute embeddings from strings; use `Text`. |
-| Free-form text | [`Text`](text.md) | The string is a bounded label; use `Category` or `Set`. |
+| Continuous scalar | [`Number`](../data-types/number.md) | Numeric value is an ID, code, or class label. |
+| One label | [`Category`](../data-types/category.md) | The label only needs equality matching within a repeated context; use `Entity`. |
+| Zero or more labels | [`Set`](../data-types/set.md) | Labels have attributes or order; use `Array`. |
+| Repeated objects | [`Array`](../data-types/array.md) | Repetition is only an upstream storage artifact; preprocess or flatten. |
+| Timestamp/calendar value | [`DateParts`](../data-types/dateparts.md) | Elapsed time or recency matters; derive a `Number`. |
+| Local repeated identity | [`Entity`](../data-types/entity.md) | The ID must be stable across training and prediction; use `Category`. |
+| Precomputed dense vector | [`Vector`](../data-types/vector.md) | `json2vec` should compute embeddings from strings; use `Text`. |
+| Free-form text | [`Text`](../data-types/text.md) | The string is a bounded label; use `Category` or `Set`. |
 
 Same raw value can need different types:
 
@@ -46,6 +46,9 @@ Same raw value can need different types:
 | `Text` | No | No public payload | Reconstructs frozen encoder embeddings, not text. |
 | `Array` | No direct payload | No | Child fields may emit predictions. |
 
+Any node configured with `embed=True` can also emit an `embedding` payload from
+`Model.predict(...)`. See [Embeddings & Self-Supervised Learning](embeddings.md).
+
 ## Shared Leaf Options
 
 Every tensorfield inherits shared leaf options. Type-specific pages document
@@ -57,7 +60,7 @@ groups children instead of reading one source value.
 | Option | Default | Notes |
 | --- | --- | --- |
 | `name` | required | Public schema name. If `query` is omitted, this is also the source key. |
-| `query` | inferred | JMESPath expression for the source value. See [Schemas & Queries](../guides/model-schemas.md). |
+| `query` | inferred | JMESPath expression for the source value. See [Query Paths](querypaths.md). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields stay in the schema but are ignored by encoding, losses, and prediction. |
 
@@ -65,16 +68,23 @@ groups children instead of reading one source value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `target` | `False` | Shorthand for `p_prune=1.0`; hides the field from input and trains reconstruction. |
-| `p_mask` | `None` | Randomly hides individual values during training. |
+| `target` | `False` | Exact shorthand for `p_prune=1.0`; hides the field from input and trains reconstruction as a supervised output. |
+| `p_mask` | `None` | Randomly hides individual values during training. Rates must be less than `1.0`. |
 | `p_prune` | `None` | Randomly hides whole field instances during training. |
 | `weight` | `1.0` | Multiplier applied to this field's loss. |
+
+`target=True` is functionally the "always pruned" form of the same
+reconstruction machinery used by `p_prune`: the field is withheld from model
+input and decoded from the remaining context. It is conceptually close to asking
+the model to always reconstruct a hidden value, but it is not the same API as
+`p_mask=1.0`. Masking is value-level and stochastic, and `p_mask` rates are
+validated to be lower than `1.0`.
 
 ### Outputs And Decoder Options
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `embed` | `False` | Includes this node in `Model.predict(...)` outputs under `embedding`. It does not make the field a target. |
+| `embed` | `False` | Includes this node in `Model.predict(...)` outputs under `embedding`. It does not make the field a target. See [Embeddings & Self-Supervised Learning](embeddings.md). |
 | `pooling` | `"query"` | Target decoder pooling: `"query"` or `"mean"`. |
 | `n_heads` | `4` | Attention heads used by query pooling. Must be even. |
 | `dropout` | `None` | Optional dropout rate for query pooling. |

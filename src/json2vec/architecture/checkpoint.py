@@ -1,4 +1,4 @@
-"""Checkpoint serialization helpers for JSON2Vec models."""
+"""Checkpoint serialization helpers for `json2vec` models."""
 
 from __future__ import annotations
 
