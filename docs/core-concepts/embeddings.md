@@ -1,24 +1,34 @@
-# Embeddings & Self-Supervised Learning
+# Learning Modes & Embeddings
 
-`json2vec` can learn useful representations without a labeled target. Configure
-reconstruction tasks with `p_mask` or `p_prune`, then request embeddings from the
-schema nodes you want to export with `embed=True`.
+`json2vec` uses one typed prediction mechanism for supervised,
+self-supervised, and unsupervised representation learning. Configure which leaf
+values are hidden from the encoder with `target=True`, `p_mask`, or `p_prune`,
+then request embeddings from the schema nodes you want to export with
+`embed=True`. If root, branch, and leaf addresses are unfamiliar, read
+[Model Tree](model-tree.md) first.
 
-The same decoder path is used for supervised and self-supervised training:
+The model does not maintain separate supervised and self-supervised code paths.
+Supervised learning is the special case where a target field is hidden from the
+input 100% of the time and decoded from the remaining context:
 
 - `target=True` is exact shorthand for `p_prune=1.0`: it hides a field from
-  input and trains a supervised prediction.
+  input for every training example and trains a supervised prediction.
 - `p_mask` randomly hides individual observed values during training and asks
   the model to reconstruct them.
-- `p_prune` randomly removes fields or contexts during training and asks the
-  model to reconstruct them.
+- `p_prune` randomly removes whole leaf field instances during training and
+  asks the model to reconstruct them.
 - `embed=True` emits an embedding for that schema node during prediction. It
   does not make the field a target.
 
 Think of `target=True` as the always-pruned supervised case. It is conceptually
-similar to always asking the model to reconstruct the field, but use
-`target=True` or `p_prune=1.0` for that behavior. `p_mask=1.0` is not a valid
-configuration; masking is stochastic and uses rates lower than `1.0`.
+the same as asking the model to predict a masked value every time. In API terms,
+use `target=True` or `p_prune=1.0` for that always-hidden behavior.
+`p_mask=1.0` is not a valid configuration; value masking is stochastic and uses
+rates lower than `1.0`.
+
+Unsupervised embedding workflows are built from the same machinery: train on
+masked or pruned reconstruction objectives without an external label, then emit
+representations with `embed=True`.
 
 ## Root Embeddings
 
@@ -75,6 +85,8 @@ model = j2v.Model.from_schema(
 This produces an embedding tree with at least two useful addresses:
 
 ```python
+predictions = model.predict(records)
+
 customer_embedding = predictions[j2v.Address("customer")]["embedding"]
 events_embedding = predictions[j2v.Address("customer", "events")]["embedding"]
 ```
@@ -109,11 +121,12 @@ Use `Entity` for local repeated-identity matching, such as whether the same
 device appears multiple times inside one observation. Use `Category` when the
 identifier should have a persistent vocabulary across training and prediction.
 
-## A Self-Supervised Schema
+## An Unsupervised Schema
 
-This sketch has no label. The model learns by reconstructing masked values and
-emits both root and array embeddings. The complete inline version below trains
-one tiny CPU batch from the bundled digit records.
+This sketch has no label. The model learns by reconstructing masked values,
+which is often called self-supervised learning, and emits both root and array
+embeddings. The complete inline version below trains one tiny CPU batch from the
+bundled digit records.
 
 ```python
 import lightning.pytorch as lit
@@ -165,15 +178,20 @@ trainer = lit.Trainer(
 )
 
 trainer.fit(model=model, datamodule=datamodule)
+model.plot(detail=True)
 predictions = model.predict(records.to_dicts()[:2])
 
 digit = predictions[j2v.Address("digit")]["embedding"]
 pixels = predictions[j2v.Address("digit", "pixels")]["embedding"]
 ```
 
-## Mixed Supervised And Self-Supervised Training
+Root embeddings return one vector per input observation. Array embeddings return
+vectors shaped by the retained slots at that array address.
 
-You can combine a supervised target with auxiliary reconstruction tasks.
+## Combining Learning Signals
+
+You can combine an always-hidden supervised target with auxiliary stochastic
+reconstruction tasks because both use the same typed decoder path.
 
 ```python
 model = j2v.Model.from_schema(
@@ -188,9 +206,9 @@ model = j2v.Model.from_schema(
 )
 ```
 
-The target trains the task you care about directly. The masked fields add
-reconstruction pressure that can improve the representation, especially when
-labels are sparse.
+The target trains the task you care about directly by masking that field from
+the input for every example. The other masked fields add reconstruction pressure
+that can improve the representation, especially when labels are sparse.
 
 ## Exporting Embeddings
 
@@ -221,10 +239,11 @@ explanations.
 
 ## When Not To Use This Pattern
 
-Do not use self-supervised embeddings as a substitute for a validated supervised
-target when the deployment decision requires one. Do not add masking to fields
-that are mostly noise or leakage. Do not expose embeddings from public APIs
-unless downstream consumers need them and privacy review allows it.
+Do not use embeddings learned only from reconstruction as a substitute for a
+validated supervised target when the deployment decision requires one. Do not
+add masking to fields that are mostly noise or leakage. Do not expose embeddings
+from public APIs unless downstream consumers need them and privacy review allows
+it.
 
 Use embeddings when the representation itself is useful: retrieval, clustering,
 anomaly detection, weak supervision, transfer learning, or diagnostics.

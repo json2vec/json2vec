@@ -110,7 +110,6 @@ def test_model_from_schema_accepts_root_array_options():
         max_length=3,
         n_linear=2,
         dropout=0.2,
-        p_mask=0.1,
     )
     params = model.hyperparameters
 
@@ -121,9 +120,20 @@ def test_model_from_schema_accepts_root_array_options():
     assert params.fields.max_length == 3
     assert params.fields.n_linear == 2
     assert params.fields.dropout == 0.2
-    assert params.fields.p_mask == 0.1
+    assert not hasattr(params.fields, "p_mask")
     assert params.embed == ["events"]
     assert params.shapes["events/amount"] == (3,)
+
+
+def test_model_from_schema_rejects_root_array_mask_options():
+    with pytest.raises(TypeError, match="unexpected keyword argument 'p_mask'"):
+        j2v.Model.from_schema(
+            j2v.Number("amount"),
+            d_model=16,
+            n_layers=2,
+            n_heads=4,
+            p_mask=0.1,
+        )
 
 
 def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
@@ -156,7 +166,7 @@ def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
     ]
 
     model.update(j2v.where("name") == "amount", target=False)
-    assert params.requests["record/amount"].p_prune is None
+    assert params.requests["record/amount"].p_prune == 0.0
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
     model.update(j2v.where("name") == "amount", p_prune=0.25)

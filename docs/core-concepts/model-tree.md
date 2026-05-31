@@ -1,10 +1,11 @@
 # Model Tree
 
-The base structure of a model is a tree of `anytree`-backed `pydantic` models.
+The schema you pass to `Model.from_schema(...)` becomes a tree. The generated
+root array encodes one processed observation, nested `Array(...)` nodes encode
+repeated child contexts, and leaf tensorfields read values from input records.
 
-`Model.from_schema(...)` creates a "root" `Array` node, and any
-nested `Array(...)` declarations become "branch" nodes, and tensorfields such as
-`Number`, `Category`, and `Text` become "leaves".
+Internally, the tree is backed by `anytree` and `pydantic`, but the public model
+is easiest to read as root, branch, and leaf nodes.
 
 Each node has a stable slash-delimited address (`j2v.Address`):
 
@@ -40,10 +41,12 @@ order                         array, root context encoder, embed
 `-- returned                  category leaf, supervised target
 ```
 
-`order` is the root context. `j2v.Address("order", "line_items")` is a branching context. The
-leaves are the typed requests that read values from input records.
+`order` is the root context. `j2v.Address("order", "line_items")` is the
+branch address rendered as `order/line_items`. The leaves are the typed
+requests that read values from input records.
 
-Thus, an order is defined by a customer ID, a list a items purchased, and whether or not the customer returned any of the items.
+Thus, an order is defined by a customer ID, a list of items purchased, and
+whether or not the customer returned any of the items.
 
 ## Node Kinds
 
@@ -54,14 +57,19 @@ Thus, an order is defined by a customer ID, a list a items purchased, and whethe
 | Leaf tensorfield | `Number`, `Category`, `Set`, `Vector`, and other tensorfields | Reads source values, stores typed tensors, embeds visible input, and decodes predictions when trained or requested. |
 
 !!! Note
-    Tensorfields represent an extensible typing system. There are many builtin data types, with more in development. Users are empowered to create and register their own [custom data types](../data-types/tensorfields.ipynb).
+    Tensorfields represent an extensible typing system. There are many built-in
+    data types, with more in development. Users can create and register their
+    own [custom data types](../data-types/tensorfields.ipynb).
 
 Array nodes are context encoders with cross-attention pooling.
 Leaf nodes are the only nodes that bind directly to values with a request-level `query`. See
 [Query Paths](querypaths.md) for how leaf queries are inferred.
 
 !!! Note
-    Under the hood, the "Root" array is just another branch (`Array`), but has a `max_length=1`.
+    Under the hood, the root array uses the same machinery as other arrays. Its
+    default `max_length` is `1`, which is why normal raw dictionaries become
+    one-record observations. Advanced users can override the root
+    `max_length=...` on `Model.from_schema(...)`.
 
 ## Nodes As N-Dimensional Arrays
 
@@ -80,15 +88,19 @@ leaf shape             -> (1, 32)
 At runtime, a scalar tensorfield such as `price` has arrays like:
 
 ```text
-state      (batch, 1, 32)
-content    (batch, 1, 32)
-trainable  (batch, 1, 32)
+state      (batch, 1, 32)  - if the content is valued, padded, masked, or null
+content    (batch, 1, 32)  - the actual content payload (numerical value, token indices, etc.)
+trainable  (batch, 1, 32)  - boolean mask to determine whether the content may contribute to losss
 ```
 
 Some field types add content dimensions. For example, `Vector` content includes
 the configured vector width, and `Set` content includes vocabulary dimensions.
 The shared rule is that `state` carries the node's value-state array and
 `content` carries the type-specific value array.
+
+The state array distinguishes observed values, explicit nulls, padded slots,
+and training-time masks. See [Built-In Data Types](data-types.md#value-state)
+for the shared state vocabulary.
 
 Embedders convert leaf arrays into `d_model` vectors:
 
@@ -138,7 +150,7 @@ leaves from their available context.
 6. Leaves that are trainable, targets, or configured with `embed=True` run their
    decoders.
 7. Losses are computed for decoded leaf predictions that have trainable targets.
-   Pure embedding outputs are outputted only at inference time.
+   Pure embedding outputs are emitted only at inference time.
 
 ## Pooling And Heritage
 
@@ -176,7 +188,7 @@ Schema roles change how nodes participate in training and prediction:
 | --- | --- |
 | `p_mask=0.15` | Randomly hides individual leaf values for reconstruction. |
 | `p_prune=0.15` | Randomly hides whole leaf instances for reconstruction. |
-| `target=True` | Always prunes/masks a leaf and decodes it as a supervised target. |
+| `target=True` | Always hides a leaf from input and decodes it as a supervised target; shorthand for `p_prune=1.0`. |
 | `embed=True` | Emits an embedding for root, branch, or leaf nodes during prediction. |
 | `active=False` | Keeps a leaf in the schema but removes it from encoding, forward passes, losses, and prediction until it is reactivated. |
 
@@ -202,5 +214,5 @@ Use predicates such as `j2v.where("name") == "price"` or
 
 - Use [Built-In Data Types](data-types.md) to choose leaf tensorfields.
 - Use [Array](../data-types/array.md) for repeated branch contexts.
-- Use [Embeddings & Self-Supervised Learning](embeddings.md) for `p_mask`,
+- Use [Learning Modes & Embeddings](embeddings.md) for `p_mask`,
   `p_prune`, and `embed=True` patterns.

@@ -33,6 +33,8 @@ record. Use `Text` when `json2vec` should compute embeddings from strings. Use a
 
 Every valued input must have exactly `n_dim` numeric elements. `None` is encoded
 as a null state, and missing array positions are encoded as padded state.
+Prepare vector scale and normalization upstream unless a custom tensorfield owns
+that behavior.
 
 ## Examples
 
@@ -81,4 +83,6 @@ content:
 
 Use `Text` when `json2vec` should compute text embeddings from strings. Use
 `Vector` when embeddings or dense features are already present in the input
-record. This may be used for encoding media. At this point in time, `json2vec` does not support arbitrary media (images, videos, audio).
+record. Specialized vector or media handling can be implemented with
+[custom data types](tensorfields.ipynb); the built-in package does not include
+image, video, or audio tensorfields.

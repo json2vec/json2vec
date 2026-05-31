@@ -26,7 +26,7 @@ from json2vec.structs.selectors import (
     where,
 )
 from json2vec.structs.structure import Array, RequestTypes
-from json2vec.structs.tree import Address, Leaf, Node, PruneRate, Rate
+from json2vec.structs.tree import Address, Leaf, Node, Rate
 
 __all__ = [
     "ExtendArg",
@@ -56,9 +56,7 @@ class Hyperparameters(Node):
     fields: Array
 
     embed: ClassVar[None] = None
-    p_prune: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
     dropout: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
-    p_mask: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
 
     _selection_cache: dict[SelectionKey, SelectionCacheEntry] = pydantic.PrivateAttr(default_factory=dict)
 
@@ -77,8 +75,8 @@ class Hyperparameters(Node):
             if normalized.get("p_prune") not in (None, 1.0):
                 raise ValueError("target=True is shorthand for p_prune=1.0")
         else:
-            if "p_prune" in normalized and normalized["p_prune"] is not None:
-                raise ValueError("target=False is shorthand for p_prune=None")
+            if "p_prune" in normalized and normalized["p_prune"] not in (None, 0.0):
+                raise ValueError("target=False is shorthand for p_prune=0.0")
 
         return normalized
 
@@ -146,8 +144,6 @@ class Hyperparameters(Node):
         max_length: Annotated[int, pydantic.Field(gt=0)] = 1,
         n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
         dropout: Rate | None = None,
-        p_mask: Rate | None = None,
-        p_prune: PruneRate | None = None,
     ) -> Self:
         """Build hyperparameters from schema fields."""
         normalized = [*(fields or ()), *field_args]
@@ -178,8 +174,6 @@ class Hyperparameters(Node):
             n_linear=n_linear,
             max_length=max_length,
             dropout=dropout,
-            p_mask=p_mask,
-            p_prune=p_prune,
             fields=root_fields,
         )
         return cls(d_model=d_model, fields=array)
@@ -324,7 +318,7 @@ class Hyperparameters(Node):
         """Mutate matching schema nodes.
 
         `target=True` is normalized to `p_prune=1.0`; `target=False` clears the
-        target prune rate.
+        target prune rate by setting `p_prune=0.0`.
         """
         values = self.update_values(values)
         if not values:

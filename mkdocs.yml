@@ -63,12 +63,12 @@ nav:
   - Home: index.md
   - Motivation: motivation.md
   - Getting Started: getting-started.md
-  - AI Quickstart: ai-quickstart.md
+  - AI / Expert Quickstart: ai-quickstart.md
   - Core Concepts:
       - Model Tree: core-concepts/model-tree.md
       - Query Paths: core-concepts/querypaths.md
       - Data Types: core-concepts/data-types.md
-      - Embeddings & Self-Supervised Learning: core-concepts/embeddings.md
+      - Learning Modes & Embeddings: core-concepts/embeddings.md
       - Mutations: core-concepts/mutations.ipynb
   - Data Types:
       - Array: data-types/array.md
@@ -82,8 +82,8 @@ nav:
       - Custom Data Types: data-types/tensorfields.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
-      - Masked Pretraining: tutorials/pretraining.ipynb
       - Nested Supervised Training: tutorials/nested-supervised-training.ipynb
+      - Masked Pretraining: tutorials/pretraining.ipynb
       - Supervised Tabular Training: tutorials/supervised-tabular-training.ipynb
       - Serving: tutorials/serving.ipynb
   - Guides:

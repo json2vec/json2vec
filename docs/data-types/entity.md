@@ -1,8 +1,9 @@
 # Entity
 
 Use `Entity` for local identity matching inside repeated records. It is useful
-when the model should notice that two items in the same encoded batch share the
-same identifier, without maintaining a global vocabulary for that identifier.
+when the model should notice that two items in the same observation and
+repeated context share the same identifier, without maintaining a global
+vocabulary for that identifier.
 
 ```json
 {
@@ -53,9 +54,12 @@ Common entity fields include:
 | --- | --- | --- |
 | `topk` | `[]` | Optional top-k identity accuracy metrics. Values must be positive and not `1`. |
 
-An `Entity` field must have at least two slots per observation. In practice that
-means placing it under an `Array(max_length=...)` greater than `1`, or otherwise
-configuring the model root shape to provide repeated values.
+An `Entity` field must have at least two slots per observation. In practice,
+place it under an `Array(max_length=...)` greater than `1`.
+
+!!! Note
+    Advanced root shapes can also provide repeated values, but the normal and
+    clearest pattern is `Entity` under an `Array`.
 
 ## Target Behavior
 
@@ -81,3 +85,6 @@ be emitted as labels. Use `j2v.Entity` when only equality relationships within t
 current repeated context matter, or there are simply too many unique global values to track.
 
 Users may also consider defining a "superbloom" style custom extension to maintain a larger set of unique categorical values without the linear memory costs associated with `j2v.Category`.
+
+See the [Device Tenure](../case-studies/device-tenure.md) case study for an
+applied repeated-device pattern.

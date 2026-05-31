@@ -61,6 +61,13 @@ the query `[*].[origin, destination]` produces two location values for the
 `locations` array. The modeled field is `itinerary/locations/location`, so both
 positions share one categorical vocabulary.
 
+```python
+import jmespath
+
+observation = [{"origin": "IAD", "destination": "SFO"}]
+assert jmespath.search("[*].[origin, destination]", observation) == [["IAD", "SFO"]]
+```
+
 ## Buyer And Seller Accounts
 
 Stacking also works for repeated identity roles.
@@ -124,6 +131,11 @@ model = j2v.Model.from_schema(
 
 This keeps the shared identity representation while letting the model distinguish
 buyer from seller.
+
+Stacking shares parameters by design, but it also removes the original
+role-specific field names from the address. Add an explicit role field whenever
+origin vs destination, buyer vs seller, or before vs after is part of the
+signal.
 
 ## Before And After Values
 

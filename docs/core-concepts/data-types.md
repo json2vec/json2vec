@@ -11,6 +11,13 @@ the lower-case `type` value.
 The individual data type pages cover built-in data types. To define a new data
 type, see [Custom Data Types](../data-types/tensorfields.ipynb).
 
+Every leaf tensorfield follows the same high-level lifecycle:
+
+```text
+query -> validate raw values -> tensorize content/state -> embed visible values
+-> optionally decode trainable targets -> write public prediction payload
+```
+
 ## Choose A Data Type
 
 | Source value | Recommended type | Use a different type when |
@@ -42,12 +49,16 @@ Same raw value can need different types:
 | `Set` | Yes, per-label probabilities or thresholded labels | Yes | `threshold` can reduce API response size. |
 | `Vector` | Yes, reconstructed vector | Yes | Non-valued predictions return zero-vector content. |
 | `DateParts` | No | No public payload | Trains losses and accuracies only. |
-| `Entity` | No | No public payload | Batch-local identity representation. |
+| `Entity` | No | No public payload | Observation-local identity representation. |
 | `Text` | No | No public payload | Reconstructs frozen encoder embeddings, not text. |
 | `Array` | No direct payload | No | Child fields may emit predictions. |
 
 Any node configured with `embed=True` can also emit an `embedding` payload from
-`Model.predict(...)`. See [Embeddings & Self-Supervised Learning](embeddings.md).
+`Model.predict(...)`. See [Learning Modes & Embeddings](embeddings.md).
+
+No public content payload does not mean the field is ignored. `DateParts`,
+`Entity`, and `Text` can still be visible inputs, train reconstruction losses,
+and emit embeddings when configured with `embed=True`.
 
 ## Shared Leaf Options
 
@@ -69,8 +80,8 @@ groups children instead of reading one source value.
 | Option | Default | Notes |
 | --- | --- | --- |
 | `target` | `False` | Exact shorthand for `p_prune=1.0`; hides the field from input and trains reconstruction as a supervised output. |
-| `p_mask` | `None` | Randomly hides individual values during training. Rates must be less than `1.0`. |
-| `p_prune` | `None` | Randomly hides whole field instances during training. |
+| `p_mask` | `0.0` | Randomly hides individual values during training. Rates must be less than `1.0`. |
+| `p_prune` | `0.0` | Randomly hides whole leaf field instances during training. |
 | `weight` | `1.0` | Multiplier applied to this field's loss. |
 
 `target=True` is functionally the "always pruned" form of the same
@@ -80,11 +91,15 @@ the model to always reconstruct a hidden value, but it is not the same API as
 `p_mask=1.0`. Masking is value-level and stochastic, and `p_mask` rates are
 validated to be lower than `1.0`.
 
+`p_mask`, `p_prune`, and `target` are leaf tensorfield options. `Array` nodes
+define repeated structure and can emit embeddings, but they do not directly
+mask, prune, or target values.
+
 ### Outputs And Decoder Options
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `embed` | `False` | Includes this node in `Model.predict(...)` outputs under `embedding`. It does not make the field a target. See [Embeddings & Self-Supervised Learning](embeddings.md). |
+| `embed` | `False` | Includes this node in `Model.predict(...)` outputs under `embedding`. It does not make the field a target. See [Learning Modes & Embeddings](embeddings.md). |
 | `pooling` | `"query"` | Target decoder pooling: `"query"` or `"mean"`. |
 | `n_heads` | `4` | Attention heads used by query pooling. Must be even. |
 | `dropout` | `None` | Optional dropout rate for query pooling. |

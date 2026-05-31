@@ -14,8 +14,8 @@
 - [Why `json2vec`](https://json2vec.github.io/json2vec/motivation/): motivation and modeling philosophy.
 - [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths/): default and custom JMESPath query paths.
 - [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types/): type selection guide.
-- [Embeddings & Self-Supervised Learning](https://json2vec.github.io/json2vec/core-concepts/embeddings/): masked reconstruction and embedding export workflows.
-- [Model Updates](https://json2vec.github.io/json2vec/core-concepts/model-update/): schema mutation and transfer-learning workflow.
+- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings/): supervised targets, masked reconstruction, unsupervised representation learning, and embedding export workflows.
+- [Mutations](https://json2vec.github.io/json2vec/core-concepts/mutations/): schema mutation and transfer-learning workflow.
 - [Whitepaper](https://github.com/json2vec/json2vec/blob/main/docs/whitepaper.typ): full conceptual background.
 
 ## Data Types
@@ -50,6 +50,6 @@
 - Use `import json2vec as j2v`.
 - Use `j2v.Model.from_schema(...)`; do not invent `Struct(...)`.
 - Use `name=...` to name the generated root context.
-- Use `target=True` for supervised targets, `embed=True` for emitted embeddings, and `p_mask` for self-supervised reconstruction.
+- Use `target=True` for supervised targets, `embed=True` for emitted embeddings, and `p_mask` on leaf fields for self-supervised reconstruction.
 - Use `Array(..., name=..., max_length=...)` for repeated contexts.
 - Use preprocessors for Python input shaping and postprocessors for prediction output shaping.

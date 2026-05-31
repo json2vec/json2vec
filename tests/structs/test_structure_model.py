@@ -52,6 +52,15 @@ def test_array_rejects_positional_and_keyword_children():
         )
 
 
+def test_array_rejects_leaf_mask_and_target_options():
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        Array(
+            Category(name="category_leaf", query="[*].code"),
+            name="branch",
+            p_mask=0.1,
+        )
+
+
 def test_hyperparameters_derives_arrays_requests_and_shapes():
     structure = Hyperparameters.model_validate(_payload())
 
@@ -129,27 +138,41 @@ def test_hyperparameters_preserves_direct_field_dropout():
     assert structure.requests["root/branch/category_leaf"].dropout == 0.4
 
 
-def test_hyperparameters_preserves_direct_mask_and_target_rates():
+def test_hyperparameters_rejects_array_mask_and_target_rates():
     payload = _payload()
     payload["fields"]["p_mask"] = 0.2
     payload["fields"]["p_prune"] = 0.1
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        Hyperparameters.model_validate(payload)
+
+
+def test_hyperparameters_preserves_direct_leaf_mask_and_target_rates():
+    payload = _payload()
     payload["fields"]["fields"][0]["p_mask"] = 0.3
     payload["fields"]["fields"][0]["p_prune"] = 0.4
     payload["fields"]["fields"][0]["fields"][0]["p_mask"] = 0.5
+    payload["fields"]["fields"][0]["fields"][0]["p_prune"] = 0.6
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        Hyperparameters.model_validate(payload)
+
+    payload["fields"]["fields"][0].pop("p_mask")
+    payload["fields"]["fields"][0].pop("p_prune")
 
     structure = Hyperparameters.model_validate(payload)
 
-    assert structure.arrays["root"].p_mask == 0.2
-    assert structure.arrays["root/branch"].p_mask == 0.3
+    assert not hasattr(structure.arrays["root"], "p_mask")
+    assert not hasattr(structure.arrays["root/branch"], "p_mask")
     assert structure.requests["root/branch/category_leaf"].p_mask == 0.5
-    assert structure.requests["root/branch/category_leaf"].p_prune is None
+    assert structure.requests["root/branch/category_leaf"].p_prune == 0.6
 
 
 def test_hyperparameters_allows_missing_mask_and_target_rates():
     structure = Hyperparameters.model_validate(_payload())
 
-    assert structure.requests["root/branch/category_leaf"].p_mask is None
-    assert structure.requests["root/branch/category_leaf"].p_prune is None
+    assert structure.requests["root/branch/category_leaf"].p_mask == 0.0
+    assert structure.requests["root/branch/category_leaf"].p_prune == 0.0
 
 
 def test_inactive_leaf_nodes_are_kept_in_tree_but_removed_from_runtime_maps():

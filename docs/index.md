@@ -13,7 +13,8 @@ record, and the schema becomes the model.
 The framework is designed for large production datasets, not just toy nested
 examples: training and batch inference over billions of observations, with
 throughput-oriented data paths and logging for pipelines that can process
-100k+ observations per second on appropriately sized hardware.
+100k+ observations per second on appropriately sized hardware. The examples in
+these docs stay deliberately small so the modeling loop is easy to inspect.
 
 ## Core Idea
 
@@ -32,6 +33,10 @@ reconstruction, embedding export, schema mutation, field importance, and serving
 without rebuilding the data representation for each workflow.
 
 ## A Schema Defines A Model
+
+The generated root schema node is named `record` by default. This example names
+it `order`, which changes output addresses such as `order/returned` but does not
+change the source keys read from each input record.
 
 ```python
 import json2vec as j2v
@@ -86,7 +91,7 @@ addresses.
   the model tree.
 - **Embedding trees:** embeddings can come from the root, arrays, or selected
   leaves, making branch-level retrieval and diagnostics possible.
-- **Schema evolution:** models can be updated, extended, deleted, reset, or
+- **Schema evolution:** models are completely mutable and can be updated, extended, deleted, reset, or
   temporarily overridden after construction.
 - **Scale-oriented runtime:** online preprocessing state, streaming data
   modules, throughput logging, and checkpointed tensorfield state are designed
@@ -109,21 +114,30 @@ without making a feature table the only representation the model can see.
 ## Where To Start
 
 - New to the package: [Getting Started](getting-started.md)
-- Short API map: [AI Quickstart](ai-quickstart.md)
+- Read the schema as a tree: [Model Tree](core-concepts/model-tree.md)
+- Bind source records to fields: [Query Paths](core-concepts/querypaths.md)
+- Short API map: [AI / Expert Quickstart](ai-quickstart.md)
 - Modeling rationale: [Why `json2vec`](motivation.md)
-- Record shapes and query rules: [Query Paths](core-concepts/querypaths.md)
 - Built-in fields: [Data Types](core-concepts/data-types.md)
-- Self-supervised embeddings: [Embeddings & Self-Supervised Learning](core-concepts/embeddings.md)
+- Learning modes and embeddings: [Learning Modes & Embeddings](core-concepts/embeddings.md)
 - Serving-time output shaping: [Postprocessors](guides/postprocessors.md)
 - Applied risk example: [Device Tenure](case-studies/device-tenure.md)
+
+## Learning Path
+
+For a first pass, follow this sequence:
+
+```text
+Getting Started -> Model Tree -> Query Paths -> Data Types -> Embeddings -> Guides
+```
 
 ## Tutorials
 
 The tutorials are ordered by workflow:
 
 - **Hello World** runs the smallest supervised training loop.
-- **Masked Pretraining** introduces nested arrays and self-supervised masking.
 - **Nested Supervised Training** uses repeated measurement objects plus a root target.
+- **Masked Pretraining** introduces nested arrays and self-supervised masking.
 - **Supervised Tabular Training** shows a compact flat classifier for comparison.
 - **Serving** turns a saved model into a deployment wrapper.
 

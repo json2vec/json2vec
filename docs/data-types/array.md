@@ -35,6 +35,11 @@ or flattening is usually more efficient.
 the child fields use explicit `query` expressions. Each child tensorfield is
 padded or truncated to the configured `max_length`.
 
+!!! Note
+    Set `max_length` deliberately for real repeated data. The default is `1`,
+    which is useful for root contexts but usually too small for meaningful child
+    histories.
+
 With `max_length=2`, two items are retained, extra items are truncated, and
 missing slots are padded:
 
@@ -46,7 +51,9 @@ missing slots are padded:
 ```
 
 The first record keeps `a` and `b`; `c` is truncated. The second record keeps
-`a` and adds one padded slot.
+`a` and adds one padded slot. Array order is the order returned by the query.
+Sort, window, or filter in a [preprocessor](../guides/preprocessors.ipynb) when
+order matters.
 
 For a top-level schema like:
 
@@ -70,7 +77,8 @@ model = j2v.Model.from_schema(
 !!! Note
     Field `name` controls the public schema name. `query` controls where values
     are read. When omitted, `json2vec` infers the request query from the field and
-    parent array names.
+    parent array names. `Array` itself does not read a value with `query`; its
+    child leaves do.
 
 Use explicit queries when the source keys do not match the public schema names:
 
@@ -107,9 +115,7 @@ Common array fields include:
 | `n_heads` | `4` | Attention heads for this array. Must be even. |
 | `n_linear` | `1` | Number of feed-forward linear layers in this array. |
 | `dropout` | `None` | Optional dropout rate. |
-| `p_mask` | `None` | Stored on the array node. Runtime masking is applied to active child tensorfields. |
-| `p_prune` | `None` | Stored on the array node. Runtime pruning is applied to active child tensorfields. |
-| `embed` | `False` | Includes this array node in `Model.predict(...)` outputs under `embedding`. See [Embeddings & Self-Supervised Learning](../core-concepts/embeddings.md). |
+| `embed` | `False` | Includes this array node in `Model.predict(...)` outputs under `embedding`. See [Learning Modes & Embeddings](../core-concepts/embeddings.md). |
 | `description` | `None` | Optional schema metadata. |
 
 ## Nesting
@@ -139,7 +145,11 @@ be more efficient.
 targets, and the array context is used to encode those children and route
 information through the model.
 
+`p_mask`, `p_prune`, and `target=True` are configured on leaf tensorfields, not
+on `Array`. To apply the same masking or pruning rate to every child field, use
+`model.update(...)` with a selector that matches those leaves.
+
 Configure `embed=True` on an array when you want `Model.predict(...)` to return
 a representation for the grouped context under that array address. See
-[Embeddings & Self-Supervised Learning](../core-concepts/embeddings.md) for root,
+[Learning Modes & Embeddings](../core-concepts/embeddings.md) for root,
 array, and leaf embedding patterns.

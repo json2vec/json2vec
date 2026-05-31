@@ -92,6 +92,17 @@ Finally, querying and preprocessing should live in the same path used for
 training and inference. The same schema and optional preprocessors and postprocessors
 should feed offline training, batch inference, and serving.
 
+These requirements map to the rest of the docs:
+
+| Capability | Start here |
+| --- | --- |
+| Dynamic schema architecture | [Model Tree](core-concepts/model-tree.md) |
+| Hierarchical context encoding | [Model Tree](core-concepts/model-tree.md), [Array](data-types/array.md) |
+| Schema evolution | [Mutations](core-concepts/mutations.ipynb) |
+| Datatype plugins | [Built-In Data Types](core-concepts/data-types.md), [Custom Data Types](data-types/tensorfields.ipynb) |
+| Explainability | [Field Importance](guides/field-importance.ipynb), [Learning Modes & Embeddings](core-concepts/embeddings.md) |
+| Querying and wrangling | [Query Paths](core-concepts/querypaths.md), [Preprocessors](guides/preprocessors.ipynb) |
+
 ## Schema As Model Blueprint
 
 In `json2vec`, the schema is not metadata around the model. It is the model
@@ -131,7 +142,9 @@ model.update(j2v.where("name") == "proline", active=False)
 
 This matters because a schema can evolve with the use case. A pretraining model,
 a fine-tuned model, an embedding model, and a serving deployment can be
-different configurations of the same underlying tree.
+different configurations of the same underlying tree. See
+[Model Tree](core-concepts/model-tree.md) for the node structure and
+[Mutations](core-concepts/mutations.ipynb) for the update workflow.
 
 ## Hierarchical Contexts
 
@@ -154,7 +167,8 @@ password reset, email change, and new-device login may disappear behind noise.
 Nested contexts reduce that risk. Login-session events stay local to their
 session. Transactions stay in their transaction context. Statement histories
 stay separate from clickstream behavior. Each branch can use a window size that
-matches the business meaning of that branch.
+matches the business meaning of that branch. The [Device Tenure](case-studies/device-tenure.md)
+case study shows this pattern in an account-risk setting.
 
 ## Transfer Learning With Schema Evolution
 
@@ -218,13 +232,17 @@ remaining context. This turns a field into a question:
 That mechanism supports supervised learning, but it also supports diagnostics.
 A developer can remove a branch, hold the rest of the pipeline constant, and
 measure what changes. If removing login-session clickstream events degrades
-account-takeover performance, that branch is contributing signal.
+account-takeover performance, that branch is contributing signal. See
+[Field Importance](guides/field-importance.ipynb) for a runnable pruning-based
+diagnostic.
 
 Embedding trees are another example. The model can emit vectors at selected
 addresses, not only at the root. Two customers may look similar globally but
 diverge inside login sessions. Two transactions may look different locally while
 their parent account histories remain similar. Embeddings at multiple addresses
-make that distinction observable.
+make that distinction observable. See
+[Learning Modes & Embeddings](core-concepts/embeddings.md) for export
+patterns.
 
 Finally, counterfactual analysis can be expressed in the original record shape.
 Instead of asking which derived feature moved, a practitioner can edit the raw

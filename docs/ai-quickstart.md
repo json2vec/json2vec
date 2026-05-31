@@ -1,6 +1,8 @@
 # AI Quickstart
 
-This page gives AI agents and experienced Python users the shortest reliable path through `json2vec`.
+This page gives AI agents and experienced Python users the shortest reliable
+path through `json2vec`. If you are new to the package, start with
+[Getting Started](getting-started.md).
 
 ## Import Style
 
@@ -129,6 +131,9 @@ trainer.fit(model=model, datamodule=datamodule)
 
 ```python
 predictions = model.predict(records.to_dicts()[:3])
+
+species = predictions[j2v.Address("record", "species")]
+record = predictions[j2v.Address("record")]
 ```
 
 ## Shape Raw Data
@@ -146,9 +151,13 @@ model = j2v.Model.from_schema(
 )
 ```
 
-Use a preprocessor when the source needs Python logic before querying:
+Use a preprocessor when the source needs Python logic before querying. The
+decorator registers the callable for dataset and deployment configuration, and
+the same callable can be passed directly to `model.encode(...)` or
+`model.predict(...)`.
 
 ```python
+@j2v.preprocess
 def normalize_request(record: dict) -> dict:
     return {
         "amount": float(record["amount_usd"]),
@@ -157,7 +166,8 @@ def normalize_request(record: dict) -> dict:
     }
 ```
 
-Then pass it to data modules, `model.encode(...)`, `model.predict(...)`, or deployments where supported.
+Then pass it to data modules, `model.encode(...)`, `model.predict(...)`, or
+deployments where supported.
 
 ## Reshape Outputs
 

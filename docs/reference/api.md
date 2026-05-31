@@ -11,7 +11,16 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Model.predict(...)` returns configured target predictions and embeddings.
 - `Postprocessor` reshapes predictions after decoding; see
   [Postprocessors](../guides/postprocessors.md).
-- `Deployment` wraps a checkpoint or model instance for serving.
+- `Deployment` wraps a checkpoint or model instance for serving; install the
+  `serving` extra for LitServe-backed deployment paths.
+
+Learning-oriented entry points:
+
+- [Getting Started](../getting-started.md)
+- [Model Tree](../core-concepts/model-tree.md)
+- [Query Paths](../core-concepts/querypaths.md)
+- [Built-In Data Types](../core-concepts/data-types.md)
+- [Serving](../tutorials/serving.ipynb)
 
 ## Package
 

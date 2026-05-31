@@ -36,6 +36,10 @@ uv sync --extra text
 Without that extra, using `type: text` raises an import error when `json2vec`
 tries to load the tokenizer or encoder.
 
+Hugging Face may download model assets the first time a model is used. Use a
+local path or `local_files_only=True` when documentation, training, or serving
+must run from cached files only.
+
 ## Input Values
 
 `Text` expects string values. `None` is encoded as a null state, and missing
@@ -53,6 +57,17 @@ Common text fields include:
 - Merchant names, product names, search queries, or support subjects.
 - Short explanations or free-form metadata attached to structured events.
 - Text that should be encoded as a semantic feature rather than generated as output.
+
+Text can be nested like any other leaf:
+
+```python
+ticket_events = j2v.Array(
+    j2v.Text("message", model_name="bert-base-uncased", max_length=128),
+    j2v.Category("event_type", max_vocab_size=64),
+    name="ticket_events",
+    max_length=32,
+)
+```
 
 ## Configuration
 

@@ -42,7 +42,7 @@ schemas, and checkpoints private.
   (pretraining, finetuning, refitting, and task adaptation), the model can be
   mutated. Fields can be added (`model.extend`), removed (`model.delete`),
   updated (`model.update` / `with model.override`), and reset (`model.reset`).
-  See the [model update guide](https://json2vec.github.io/json2vec/core-concepts/model-update/).
+  See the [mutations guide](https://json2vec.github.io/json2vec/core-concepts/mutations/).
 - **Production semantics for missingness.** `null`, `padded`, `masked`, and
   `valued` are distinct states in the tensorfield type system.
   They are not collapsed into one generic missing-value bucket.
@@ -161,9 +161,7 @@ trainer = lit.Trainer(
 
 trainer.fit(model=model, datamodule=datamodule)
 
-batch = [[record] for record in records.to_dicts()[:3]]
-
-pprint(model.predict(batch))
+pprint(model.predict(records.to_dicts()[:3]))
 ```
 
 The prediction call returns a typed result for `record/species` and the
@@ -185,11 +183,12 @@ Useful entry points:
 - [Why `json2vec`](https://json2vec.github.io/json2vec/motivation/)
 - [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths/)
 - [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types/)
-- [Embeddings & Self-Supervised Learning](https://json2vec.github.io/json2vec/core-concepts/embeddings/)
-- [Model Updates](https://json2vec.github.io/json2vec/core-concepts/model-update/)
+- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings/)
+- [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree/)
+- [Mutations](https://json2vec.github.io/json2vec/core-concepts/mutations/)
 - [Hello World](https://json2vec.github.io/json2vec/tutorials/hello-world/)
-- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
 - [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/)
+- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
 - [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/)
 - [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance/)
 - [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/)

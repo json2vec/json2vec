@@ -8,6 +8,12 @@ Each leaf field has a request-level `query`. When `query` is omitted,
 source payload does not match the schema names, pass an explicit
 [JMESPath](https://jmespath.org/) expression with `query=...`.
 
+Queries are the bridge between your raw record shape and the model tree. Arrays
+define repeated contexts, but only leaf tensorfields such as `Number`,
+`Category`, and `Entity` bind directly to source values with `query`.
+Those leaf queries can be set when the field is constructed, updated later with
+`model.update(...)`, or temporarily overridden with `model.override(...)`.
+
 For JMESPath syntax beyond the patterns below, use the upstream
 [JMESPath tutorial](https://jmespath.org/tutorial.html),
 [examples](https://jmespath.org/examples.html), and
@@ -47,6 +53,23 @@ internal_search = "[*][*].amount"
 Write the request query, not the internal batch query. In normal schemas,
 `[*].amount` is correct and `[*][*].amount` is over-nested.
 
+The three shapes are:
+
+| Shape | Example | Who usually handles it |
+| --- | --- | --- |
+| Raw record | `{"amount": 12.50}` | Your code or source system |
+| Processed observation | `[{"amount": 12.50}]` | `json2vec` wraps raw dicts this way |
+| Encoded batch | `[[{"amount": 12.50}], [{"amount": 8.25}]]` | Data modules and `model.encode(...)` |
+
+For the public convenience APIs, pass raw dictionaries:
+
+```python
+predictions = model.predict([{"amount": 12.50}])
+```
+
+You usually only pass the nested encoded shape when testing lower-level
+tensorization behavior.
+
 ## Default Query Rules
 
 When a leaf field omits `query`, `json2vec` builds the query from the schema
@@ -56,7 +79,8 @@ path:
 [*].<array_name>[*].<nested_array_name>[*].<field_name>
 ```
 
-For a top-level field, there are no array selectors:
+For a top-level field, there are no nested array selectors after the root
+observation selector:
 
 ```text
 [*].<field_name>
@@ -234,6 +258,45 @@ Important rules:
 - Use JMESPath syntax, not JSONPath syntax. For example, use `[*].amount`, not
   `$.amount`.
 
+Use a preprocessor instead of a dense query when the source needs Python logic:
+
+| Need | Use |
+| --- | --- |
+| Rename or select stable fields | `query=...` |
+| Quote unusual source keys | `query=...` |
+| Read nested arrays without changing shape | `query=...` |
+| Sort, window, or filter with business rules | preprocessor |
+| Derive recency, elapsed time, or normalized values | preprocessor |
+| Split one source object into many observations | yielding preprocessor |
+| Normalize inconsistent source formats | preprocessor |
+
+## Updating Leaf Queries
+
+Queries are leaf-node schema attributes. If the model structure is right but the
+source payload changes, you can update the query on the matching leaf instead
+of rebuilding the schema:
+
+```python
+model.update(
+    j2v.where("address") == "record/amount",
+    query="[*].transaction.amount_usd",
+)
+```
+
+For serving, experiments, or one-off checks, use `model.override(...)` as a
+context manager. The original query is restored when the context exits:
+
+```python
+with model.override(
+    j2v.where("address") == "record/amount",
+    query="[*].fallback.amount",
+):
+    predictions = model.predict(records)
+```
+
+Select leaf tensorfields when changing `query`. `Array` nodes define model
+structure and addresses, but they do not bind directly to source values.
+
 ## Renamed Source Keys
 
 The schema name can be stable even when the input key is awkward or versioned:
@@ -362,7 +425,11 @@ Both leaves use the same filter so `device_id` and `risk_score` remain aligned
 within `login_events`.
 
 !!! Note
-     You can filter nested arrays with a querypath, but you may alternatively consider using a `preprocessor`
+    You can filter nested arrays with a query path, but use a
+    [preprocessor](../guides/preprocessors.ipynb) when filtering depends on
+    sorting, windowing, request time, or other business rules. Sibling fields
+    under the same `Array` should use the same filter so their values remain
+    aligned.
 
 ## Index And Slice Queries
 
@@ -401,7 +468,9 @@ The slice query preserves the root dimension and returns up to ten event amounts
 per processed record.
 
 !!! Note
-     You can slice nested arrays with a querypath, but you may alternatively consider using a `preprocessor`
+    You can slice nested arrays with a query path, but use a
+    [preprocessor](../guides/preprocessors.ipynb) when you need to sort first,
+    choose a time window, or make the slicing rule testable outside JMESPath.
 
 ## Common Query Examples
 
@@ -425,6 +494,13 @@ per processed record.
 Avoid flattening operators such as `[]` unless you intentionally want to remove
 an array dimension. Most fields under `Array` should use `[*]` at each array
 level so values remain aligned with the schema tree.
+
+For example:
+
+| Intent | Query | Result |
+| --- | --- | --- |
+| Preserve `items` as one array under the root record | `[*].items[*].sku` | `[["A", "B"]]` |
+| Flatten away the `items` dimension | `[*].items[].sku` | `["A", "B"]` |
 
 ## Testing A Query
 
@@ -450,7 +526,12 @@ assert jmespath.search("[*].payload.items[*].product.sku", observation) == [["A1
 If that works, use the same string as `query=...`. Do not add another leading
 `[*]`; `json2vec` adds the batch selector internally.
 
-You may also inspect processed model inputs via `Model.encode(...)`.
+You may also inspect processed model inputs via `Model.encode(...)`:
+
+```python
+tensors = model.encode([{"amount": 12.50, "merchant": "bookshop"}])
+print(tensors)
+```
 
 ## Troubleshooting
 

@@ -30,7 +30,7 @@ from json2vec.structs.experiment import (
     SchemaField,
 )
 from json2vec.structs.packages import Prediction
-from json2vec.structs.tree import Address, Node, PruneRate, Rate
+from json2vec.structs.tree import Address, Node, Rate
 from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
@@ -176,8 +176,6 @@ class Model(lit.LightningModule):
         max_length: int = 1,
         n_linear: int = 1,
         dropout: Rate | None = None,
-        p_mask: Rate | None = None,
-        p_prune: PruneRate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
     ) -> Self:
@@ -199,8 +197,6 @@ class Model(lit.LightningModule):
             max_length: Maximum number of records per observation at the root.
             n_linear: Feed-forward block count on the generated root array.
             dropout: Optional dropout rate on the generated root array.
-            p_mask: Optional mask rate on the generated root array.
-            p_prune: Optional prune rate on the generated root array.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
 
@@ -220,8 +216,6 @@ class Model(lit.LightningModule):
             max_length=max_length,
             n_linear=n_linear,
             dropout=dropout,
-            p_mask=p_mask,
-            p_prune=p_prune,
         )
         return cls(
             hyperparameters=hyperparameters,
@@ -296,7 +290,7 @@ class Model(lit.LightningModule):
         """Mutate selected schema nodes and rebuild compatible modules.
 
         `target=True` is shorthand for `p_prune=1.0`; `target=False` clears
-        target behavior by setting `p_prune=None`.
+        target behavior by setting `p_prune=0.0`.
 
         Args:
             *predicates: Predicates used to select nodes.

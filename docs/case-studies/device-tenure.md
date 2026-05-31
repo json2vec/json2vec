@@ -113,6 +113,51 @@ relationships within the customer observation. `days_since_event` gives it
 recency. The login-session array and root node request embeddings so offline
 analysis can inspect both customer-level and login-history representations.
 
+`customer_id` is marked `active=False` so the schema can retain the field as
+metadata without feeding a high-cardinality identifier into the model. Use an
+active `Category` only when a persistent global identity vocabulary is intended
+and appropriate for the decision.
+
+`Entity` encodes local sameness within the tensorfield values it reads. If a
+use case requires matching the same identifier across sibling branches, such as
+`login_sessions` and `transactions`, validate that behavior explicitly or
+preprocess the data into a shared repeated context.
+
+## From Histories To Observations
+
+Real account histories usually need windowing before they become model
+observations. A preprocessor can make the `as_of` time, trailing windows, and
+derived recency fields explicit:
+
+```python
+def customer_window(customer: dict, as_of) -> dict:
+    return {
+        "customer_id": customer["customer_id"],
+        "login_sessions": [
+            {
+                "device_id": event["device_id"],
+                "event_type": event["event_type"],
+                "days_since_event": (as_of - event["timestamp"]).days,
+                "ip_country": event["ip_country"],
+            }
+            for event in recent_logins(customer, as_of=as_of)
+        ],
+        "transactions": [
+            {
+                "device_id": txn["device_id"],
+                "amount": txn["amount"],
+                "merchant_category": txn["merchant_category"],
+                "days_since_event": (as_of - txn["timestamp"]).days,
+            }
+            for txn in recent_transactions(customer, as_of=as_of)
+        ],
+        "account_takeover": customer.get("account_takeover"),
+    }
+```
+
+The schema remains the model-facing contract. The preprocessor only prepares a
+raw customer history into the shape the schema can query.
+
 ## Training Setup
 
 Use the same data path as other supervised `json2vec` models:
@@ -192,7 +237,7 @@ sides of evaluation. Do not assume a learned embedding is a causal explanation.
 
 ## Where Next
 
-- Use [Embeddings & Self-Supervised Learning](../core-concepts/embeddings.md) to export
+- Use [Learning Modes & Embeddings](../core-concepts/embeddings.md) to export
   customer and login-session representations.
 - Use [Field Stacking](../guides/field-stacking.md) for repeated roles such as
   source and target accounts.

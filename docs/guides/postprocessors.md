@@ -37,6 +37,15 @@ Return a replacement dictionary when you want to reshape the output. Return
     writers should keep row-aligned values so the Parquet writer can build a
     table.
 
+Common context keys include:
+
+| Key | Meaning |
+| --- | --- |
+| `"batch"` | The raw batch passed to prediction. |
+| `"observations"` | Processed observation metadata from encoding. |
+| `"input"` | Encoded tensorfield input. |
+| `j2v.TensorKey.metadata` | Row-aligned metadata used by writers and joins. |
+
 ## Where They Run
 
 | Entry point | How postprocessing is used |
@@ -247,7 +256,7 @@ metadata joins, and response formatting.
 ## Where Next
 
 - Use [Preprocessors](preprocessors.ipynb) for input-side Python logic.
-- Use [Embeddings & Self-Supervised Learning](../core-concepts/embeddings.md) when reshaping
+- Use [Learning Modes & Embeddings](../core-concepts/embeddings.md) when reshaping
   embedding output for retrieval or clustering.
 - Use the [Serving tutorial](../tutorials/serving.ipynb) for deployment wiring.
 - Use the [API Reference](../reference/api.md) for `Model.predict`, `Writer`,

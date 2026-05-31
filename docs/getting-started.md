@@ -1,9 +1,21 @@
 # Getting Started
 
 This page is the first practical pass through `json2vec`: define the record
-shape, train a tiny model, inspect predictions, then extend the same idea
-to nested arrays. The goal is not model quality. It is to make the package's
-core loop concrete.
+shape, train a tiny model, inspect predictions, then extend the same idea to
+nested arrays. The goal is not model quality. It is to make the package's core
+loop concrete.
+
+## Prerequisites
+
+These examples assume a repository checkout, Python 3.12 or newer, and the
+bundled example data under `docs/data/`.
+
+```bash
+uv sync
+```
+
+If you are reading the docs outside the repository, replace the
+`pl.read_ndjson("docs/data/...")` calls with your own records.
 
 ## Start With The Record Shape
 
@@ -22,12 +34,18 @@ This is the contract you want the model to see:
 
 - `sepal_length` and `petal_length` are numeric inputs.
 - `species` is a categorical target.
-- the root record should also emit an embedding during prediction.
+- the generated root `record` should emit an embedding during prediction.
+
+Training records usually include target values so losses can be computed. When
+a field has `target=True`, `json2vec` hides that value from model input and
+caches it as the answer. At prediction or serving time, requests may omit the
+target field; the target tensorfield creates a masked slot and the decoder
+writes the prediction.
 
 ## Build The Model
 
 Use the package root import. `Model.from_schema(...)` turns the field
-declarations into a model tree.
+declarations into a model tree. The root node is named `record` by default.
 
 ```python
 import json2vec as j2v
@@ -48,25 +66,32 @@ model = j2v.Model.from_schema(
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
+
+model.plot()
 ```
 
-Just like that, a model has been created.
+The plot is the fastest way to verify the tree that was built: root array,
+numeric input leaves, target leaf, inferred queries, and root embedding.
 
-`target=True` defines a field as supervised target: it withholds `species` from the input during the training loop and asks the model to decode it from the remaining fields.
+Schema roles control what the model sees and what prediction can emit:
 
-You may use `p_mask` to randomly "mask" a random portion of field values. This allows for a powerful "masked language modeling" like self-supervised learning task. `p_mask` is defined such that random values of nested arrays are masked.
+| Setting | What the model sees | What prediction can emit |
+| --- | --- | --- |
+| plain input | value is visible | no decoded output unless otherwise configured |
+| `target=True` | value is hidden | decoded supervised output |
+| `p_mask` | some observed values are hidden during training | decoded reconstruction for trainable values |
+| `p_prune` | whole field instances are hidden during training | decoded reconstruction for trainable values |
+| `embed=True` | does not hide the value | embedding at that address |
 
-You may also define `p_prune` to randomly "mask" all values of a field within a batch. For tabular data, this is the same thing as `p_mask`, but for nested data (a multi-dimensional context of input tokens), it will mask all available data within an observation with probability `p_prune`.
-
-!!! Note
-    Use `target=True` or `p_prune=1.0` when a field should always be hidden.
-    `p_mask` is stochastic and must be lower than `1.0`.
-
-Lastly, `embed=True` is separate. It asks prediction to include an embedding for any node. You may embed the entire observation, individual fields, or branches of the observation.
+`target=True` is the always-pruned supervised case and is shorthand for
+`p_prune=1.0`. Use `p_mask` for stochastic value-level reconstruction with
+rates lower than `1.0`. Use `embed=True` when you want a representation returned
+from prediction; it does not make a field a target.
 
 ## Train One Batch
 
-For small in-memory examples, `PolarsDataModule(...)` ties the configured model to sample observations from a Polars dataframe.
+For small in-memory examples, `PolarsDataModule(...)` ties the configured model
+to sample observations from a Polars dataframe.
 
 ```python
 datamodule = j2v.PolarsDataModule(
@@ -94,27 +119,11 @@ trainer = lit.Trainer(
 trainer.fit(model=model, datamodule=datamodule)
 ```
 
-## Inspect Tensor Representations
-
-
-`model.encode(...)` accepts raw dictionaries and will return a `torch.TensorDict` of nested data structures. `json2vec` tensor data structures are defined by nested collections of [`tensorfields`](data-types/tensorfields.ipynb), which define the `content` and `state` of type-specific multi-dimensional arrays. These are complex, but may be viewed for validation or parsing logic.
-
-```python
-tensors = model.encode(records.to_dicts()[:3])
-
-print(tensors)
-```
-
-For messy data, you may define custom [preprocessors](guides/preprocessors.ipynb) to reshape training observations, filter some out, or yield multiple training observations from a data record.
-
-Alternatively, you may choose to define [custom queries](core-concepts/querypaths.md) to extract data from awkwardly data structures.
-
-
 ## Inspect Predictions
 
-`model.predict(...)` accepts raw dictionaries. It returns a dictionary keyed by
-schema address, so decoded targets and embeddings stay attached to the part of
-the schema that produced them.
+`model.predict(...)` accepts a list of raw dictionaries. It returns a dictionary
+keyed by schema address, so decoded targets and embeddings stay attached to the
+part of the schema that produced them.
 
 ```python
 predictions = model.predict(records.to_dicts()[:3])
@@ -131,9 +140,31 @@ For API responses or warehouse rows, keep the model output stable and add a
 [postprocessor](guides/postprocessors.md) to reshape the address-keyed
 dictionary.
 
+## Debug Encoding
+
+Most users do not need the encoded tensors during a first run. They are useful
+when a query or preprocessor is not producing the shape you expect.
+
+`model.encode(...)` accepts raw dictionaries and returns nested tensorfield
+inputs. Each tensorfield keeps `content` separate from value `state`, so nulls,
+padded array slots, and training masks are distinct.
+
+```python
+tensors = model.encode(records.to_dicts()[:3])
+
+print(tensors)
+```
+
+For messy data, use [preprocessors](guides/preprocessors.ipynb) when you need
+Python logic such as type coercion, windowing, sorting, or splitting one raw
+record into multiple observations. Use [custom queries](core-concepts/querypaths.md)
+when the source shape is stable and selection is enough.
+
 ## Add Nested Arrays
 
-Flat examples are useful for mechanics, but `json2vec` is designed for predictive modeling with hierarchical data structure in which nested structures carry signal. Use `Array` when a record contains a list of objects:
+Flat examples are useful for mechanics, but `json2vec` is designed for
+predictive modeling with hierarchical data where nested structures carry
+signal. Use `Array` when a record contains a list of child objects:
 
 ```python
 {
@@ -164,11 +195,14 @@ model = j2v.Model.from_schema(
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
+
+model.plot()
 ```
 
 The inferred child queries are `[*].measurements[*].name` and
 `[*].measurements[*].value`. During prediction, configured embeddings can appear
-at both `record` and `record/measurements`. These queries are inferred from the schema, but you may alternatively define [custom queries](core-concepts/querypaths.md).
+at both `record` and `record/measurements`. These queries are inferred from the
+schema, but you may also define [custom queries](core-concepts/querypaths.md).
 
 Run the complete nested example with:
 
@@ -199,16 +233,21 @@ nested_trainer = lit.Trainer(
 
 nested_trainer.fit(model=model, datamodule=nested_datamodule)
 nested_predictions = model.predict(nested_records.to_dicts()[:2])
-print(nested_predictions.keys())
+
+diagnosis = nested_predictions[j2v.Address("record", "diagnosis")]
+measurements = nested_predictions[j2v.Address("record", "measurements")]
+
+print(diagnosis["content"]["value"])
+print(measurements["embedding"])
 ```
 
 ## Next Steps
 
-- **Understand the modeling idea:** [Why `json2vec`](motivation.md)
+- **Read schemas as model trees:** [Model Tree](core-concepts/model-tree.md)
 - **Map source records to schemas:** [Query Paths](core-concepts/querypaths.md)
 - **Choose field types:** [Built-In Data Types](core-concepts/data-types.md)
 - **Run a notebook walkthrough:** [Hello World](tutorials/hello-world.ipynb)
 - **Train without labels:** [Masked Pretraining](tutorials/pretraining.ipynb)
-- **Export embeddings:** [Embeddings & Self-Supervised Learning](core-concepts/embeddings.md)
+- **Export embeddings:** [Learning Modes & Embeddings](core-concepts/embeddings.md)
 - **Change schemas after construction:** [Mutations](core-concepts/mutations.ipynb)
 - **Apply the nested-data pattern:** [Device Tenure](case-studies/device-tenure.md)
