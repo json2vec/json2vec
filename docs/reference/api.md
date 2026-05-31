@@ -8,7 +8,9 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Array(...)` declares a repeated nested context.
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
 - `PolarsDataModule(...)` builds data loaders from a configured model.
+- `StreamingDataModule(...)` streams local or S3-backed files into Lightning loops.
 - `Model.predict(...)` returns configured target predictions and embeddings.
+- `Writer(...)` writes batch prediction output from `Trainer.predict(...)`.
 - `Postprocessor` reshapes predictions after decoding; see
   [Postprocessors](../guides/postprocessors.md).
 - `Deployment` wraps a checkpoint or model instance for serving; install the
@@ -20,6 +22,9 @@ Learning-oriented entry points:
 - [Model Tree](../core-concepts/model-tree.md)
 - [Query Paths](../core-concepts/querypaths.md)
 - [Built-In Data Types](../core-concepts/data-types.md)
+- [Training With Lightning](../guides/lightning.md)
+- [Data Modules](../guides/data-modules.md)
+- [Batch Inference](../guides/batch-inference.md)
 - [Serving](../tutorials/serving.ipynb)
 
 ## Package
@@ -113,6 +118,9 @@ Learning-oriented entry points:
 
 ## Data
 
+Use [Data Modules](../guides/data-modules.md) for the workflow-level guide to
+`PolarsDataModule` and `StreamingDataModule`.
+
 ::: json2vec.PolarsDataModule
     options:
       show_root_heading: true
@@ -134,6 +142,16 @@ Learning-oriented entry points:
         - val_dataloader
         - test_dataloader
         - predict_dataloader
+
+## Batch Inference
+
+Use [Batch Inference](../guides/batch-inference.md) for the workflow-level guide
+to `Trainer.predict(...)`, `Writer`, and postprocessed Parquet output.
+
+::: json2vec.Writer
+    options:
+      show_root_heading: true
+      show_root_full_path: false
 
 ## Preprocessing
 
@@ -161,11 +179,6 @@ Learning-oriented entry points:
         - postprocess
         - update
         - serve
-
-::: json2vec.Writer
-    options:
-      show_root_heading: true
-      show_root_full_path: false
 
 ## Tensorfield Extension API
 

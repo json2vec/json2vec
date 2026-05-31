@@ -32,6 +32,13 @@ That lets one model surface support supervised prediction, self-supervised
 reconstruction, embedding export, schema mutation, field importance, and serving
 without rebuilding the data representation for each workflow.
 
+## Execution Model
+
+`json2vec` builds Lightning-compatible models. The schema defines the model
+tree, typed losses, prediction outputs, and embeddings; Lightning runs the
+fit, validation, test, and prediction loops, including device placement,
+callbacks, logging, checkpointing, and distributed execution.
+
 ## A Schema Defines A Model
 
 The generated root schema node is named `record` by default. This example names
@@ -120,6 +127,9 @@ without making a feature table the only representation the model can see.
 - Modeling rationale: [Why `json2vec`](motivation.md)
 - Built-in fields: [Data Types](core-concepts/data-types.md)
 - Learning modes and embeddings: [Learning Modes & Embeddings](core-concepts/embeddings.md)
+- Training execution: [Training With Lightning](guides/lightning.md)
+- In-memory and streaming inputs: [Data Modules](guides/data-modules.md)
+- Offline prediction jobs: [Batch Inference](guides/batch-inference.md)
 - Serving-time output shaping: [Postprocessors](guides/postprocessors.md)
 - Applied risk example: [Device Tenure](case-studies/device-tenure.md)
 
@@ -128,7 +138,7 @@ without making a feature table the only representation the model can see.
 For a first pass, follow this sequence:
 
 ```text
-Getting Started -> Model Tree -> Query Paths -> Data Types -> Embeddings -> Guides
+Getting Started -> Model Tree -> Query Paths -> Data Types -> Training With Lightning -> Data Modules -> Batch Inference
 ```
 
 ## Tutorials

@@ -119,6 +119,13 @@ trainer = lit.Trainer(
 trainer.fit(model=model, datamodule=datamodule)
 ```
 
+`j2v.Model` is a LightningModule, and `j2v.PolarsDataModule` is a
+LightningDataModule. This example uses the normal Lightning `Trainer.fit(...)`
+loop. Use [Training With Lightning](guides/lightning.md) for callbacks,
+devices, checkpointing, and distributed training, and use
+[Data Modules](guides/data-modules.md) when choosing between in-memory and
+streaming inputs.
+
 ## Inspect Predictions
 
 `model.predict(...)` accepts a list of raw dictionaries. It returns a dictionary
@@ -246,6 +253,9 @@ print(measurements["embedding"])
 - **Read schemas as model trees:** [Model Tree](core-concepts/model-tree.md)
 - **Map source records to schemas:** [Query Paths](core-concepts/querypaths.md)
 - **Choose field types:** [Built-In Data Types](core-concepts/data-types.md)
+- **Understand the trainer loop:** [Training With Lightning](guides/lightning.md)
+- **Choose input loaders:** [Data Modules](guides/data-modules.md)
+- **Run offline prediction:** [Batch Inference](guides/batch-inference.md)
 - **Run a notebook walkthrough:** [Hello World](tutorials/hello-world.ipynb)
 - **Train without labels:** [Masked Pretraining](tutorials/pretraining.ipynb)
 - **Export embeddings:** [Learning Modes & Embeddings](core-concepts/embeddings.md)

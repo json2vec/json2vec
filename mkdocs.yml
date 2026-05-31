@@ -82,11 +82,14 @@ nav:
       - Custom Data Types: data-types/tensorfields.ipynb
   - Tutorials:
       - Hello World: tutorials/hello-world.ipynb
-      - Nested Supervised Training: tutorials/nested-supervised-training.ipynb
-      - Masked Pretraining: tutorials/pretraining.ipynb
       - Supervised Tabular Training: tutorials/supervised-tabular-training.ipynb
+      - Masked Pretraining: tutorials/pretraining.ipynb
+      - Nested Supervised Training: tutorials/nested-supervised-training.ipynb
       - Serving: tutorials/serving.ipynb
   - Guides:
+      - Training With Lightning: guides/lightning.md
+      - Data Modules: guides/data-modules.md
+      - Batch Inference: guides/batch-inference.md
       - Field Importance: guides/field-importance.ipynb
       - Preprocessors: guides/preprocessors.ipynb
       - Postprocessors: guides/postprocessors.md

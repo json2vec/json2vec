@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://json2vec.github.io/json2vec/diagrams/json2vec.png" alt="json2vec logo" width="180">
-</p>
-
 <h1 align="center"><code>json2vec</code></h1>
 
 <p align="center">
@@ -13,115 +9,85 @@
   <!-- discord-invite:end -->
 </p>
 
-`json2vec` is a schema-driven framework for predictive modeling over nested,
-structured records without flattening them into a fixed feature table first.
+`json2vec` builds PyTorch/Lightning models directly from JSON-like schemas.
+It is meant for predictive modeling on records that are not naturally flat:
+customers with transactions, orders with line items, sessions with clickstream
+events, devices recurring across histories, and mixed datatypes at every level.
 
-The schema becomes the encoder: leaf tensorfield plugins encode raw values,
-array nodes aggregate child embeddings with transformer layers, and
-datatype-specific decoders reconstruct masked, targeted, or supervised fields
-from the surrounding hierarchy.
+Most ML pipelines flatten that shape first, then train on one fixed feature
+row. `json2vec` takes the opposite path: describe the structured record, and
+the schema becomes the model.
 
-This supports self-supervised pretraining, supervised targets, embeddings, and
-schema evolution in one model surface. Customer/account/transaction data,
-flight itineraries, order fulfillment events, clickstream sessions, and other
-nested records can use the same machinery while keeping proprietary data,
-schemas, and checkpoints private.
+## Core Idea
 
-## What Makes This Different
+A `json2vec` schema is both a data contract and an architecture blueprint.
 
-- **Attributed embeddings.** The model can emit embeddings from any configured
-  field or array, not only from the root. That makes branch-level similarity and
-  retrieval workflows possible without flattening the record.
-- **Extensible data types for predictive modeling.** Masked values,
-  targeted fields, and explicit supervised targets all flow through the same
-  datatype-specific heads. A new
-  [tensorfield type](https://json2vec.github.io/json2vec/data-types/tensorfields/) brings its own embedding,
-  decoding, loss, and writing logic, so the framework stays reusable as schemas
-  grow.
-- **Schema evolution is a first-class workflow.** Between training loops
-  (pretraining, finetuning, refitting, and task adaptation), the model can be
-  mutated. Fields can be added (`model.extend`), removed (`model.delete`),
-  updated (`model.update` / `with model.override`), and reset (`model.reset`).
-  See the [mutations guide](https://json2vec.github.io/json2vec/core-concepts/mutations/).
-- **Production semantics for missingness.** `null`, `padded`, `masked`, and
-  `valued` are distinct states in the tensorfield type system.
-  They are not collapsed into one generic missing-value bucket.
-- **Online state lives with the model.** Stateful components such as category
-  vocabularies, counters, and numeric normalization state are learned during
-  streaming training and serialized with checkpoints, so deployment does not
-  depend on a parallel tokenizer or normalizer artifact.
-- **Training-serving parity.** The same configured graph is used for fitting,
-  validation, testing, batch prediction, and LitServe-backed online inference.
-- **Target-trained counterfactuals.** Training can periodically remove whole
-  field instances with `target=True` or `p_prune`, not just mask individual
-  values. At inference time, schema overrides support ablation questions such
-  as "what changes if device data is unavailable?" without retraining a separate
-  model for every feature-removal scenario.
+- Leaf fields such as `Number`, `Category`, `Set`, `Entity`, `Text`, and
+  `Vector` become datatype-specific tensorfields.
+- `Array` nodes become local context encoders for repeated child objects.
+- Targets, masks, pruning, and embeddings are configured on the same schema
+  tree.
+- Prediction output is keyed by schema address, so decoded values and
+  embeddings remain attached to the part of the record that produced them.
 
-## Where It Fits
+That gives one model surface for supervised prediction, masked reconstruction,
+unsupervised embedding workflows, schema mutation, field importance, batch
+inference, and serving.
 
-Use `json2vec` when the hierarchy is part of the signal:
+## A Model From A Nested Record
 
-- customer, account, transaction, statement, device, and session records
-- flight itineraries, legs, segments, and events
-- orders, shipments, fulfillment events, and support histories
-- entities with repeated sub-objects, evolving schemas, and mixed datatypes
-- embedding retrieval, anomaly detection, counterfactual ablation, and
-  multi-target prediction over nested records
+```python
+import json2vec as j2v
 
-For more context on the modeling problem, read
-[Why `json2vec`](https://json2vec.github.io/json2vec/motivation/).
-
-## What It Does Not Do
-
-`json2vec` stops at the representation and typed prediction layer. It does not
-try to be a feature store, governance system, rule engine, authorization layer,
-decision-capture system, or audit platform. Those systems can consume
-`json2vec` embeddings and predictions, but their policies and operational
-controls remain separate concerns.
-
-It also does not require users to publish data, schemas, checkpoints, or model
-parameters. The open-source layer is the reusable encoder and runtime
-infrastructure. Your data stays yours, and so do your parameters.
-The framework works under the assumption that model parameters will not be shared.
-
-## What Is In This Repository
-
-This repository currently contains:
-
-- the core library under `src/json2vec/`
-- tensorfield plugins for `number`, `category`, `set`, `dateparts`, `entity`, `vector`, and `text`
-- a preprocessor registry for dataset-specific preprocessing
-- a LitServe deployment entrypoint for serving from checkpoints
-- tests covering structure loading, data processing, tensorfields, training helpers, logging, and inference
-- rendered tutorial and guide notebooks under [`docs/`](https://json2vec.github.io/json2vec/)
-- diagrams plus whitepaper in [`docs/`](https://json2vec.github.io/json2vec/)
-
-## Install
-
-For local development:
-
-```bash
-uv sync
+model = j2v.Model.from_schema(
+    j2v.Category("customer_tier", max_vocab_size=16),
+    j2v.Array(
+        j2v.Category("sku", max_vocab_size=2048),
+        j2v.Number("quantity"),
+        j2v.Number("price"),
+        name="line_items",
+        max_length=32,
+        embed=True,
+    ),
+    j2v.Category("returned", target=True, max_vocab_size=2),
+    name="order",
+    d_model=64,
+    n_layers=2,
+    n_heads=4,
+    embed=True,
+)
 ```
 
-The package requires Python `>=3.12`.
+This model reads records shaped like:
 
-## Hello World Notebook
+```python
+{
+    "customer_tier": "gold",
+    "line_items": [
+        {"sku": "A12", "quantity": 2, "price": 19.99},
+        {"sku": "B07", "quantity": 1, "price": 45.50},
+    ],
+    "returned": "false",
+}
+```
 
-The [hello world notebook](https://json2vec.github.io/json2vec/tutorials/hello-world/) trains a tiny model
-from the bundled Iris JSONL buffer. It demonstrates the full loop: create a
-Polars DataFrame, declare a schema, train a supervised category target, then
-call `predict` and `embed`.
+The `line_items` branch has its own repeated context, `returned` is withheld
+from input and decoded as a supervised target, and `embed=True` asks prediction
+to emit embeddings at configured addresses.
+
+## Train With Lightning
+
+`j2v.Model` is a LightningModule. `j2v.PolarsDataModule` and
+`j2v.StreamingDataModule` are LightningDataModule implementations. The schema
+defines the model tree, typed losses, prediction outputs, and embeddings;
+Lightning runs `fit`, `validate`, `test`, and `predict`.
 
 ```python
 import lightning.pytorch as lit
 import polars as pl
 import torch
-from rich.pretty import pprint
 
 import json2vec as j2v
-
 
 records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
@@ -160,157 +126,228 @@ trainer = lit.Trainer(
 )
 
 trainer.fit(model=model, datamodule=datamodule)
-
-pprint(model.predict(records.to_dicts()[:3]))
 ```
 
-The prediction call returns a typed result for `record/species` and the
-configured `record` embedding for each input observation.
+For larger jobs, the same model can run through normal Lightning callbacks,
+checkpointing, precision settings, device placement, and distributed
+strategies. See
+[Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning/).
 
-## Documentation
+## Predict And Embed
 
-The tutorial examples live as self-contained notebooks under `docs/` and are
-rendered in the documentation site. Build the site locally with:
+For small interactive batches, call `model.predict(...)` with raw dictionaries.
+
+```python
+predictions = model.predict(records.to_dicts()[:3])
+
+species = predictions[j2v.Address("record", "species")]
+record = predictions[j2v.Address("record")]
+
+print(species["content"]["value"])
+print(species["content"]["probability"])
+print(record["embedding"])
+```
+
+For larger offline jobs, configure a `predict` split on a data module and attach
+`j2v.Writer` to Lightning's prediction loop.
+
+```python
+writer = j2v.Writer("predictions")
+
+trainer = lit.Trainer(
+    accelerator="cpu",
+    callbacks=[writer],
+    logger=False,
+)
+
+predict_datamodule = j2v.PolarsDataModule(
+    model=model,
+    predict=records.drop("species"),
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+)
+
+trainer.predict(model=model, datamodule=predict_datamodule)
+```
+
+`Writer` creates rank-partitioned Parquet files such as
+`predictions/rank-0.parquet`. Use a postprocessor when downstream systems need
+flat columns, renamed addresses, redacted payloads, or fewer fields. See
+[Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference/)
+and [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors/).
+
+## Learning Modes
+
+`json2vec` does not maintain separate supervised and self-supervised code
+paths. Supervised learning is the special case where a target field is hidden
+from the input 100% of the time and decoded from the remaining context.
+
+| Setting | What the model sees | What prediction can emit |
+| --- | --- | --- |
+| plain input | value is visible | no decoded output unless otherwise configured |
+| `target=True` | value is hidden | decoded supervised output |
+| `p_mask` | some observed values are hidden during training | decoded reconstruction |
+| `p_prune` | whole leaf instances are hidden during training | decoded reconstruction |
+| `embed=True` | does not hide the value | embedding at that address |
+
+`target=True` is exact shorthand for `p_prune=1.0`. Use `p_mask` for stochastic
+value-level reconstruction with rates lower than `1.0`. Use `embed=True` when
+you want a representation returned from prediction.
+
+## Data Modules
+
+Data modules load raw records, apply optional preprocessing, batch
+observations, tensorize values from the model schema, apply training-time
+masking and target pruning, and hand encoded batches to Lightning.
+
+Choose the data module by where the records live:
+
+| Use case | Module |
+| --- | --- |
+| Tutorials, tests, notebooks, in-memory Polars frames | `PolarsDataModule` |
+| Many local files | `StreamingDataModule` |
+| S3-backed datasets | `StreamingDataModule` |
+| Distributed training or prediction over large inputs | `StreamingDataModule` |
+
+`StreamingDataModule` supports local paths and `s3://...` roots with `ndjson`,
+`parquet`, `feather`, `avro`, `csv`, `orc`, and `json` suffixes. Split
+arguments are compiled regular expressions matched against discovered file
+paths.
+
+See [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules/)
+for split configuration, sharding, sampling, buffers, and preprocessors.
+
+## What Makes This Different
+
+- **Hierarchical context encoding:** child records interact locally before
+  their representation flows upward.
+- **Extensible datatypes:** each field type owns validation, tensorization,
+  missing-state handling, masking, decoding, loss, metrics, and output writing.
+- **Unified training roles:** `target=True`, `p_prune`, and `p_mask` all use the
+  same reconstruction path.
+- **Embedding trees:** embeddings can come from the root, arrays, or selected
+  leaves.
+- **Schema evolution:** fields can be added, removed, updated, reset, or
+  temporarily overridden after construction.
+- **Production missingness semantics:** `null`, `padded`, `masked`, and
+  `valued` are distinct tensorfield states.
+- **Training-serving parity:** queries, preprocessors, tensorization, model
+  execution, prediction writing, and postprocessors stay on the same configured
+  path.
+
+## Where It Fits
+
+Use `json2vec` when relationships inside the record matter: account histories,
+fraud or risk snapshots, order and fulfillment events, flight itineraries,
+operations telemetry, user sessions, repeated measurements, or mixed datatype
+objects where flattening would discard useful structure.
+
+Use a simpler tabular model when flattening loses no meaningful context. The
+point is not to replace every table. The point is to model nested business data
+without making a feature table the only representation the model can see.
+
+## What It Does Not Do
+
+`json2vec` stops at the representation and typed prediction layer. It is not a
+feature store, governance system, rule engine, authorization layer,
+decision-capture system, or audit platform. Those systems can consume
+`json2vec` embeddings and predictions, but their policies and operational
+controls remain separate concerns.
+
+The open-source layer is the reusable encoder and runtime infrastructure. It
+does not require users to publish data, schemas, checkpoints, or model
+parameters.
+
+## Install
+
+For local development:
+
+```bash
+uv sync
+```
+
+The package requires Python `>=3.12`.
+
+Optional extras:
+
+```bash
+uv sync --extra text
+uv sync --extra serving
+uv sync --extra docs
+```
+
+The `text` extra installs Hugging Face `transformers`. The `serving` extra
+installs LitServe-backed deployment dependencies. The `docs` extra installs the
+MkDocs toolchain.
+
+## Documentation Map
+
+Start with:
+
+- [Getting Started](https://json2vec.github.io/json2vec/getting-started/)
+- [AI / Expert Quickstart](https://json2vec.github.io/json2vec/ai-quickstart/)
+- [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree/)
+- [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths/)
+- [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types/)
+- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings/)
+- [Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning/)
+- [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules/)
+- [Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference/)
+- [API Reference](https://json2vec.github.io/json2vec/reference/api/)
+
+Tutorials and guides:
+
+- [Hello World](https://json2vec.github.io/json2vec/tutorials/hello-world/)
+- [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/)
+- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
+- [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/)
+- [Serving](https://json2vec.github.io/json2vec/tutorials/serving/)
+- [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/)
+- [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors/)
+- [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance/)
+- [Field Stacking](https://json2vec.github.io/json2vec/guides/field-stacking/)
+- [Custom Data Types](https://json2vec.github.io/json2vec/data-types/tensorfields/)
+- [Device Tenure Case Study](https://json2vec.github.io/json2vec/case-studies/device-tenure/)
+- [Whitepaper](https://json2vec.github.io/json2vec/whitepaper.pdf)
+
+Build the docs locally with:
 
 ```bash
 uv run --extra docs mkdocs build --strict
 ```
 
-Useful entry points:
-
-- [Getting Started](https://json2vec.github.io/json2vec/getting-started/)
-- [AI Quickstart](https://json2vec.github.io/json2vec/ai-quickstart/)
-- [Why `json2vec`](https://json2vec.github.io/json2vec/motivation/)
-- [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths/)
-- [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types/)
-- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings/)
-- [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree/)
-- [Mutations](https://json2vec.github.io/json2vec/core-concepts/mutations/)
-- [Hello World](https://json2vec.github.io/json2vec/tutorials/hello-world/)
-- [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/)
-- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
-- [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/)
-- [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance/)
-- [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/)
-- [Custom Data Types](https://json2vec.github.io/json2vec/data-types/tensorfields/)
-- [Serving](https://json2vec.github.io/json2vec/tutorials/serving/)
-- [API Reference](https://json2vec.github.io/json2vec/reference/api/)
-- [Whitepaper](https://json2vec.github.io/json2vec/whitepaper.pdf)
-
-## Core Concepts
-
-- `Model.from_schema(...)` builds the model tree plus masking, targeting, and embedding controls.
-- `Array` nodes describe hierarchical grouping and aggregation.
-- Field `Request` nodes declare a `type`, a `query`, and type-specific options.
-- `Address` values are stable paths such as `record/account/transaction/amount`.
-- `jmespath` queries extract values from each observation.
-- `TensorField` instances preserve typed content plus state tokens such as
-  `valued`, `null`, `padded`, and `masked`.
-- `Parcel` objects carry embeddings from leaves to parent arrays and then up
-  the tree.
-- `heritage` is the path from a leaf to the root; decoders use that path when
-  reconstructing masked, targeted, or supervised targets.
-
-For large local or cloud-hosted datasets, `StreamingDataModule` supports these
-dataset suffixes:
-
-- `ndjson`
-- `parquet`
-- `feather`
-- `avro`
-- `csv`
-- `orc`
-- `json`
-
-Supported dataset roots are local paths and `s3://...` URIs.
-
-## How The Graph Runs
-
-For each batch:
-
-1. Each field request extracts values with its `jmespath` query.
-2. The matching tensorfield plugin tensorizes values, updates online state when
-   allowed for the current split, and records trainable targets when masking or
-   targeting occurs.
-3. Leaf embedders emit parcels to their parent arrays.
-4. Array nodes run bottom-up, aggregate child parcels, and emit parent context.
-5. Leaf decoders consume their context path to reconstruct trainable targets.
-
-Random `p_mask` corrupts individual values. Random `p_prune` removes whole
-field instances across an observation. `target=True` is shorthand for
-`p_prune=1.0`; `embed=True` exposes embeddings during prediction.
-
-## Preprocessor Model
-
-Preprocessors are optional registered Python callables. See the
-[preprocessor guide](https://json2vec.github.io/json2vec/guides/preprocessors/) for examples. If no
-preprocessor is configured, each observation is used as-is without calling a
-default function.
-
-Custom preprocessors are registered with `@preprocess(yields=False)` for single-object transformations or `@preprocess(yields=True)` for generators.
-
-- transformation preprocessors must return a single `dict`
-- generator preprocessors may yield `dict` objects or return a `list[dict]`
-- every emitted object is wrapped as a single-item root array before tensorization
-
-Configured `dataset.kwargs` are passed into the preprocessor, with unsupported keyword arguments automatically ignored.
-
-## Tensorfield Plugins
-
-Each tensorfield plugin provides a request schema plus the model components
-needed to encode values, decode predictions, compute losses, and optionally
-serialize outputs. See [Custom Data Types](https://json2vec.github.io/json2vec/data-types/tensorfields/)
-for a custom plugin walkthrough. Built-in tensorfields share the base leaf
-options `name`, `query`, `pooling`, `weight`, `n_heads`, `n_linear`, `dropout`,
-`p_mask`, and `p_prune`.
-
-| Type | Use It For | Key Options |
-| --- | --- | --- |
-| `number` | Scalar numeric values. Values are padded with explicit state tokens, normalized online during training, embedded with learned Fourier features, and decoded as regression targets. | `jitter`, `n_bands`, `offset`, `alpha`, `objective` (`mae`, `mse`, `huber`) |
-| `category` | Single-label categorical values with an online vocabulary stored in the checkpoint. Unknown or overflow labels route to a reserved unavailable bucket instead of becoming `null`. Prediction output includes label probabilities and optional top-k candidates. | `max_vocab_size`, `n_bands`, `p_unavailable`, `topk` |
-| `set` | Unordered collections of categorical labels, encoded as a multi-hot vector over an online vocabulary. Strings are treated as one-item sets, iterables as many-item sets, and unknown labels use the reserved unavailable bucket. | `max_vocab_size`, `p_unavailable` |
-| `dateparts` | Datetime values represented through selected calendar/time components. Inputs may be native datetimes or strings parsed with a configured pattern. | `dateparts` (`day_of_year`, `week_of_year`, `month_of_year`, `day_of_month`, `week_of_month`, `day_of_week`, `hour_of_day`, `minute_of_hour`), `pattern` |
-| `entity` | Hashable identifiers where the useful signal is equality or co-occurrence within the current observation rather than a global vocabulary. Values are re-indexed locally per observation and require at least two slots per observation. | `topk` |
-| `vector` | Fixed-width numeric embeddings or dense feature vectors supplied by another model or system. Inputs may be lists, tuples, 1D NumPy arrays, or 1D Torch tensors and are projected into `d_model`. | `n_dim`, `objective` (`l1`, `l2`) |
-| `text` | String values encoded by a frozen Hugging Face `AutoModel`, pooled, and projected into `d_model`. Masked or targeted text is trained by reconstructing the encoder representation rather than generating text. | `model_name`, `max_length`, `encoder_batch_size`, `encoder_pooling` (`cls`, `mean`, `pooler`), `objective` (`l1`, `l2`), `revision`, `local_files_only` |
-
-The `text` tensorfield requires the optional `transformers` dependency and is
-not installed by default:
-
-```bash
-uv sync --extra text
-```
-
-## Community
-
-Join the Discord channel for questions, design discussion, and release notes:
-<https://discord.gg/DVyZUkvTFA>
-
 ## Repository Layout
 
-- `src/json2vec/architecture`: model assembly, attention, pooling, and parcel routing
+- `src/json2vec/architecture`: model assembly, attention, pooling, and routing
 - `src/json2vec/data`: dataset fetch/read/process/batch/encode pipeline
 - `src/json2vec/inference`: serving and prediction callbacks
 - `src/json2vec/logging`: runtime logging callbacks
 - `src/json2vec/preprocessors`: preprocessor registry
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
-- `src/json2vec/tensorfields`: tensorfield plugin system and built-in field types
+- `src/json2vec/tensorfields`: tensorfield plugin system and built-in fields
 - `tests/`: package test suite
-- [`docs/whitepaper.typ`](https://json2vec.github.io/json2vec/whitepaper.pdf): longer written documentation
+- `docs/`: tutorials, guides, diagrams, and whitepaper source
 
 ## Development
 
-Run the test suite with:
+Run tests:
 
 ```bash
 uv run pytest
 ```
 
-Run lint checks with:
+Run type and lint checks:
 
 ```bash
+uv run ty check src/json2vec --output-format concise
 uv run ruff check
 ```
+
+## Community
+
+Join the [`json2vec` Discord](https://discord.gg/DVyZUkvTFA) for questions,
+design discussion, and release notes.
 
 ## License
 
