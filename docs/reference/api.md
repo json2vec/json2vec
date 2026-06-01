@@ -8,6 +8,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Array(...)` declares a repeated nested context.
 - `Overflow` enumerates `Array` overflow policies: `head`, `tail`, and `error`.
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
+- `CustomDataModule(...)` wraps user-provided PyTorch iterable datasets.
 - `PolarsDataModule(...)` builds data loaders from a configured model.
 - `StreamingDataModule(...)` streams local or S3-backed files into Lightning loops.
 - `Model.predict(...)` returns configured target predictions and embeddings.
@@ -120,7 +121,18 @@ Learning-oriented entry points:
 ## Data
 
 Use [Data Modules](../guides/data-modules.md) for the workflow-level guide to
-`PolarsDataModule` and `StreamingDataModule`.
+`CustomDataModule`, `PolarsDataModule`, and `StreamingDataModule`.
+
+::: json2vec.CustomDataModule
+    options:
+      show_root_heading: true
+      show_root_full_path: false
+      members:
+        - dataloader
+        - train_dataloader
+        - val_dataloader
+        - test_dataloader
+        - predict_dataloader
 
 ::: json2vec.PolarsDataModule
     options:

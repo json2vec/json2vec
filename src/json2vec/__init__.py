@@ -16,7 +16,7 @@ from json2vec.architecture.root import (
     RuntimePlacementCallback,
     SchedulerConfig,
 )
-from json2vec.data.datasets import PolarsDataModule, StreamingDataModule
+from json2vec.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule
 from json2vec.inference.callback import Postprocessor, Writer
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
 from json2vec.structs.enums import (
@@ -105,6 +105,7 @@ __all__ = [
     "BatchItem",
     "Category",
     "Component",
+    "CustomDataModule",
     "DateParts",
     "DecoderBase",
     "Deployment",

@@ -10,7 +10,7 @@ The data module does not define the model schema. It reads schema state from the
 
 The batch path is:
 
-1. Raw records are read from a DataFrame or files.
+1. Raw records are read from a DataFrame, files, or a user dataset.
 2. An optional preprocessor emits processed observations.
 3. Observations are sampled and shuffled.
 4. Observations are grouped into model batches.
@@ -22,7 +22,7 @@ The batch path is:
 
 ## Shared Options
 
-Both data modules use the same core ideas:
+Data modules use the same core ideas:
 
 | Option | Meaning |
 | --- | --- |
@@ -34,7 +34,7 @@ Both data modules use the same core ideas:
 | `pin_memory` | Enables dataloader pinning when useful for accelerator transfer. |
 | `sample_rate` | Samples observations before batching. |
 | `observation_buffer_size` | Local shuffle buffer for processed observations. |
-| `chunk_batch_size` | Read chunk size. This is separate from `model.batch_size`. |
+| `chunk_batch_size` | Read chunk size for Polars and streaming sources. This is separate from `model.batch_size`. |
 
 Most execution options accept either one value or a mapping keyed by
 `"train"`, `"validate"`, `"test"`, or `"predict"`.
@@ -56,9 +56,65 @@ datamodule = j2v.PolarsDataModule(
 | Tutorial or notebook | `PolarsDataModule` |
 | Unit test or tiny local sample | `PolarsDataModule` |
 | Data already in memory as a Polars DataFrame | `PolarsDataModule` |
+| Data already exposed as a PyTorch `IterableDataset` | `CustomDataModule` |
+| SQL, API, queue, or custom SDK feed | User `IterableDataset` plus `CustomDataModule` |
 | Many local files | `StreamingDataModule` |
 | S3-backed data | `StreamingDataModule` |
 | Distributed training or prediction over large inputs | `StreamingDataModule` |
+
+## CustomDataModule
+
+Use `CustomDataModule` when you already have a PyTorch `IterableDataset` that
+yields raw observation dictionaries. The dataset owns the upstream feed.
+`json2vec` owns preprocessing, batching, tensorization, masking, and target
+pruning.
+
+```python
+from torch.utils.data import IterableDataset
+
+import json2vec as j2v
+
+
+class Records(IterableDataset):
+    def __init__(self, records):
+        self.records = records
+
+    def __iter__(self):
+        yield from self.records
+
+
+datamodule = j2v.CustomDataModule(
+    model=model,
+    train=Records([
+        {"amount": 10.5, "merchant": "bookstore", "label": "ok"},
+        {"amount": 99.0, "merchant": "electronics", "label": "review"},
+    ]),
+    validate=Records([
+        {"amount": 24.0, "merchant": "grocery", "label": "ok"},
+    ]),
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+)
+```
+
+You may pass named splits or one split mapping:
+
+```python
+datamodule = j2v.CustomDataModule(
+    model=model,
+    datasets={
+        "train": train_dataset,
+        "validate": valid_dataset,
+        "predict": predict_dataset,
+    },
+)
+```
+
+Each dataset should yield `dict[str, Any]` records. Open external connections
+inside `__iter__`, so dataloader worker processes create their own connections.
+If the dataset needs source-specific sharding, implement that in the dataset
+with PyTorch worker utilities such as `torch.utils.data.get_worker_info()`.
 
 ## PolarsDataModule
 
@@ -205,7 +261,7 @@ splits do not. Set `replacement` explicitly when you need different behavior.
 
 ## Preprocessors
 
-Both data modules accept the same preprocessor forms:
+All data modules accept the same preprocessor forms:
 
 ```python
 datamodule = j2v.PolarsDataModule(

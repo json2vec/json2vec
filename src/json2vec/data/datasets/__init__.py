@@ -13,12 +13,16 @@ from json2vec.data.datasets.base import (
     SampleRate,
     StrataMap,
 )
+from json2vec.data.datasets.custom import CustomBatchDataset, CustomDataModule, DatasetMap, custom_dataloader
 from json2vec.data.datasets.polars import DataFrameMap, PolarsBatchDataset, PolarsDataModule, polars_dataloader
 from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule, dataloader
 
 __all__ = [
     "BatchDataset",
+    "CustomBatchDataset",
+    "CustomDataModule",
     "DataFrameMap",
+    "DatasetMap",
     "EncodedBatch",
     "EncodedInput",
     "InterprocessEncodingContext",
@@ -31,6 +35,7 @@ __all__ = [
     "SampleRate",
     "StrataMap",
     "StreamingDataModule",
+    "custom_dataloader",
     "dataloader",
     "polars_dataloader",
 ]
