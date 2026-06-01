@@ -108,6 +108,8 @@ class TensorField(TensorFieldBase):
             shape=(len(values), *array_shape),
             dtype=object,
             pad_value=None,
+            overflows=hyperparameters.overflows(address),
+            address=address,
         )
 
         try:

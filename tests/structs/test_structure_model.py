@@ -1,5 +1,6 @@
 import pytest
 
+from json2vec.structs.enums import Overflow
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.structure import Array
 from json2vec.tensorfields.extensions.category import Request as Category
@@ -67,7 +68,29 @@ def test_hyperparameters_derives_arrays_requests_and_shapes():
     assert "root" in structure.arrays
     assert "root/branch" in structure.arrays
     assert "root/branch/category_leaf" in structure.requests
-    assert structure.shapes["root/branch/category_leaf"] == (2, 4)
+    assert structure.arrays["root"].max_length == 1
+    assert structure.arrays["root"].overflow == Overflow.error
+    assert structure.shapes["root/branch/category_leaf"] == (1, 4)
+    assert structure.overflows("root/branch/category_leaf") == (Overflow.error, Overflow.error, Overflow.head)
+
+
+def test_array_accepts_overflow_policy():
+    array = Array(
+        Category(name="category_leaf", query="[*].code"),
+        name="branch",
+        overflow="tail",
+    )
+
+    assert array.overflow == Overflow.tail
+
+
+def test_array_rejects_invalid_overflow_policy():
+    with pytest.raises(ValueError):
+        Array(
+            Category(name="category_leaf", query="[*].code"),
+            name="branch",
+            overflow="middle",
+        )
 
 
 def test_hyperparameters_converts_leaf_instances_nested_in_arrays():
@@ -188,6 +211,6 @@ def test_inactive_leaf_nodes_are_kept_in_tree_but_removed_from_runtime_maps():
     assert inactive.address == "root/branch/category_leaf"
     assert "root/branch/category_leaf" in structure.requests
     assert "root/branch/category_leaf" not in structure.active_requests
-    assert structure.shapes["root/branch/category_leaf"] == (2, 4)
+    assert structure.shapes["root/branch/category_leaf"] == (1, 4)
     assert structure.target == []
     assert structure.embed == []

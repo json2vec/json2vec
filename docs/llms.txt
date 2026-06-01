@@ -59,10 +59,10 @@
 
 - Use `import json2vec as j2v`.
 - Use `j2v.Model.from_schema(...)`; do not invent `Struct(...)`.
-- Use `name=...` to name the generated root context.
+- Use `name=...` to name the generated root context; it is always length `1`.
 - Use `target=True` for supervised targets; it is exact shorthand for `p_prune=1.0`.
 - Use `embed=True` for emitted embeddings, and `p_mask` for stochastic self-supervised reconstruction with rates lower than `1.0`.
-- Use `Array(..., name=..., max_length=...)` for repeated contexts.
+- Use `Array(..., name=..., max_length=...)` for repeated contexts; add `overflow="tail"` for newest-last histories or `overflow="error"` for strict schemas.
 - Use Lightning `Trainer` with `PolarsDataModule` or `StreamingDataModule` for training and batch prediction.
 - Use `j2v.Writer` for Parquet batch inference output.
 - Use preprocessors for Python input shaping and postprocessors for prediction output shaping.

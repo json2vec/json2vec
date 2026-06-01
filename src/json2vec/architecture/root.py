@@ -173,7 +173,6 @@ class Model(lit.LightningModule):
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
-        max_length: int = 1,
         n_linear: int = 1,
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
@@ -194,7 +193,6 @@ class Model(lit.LightningModule):
             description: Optional description on the generated root array.
             embed: Configure the generated root array as an embedding output.
             attention: Attention mode for the generated root array.
-            max_length: Maximum number of records per observation at the root.
             n_linear: Feed-forward block count on the generated root array.
             dropout: Optional dropout rate on the generated root array.
             optimizer: Optimizer instance or factory used by Lightning training.
@@ -213,7 +211,6 @@ class Model(lit.LightningModule):
             description=description,
             embed=embed,
             attention=attention,
-            max_length=max_length,
             n_linear=n_linear,
             dropout=dropout,
         )

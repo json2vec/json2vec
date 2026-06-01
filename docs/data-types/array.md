@@ -21,6 +21,7 @@ measurements = j2v.Array(
     j2v.Number("value"),
     name="measurements",
     max_length=8,
+    overflow="tail",
     n_layers=2,
 )
 ```
@@ -31,17 +32,18 @@ or flattening is usually more efficient.
 
 ## Input Values
 
-`Array` expects a list of child objects at the source path named by `name`, unless
-the child fields use explicit `query` expressions. Each child tensorfield is
-padded or truncated to the configured `max_length`.
+`Array` expects a list of child objects at the source path named by `name`,
+unless the child fields use explicit `query` expressions. Each child tensorfield
+is padded to the configured `max_length`, and overlong inputs are handled by the
+array's `overflow` policy.
 
 !!! Note
     Set `max_length` deliberately for real repeated data. The default is `1`,
-    which is useful for root contexts but usually too small for meaningful child
+    which is useful for singleton contexts but usually too small for meaningful
     histories.
 
-With `max_length=2`, two items are retained, extra items are truncated, and
-missing slots are padded:
+With `max_length=2` and the default `overflow="head"`, the first two items are
+retained, extra items are truncated, and missing slots are padded:
 
 ```json
 [
@@ -54,6 +56,22 @@ The first record keeps `a` and `b`; `c` is truncated. The second record keeps
 `a` and adds one padded slot. Array order is the order returned by the query.
 Sort, window, or filter in a [preprocessor](../guides/preprocessors.ipynb) when
 order matters.
+
+Use `overflow="tail"` when the query result is ordered oldest-to-newest and the
+most recent records should be retained:
+
+```python
+events = j2v.Array(
+    j2v.Category("event_type", max_vocab_size=128),
+    j2v.Number("amount"),
+    name="events",
+    max_length=128,
+    overflow="tail",
+)
+```
+
+Use `overflow="error"` when any truncated input would indicate a bad schema,
+bad query, or upstream data contract failure.
 
 For a top-level schema like:
 
@@ -110,6 +128,7 @@ Common array fields include:
 | `name` | required | Public schema name and inferred source key. |
 | `fields` | `[]` | Child arrays or tensorfields. Positional constructor arguments become `fields`. |
 | `max_length` | `1` | Number of repeated slots retained per observation. Must be positive. |
+| `overflow` | `"head"` | How to handle more than `max_length` child records: `"head"` keeps the first records, `"tail"` keeps the last records, and `"error"` raises. |
 | `attention` | `"mha"` | Attention implementation for the array encoder. |
 | `n_layers` | `1` | Number of encoder layers for this array. |
 | `n_heads` | `4` | Attention heads for this array. Must be even. |

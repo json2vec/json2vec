@@ -137,19 +137,23 @@ without making a feature table the only representation the model can see.
 
 For a first pass, follow this sequence:
 
-```text
-Getting Started -> Model Tree -> Query Paths -> Data Types -> Training With Lightning -> Data Modules -> Batch Inference
-```
+[Getting Started](getting-started.md) ->
+[Model Tree](core-concepts/model-tree.md) ->
+[Query Paths](core-concepts/querypaths.md) ->
+[Data Types](core-concepts/data-types.md) ->
+[Training With Lightning](guides/lightning.md) ->
+[Data Modules](guides/data-modules.md) ->
+[Batch Inference](guides/batch-inference.md)
 
 ## Tutorials
 
 The tutorials are ordered by workflow:
 
-- **Hello World** runs the smallest supervised training loop.
-- **Nested Supervised Training** uses repeated measurement objects plus a root target.
-- **Masked Pretraining** introduces nested arrays and self-supervised masking.
-- **Supervised Tabular Training** shows a compact flat classifier for comparison.
-- **Serving** turns a saved model into a deployment wrapper.
+- [**Hello World**](tutorials/hello-world.ipynb) runs the smallest supervised training loop.
+- [**Nested Supervised Training**](tutorials/nested-supervised-training.ipynb) uses repeated measurement objects plus a root target.
+- [**Masked Pretraining**](tutorials/pretraining.ipynb) introduces nested arrays and self-supervised masking.
+- [**Supervised Tabular Training**](tutorials/supervised-tabular-training.ipynb) shows a compact flat classifier for comparison.
+- [**Serving**](tutorials/serving.ipynb) turns a saved model into a deployment wrapper.
 
 ## Community
 

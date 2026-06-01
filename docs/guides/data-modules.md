@@ -14,7 +14,8 @@ The batch path is:
 2. An optional preprocessor emits processed observations.
 3. Observations are sampled and shuffled.
 4. Observations are grouped into model batches.
-5. Query paths tensorize values from the model schema.
+5. Query paths tensorize values from the model schema and resolve array
+   `overflow` policies.
 6. `p_mask` hides selected leaf values for reconstruction.
 7. `p_prune` and `target=True` hide selected leaf instances for decoding.
 8. The encoded batch is handed to the Lightning loop.

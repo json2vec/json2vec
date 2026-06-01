@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
+import json2vec as j2v
 from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
@@ -606,6 +607,62 @@ def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
         torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
     )
     assert torch.equal(label.state, torch.full((2, 1), Tokens.masked.value))
+
+
+def test_encode_array_tail_overflow_keeps_last_values() -> None:
+    model = j2v.Model.from_schema(
+        j2v.Array(
+            j2v.Number("amount"),
+            name="events",
+            max_length=2,
+            overflow="tail",
+        ),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    inputs = model.encode(
+        batch=[
+            {
+                "events": [
+                    {"amount": 1.0},
+                    {"amount": 2.0},
+                    {"amount": 3.0},
+                ]
+            }
+        ]
+    )
+
+    amount = inputs[Address("record", "events", "amount")]
+    assert torch.equal(amount.content, torch.tensor([[[2.0, 3.0]]]))
+
+
+def test_encode_array_error_overflow_raises() -> None:
+    model = j2v.Model.from_schema(
+        j2v.Array(
+            j2v.Number("amount"),
+            name="events",
+            max_length=2,
+            overflow="error",
+        ),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    with pytest.raises(ValueError, match="array overflow at dimension 2 for record/events/amount"):
+        model.encode(
+            batch=[
+                {
+                    "events": [
+                        {"amount": 1.0},
+                        {"amount": 2.0},
+                        {"amount": 3.0},
+                    ]
+                }
+            ]
+        )
 
 
 def test_encode_accepts_preprocess() -> None:

@@ -53,6 +53,10 @@ model = j2v.Model.from_schema(
 )
 ```
 
+For ordered histories, set `overflow="tail"` on the array when the newest
+records should be retained after `max_length` is reached. Use
+`overflow="error"` when truncation should fail.
+
 This reads records shaped like:
 
 ```python

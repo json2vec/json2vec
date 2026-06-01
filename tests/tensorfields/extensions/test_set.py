@@ -6,6 +6,8 @@ from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
 
+ADDRESS = "root/items/tags"
+
 
 def _structure_payload(
     *,
@@ -15,7 +17,7 @@ def _structure_payload(
     field: dict = {
         "name": "tags",
         "type": "set",
-        "query": "[*].tags",
+        "query": "[*].items[*].tags",
         "max_vocab_size": 8,
     }
     if p_unavailable is not None:
@@ -29,8 +31,14 @@ def _structure_payload(
             "name": "root",
             "type": "array",
             "dropout": 0.1,
-            "max_length": 2,
-            "fields": [field],
+            "fields": [
+                {
+                    "name": "items",
+                    "type": "array",
+                    "max_length": 2,
+                    "fields": [field],
+                }
+            ],
         },
     }
 
@@ -59,7 +67,7 @@ class _DummyState:
 
 def test_set_request_is_available_in_hyperparameters():
     structure = Hyperparameters.model_validate(_structure_payload())
-    request = structure.requests["root/tags"]
+    request = structure.requests[ADDRESS]
 
     assert request.type == "set"
     assert request.max_vocab_size == 8
@@ -68,7 +76,7 @@ def test_set_request_is_available_in_hyperparameters():
 
 def test_set_request_accepts_threshold():
     structure = Hyperparameters.model_validate(_structure_payload(threshold=0.8))
-    assert structure.requests["root/tags"].threshold == 0.8
+    assert structure.requests[ADDRESS].threshold == 0.8
 
 
 def test_set_tensorfield_encodes_multi_hot_content():
@@ -76,8 +84,8 @@ def test_set_tensorfield_encodes_multi_hot_content():
     state = _DummyState()
 
     field = TensorField.new(
-        values=[[["ALPHA", "BETA"], []], [["BETA"]]],
-        address="root/tags",
+        values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
+        address=ADDRESS,
         hyperparameters=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -87,43 +95,43 @@ def test_set_tensorfield_encodes_multi_hot_content():
         field.state,
         torch.tensor(
             [
-                [Tokens.valued.value, Tokens.valued.value],
-                [Tokens.valued.value, Tokens.padded.value],
+                [[Tokens.valued.value, Tokens.valued.value]],
+                [[Tokens.valued.value, Tokens.padded.value]],
             ],
             dtype=torch.int64,
         ),
     )
-    assert field.content.shape == (2, 2, structure.requests["root/tags"].max_vocab_size + 1)
-    assert field.content[0, 0, 0] == 1.0
-    assert field.content[0, 0, 1] == 1.0
-    assert field.content[0, 1].sum() == 0.0
-    assert field.content[1, 0, 1] == 1.0
+    assert field.content.shape == (2, 1, 2, structure.requests[ADDRESS].max_vocab_size + 1)
+    assert field.content[0, 0, 0, 0] == 1.0
+    assert field.content[0, 0, 0, 1] == 1.0
+    assert field.content[0, 0, 1].sum() == 0.0
+    assert field.content[1, 0, 0, 1] == 1.0
 
 
 def test_set_tensorfield_marks_oov_as_unavailable_without_changing_state():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _DummyState(max_vocab_size=structure.requests["root/tags"].max_vocab_size)
+    state = _DummyState(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
     TensorField.new(
-        values=[[["ALPHA"]]],
-        address="root/tags",
+        values=[[[["ALPHA"]]]],
+        address=ADDRESS,
         hyperparameters=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
 
     field = TensorField.new(
-        values=[[["OMEGA"]]],
-        address="root/tags",
+        values=[[[["OMEGA"]]]],
+        address=ADDRESS,
         hyperparameters=structure,
         strata=Strata.validate,
         interprocess_encoding_context=state,
     )
 
-    unavailable = structure.requests["root/tags"].max_vocab_size
-    assert field.state[0, 0] == Tokens.valued.value
-    assert field.content[0, 0, unavailable] == 1.0
-    assert field.content[0, 0, :unavailable].sum() == 0.0
+    unavailable = structure.requests[ADDRESS].max_vocab_size
+    assert field.state[0, 0, 0] == Tokens.valued.value
+    assert field.content[0, 0, 0, unavailable] == 1.0
+    assert field.content[0, 0, 0, :unavailable].sum() == 0.0
 
 
 class _DummyVocab:
@@ -144,7 +152,7 @@ class _DummyNode:
 
 class _DummyModule:
     def __init__(self, hyperparameters=None, embedder=None, decoder: Decoder | None = None):
-        self.nodes = {"root/tags": _DummyNode(embedder=embedder, decoder=decoder)}
+        self.nodes = {ADDRESS: _DummyNode(embedder=embedder, decoder=decoder)}
         self.hyperparameters = hyperparameters
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
@@ -163,7 +171,7 @@ def test_set_write_emits_probability_for_each_known_vocab_item():
         ]
     )
     prediction = Prediction(
-        address="root/tags",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
@@ -193,7 +201,7 @@ def test_set_write_filters_content_when_threshold_is_configured():
         ]
     )
     prediction = Prediction(
-        address="root/tags",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
@@ -216,19 +224,19 @@ def test_set_loss_does_not_mutate_counter():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     state = _DummyState()
     field = TensorField.new(
-        values=[[["ALPHA", "BETA"], []], [["BETA"]]],
-        address="root/tags",
+        values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
+        address=ADDRESS,
         hyperparameters=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
     field.mask(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address="root/tags")
-    decoder = Decoder(hyperparameters=structure, address="root/tags")
+    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
     module = _DummyModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
     prediction = Prediction(
-        address="root/tags",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),

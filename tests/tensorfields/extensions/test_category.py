@@ -18,12 +18,14 @@ from json2vec.tensorfields.extensions.category import (
     write,
 )
 
+ADDRESS = "root/items/category"
+
 
 def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | None = None) -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
-        "query": "[*].label",
+        "query": "[*].items[*].label",
         "max_vocab_size": 8,
     }
     if topk is not None:
@@ -37,8 +39,14 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
             "name": "root",
             "type": "array",
             "dropout": 0.1,
-            "max_length": 2,
-            "fields": [field],
+            "fields": [
+                {
+                    "name": "items",
+                    "type": "array",
+                    "max_length": 2,
+                    "fields": [field],
+                }
+            ],
         },
     }
 
@@ -116,8 +124,8 @@ def test_category_tensorfield_separates_state_and_content():
     state = _DummyState()
 
     field = TensorField.new(
-        values=[["ALPHA", None], ["BETA"]],
-        address="root/category",
+        values=[[["ALPHA", None]], [["BETA"]]],
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -127,8 +135,8 @@ def test_category_tensorfield_separates_state_and_content():
         field.state,
         torch.tensor(
             [
-                [Tokens.valued.value, Tokens.null.value],
-                [Tokens.valued.value, Tokens.padded.value],
+                [[Tokens.valued.value, Tokens.null.value]],
+                [[Tokens.valued.value, Tokens.padded.value]],
             ],
             dtype=torch.int64,
         ),
@@ -137,8 +145,8 @@ def test_category_tensorfield_separates_state_and_content():
         field.content,
         torch.tensor(
             [
-                [0, 0],
-                [1, 0],
+                [[0, 0]],
+                [[1, 0]],
             ],
             dtype=torch.int64,
         ),
@@ -148,19 +156,19 @@ def test_category_tensorfield_separates_state_and_content():
 def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     hyperparameters = structure
-    state = _DummyState(max_vocab_size=structure.requests["root/category"].max_vocab_size)
+    state = _DummyState(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
     TensorField.new(
-        values=[["ALPHA"]],
-        address="root/category",
+        values=[[["ALPHA"]]],
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
 
     field = TensorField.new(
-        values=[["OMEGA"]],
-        address="root/category",
+        values=[[["OMEGA"]]],
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.validate,
         interprocess_encoding_context=state,
@@ -168,22 +176,22 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
 
     assert torch.equal(
         field.state,
-        torch.tensor([[Tokens.valued.value, Tokens.padded.value]], dtype=torch.int64),
+        torch.tensor([[[Tokens.valued.value, Tokens.padded.value]]], dtype=torch.int64),
     )
     assert torch.equal(
         field.content,
-        torch.tensor([[structure.requests["root/category"].max_vocab_size, 0]], dtype=torch.int64),
+        torch.tensor([[[structure.requests[ADDRESS].max_vocab_size, 0]]], dtype=torch.int64),
     )
 
 
 def test_category_tensorfield_can_simulate_unavailable_during_training():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=1.0))
     hyperparameters = structure
-    state = _DummyState(max_vocab_size=structure.requests["root/category"].max_vocab_size)
+    state = _DummyState(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
     field = TensorField.new(
-        values=[["ALPHA", None], ["BETA"]],
-        address="root/category",
+        values=[[["ALPHA", None]], [["BETA"]]],
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -193,8 +201,8 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
         field.content,
         torch.tensor(
             [
-                [structure.requests["root/category"].max_vocab_size, 0],
-                [structure.requests["root/category"].max_vocab_size, 0],
+                [[structure.requests[ADDRESS].max_vocab_size, 0]],
+                [[structure.requests[ADDRESS].max_vocab_size, 0]],
             ],
             dtype=torch.int64,
         ),
@@ -218,9 +226,9 @@ class _DummyNode:
 
 class _DummyModule:
     def __init__(self):
-        self.nodes = {"root/category": _DummyNode()}
+        self.nodes = {ADDRESS: _DummyNode()}
         self.hyperparameters = SimpleNamespace(
-            requests={"root/category": SimpleNamespace(topk=[2, 3, 5, 10], max_vocab_size=8)}
+            requests={ADDRESS: SimpleNamespace(topk=[2, 3, 5, 10], max_vocab_size=8)}
         )
 
 
@@ -236,7 +244,7 @@ def test_category_write_emits_state_and_content_payloads():
         ]
     )
     prediction = Prediction(
-        address="root/category",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
@@ -277,7 +285,7 @@ def test_category_write_excludes_unavailable_when_it_has_highest_logit():
     state_logits = torch.zeros(1, 1, len(Tokens))
     content_logits = torch.tensor([[[0.1, 0.2, 0.3, 0.4, 0.5, 0.0, 0.0, 0.0, 100.0]]])
     prediction = Prediction(
-        address="root/category",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
@@ -299,7 +307,7 @@ def test_category_write_excludes_unavailable_when_it_has_highest_logit():
 class _TrackingModule:
     def __init__(self, hyperparameters: Hyperparameters, embedder: Embedder, decoder: Decoder):
         self.hyperparameters = hyperparameters
-        self.nodes = {"root/category": SimpleNamespace(embedder=embedder, decoder=decoder)}
+        self.nodes = {ADDRESS: SimpleNamespace(embedder=embedder, decoder=decoder)}
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
         return value
@@ -311,26 +319,26 @@ def test_category_loss_does_not_mutate_counters():
     state = _DummyState()
 
     field = TensorField.new(
-        values=[["ALPHA", None], ["BETA"]],
-        address="root/category",
+        values=[[["ALPHA", None]], [["BETA"]]],
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
     field.mask(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address="root/category")
-    decoder = Decoder(hyperparameters=structure, address="root/category")
+    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
     module = _TrackingModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
 
     prediction = Prediction(
-        address="root/category",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
                 TensorKey.content: torch.zeros(
                     *field.content.shape,
-                    structure.requests["root/category"].max_vocab_size + 1,
+                    structure.requests[ADDRESS].max_vocab_size + 1,
                 ),
             },
             batch_size=field.batch_size,
@@ -343,7 +351,7 @@ def test_category_loss_does_not_mutate_counters():
     assert torch.equal(embedder.counters[TensorKey.state.name].counts, expected_state_counts)
 
     expected_content_counts = torch.ones(
-        structure.requests["root/category"].max_vocab_size + 1,
+        structure.requests[ADDRESS].max_vocab_size + 1,
         dtype=torch.int64,
     )
     assert torch.equal(embedder.counters[TensorKey.content.name].counts, expected_content_counts)

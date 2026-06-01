@@ -121,6 +121,12 @@ class AttentionMode(enum.StrEnum):
                 raise ValueError("attention mode 'none' does not define key/value heads")
 
 
+class Overflow(enum.StrEnum):
+    head = "head"
+    tail = "tail"
+    error = "error"
+
+
 class Component(enum.StrEnum):
     Request = "Request"
     Embedder = "Embedder"

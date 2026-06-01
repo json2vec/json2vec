@@ -107,7 +107,6 @@ def test_model_from_schema_accepts_root_array_options():
         description="event records",
         embed=True,
         attention="none",
-        max_length=3,
         n_linear=2,
         dropout=0.2,
     )
@@ -117,12 +116,23 @@ def test_model_from_schema_accepts_root_array_options():
     assert params.fields.description == "event records"
     assert params.fields.embed is True
     assert params.fields.attention == "none"
-    assert params.fields.max_length == 3
+    assert params.fields.max_length == 1
     assert params.fields.n_linear == 2
     assert params.fields.dropout == 0.2
     assert not hasattr(params.fields, "p_mask")
     assert params.embed == ["events"]
-    assert params.shapes["events/amount"] == (3,)
+    assert params.shapes["events/amount"] == (1,)
+
+
+def test_model_from_schema_rejects_root_max_length_argument():
+    with pytest.raises(TypeError, match="unexpected keyword argument 'max_length'"):
+        j2v.Model.from_schema(
+            j2v.Number("amount"),
+            d_model=16,
+            n_layers=2,
+            n_heads=4,
+            max_length=3,
+        )
 
 
 def test_model_from_schema_rejects_root_array_mask_options():

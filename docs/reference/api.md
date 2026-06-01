@@ -6,6 +6,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 
 - `Model.from_schema(...)` builds the model tree from field constructors and arrays.
 - `Array(...)` declares a repeated nested context.
+- `Overflow` enumerates `Array` overflow policies: `head`, `tail`, and `error`.
 - `Number`, `Category`, `Set`, `DateParts`, `Entity`, `Vector`, and `Text` declare typed fields.
 - `PolarsDataModule(...)` builds data loaders from a configured model.
 - `StreamingDataModule(...)` streams local or S3-backed files into Lightning loops.
