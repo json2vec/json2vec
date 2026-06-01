@@ -19,7 +19,6 @@ def _model(*fields: j2v.SchemaField) -> j2v.Model:
         n_layers=1,
         n_heads=4,
         batch_size=2,
-        max_length=1,
         attention="none",
     )
 

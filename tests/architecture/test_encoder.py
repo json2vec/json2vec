@@ -9,6 +9,13 @@ from json2vec.structs.packages import Parcel
 
 
 def _payload(*, attention: str = "mha", pooling: str = "query") -> dict:
+    field: dict = {
+        "name": "category",
+        "type": "category",
+        "query": "[*].items[*].label",
+        "pooling": pooling,
+        "max_vocab_size": 8,
+    }
     return {
         "d_model": 16,
         "fields": {
@@ -16,14 +23,12 @@ def _payload(*, attention: str = "mha", pooling: str = "query") -> dict:
             "type": "array",
             "attention": attention,
             "dropout": 0.0,
-            "max_length": 2,
             "fields": [
                 {
-                    "name": "category",
-                    "type": "category",
-                    "query": "[*].label",
-                    "pooling": pooling,
-                    "max_vocab_size": 8,
+                    "name": "items",
+                    "type": "array",
+                    "max_length": 2,
+                    "fields": [field],
                 }
             ],
         },
@@ -56,7 +61,7 @@ def test_array_encoder_none_skips_transformer_layers():
 def test_decoder_mean_pooling_repeats_heritage_mean_for_each_target_slot():
     hyperparameters = Hyperparameters.model_validate(_payload(pooling="mean"))
     model = Model(hyperparameters=hyperparameters, batch_size=2)
-    decoder = model.nodes["root/category"].decoder
+    decoder = model.nodes["root/items/category"].decoder
     parcel = Parcel(
         origin="root",
         destination="",

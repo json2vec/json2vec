@@ -19,25 +19,32 @@ from json2vec.tensorfields.extensions.text import (
     write,
 )
 
+ADDRESS = "root/items/body"
+
 
 def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", encoder_batch_size: int = 2) -> dict:
+    field: dict = {
+        "name": "body",
+        "type": "text",
+        "query": "[*].items[*].body",
+        "model_name": "bert-base-uncased",
+        "max_length": 4,
+        "encoder_batch_size": encoder_batch_size,
+        "encoder_pooling": encoder_pooling,
+        "objective": objective,
+    }
     return {
         "d_model": 16,
         "fields": {
             "name": "root",
             "type": "array",
             "dropout": 0.1,
-            "max_length": 2,
             "fields": [
                 {
-                    "name": "body",
-                    "type": "text",
-                    "query": "[*].body",
-                    "model_name": "bert-base-uncased",
-                    "max_length": 4,
-                    "encoder_batch_size": encoder_batch_size,
-                    "encoder_pooling": encoder_pooling,
-                    "objective": objective,
+                    "name": "items",
+                    "type": "array",
+                    "max_length": 2,
+                    "fields": [field],
                 }
             ],
         },
@@ -46,8 +53,8 @@ def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", e
 
 def _values() -> list:
     return [
-        ["alpha", "beta"],
-        ["gamma", "delta"],
+        [["alpha", "beta"]],
+        [["gamma", "delta"]],
     ]
 
 
@@ -121,7 +128,7 @@ def _patch_hf(monkeypatch: pytest.MonkeyPatch, *, hidden_size: int = 4) -> FakeH
 
 def test_text_request_is_available_in_structure():
     structure = Hyperparameters.model_validate(_structure_payload())
-    request = structure.requests["root/body"]
+    request = structure.requests[ADDRESS]
     assert request.type == "text"
     assert request.model_name == "bert-base-uncased"
     assert request.max_length == 4
@@ -129,7 +136,7 @@ def test_text_request_is_available_in_structure():
 
 def test_text_request_rejects_blank_model_name():
     payload = _structure_payload()
-    payload["fields"]["fields"][0]["model_name"] = "   "
+    payload["fields"]["fields"][0]["fields"][0]["model_name"] = "   "
 
     with pytest.raises(ValueError, match="model_name must be a non-empty string"):
         Hyperparameters.model_validate(payload)
@@ -159,15 +166,15 @@ def test_text_tensorfield_tokenizes_strings(monkeypatch: pytest.MonkeyPatch):
     hyperparameters = structure
     field = TensorField.new(
         values=_values(),
-        address="root/body",
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
     )
 
-    assert field.content[INPUT_IDS].shape == (2, 2, 4)
-    assert field.content[ATTENTION_MASK].shape == (2, 2, 4)
-    assert field.content[INPUT_IDS][0, 0].tolist() == [5, 6, 0, 0]
-    assert field.content[ATTENTION_MASK][0, 0].tolist() == [1, 1, 0, 0]
+    assert field.content[INPUT_IDS].shape == (2, 1, 2, 4)
+    assert field.content[ATTENTION_MASK].shape == (2, 1, 2, 4)
+    assert field.content[INPUT_IDS][0, 0, 0].tolist() == [5, 6, 0, 0]
+    assert field.content[ATTENTION_MASK][0, 0, 0].tolist() == [1, 1, 0, 0]
 
 
 def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
@@ -177,17 +184,17 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
     hyperparameters = structure
     field = TensorField.new(
         values=_values(),
-        address="root/body",
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
     )
 
-    embedder = Embedder(hyperparameters=structure, address="root/body")
+    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
     parcel = embedder(field)
-    assert parcel.payload.shape == (2, 2, 16)
+    assert parcel.payload.shape == (2, 1, 2, 16)
     assert fake_model.calls == 4
 
-    decoder = Decoder(hyperparameters=structure, address="root/body")
+    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
     prediction = decoder([parcel])
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 4)
@@ -196,7 +203,7 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
 class _DummyModule:
     def __init__(self, structure: Hyperparameters, embedder: Embedder, decoder: Decoder | None):
         self.hyperparameters = structure
-        self.nodes = {"root/body": SimpleNamespace(embedder=embedder, decoder=decoder)}
+        self.nodes = {ADDRESS: SimpleNamespace(embedder=embedder, decoder=decoder)}
         self.logged: list[tuple[tuple[str, ...], float]] = []
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
@@ -212,19 +219,19 @@ def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch
     hyperparameters = structure
     field = TensorField.new(
         values=_values(),
-        address="root/body",
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
     )
     field.mask(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address="root/body")
-    decoder = Decoder(hyperparameters=structure, address="root/body")
+    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
     targets = embedder.target_embeddings(field)
     state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
     state_logits[..., Tokens.valued.value] = 50.0
     prediction = Prediction(
-        address="root/body",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
@@ -244,7 +251,7 @@ def test_text_write_returns_no_payload(monkeypatch: pytest.MonkeyPatch):
 
     structure = Hyperparameters.model_validate(_structure_payload())
     prediction = Prediction(
-        address="root/body",
+        address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: torch.zeros(2, 2, len(Tokens)),

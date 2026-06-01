@@ -38,6 +38,9 @@
 - [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/): repeated child objects.
 - [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/): tabular comparison point.
 - [Serving](https://json2vec.github.io/json2vec/tutorials/serving/): deployment wrapper workflow.
+- [Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning/): how `j2v.Model`, data modules, and Lightning `Trainer` fit together.
+- [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules/): choose `PolarsDataModule` or `StreamingDataModule` and configure splits.
+- [Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference/): write large prediction jobs with `Trainer.predict(...)` and `j2v.Writer`.
 - [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/): Python transformations before tensorization.
 - [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors/): prediction output shaping for APIs, writers, and serving.
 - [Field Stacking](https://json2vec.github.io/json2vec/guides/field-stacking/): query pattern for shared repeated semantic roles.
@@ -56,8 +59,10 @@
 
 - Use `import json2vec as j2v`.
 - Use `j2v.Model.from_schema(...)`; do not invent `Struct(...)`.
-- Use `name=...` to name the generated root context.
+- Use `name=...` to name the generated root context; it is always length `1`.
 - Use `target=True` for supervised targets; it is exact shorthand for `p_prune=1.0`.
 - Use `embed=True` for emitted embeddings, and `p_mask` for stochastic self-supervised reconstruction with rates lower than `1.0`.
-- Use `Array(..., name=..., max_length=...)` for repeated contexts.
+- Use `Array(..., name=..., max_length=...)` for repeated contexts; add `overflow="tail"` for newest-last histories or `overflow="error"` for strict schemas.
+- Use Lightning `Trainer` with `PolarsDataModule` or `StreamingDataModule` for training and batch prediction.
+- Use `j2v.Writer` for Parquet batch inference output.
 - Use preprocessors for Python input shaping and postprocessors for prediction output shaping.

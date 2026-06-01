@@ -10,6 +10,8 @@ import pydantic
 from anytree import NodeMixin
 from jmespath.exceptions import JMESPathError
 
+from json2vec.structs.enums import Overflow
+
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
 PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
 
@@ -219,5 +221,15 @@ class Leaf(Node):
         for node in self.path:
             if node.type == "array":
                 out.append(node.max_length)
+
+        return tuple(out)
+
+    @functools.cached_property
+    def overflows(self) -> tuple[Overflow, ...]:
+        out: list[Overflow] = []
+
+        for node in self.path:
+            if node.type == "array":
+                out.append(node.overflow)
 
         return tuple(out)

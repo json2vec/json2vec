@@ -32,6 +32,13 @@ That lets one model surface support supervised prediction, self-supervised
 reconstruction, embedding export, schema mutation, field importance, and serving
 without rebuilding the data representation for each workflow.
 
+## Execution Model
+
+`json2vec` builds Lightning-compatible models. The schema defines the model
+tree, typed losses, prediction outputs, and embeddings; Lightning runs the
+fit, validation, test, and prediction loops, including device placement,
+callbacks, logging, checkpointing, and distributed execution.
+
 ## A Schema Defines A Model
 
 The generated root schema node is named `record` by default. This example names
@@ -120,6 +127,9 @@ without making a feature table the only representation the model can see.
 - Modeling rationale: [Why `json2vec`](motivation.md)
 - Built-in fields: [Data Types](core-concepts/data-types.md)
 - Learning modes and embeddings: [Learning Modes & Embeddings](core-concepts/embeddings.md)
+- Training execution: [Training With Lightning](guides/lightning.md)
+- In-memory and streaming inputs: [Data Modules](guides/data-modules.md)
+- Offline prediction jobs: [Batch Inference](guides/batch-inference.md)
 - Serving-time output shaping: [Postprocessors](guides/postprocessors.md)
 - Applied risk example: [Device Tenure](case-studies/device-tenure.md)
 
@@ -127,19 +137,23 @@ without making a feature table the only representation the model can see.
 
 For a first pass, follow this sequence:
 
-```text
-Getting Started -> Model Tree -> Query Paths -> Data Types -> Embeddings -> Guides
-```
+[Getting Started](getting-started.md) ->
+[Model Tree](core-concepts/model-tree.md) ->
+[Query Paths](core-concepts/querypaths.md) ->
+[Data Types](core-concepts/data-types.md) ->
+[Training With Lightning](guides/lightning.md) ->
+[Data Modules](guides/data-modules.md) ->
+[Batch Inference](guides/batch-inference.md)
 
 ## Tutorials
 
 The tutorials are ordered by workflow:
 
-- **Hello World** runs the smallest supervised training loop.
-- **Nested Supervised Training** uses repeated measurement objects plus a root target.
-- **Masked Pretraining** introduces nested arrays and self-supervised masking.
-- **Supervised Tabular Training** shows a compact flat classifier for comparison.
-- **Serving** turns a saved model into a deployment wrapper.
+- [**Hello World**](tutorials/hello-world.ipynb) runs the smallest supervised training loop.
+- [**Nested Supervised Training**](tutorials/nested-supervised-training.ipynb) uses repeated measurement objects plus a root target.
+- [**Masked Pretraining**](tutorials/pretraining.ipynb) introduces nested arrays and self-supervised masking.
+- [**Supervised Tabular Training**](tutorials/supervised-tabular-training.ipynb) shows a compact flat classifier for comparison.
+- [**Serving**](tutorials/serving.ipynb) turns a saved model into a deployment wrapper.
 
 ## Community
 

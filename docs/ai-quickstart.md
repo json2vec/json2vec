@@ -53,6 +53,10 @@ model = j2v.Model.from_schema(
 )
 ```
 
+For ordered histories, set `overflow="tail"` on the array when the newest
+records should be retained after `max_length` is reached. Use
+`overflow="error"` when truncation should fail.
+
 This reads records shaped like:
 
 ```python
@@ -82,7 +86,8 @@ model = j2v.Model.from_schema(
 
 ## Train Quickly
 
-Use `PolarsDataModule(...)` for in-memory examples.
+Use `PolarsDataModule(...)` for in-memory examples. `j2v.Model` is a Lightning
+module, so training uses the normal Lightning `Trainer.fit(...)` loop.
 
 ```python
 import lightning.pytorch as lit
@@ -125,6 +130,10 @@ trainer = lit.Trainer(
 trainer.fit(model=model, datamodule=datamodule)
 ```
 
+For larger file-backed datasets, use
+[Data Modules](guides/data-modules.md) to choose `PolarsDataModule` or
+`StreamingDataModule`.
+
 ## Predict
 
 `model.predict(...)` accepts a list of raw dictionaries. Configured embeddings appear in the same address-keyed output.
@@ -135,6 +144,11 @@ predictions = model.predict(records.to_dicts()[:3])
 species = predictions[j2v.Address("record", "species")]
 record = predictions[j2v.Address("record")]
 ```
+
+For batch prediction jobs, use
+[Batch Inference](guides/batch-inference.md): configure a `predict` split on a
+data module, attach `j2v.Writer(...)` to `Trainer(callbacks=[...])`, and call
+`trainer.predict(...)`.
 
 ## Shape Raw Data
 
@@ -215,6 +229,9 @@ Use `model=...` for an already constructed model during local setup, or
 - Use `embed=True` for embeddings and `target=True` for supervised targets.
 - Use `p_mask` for stochastic self-supervised reconstruction; use `target=True`
   or `p_prune=1.0` when a field should always be hidden and decoded.
+- Use Lightning `Trainer` with `PolarsDataModule` or `StreamingDataModule` for
+  training and batch prediction.
+- Use `j2v.Writer` for Parquet batch inference output.
 
 Use [Getting Started](getting-started.md) and the tutorial notebooks for
 runnable patterns.

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias, Unio
 
 import pydantic
 
-from json2vec.structs.enums import AttentionMode
+from json2vec.structs.enums import AttentionMode, Overflow
 from json2vec.structs.tree import Leaf, Node, Rate
 from json2vec.tensorfields import extensions as _extensions  # noqa: F401
 from json2vec.tensorfields.base import TENSORFIELDS
@@ -31,6 +31,7 @@ class Array(Node):
     type: Annotated[Literal["array"], pydantic.Field(default="array")] = "array"
     attention: AttentionMode = AttentionMode.mha
     max_length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    overflow: Overflow = Overflow.head
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)

@@ -232,6 +232,8 @@ class TensorField(TensorFieldBase):
             shape=(len(values), *array_shape),
             dtype="datetime64[m]",
             pad_value=np.nan,
+            overflows=hyperparameters.overflows(address),
+            address=address,
         )
 
         state: torch.Tensor = torch.tensor(data=state, dtype=torch.int64)

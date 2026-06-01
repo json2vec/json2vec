@@ -110,6 +110,8 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=object,
             pad_value=None,
+            overflows=hyperparameters.overflows(address),
+            address=address,
         )
 
         content = np.zeros((*leading_shape, request.n_dim), dtype=np.float32)

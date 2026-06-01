@@ -220,10 +220,11 @@ root = predictions[j2v.Address("customer")]["embedding"]
 events = predictions[j2v.Address("customer", "events")]["embedding"]
 ```
 
-For larger offline jobs, use `j2v.Writer` with the normal Lightning prediction
-loop so embeddings and metadata can be written to Parquet. Add a
-[postprocessor](../guides/postprocessors.md) when you need to strip, rename, or flatten the
-output for a downstream index.
+For larger offline jobs, use the [Batch Inference](../guides/batch-inference.md)
+guide. `j2v.Writer` writes target predictions, configured embeddings, and input
+metadata from `trainer.predict(...)` to rank-partitioned Parquet files. Add a
+[postprocessor](../guides/postprocessors.md) when you need to strip, rename, or
+flatten the output for a downstream index.
 
 ## Comparing Embeddings
 
@@ -252,6 +253,8 @@ anomaly detection, weak supervision, transfer learning, or diagnostics.
 
 - Use [Built-In Data Types](data-types.md) to choose leaf fields.
 - Use [Query Paths](querypaths.md) to bind source data to schema nodes.
+- Use [Batch Inference](../guides/batch-inference.md) to write embedding jobs to
+  Parquet.
 - Use [Postprocessors](../guides/postprocessors.md) to reshape exported embeddings.
 - See the [Device Tenure case study](../case-studies/device-tenure.md) for a
   nested risk-modeling example.

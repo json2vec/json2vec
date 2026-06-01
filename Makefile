@@ -43,3 +43,6 @@ notebooks:
 
 notebooks-check:
 	uv run python -c "$$RUN_NOTEBOOKS"
+
+docs:
+	uv run mkdocs serve --dirtyreload

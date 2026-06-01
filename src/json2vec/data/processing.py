@@ -6,7 +6,8 @@ from typing import Any
 import numpy as np
 from beartype import beartype
 
-from json2vec.structs.enums import Tokens
+from json2vec.structs.enums import Overflow, Tokens
+from json2vec.structs.tree import Address
 
 
 def apply(
@@ -54,6 +55,8 @@ def _iter_leaf_nodes(
     nested: Any,
     shape: tuple[int, ...],
     strides: tuple[int, ...],
+    overflows: tuple[Overflow, ...],
+    address: Address | str | None = None,
 ):
     ndim = len(shape)
     stack: list[tuple[Any, int, int]] = [(nested, 0, 0)]
@@ -65,13 +68,38 @@ def _iter_leaf_nodes(
             yield base, node
             continue
 
-        if not isinstance(node, list):
+        if not isinstance(node, (list, tuple, np.ndarray)):
             continue
 
-        limit = min(len(node), shape[depth])
+        if isinstance(node, np.ndarray) and node.ndim == 0:
+            continue
+
+        length = len(node)
+        max_length = shape[depth]
+        policy = overflows[depth]
+
+        if policy == Overflow.error and length > max_length:
+            provided_shape = (*shape[:depth], length, *shape[depth + 1 :])
+            if depth == 0:
+                context = "batch dimension 0"
+            elif depth == 1:
+                context = "root node dimension 1"
+            else:
+                context = f"dimension {depth}"
+            if address is not None:
+                context = f"{context} for {Address(str(address))}"
+            raise ValueError(f"array overflow at {context}: expected shape {shape}, provided shape {provided_shape}")
+
+        limit = min(length, max_length)
+        if policy == Overflow.tail:
+            source_start = length - limit
+            indices = [(source_start + destination, destination) for destination in range(limit)]
+        else:
+            indices = [(destination, destination) for destination in range(limit)]
+
         step = strides[depth]
-        for index in range(limit - 1, -1, -1):
-            stack.append((node[index], depth + 1, base + (index * step)))
+        for source_index, destination_index in reversed(indices):
+            stack.append((node[source_index], depth + 1, base + (destination_index * step)))
 
 
 def _fill_python(
@@ -80,29 +108,49 @@ def _fill_python(
     flat_flags: np.ndarray,
     shape: tuple[int, ...],
     strides: tuple[int, ...],
+    overflows: tuple[Overflow, ...],
+    address: Address | str | None,
+    encode: Callable[[Any], Any] | None,
 ) -> None:
-    for flat_index, node in _iter_leaf_nodes(nested=nested, shape=shape, strides=strides):
+    for flat_index, node in _iter_leaf_nodes(
+        nested=nested,
+        shape=shape,
+        strides=strides,
+        overflows=overflows,
+        address=address,
+    ):
         if node is None:
             flat_flags[flat_index] = Tokens.null.value
         else:
-            flat_values[flat_index] = node
+            flat_values[flat_index] = encode(node) if encode is not None else node
             flat_flags[flat_index] = Tokens.valued.value
 
 
 @beartype
 def pad(
-    nested: Any, shape: tuple[int, ...], dtype: type | str = object, pad_value: Any = None
+    nested: Any,
+    shape: tuple[int, ...],
+    dtype: type | str = object,
+    pad_value: Any = None,
+    overflows: tuple[Overflow, ...] | None = None,
+    address: Address | str | None = None,
+    value_shape: tuple[int, ...] = (),
+    encode: Callable[[Any], Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     resolved_dtype = np.dtype(dtype)
-    values = np.full(shape, pad_value, dtype=resolved_dtype)
+    values = np.full((*shape, *value_shape), pad_value, dtype=resolved_dtype)
     flags = np.full(shape, Tokens.padded.value, dtype=np.int8)
 
     ndim = len(shape)
+    resolved_overflows = (Overflow.head,) * ndim if overflows is None else tuple(Overflow(item) for item in overflows)
+    if len(resolved_overflows) != ndim:
+        raise ValueError(f"overflows length must match shape rank: expected {ndim}, got {len(resolved_overflows)}")
+
     if ndim == 0:
         if nested is None:
             flags[...] = Tokens.null.value
         else:
-            values[...] = nested
+            values[...] = encode(nested) if encode is not None else nested
             flags[...] = Tokens.valued.value
         return values, flags
 
@@ -111,7 +159,7 @@ def pad(
         strides[depth] = strides[depth + 1] * shape[depth + 1]
     stride_tuple = tuple(strides)
 
-    flat_values = values.reshape(-1)
+    flat_values = values.reshape(-1, *value_shape)
     flat_flags = flags.reshape(-1)
 
     _fill_python(
@@ -120,6 +168,9 @@ def pad(
         flat_flags=flat_flags,
         shape=shape,
         strides=stride_tuple,
+        overflows=resolved_overflows,
+        address=address,
+        encode=encode,
     )
 
     return values, flags

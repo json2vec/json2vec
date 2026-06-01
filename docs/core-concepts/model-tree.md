@@ -66,10 +66,9 @@ Leaf nodes are the only nodes that bind directly to values with a request-level 
 [Query Paths](querypaths.md) for how leaf queries are inferred.
 
 !!! Note
-    Under the hood, the root array uses the same machinery as other arrays. Its
-    default `max_length` is `1`, which is why normal raw dictionaries become
-    one-record observations. Advanced users can override the root
-    `max_length=...` on `Model.from_schema(...)`.
+    Under the hood, the root array uses the same machinery as other arrays, but
+    it is always a singleton context with `max_length=1`. Use nested
+    `Array(max_length=...)` for repeated data.
 
 ## Nodes As N-Dimensional Arrays
 
@@ -85,12 +84,16 @@ line_items.max_length  -> 32
 leaf shape             -> (1, 32)
 ```
 
+For user-declared arrays, `max_length` defines the retained dimension and
+`overflow` controls whether overlong query results keep the head, keep the
+tail, or raise an error.
+
 At runtime, a scalar tensorfield such as `price` has arrays like:
 
 ```text
 state      (batch, 1, 32)  - if the content is valued, padded, masked, or null
 content    (batch, 1, 32)  - the actual content payload (numerical value, token indices, etc.)
-trainable  (batch, 1, 32)  - boolean mask to determine whether the content may contribute to losss
+trainable  (batch, 1, 32)  - boolean mask to determine whether the content may contribute to loss
 ```
 
 Some field types add content dimensions. For example, `Vector` content includes

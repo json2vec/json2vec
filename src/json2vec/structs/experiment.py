@@ -12,7 +12,7 @@ from typing import Annotated, Any, ClassVar, Literal, Self
 import pydantic
 from anytree import LevelOrderGroupIter, PreOrderIter, RenderTree
 
-from json2vec.structs.enums import AttentionMode
+from json2vec.structs.enums import AttentionMode, Overflow
 from json2vec.structs.selectors import (
     ExtendArg,
     NodeAttribute,
@@ -141,7 +141,6 @@ class Hyperparameters(Node):
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
-        max_length: Annotated[int, pydantic.Field(gt=0)] = 1,
         n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
         dropout: Rate | None = None,
     ) -> Self:
@@ -172,7 +171,8 @@ class Hyperparameters(Node):
             n_layers=n_layers,
             n_heads=n_heads,
             n_linear=n_linear,
-            max_length=max_length,
+            max_length=1,
+            overflow=Overflow.error,
             dropout=dropout,
             fields=root_fields,
         )
@@ -198,6 +198,8 @@ class Hyperparameters(Node):
             return array
 
         self.fields = materialize(self.fields)
+        self.fields.max_length = 1
+        self.fields.overflow = Overflow.error
         self.fields.parent: Self = self
         for request in self.requests.values():
             request.post_bind_validate()
@@ -234,6 +236,9 @@ class Hyperparameters(Node):
     def shapes(self) -> dict[Address, tuple[int, ...]]:
         return {request.address: request.shape for request in self.requests.values()}
 
+    def overflows(self, address: Address) -> tuple[Overflow, ...]:
+        return (Overflow.error, *self.requests[Address(str(address))].overflows)
+
     @functools.cached_property
     def depthwise(self) -> list[list[Address]]:
         out: list[list[Address]] = []
@@ -249,7 +254,7 @@ class Hyperparameters(Node):
             self.__dict__.pop(name, None)
 
         for node in PreOrderIter(self.fields):
-            for name in ("address", "heritage", "shape"):
+            for name in ("address", "heritage", "shape", "overflows"):
                 node.__dict__.pop(name, None)
 
     def clear_selection_cache(self) -> None:
