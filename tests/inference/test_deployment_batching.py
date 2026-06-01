@@ -72,6 +72,35 @@ def test_deployment_batches_only_valid_inputs_and_preserves_per_item_errors():
     assert encoded[2]["predictions"]["root/label"]["value"] == "ok"
 
 
+def test_deployment_batches_real_encoded_requests_without_extra_tensor_rank():
+    model = Model.from_schema(
+        Number(name="amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=2,
+        embed=True,
+    )
+    deployment = API(model=model)
+    deployment.setup(device="cpu")
+
+    first = deployment.decode_request({"amount": 1.5})
+    second = deployment.decode_request({"amount": 2.5})
+
+    assert isinstance(first, TensorDict)
+    assert isinstance(second, TensorDict)
+
+    batch = deployment.batch([first, second])
+
+    assert batch.data is not None
+    assert batch.data["record/amount"].state.shape == torch.Size([2, 1])
+
+    outputs = deployment.predict(batch)
+
+    assert len(outputs) == 2
+    assert all(isinstance(item, list) for item in outputs)
+
+
 def test_deployment_postprocess_can_rewrite_encoded_response():
     seen = {}
 

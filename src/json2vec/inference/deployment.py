@@ -16,7 +16,7 @@ from tensordict import TensorDict
 
 from json2vec.architecture.root import Model
 from json2vec.data.iterables import JMESPathResolutionMonitor, encode
-from json2vec.structs.enums import Strata
+from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.experiment import NodeAttribute, NodePredicate
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address, Node
@@ -56,6 +56,38 @@ class BatchItem(pydantic.BaseModel):
     data: Input | None
     valid_indices: list[int]
     items: list[Input | ErrorItem]
+
+
+def _input_batch_size(item: Input) -> int:
+    if len(item.batch_size) > 0:
+        return int(item.batch_size[0])
+
+    for key, value in item.items():
+        if key == TensorKey.metadata:
+            continue
+
+        batch_size = getattr(value, "batch_size", ())
+        if len(batch_size) > 0:
+            return int(batch_size[0])
+
+        if torch.is_tensor(value) and value.ndim > 0:
+            return int(value.shape[0])
+
+    return 1
+
+
+def _cat_inputs(inputs: list[Input]) -> Input:
+    out: dict[Address, TensorFieldBase] = {}
+
+    for key in inputs[0].keys():
+        if key == TensorKey.metadata:
+            continue
+
+        address = Address(str(key))
+        out[address] = torch.cat([item[key] for item in inputs], dim=0)
+
+    batch_size = sum(_input_batch_size(item) for item in inputs)
+    return cast(Input, TensorDict(source=cast(Any, out), batch_size=[batch_size]))
 
 
 class API(ls.LitAPI):
@@ -170,7 +202,7 @@ class API(ls.LitAPI):
             valid_indices.append(index)
             valid_inputs.append(item)
 
-        data = torch.stack(valid_inputs, dim=0) if valid_inputs else None
+        data = _cat_inputs(valid_inputs) if valid_inputs else None
         return BatchItem(data=data, valid_indices=valid_indices, items=inputs)
 
     @beartype
