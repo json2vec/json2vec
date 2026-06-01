@@ -25,13 +25,6 @@ repos:
         always_run: true
         verbose: true
 
-      - id: pytest
-        name: Run Pytest
-        entry: uv run pytest
-        language: system
-        pass_filenames: false
-        always_run: true
-
       - id: notebooks
         name: Check Notebooks
         entry: make notebooks-check
@@ -42,6 +35,13 @@ repos:
       - id: docs
         name: Render Docs
         entry: uv run --extra docs mkdocs build --strict
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest
+        name: Run Pytest
+        entry: uv run pytest
         language: system
         pass_filenames: false
         always_run: true

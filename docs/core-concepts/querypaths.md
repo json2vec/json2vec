@@ -194,7 +194,10 @@ Query shape follows the schema shape. Against one processed observation,
 ```
 
 That nested result is intentional. It preserves the root record dimension and
-the `line_items` dimension.
+the `line_items` dimension. Array overflow is resolved after query selection,
+using the order returned by the query. Use `overflow="tail"` on an `Array` when
+the newest records are at the end of that result, or `overflow="error"` when
+truncation should fail fast.
 
 ## Multiple Nested Arrays
 

@@ -113,6 +113,8 @@ class TensorField(TensorFieldBase):
             shape=(len(values), *array_shape),
             dtype=np.int64,
             pad_value=0,
+            overflows=hyperparameters.overflows(address),
+            address=address,
         )
 
         state_tensor = torch.tensor(states, dtype=torch.int64)

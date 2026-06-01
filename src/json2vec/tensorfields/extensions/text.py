@@ -209,6 +209,8 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=object,
             pad_value=None,
+            overflows=hyperparameters.overflows(address),
+            address=address,
         )
 
         token_ids = torch.zeros((*leading_shape, request.max_length), dtype=torch.int64)

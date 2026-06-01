@@ -19,7 +19,17 @@ from json2vec.architecture.root import (
 from json2vec.data.datasets import PolarsDataModule, StreamingDataModule
 from json2vec.inference.callback import Postprocessor, Writer
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
-from json2vec.structs.enums import AttentionMode, Component, Metric, ShardingStrategy, Strata, Suffix, TensorKey, Tokens
+from json2vec.structs.enums import (
+    AttentionMode,
+    Component,
+    Metric,
+    Overflow,
+    ShardingStrategy,
+    Strata,
+    Suffix,
+    TensorKey,
+    Tokens,
+)
 from json2vec.structs.experiment import (
     Hyperparameters,
     NodeAttribute,
@@ -112,6 +122,7 @@ __all__ = [
     "NodePredicate",
     "Number",
     "OptimizerConfig",
+    "Overflow",
     "PREPROCESSORS",
     "Plugin",
     "PolarsDataModule",

@@ -4,18 +4,23 @@ from json2vec.structs.experiment import Hyperparameters
 
 
 def _structure_payload() -> dict:
+    field: dict = {
+        "name": "identifier",
+        "type": "entity",
+        "query": "[*].items[*].id",
+    }
     return {
         "d_model": 16,
         "fields": {
             "name": "root",
             "type": "array",
             "dropout": 0.1,
-            "max_length": 2,
             "fields": [
                 {
-                    "name": "identifier",
-                    "type": "entity",
-                    "query": "[*].id",
+                    "name": "items",
+                    "type": "array",
+                    "max_length": 2,
+                    "fields": [field],
                 }
             ],
         },
@@ -36,12 +41,12 @@ def test_hyperparameters_rejects_target_constructor_list():
 
 def test_hyperparameters_derives_target_from_node_prune_rate():
     payload = _hyperparameters_payload()
-    payload["fields"]["fields"][0]["p_prune"] = 1.0
-    payload["fields"]["fields"][0]["embed"] = False
+    payload["fields"]["fields"][0]["fields"][0]["p_prune"] = 1.0
+    payload["fields"]["fields"][0]["fields"][0]["embed"] = False
 
     hyperparameters = Hyperparameters.model_validate(payload)
 
-    assert hyperparameters.target == ["root/identifier"]
+    assert hyperparameters.target == ["root/items/identifier"]
 
 
 def test_hyperparameters_rejects_embed_constructor_list():
@@ -88,7 +93,7 @@ def test_hyperparameters_rejects_invalid_node_mask_rate():
 
 def test_hyperparameters_rejects_invalid_leaf_target_rate():
     payload = _hyperparameters_payload()
-    payload["fields"]["fields"][0]["p_prune"] = -0.1
+    payload["fields"]["fields"][0]["fields"][0]["p_prune"] = -0.1
 
     with pytest.raises(ValueError):
         Hyperparameters.model_validate(payload)

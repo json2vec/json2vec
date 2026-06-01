@@ -11,6 +11,7 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from json2vec.architecture.plot import Pane
+from json2vec.data.processing import pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -73,37 +74,6 @@ def _encode_set(value: Any, state: Vocabulary, update: bool, n_tokens: int) -> n
     return encoded
 
 
-def _pad_sets(
-    values: list,
-    shape: tuple[int, ...],
-    state: Vocabulary,
-    update: bool,
-    n_tokens: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    content = np.zeros((*shape, n_tokens), dtype=np.float32)
-    flags = np.full(shape, Tokens.padded.value, dtype=np.int64)
-
-    def walk(node: Any, depth: int, index: tuple[int, ...]) -> None:
-        if depth == len(shape):
-            if node is None:
-                flags[index] = Tokens.null.value
-                return
-
-            flags[index] = Tokens.valued.value
-            content[index] = _encode_set(value=node, state=state, update=update, n_tokens=n_tokens)
-            return
-
-        if not isinstance(node, list):
-            return
-
-        for position, child in enumerate(node[: shape[depth]]):
-            walk(child, depth + 1, (*index, position))
-
-    walk(values, 0, ())
-
-    return content, flags
-
-
 @sets.register
 @tensorclass
 class TensorField(TensorFieldBase):
@@ -125,12 +95,20 @@ class TensorField(TensorFieldBase):
         shape: tuple[int, ...] = (len(values), *hyperparameters.shapes[address])
         n_tokens: int = request.max_vocab_size + 1
 
-        data, states = _pad_sets(
-            values=values,
+        data, states = pad(
+            nested=values,
             shape=shape,
-            state=interprocess_encoding_context,
-            update=(strata == Strata.train),
-            n_tokens=n_tokens,
+            dtype=np.float32,
+            pad_value=0.0,
+            overflows=hyperparameters.overflows(address),
+            address=address,
+            value_shape=(n_tokens,),
+            encode=lambda value: _encode_set(
+                value=value,
+                state=interprocess_encoding_context,
+                update=(strata == Strata.train),
+                n_tokens=n_tokens,
+            ),
         )
 
         state_tensor = torch.tensor(states, dtype=torch.int64)

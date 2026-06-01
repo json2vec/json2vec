@@ -1,9 +1,10 @@
 from collections.abc import Iterable, Iterator
 
 import numpy as np
+import pytest
 
 from json2vec.data.processing import Pipeline, apply, pad
-from json2vec.structs.enums import Tokens
+from json2vec.structs.enums import Overflow, Tokens
 
 
 def test_pipeline():
@@ -50,6 +51,107 @@ def test_pad_truncates_shape_and_skips_incomplete_scalars():
     assert flags[1, 1] == Tokens.padded
     assert flags[2, 0] == Tokens.null
     assert flags[2, 1] == Tokens.valued
+
+
+def test_pad_tail_overflow_keeps_last_items_and_compacts_slots():
+    values, flags = pad(
+        nested=[[1, 2, 3]],
+        shape=(1, 2),
+        dtype=object,
+        pad_value="PAD",
+        overflows=(Overflow.error, Overflow.tail),
+    )
+
+    assert values.tolist() == [[2, 3]]
+    assert flags[0, 0] == Tokens.valued
+    assert flags[0, 1] == Tokens.valued
+
+
+def test_pad_error_overflow_raises():
+    with pytest.raises(ValueError, match="array overflow at root node dimension 1"):
+        pad(
+            nested=[[1, 2, 3]],
+            shape=(1, 2),
+            overflows=(Overflow.error, Overflow.error),
+        )
+
+
+def test_pad_error_overflow_includes_address_when_provided():
+    with pytest.raises(ValueError, match="array overflow at root node dimension 1 for record/events/amount"):
+        pad(
+            nested=[[1, 2, 3]],
+            shape=(1, 2),
+            overflows=(Overflow.error, Overflow.error),
+            address="record/events/amount",
+        )
+
+
+def test_pad_batch_overflow_raises():
+    with pytest.raises(ValueError, match="array overflow at batch"):
+        pad(
+            nested=[[1], [2]],
+            shape=(1, 1),
+            overflows=(Overflow.error, Overflow.head),
+        )
+
+
+def test_pad_root_overflow_raises():
+    with pytest.raises(ValueError, match="array overflow at root node dimension 1"):
+        pad(
+            nested=[[[1], [2]]],
+            shape=(1, 1, 1),
+            overflows=(Overflow.error, Overflow.error, Overflow.head),
+        )
+
+
+def test_pad_nested_overflow_policies_are_per_depth():
+    values, _ = pad(
+        nested=[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]],
+        shape=(1, 2, 2),
+        dtype=object,
+        pad_value="PAD",
+        overflows=(Overflow.error, Overflow.head, Overflow.tail),
+    )
+
+    assert values.tolist() == [[[2, 3], [5, 6]]]
+
+
+def test_pad_overflow_does_not_slice_leaf_ndarray():
+    leaf = np.array([1, 2, 3])
+    values, flags = pad(
+        nested=[[leaf]],
+        shape=(1, 1),
+        dtype=object,
+        pad_value=None,
+        overflows=(Overflow.error, Overflow.error),
+    )
+
+    assert np.array_equal(values[0, 0], leaf)
+    assert flags[0, 0] == Tokens.valued
+
+
+def test_pad_encodes_leaf_values_into_trailing_value_shape():
+    vocab = {"ALPHA": 0, "BETA": 1, "GAMMA": 2}
+
+    def encode(items: list[str]) -> np.ndarray:
+        encoded = np.zeros(3, dtype=np.float32)
+        for item in items:
+            encoded[vocab[item]] = 1.0
+        return encoded
+
+    values, flags = pad(
+        nested=[[["ALPHA", "BETA"], None]],
+        shape=(1, 2),
+        dtype=np.float32,
+        pad_value=0.0,
+        value_shape=(3,),
+        encode=encode,
+    )
+
+    assert values.shape == (1, 2, 3)
+    assert values.tolist() == [[[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]]]
+    assert flags[0, 0] == Tokens.valued
+    assert flags[0, 1] == Tokens.null
 
 
 def test_pad_numeric_dtype_tracks_null_without_object_array():

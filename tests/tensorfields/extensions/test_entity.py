@@ -5,12 +5,14 @@ from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.tensorfields.extensions.entity import TensorField
 
+ADDRESS = "root/items/identifier"
+
 
 def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) -> dict:
     field: dict = {
         "name": "identifier",
         "type": "entity",
-        "query": "[*].id",
+        "query": "[*].items[*].id",
     }
     if topk is not None:
         field["topk"] = topk
@@ -21,8 +23,14 @@ def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) ->
             "name": "root",
             "type": "array",
             "dropout": 0.1,
-            "max_length": max_length,
-            "fields": [field],
+            "fields": [
+                {
+                    "name": "items",
+                    "type": "array",
+                    "max_length": max_length,
+                    "fields": [field],
+                }
+            ],
         },
     }
 
@@ -48,13 +56,13 @@ def test_entity_tensorfield_uses_batch_local_unique_ids():
     hyperparameters = structure
 
     values = [
-        ["alice", "bob"],
-        ["alice", "carol"],
+        [["alice", "bob"]],
+        [["alice", "carol"]],
     ]
 
     field = TensorField.new(
         values=values,
-        address="root/identifier",
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
     )
@@ -71,8 +79,8 @@ def test_entity_tensorfield_separates_state_and_content():
     hyperparameters = structure
 
     field = TensorField.new(
-        values=[["alice", None], ["alice"]],
-        address="root/identifier",
+        values=[[["alice", None]], [["alice"]]],
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
     )
@@ -81,8 +89,8 @@ def test_entity_tensorfield_separates_state_and_content():
         field.state,
         torch.tensor(
             [
-                [Tokens.valued.value, Tokens.null.value],
-                [Tokens.valued.value, Tokens.padded.value],
+                [[Tokens.valued.value, Tokens.null.value]],
+                [[Tokens.valued.value, Tokens.padded.value]],
             ],
             dtype=torch.int64,
         ),
@@ -91,8 +99,8 @@ def test_entity_tensorfield_separates_state_and_content():
         field.content,
         torch.tensor(
             [
-                [0, 0],
-                [0, 0],
+                [[0, 0]],
+                [[0, 0]],
             ],
             dtype=torch.int64,
         ),
@@ -104,14 +112,14 @@ def test_entity_tensorfield_rejects_unhashable_values():
     hyperparameters = structure
 
     values = [
-        [[1, 2], "ok"],
-        ["x", "y"],
+        [[[1, 2], "ok"]],
+        [["x", "y"]],
     ]
 
     with pytest.raises(ValueError, match="only accepts hashable scalar values"):
         TensorField.new(
             values=values,
-            address="root/identifier",
+            address=ADDRESS,
             hyperparameters=hyperparameters,
             strata=Strata.train,
         )
@@ -121,13 +129,13 @@ def test_entity_mask_preserves_targets_before_replacement():
     structure = Hyperparameters.model_validate(_structure_payload())
     hyperparameters = structure
     values = [
-        ["a", "b"],
-        ["c", "d"],
+        [["a", "b"]],
+        [["c", "d"]],
     ]
 
     field = TensorField.new(
         values=values,
-        address="root/identifier",
+        address=ADDRESS,
         hyperparameters=hyperparameters,
         strata=Strata.train,
     )

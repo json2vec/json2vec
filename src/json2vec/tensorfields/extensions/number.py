@@ -89,6 +89,8 @@ class TensorField(TensorFieldBase):
             shape=(len(values), *array_shape),
             dtype=np.float64,
             pad_value=np.nan,
+            overflows=hyperparameters.overflows(address),
+            address=address,
         )
 
         cdf = np.nan_to_num(data, nan=0.0)

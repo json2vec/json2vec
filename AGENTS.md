@@ -46,7 +46,9 @@ model = j2v.Model.from_schema(
 )
 ```
 
-Root array options are passed to `Model.from_schema(...)`. Use `name=...` for the root array name.
+Root array naming is passed to `Model.from_schema(...)` with `name=...`. The
+generated root array is always a singleton; use child `Array(max_length=...)`
+for repeated data.
 
 ```python
 model = j2v.Model.from_schema(
@@ -65,6 +67,7 @@ model = j2v.Model.from_schema(
 - `Model.from_schema(..., name="customer")` names the generated root array. Older examples may say `root=...`; update them.
 - Inferred request queries are written from one processed observation: `[*].amount`, not `[*][*].amount`.
 - `Array(name="transactions")` makes child default queries like `[*].transactions[*].amount`.
+- `Array(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root array uses internal `Overflow.error`.
 - `target=True` is shorthand for `p_prune=1.0`; the field is hidden from input and decoded as a supervised target.
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
 - `Entity` is for local repeated-identity matching and requires more than one value per observation, usually under an `Array(max_length>1)`.
