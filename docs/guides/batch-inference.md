@@ -128,8 +128,6 @@ For file-backed local or S3 inputs, use `StreamingDataModule` with a `predict`
 split:
 
 ```python
-import re
-
 import lightning.pytorch as lit
 
 import json2vec as j2v
@@ -138,7 +136,7 @@ datamodule = j2v.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
-    predict=re.compile(r"/predict/.*\.parquet$"),
+    predict=r"/predict/.*\.parquet$",
     sharding="chunk",
 )
 

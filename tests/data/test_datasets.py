@@ -10,11 +10,13 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 from beartype.roar import BeartypeCallHintParamViolation
+from torch.utils.data import IterableDataset
 
 import json2vec as j2v
 from json2vec.data import iterables
-from json2vec.data.datasets import base, polars, streaming
+from json2vec.data.datasets import base, custom, polars, streaming
 from json2vec.data.datasets.base import _is_assigned_to_worker, _worker_identity, sha256
+from json2vec.data.datasets.custom import CustomBatchDataset, CustomDataModule
 from json2vec.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
 from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
 from json2vec.preprocessors.base import Preprocessor, PreprocessorMode
@@ -52,6 +54,14 @@ def _checkpoint_payload(model: j2v.Model) -> dict:
         "hyperparameters": model.hyperparameters.model_dump(mode="python"),
         "batch_size": model.batch_size,
     }
+
+
+class RecordsDataset(IterableDataset):
+    def __init__(self, records):
+        self.records = records
+
+    def __iter__(self):
+        yield from self.records
 
 
 def test_sha256():
@@ -194,6 +204,20 @@ def test_fetch_without_file_sharding_returns_all_matching_files(tmp_path: Path):
         )
     )
     assert {Path(path).name for path in files} == {"first.ndjson", "second.ndjson"}
+
+
+def test_fetch_accepts_raw_regex_string(tmp_path: Path):
+    (tmp_path / "first.ndjson").write_text("", encoding="utf-8")
+    (tmp_path / "ignore.csv").write_text("", encoding="utf-8")
+
+    files = list(
+        streaming.fetch(
+            root=tmp_path,
+            pattern=r".*\.ndjson$",
+            sharding=ShardingStrategy.chunk,
+        )
+    )
+    assert {Path(path).name for path in files} == {"first.ndjson"}
 
 
 def test_fetch_all_pattern_returns_all_files(tmp_path: Path):
@@ -577,6 +601,24 @@ def test_streaming_datamodule_defaults_to_file_sharding():
     assert module.replacement == {strata: strata == Strata.train for strata in Strata}
 
 
+def test_streaming_datamodule_accepts_raw_regex_string_patterns():
+    module = StreamingDataModule(
+        model=_datamodule_model(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        train=r"/train/.*\.ndjson$",
+        validate=r"/validate/.*\.ndjson$",
+        predict=r"/predict/.*\.ndjson$",
+    )
+
+    assert module.train is not None
+    assert module.validate is not None
+    assert module.predict is not None
+    assert module.train.pattern == r"/train/.*\.ndjson$"
+    assert module.validate.pattern == r"/validate/.*\.ndjson$"
+    assert module.predict.pattern == r"/predict/.*\.ndjson$"
+
+
 def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
     module = StreamingDataModule(
         model=_datamodule_model(),
@@ -624,6 +666,154 @@ def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp
     assert loader.dataset.batch_size == 5
     assert "record/risk_score" in loader.dataset.hyperparameters.requests
     assert "record/amount" not in loader.dataset.hyperparameters.requests
+
+
+def test_custom_datamodule_accepts_named_datasets_and_loader_configuration_per_strata():
+    train = RecordsDataset([{"id": 1}])
+    predict = RecordsDataset([{"id": 2}])
+    module = CustomDataModule(
+        model=_datamodule_model(),
+        train=train,
+        predict=predict,
+        preprocessor=None,
+        num_workers={Strata.train: 0},
+        observation_buffer_size={Strata.train: 13},
+        sample_rate={Strata.train: 0.5},
+    )
+
+    assert module.datasets[Strata.train] is train
+    assert module.datasets[Strata.predict] is predict
+    assert set(module.datasets) == {Strata.train, Strata.predict}
+    assert module.preprocessor is None
+    assert module.preprocessor_kwargs == {}
+    assert module.num_workers[Strata.train] == 0
+    assert module.num_workers[Strata.validate] is None
+    assert module.observation_buffer_size[Strata.train] == 13
+    assert module.observation_buffer_size[Strata.validate] == 1
+    assert module.sample_rate[Strata.train] == 0.5
+    assert module.sample_rate[Strata.validate] == 1.0
+    assert module.val_dataloader() is None
+
+
+def test_custom_datamodule_accepts_dataset_mapping():
+    train = RecordsDataset([{"id": 1}])
+    validate = RecordsDataset([{"id": 2}])
+
+    module = CustomDataModule(
+        model=_datamodule_model(),
+        datasets={"train": train, Strata.validate: validate},
+        num_workers=0,
+    )
+
+    assert module.datasets[Strata.train] is train
+    assert module.datasets[Strata.validate] is validate
+    assert module.test_dataloader() is None
+
+
+def test_custom_datamodule_rejects_invalid_loader_configuration():
+    kwargs = {
+        "model": _datamodule_model(),
+        "train": RecordsDataset([{"id": 1}]),
+    }
+
+    with pytest.raises(BeartypeCallHintParamViolation):
+        CustomDataModule(**kwargs, num_workers={Strata.train: True})
+
+    with pytest.raises(BeartypeCallHintParamViolation):
+        CustomDataModule(**kwargs, sample_rate={Strata.train: 0.0})
+
+
+def test_custom_datamodule_requires_at_least_one_split():
+    with pytest.raises(ValueError, match="at least one dataset split is required"):
+        CustomDataModule(model=_datamodule_model())
+
+
+def test_custom_datamodule_rejects_datasets_and_named_splits():
+    with pytest.raises(ValueError, match="pass either datasets or named splits"):
+        CustomDataModule(
+            model=_datamodule_model(),
+            train=RecordsDataset([{"id": 1}]),
+            datasets={Strata.validate: RecordsDataset([{"id": 2}])},
+        )
+
+
+def test_custom_datamodule_accepts_partial_dataset_mapping_until_loader_requested():
+    module = CustomDataModule(
+        model=_datamodule_model(),
+        datasets={Strata.train: RecordsDataset([{"id": 1}])},
+        num_workers=0,
+    )
+
+    assert set(module.datasets) == {Strata.train}
+    assert module.val_dataloader() is None
+
+    with pytest.raises(ValueError, match="no dataset configured"):
+        module.dataloader(strata=Strata.validate)
+
+
+def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    module = CustomDataModule(
+        model=model,
+        train=RecordsDataset([{"amount": 1.0, "risk_score": 2.0}]),
+        num_workers=0,
+    )
+    restored = j2v.Model.from_schema(
+        j2v.Number("risk_score"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=5,
+    )
+
+    model.restore_checkpoint_state(_checkpoint_payload(restored))
+
+    loader = module.train_dataloader()
+    assert loader is not None
+    assert module.hyperparameters is model.hyperparameters
+    assert module.batch_size == 5
+    assert loader.dataset.hyperparameters is model.hyperparameters
+    assert loader.dataset.batch_size == 5
+    assert "record/risk_score" in loader.dataset.hyperparameters.requests
+    assert "record/amount" not in loader.dataset.hyperparameters.requests
+
+
+def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest.MonkeyPatch):
+    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+        yield from pipe
+
+    def mask(pipe, hyperparameters):
+        yield from pipe
+
+    def target(pipe, hyperparameters):
+        yield from pipe
+
+    monkeypatch.setattr(custom, "transform", transform)
+    monkeypatch.setattr(custom, "mask", mask)
+    monkeypatch.setattr(custom, "target", target)
+
+    batch_dataset = CustomBatchDataset(
+        hyperparameters=SimpleNamespace(requests={}),
+        dataset=RecordsDataset([{"id": 1}, {"id": 2}, {"id": 3}]),
+        preprocessor=None,
+        preprocessor_kwargs={},
+        interprocess_encoding_context={},
+        batch_size=2,
+        strata=Strata.train,
+        observation_buffer_size=1,
+        sample_rate=1.0,
+    )
+
+    assert list(batch_dataset) == [
+        [[{"id": 1}], [{"id": 2}]],
+        [[{"id": 3}]],
+    ]
 
 
 def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata():

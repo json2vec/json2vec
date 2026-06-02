@@ -459,9 +459,11 @@ class Model(lit.LightningModule):
         return plot(module=self, address=address, detail=detail, out=out, mode=mode)
 
     @beartype
-    def save(self, pathname: str | Path) -> None:
+    def save(self, pathname: str | Path) -> str | Path:
         """Save model weights and schema hyperparameters to a checkpoint."""
         CheckpointState.save(self, pathname)
+
+        return pathname
 
     @immutable("forward")
     @beartype
@@ -502,6 +504,8 @@ class Model(lit.LightningModule):
     def load(cls, checkpoint: str | Path) -> Self:
         """Load a `Model` checkpoint written by `Model.save(...)`."""
         return cast(Self, CheckpointState.load(cls, checkpoint))
+
+    from_checkpoint = load
 
     def write(self, predictions: list[Prediction]) -> dict[Address, dict[str, Any]]:
         return ModelRuntime.write(self, predictions)
