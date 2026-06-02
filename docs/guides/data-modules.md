@@ -199,20 +199,19 @@ Supported suffixes:
 - `json`
 
 Split arguments are compiled regular expressions matched against discovered
-file paths.
+file paths. Pass either raw regex strings or already compiled `re.Pattern`
+objects.
 
 ```python
-import re
-
 import json2vec as j2v
 
 datamodule = j2v.StreamingDataModule(
     model=model,
     root="data/events",
     suffix="ndjson",
-    train=re.compile(r"/train/.*\.jsonl$"),
-    validate=re.compile(r"/validate/.*\.jsonl$"),
-    predict=re.compile(r"/predict/.*\.jsonl$"),
+    train=r"/train/.*\.jsonl$",
+    validate=r"/validate/.*\.jsonl$",
+    predict=r"/predict/.*\.jsonl$",
     sharding="file",
 )
 ```
@@ -224,8 +223,8 @@ datamodule = j2v.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
-    train=re.compile(r"/train/.*\.parquet$"),
-    validate=re.compile(r"/validate/.*\.parquet$"),
+    train=r"/train/.*\.parquet$",
+    validate=r"/validate/.*\.parquet$",
 )
 ```
 
@@ -256,8 +255,8 @@ When `replacement=None`, training uses replacement sampling and non-training
 splits do not. Set `replacement` explicitly when you need different behavior.
 
 !!! Note
-    `StreamingDataModule` expects compiled regex patterns, not glob strings.
-    Use `re.compile(...)` for split patterns.
+    Split patterns are regular expressions, not glob strings. Raw regex strings
+    are compiled by `StreamingDataModule`.
 
 ## Preprocessors
 

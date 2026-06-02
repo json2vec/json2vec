@@ -206,6 +206,20 @@ def test_fetch_without_file_sharding_returns_all_matching_files(tmp_path: Path):
     assert {Path(path).name for path in files} == {"first.ndjson", "second.ndjson"}
 
 
+def test_fetch_accepts_raw_regex_string(tmp_path: Path):
+    (tmp_path / "first.ndjson").write_text("", encoding="utf-8")
+    (tmp_path / "ignore.csv").write_text("", encoding="utf-8")
+
+    files = list(
+        streaming.fetch(
+            root=tmp_path,
+            pattern=r".*\.ndjson$",
+            sharding=ShardingStrategy.chunk,
+        )
+    )
+    assert {Path(path).name for path in files} == {"first.ndjson"}
+
+
 def test_fetch_all_pattern_returns_all_files(tmp_path: Path):
     (tmp_path / "first.ndjson").write_text("", encoding="utf-8")
     (tmp_path / "second.csv").write_text("", encoding="utf-8")
@@ -585,6 +599,24 @@ def test_streaming_datamodule_defaults_to_file_sharding():
 
     assert module.sharding == {strata: ShardingStrategy.file for strata in Strata}
     assert module.replacement == {strata: strata == Strata.train for strata in Strata}
+
+
+def test_streaming_datamodule_accepts_raw_regex_string_patterns():
+    module = StreamingDataModule(
+        model=_datamodule_model(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        train=r"/train/.*\.ndjson$",
+        validate=r"/validate/.*\.ndjson$",
+        predict=r"/predict/.*\.ndjson$",
+    )
+
+    assert module.train is not None
+    assert module.validate is not None
+    assert module.predict is not None
+    assert module.train.pattern == r"/train/.*\.ndjson$"
+    assert module.validate.pattern == r"/validate/.*\.ndjson$"
+    assert module.predict.pattern == r"/predict/.*\.ndjson$"
 
 
 def test_streaming_datamodule_accepts_replacement_configuration_per_strata():

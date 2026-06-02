@@ -1,5 +1,4 @@
 import pytest
-from beartype.roar import BeartypeCallHintParamViolation
 
 import json2vec as j2v
 from json2vec.data.datasets.base import PreprocessorConfig
@@ -78,11 +77,13 @@ def test_preprocessor_normalization_is_optional():
     assert PreprocessorConfig.normalize(_preprocessor_name()) == _preprocessor_name()
 
 
-def test_streaming_datamodule_rejects_uncompiled_split_pattern():
-    with pytest.raises(BeartypeCallHintParamViolation):
-        StreamingDataModule(
-            model=_model(),
-            root="/tmp/json2vec-test",
-            suffix=Suffix.ndjson,
-            train=r".*",
-        )
+def test_streaming_datamodule_accepts_raw_split_pattern():
+    module = StreamingDataModule(
+        model=_model(),
+        root="/tmp/json2vec-test",
+        suffix=Suffix.ndjson,
+        train=r".*",
+    )
+
+    assert module.train is not None
+    assert module.train.pattern == r".*"

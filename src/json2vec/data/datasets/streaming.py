@@ -54,15 +54,22 @@ if TYPE_CHECKING:
 else:
     Model = "json2vec.architecture.root.Model"
 
+PatternInput = str | re.Pattern[str]
+
+
+def _compile_pattern(pattern: PatternInput) -> re.Pattern[str]:
+    return re.compile(pattern) if isinstance(pattern, str) else pattern
+
 
 @beartype
 def fetch(
     root: str | Path,
-    pattern: re.Pattern[str],
+    pattern: PatternInput,
     sharding: ShardingStrategy,
     global_rank: int | None = None,
     world_size: int | None = None,
 ) -> Iterator[str]:
+    regex = _compile_pattern(pattern)
     parsed = urlparse(str(root))
 
     if parsed.scheme == "s3":
@@ -82,7 +89,7 @@ def fetch(
     for info in fs.get_file_info(selector):
         if info.is_file:
             uri_path = f"{uri_prefix}{info.path}" if uri_prefix else info.path
-            if pattern.search(uri_path):
+            if regex.search(uri_path):
                 if sharding == ShardingStrategy.file:
                     if not _is_assigned_to_worker(
                         shard_key=f"file:{uri_path}",
@@ -98,7 +105,7 @@ def fetch(
 def observe(
     root: str | Path,
     suffix: Suffix,
-    pattern: re.Pattern[str],
+    pattern: PatternInput,
     strata: Strata,
     sharding: ShardingStrategy,
     chunk_batch_size: int,
@@ -248,7 +255,7 @@ class BatchDataset(IterableDataset):
         hyperparameters: Hyperparameters,
         root: str | Path,
         suffix: Suffix,
-        pattern: re.Pattern[str],
+        pattern: PatternInput,
         preprocessor: PreprocessorConfig.Value,
         preprocessor_kwargs: dict[str, Any],
         interprocess_encoding_context: InterprocessEncodingContext,
@@ -323,7 +330,7 @@ def dataloader(
     hyperparameters: Hyperparameters,
     root: str | Path,
     suffix: Suffix,
-    pattern: re.Pattern[str],
+    pattern: PatternInput,
     preprocessor: PreprocessorConfig.Value,
     preprocessor_kwargs: dict[str, Any],
     interprocess_encoding_context: InterprocessEncodingContext,
@@ -389,10 +396,10 @@ class StreamingDataModule(lit.LightningDataModule):
         model: Model,
         root: str | Path,
         suffix: Suffix | str,
-        train: re.Pattern[str] | None = None,
-        validate: re.Pattern[str] | None = None,
-        test: re.Pattern[str] | None = None,
-        predict: re.Pattern[str] | None = None,
+        train: PatternInput | None = None,
+        validate: PatternInput | None = None,
+        test: PatternInput | None = None,
+        predict: PatternInput | None = None,
         preprocessor: str | Callable[..., Any] | Preprocessor | None = None,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
@@ -409,10 +416,10 @@ class StreamingDataModule(lit.LightningDataModule):
 
         self.root = root
         self.suffix = Suffix(suffix)
-        self.train = train
-        self.validate = validate
-        self.test = test
-        self.predict = predict
+        self.train = _compile_pattern(train) if train is not None else None
+        self.validate = _compile_pattern(validate) if validate is not None else None
+        self.test = _compile_pattern(test) if test is not None else None
+        self.predict = _compile_pattern(predict) if predict is not None else None
         self.preprocessor = PreprocessorConfig.normalize(preprocessor)
         self.preprocessor_kwargs = dict(kwargs)
         try:
