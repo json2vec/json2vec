@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import pydantic
 from loguru import logger
 
 from json2vec.architecture.graph import ModelGraph
@@ -20,12 +20,18 @@ if TYPE_CHECKING:
 _MISSING = object()
 
 
-@dataclass(frozen=True)
-class AttributeChange:
+class AttributeChange(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
     node: Node
     name: str
     original: Any
     definition_attribute: bool
+    address: str
+    node_name: str
+    node_type: str
+    changed: Any = _MISSING
+    changed_address: Any = _MISSING
 
 
 class SchemaEditor:
@@ -208,6 +214,9 @@ class SchemaEditor:
                         name=name,
                         original=getattr(node, name, _MISSING),
                         definition_attribute=_is_definition_attribute(node, name),
+                        address=str(node.address),
+                        node_name=node.name,
+                        node_type=node.type,
                     )
                 )
 
@@ -280,29 +289,55 @@ class SchemaEditor:
 
     def _log_attribute_changes(self, action: str, changes: list[AttributeChange], *, restored: bool = False) -> None:
         for change in changes:
+            current_address = str(change.node.address)
             value = change.original if restored else getattr(change.node, change.name, _MISSING)
+            if not restored:
+                change.changed = value
+                change.changed_address = current_address
+            previous_value = change.changed if restored else change.original
+            previous_address = change.changed_address if restored else change.address
+            if previous_address is _MISSING:
+                previous_address = change.address
+            address_context = (
+                current_address if previous_address == current_address else f"{previous_address} -> {current_address}"
+            )
+            value_text = _format_log_value(value)
+            previous_value_text = _format_log_value(previous_value)
             logger.bind(
                 component="schema_mutation",
                 action=action,
-                address=str(change.node.address),
-                node_type=change.node.type,
+                address=current_address,
+                previous_address=previous_address,
+                node_name=change.node.name,
+                previous_node_name=change.node_name,
+                node_type=change.node_type,
                 attribute=change.name,
                 definition_attribute=change.definition_attribute,
-                value=_format_log_value(value),
-                previous_value=_format_log_value(change.original),
-            ).info("restored schema node attribute" if restored else "mutated schema node attribute")
+                value=value_text,
+                previous_value=previous_value_text,
+                change=f"{change.name}: {previous_value_text} -> {value_text}",
+            ).info(
+                "{} {}: {} {} -> {}",
+                "restored" if restored else "mutated",
+                address_context,
+                change.name,
+                previous_value_text,
+                value_text,
+            )
 
     def _log_node_mutation(self, *, action: str, message: str, node: Node, **kwargs: Any) -> None:
         extra = {key: str(value.address) if isinstance(value, Node) else value for key, value in kwargs.items()}
+        context = _format_node_log_context(node, extra)
         logger.bind(
             component="schema_mutation",
             action=action,
             address=str(node.address),
             node_type=node.type,
+            node_name=node.name,
             attribute=None,
             definition_attribute=None,
             **extra,
-        ).info(message)
+        ).info("{} {}", message, context)
 
 
 def _has_node_attribute(node: Node, name: str) -> bool:
@@ -321,3 +356,13 @@ def _format_log_value(value: Any) -> str:
 
     text = repr(value)
     return text if len(text) <= 160 else f"{text[:157]}..."
+
+
+def _format_node_log_context(node: Node, extra: dict[str, Any]) -> str:
+    parts = [str(node.address)]
+    if parent := extra.get("parent"):
+        parts.append(f"under {parent}")
+    if "descendants" in extra:
+        parts.append(f"descendants={extra['descendants']}")
+
+    return " ".join(parts)

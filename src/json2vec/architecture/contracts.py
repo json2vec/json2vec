@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import pydantic
 import torch
 from tensordict import TensorDict
 
@@ -34,12 +34,13 @@ ContractSignature = tuple[Any, ...]
 ContractScope = tuple[str, int, int, ContractSignature]
 
 
-@dataclass
-class ContractScheduler:
+class ContractScheduler(pydantic.BaseModel):
     """Deterministic backoff scheduler for expensive forward contract checks."""
 
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
     periodic_interval: int = 1024
-    _counts: dict[ContractScope, int] = field(default_factory=dict)
+    _counts: dict[ContractScope, int] = pydantic.PrivateAttr(default_factory=dict)
 
     def reset(self) -> None:
         self._counts.clear()

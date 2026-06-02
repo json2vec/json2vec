@@ -31,7 +31,13 @@ def test_model_uses_mutation_facade() -> None:
 def test_model_mutations_emit_structured_logs() -> None:
     model = _model()
     events: list[dict[str, object]] = []
-    sink_id = logger.add(lambda message: events.append(dict(message.record["extra"])))
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: (
+            events.append(dict(message.record["extra"])),
+            messages.append(message.record["message"]),
+        )
+    )
 
     try:
         model.update(j2v.where("name") == "amount", weight=2.0)
@@ -59,6 +65,48 @@ def test_model_mutations_emit_structured_logs() -> None:
     assert any(
         event.get("attribute") == "target" and event.get("definition_attribute") is False for event in mutation_events
     )
+    assert any(
+        event.get("address") == "record/amount"
+        and event.get("attribute") == "weight"
+        and event.get("previous_value") == "1.0"
+        and event.get("value") == "2.0"
+        and event.get("change") == "weight: 1.0 -> 2.0"
+        for event in mutation_events
+    )
+    assert any("mutated record/amount: weight 1.0 -> 2.0" in message for message in messages)
+    assert any("extended schema node record/extra under record" in message for message in messages)
+    assert any("deleted schema node record/extra descendants=0" in message for message in messages)
+
+
+def test_model_mutation_logs_include_previous_and_current_address_for_renames() -> None:
+    model = _model()
+    events: list[dict[str, object]] = []
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: (
+            events.append(dict(message.record["extra"])),
+            messages.append(message.record["message"]),
+        )
+    )
+
+    try:
+        model.update(j2v.where("name") == "amount", name="total")
+    finally:
+        logger.remove(sink_id)
+
+    mutation_events = [event for event in events if event.get("component") == "schema_mutation"]
+
+    assert any(
+        event.get("action") == "update"
+        and event.get("attribute") == "name"
+        and event.get("previous_address") == "record/amount"
+        and event.get("address") == "record/total"
+        and event.get("previous_node_name") == "amount"
+        and event.get("node_name") == "total"
+        and event.get("change") == "name: 'amount' -> 'total'"
+        for event in mutation_events
+    )
+    assert any("mutated record/amount -> record/total: name 'amount' -> 'total'" in message for message in messages)
 
 
 def test_model_graph_rebuild_preserves_compatible_state() -> None:

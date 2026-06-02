@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import pydantic
 import rich.box
 import torch
 from rich.console import Console, Group, RenderableType
@@ -28,13 +28,14 @@ PlotMode = Literal["schema", "state", "flow", "debug"]
 PLOT_WIDTH = 120
 
 
-@dataclass(slots=True)
-class Pane:
+class Pane(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
     title: str
     marked: bool = False
-    values: dict[str, Any] = field(default_factory=dict)
-    sections: dict[str, Any] = field(default_factory=dict)
-    children: list["Pane"] = field(default_factory=list)
+    values: dict[str, Any] = pydantic.Field(default_factory=dict)
+    sections: dict[str, Any] = pydantic.Field(default_factory=dict)
+    children: list["Pane"] = pydantic.Field(default_factory=list)
 
     def add_section(self, title: str, values: Any) -> None:
         self.sections[title] = values
