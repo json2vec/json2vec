@@ -13,13 +13,13 @@ from beartype import beartype
 from lightning.pytorch import Callback
 from lightning.pytorch.callbacks import ModelCheckpoint
 from loguru import logger
+from rich.text import Text
 from tensordict import TensorDict
 
 from json2vec.architecture.checkpoint import CheckpointState
 from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
 from json2vec.architecture.mutations import SchemaEditor
-from json2vec.architecture.plot import PlotMode
 from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.structs.enums import AttentionMode, Strata
@@ -30,7 +30,7 @@ from json2vec.structs.experiment import (
     SchemaField,
 )
 from json2vec.structs.packages import Prediction
-from json2vec.structs.tree import Address, Node, Rate
+from json2vec.structs.tree import Address, Node, Rate, Renderable
 from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
@@ -137,12 +137,12 @@ class RollbackCheckpoint(ModelCheckpoint):
         ).info("rolled back Model to best checkpoint")
 
 
-class Model(lit.LightningModule):
+class Model(lit.LightningModule, Renderable):
     """Neural model generated from a `json2vec` schema tree.
 
     `Model` owns the schema hyperparameters, tensorfield embedders, array
     encoders, decoders, and convenience methods for prediction, checkpointing,
-    plotting, and schema mutation.
+    schema display and mutation.
 
     Example:
         ```python
@@ -264,6 +264,45 @@ class Model(lit.LightningModule):
     def _reset_contracts(self) -> None:
         self._contract_generation += 1
         self._contract_scheduler.reset()
+
+    def __rich_console__(self, console, options):
+        parameters = sum(parameter.numel() for parameter in self.parameters())
+        heading = Text()
+        heading.append(type(self).__name__, style=self.RICH_NAME_STYLE)
+        heading.append(" ")
+        heading.append("[model]", style=self.RICH_TYPE_STYLE)
+        for name, value in (
+            ("batch_size", self.batch_size),
+            ("d_model", self.hyperparameters.d_model),
+            ("parameters", f"{parameters:,}"),
+            ("arrays", len(self.hyperparameters.arrays)),
+            ("fields", len(self.hyperparameters.active_requests)),
+            ("targets", len(self.hyperparameters.target)),
+            ("embeds", len(self.hyperparameters.embed)),
+        ):
+            heading.append(" ")
+            heading.append(f"{name}=", style="dim")
+            heading.append(str(value), style="cyan")
+        yield heading
+
+        lines = list(self.hyperparameters.fields.__rich_console__(console, options))
+        if not lines:
+            return
+        first = Text()
+        first.append("`-- ", style=self.RICH_TREE_STYLE)
+        if isinstance(lines[0], Text):
+            first.append_text(lines[0])
+        else:
+            first.append(str(lines[0]))
+        yield first
+        for line in lines[1:]:
+            nested = Text()
+            nested.append("    ", style=self.RICH_TREE_STYLE)
+            if isinstance(line, Text):
+                nested.append_text(line)
+            else:
+                nested.append(str(line))
+            yield nested
 
     def select(
         self,
@@ -437,26 +476,6 @@ class Model(lit.LightningModule):
             for address, node in self.nodes.items()
             if hasattr(node, "embedder") and hasattr(node.embedder, "interprocess_encoding_context")
         }
-
-    def plot(
-        self,
-        address: Address | str | None = None,
-        detail: bool = False,
-        out: str | Path | None = None,
-        mode: PlotMode = "schema",
-    ) -> None:
-        """Print a Rich model visualization.
-
-        Args:
-            address: Optional subtree address to render.
-            detail: Include tensorfield-specific detail sections.
-            out: Optional output path for the rendered console text.
-            mode: Plot mode. Supported values are `schema`, `state`, `flow`,
-                and `debug`.
-        """
-        from json2vec.architecture.plot import plot
-
-        return plot(module=self, address=address, detail=detail, out=out, mode=mode)
 
     @beartype
     def save(self, pathname: str | Path) -> str | Path:

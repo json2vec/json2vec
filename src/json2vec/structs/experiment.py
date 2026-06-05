@@ -10,7 +10,8 @@ from contextlib import contextmanager
 from typing import Annotated, Any, ClassVar, Literal, Self
 
 import pydantic
-from anytree import LevelOrderGroupIter, PreOrderIter, RenderTree
+from anytree import LevelOrderGroupIter, PreOrderIter
+from rich.text import Text
 
 from json2vec.structs.enums import AttentionMode, Overflow
 from json2vec.structs.selectors import (
@@ -26,7 +27,7 @@ from json2vec.structs.selectors import (
     where,
 )
 from json2vec.structs.structure import Array, RequestTypes
-from json2vec.structs.tree import Address, Leaf, Node, Rate
+from json2vec.structs.tree import Address, Leaf, Node, Rate, Selection
 
 __all__ = [
     "ExtendArg",
@@ -294,7 +295,7 @@ class Hyperparameters(Node):
         key = ("select", include_root, combined.key)
 
         if use_cache and combined.cacheable and key in self._selection_cache:
-            return list(self._selection_cache[key].nodes)
+            return Selection(self._selection_cache[key].nodes)
 
         nodes = tuple(
             node for node in PreOrderIter(self.fields) if (include_root or node is not self.fields) if combined(node)
@@ -308,7 +309,7 @@ class Hyperparameters(Node):
                 nodes=nodes,
             )
 
-        return list(nodes)
+        return Selection(nodes)
 
     def update(
         self,
@@ -539,9 +540,38 @@ class Hyperparameters(Node):
             self._clear_tree_caches()
             self.refresh_selection_cache()
 
-    def __str__(self) -> str:
-        lines: list[str] = []
-        for pre, _, node in RenderTree(self):
-            lines.append(f"{pre}{node.name} ({node.type})")
+    def __rich_console__(self, console, options):
+        heading = Text()
+        heading.append(self.name, style=self.RICH_NAME_STYLE)
+        heading.append(" ")
+        heading.append(f"[{self.type}]", style=self.RICH_TYPE_STYLE)
+        for name, value in (
+            ("d_model", self.d_model),
+            ("arrays", len(self.arrays)),
+            ("fields", len(self.active_requests)),
+            ("targets", len(self.target)),
+            ("embeds", len(self.embed)),
+        ):
+            heading.append(" ")
+            heading.append(f"{name}=", style="dim")
+            heading.append(str(value), style="cyan")
+        yield heading
 
-        return "\n".join(lines)
+        lines = list(self.fields.__rich_console__(console, options))
+        if not lines:
+            return
+        first = Text()
+        first.append("`-- ", style=self.RICH_TREE_STYLE)
+        if isinstance(lines[0], Text):
+            first.append_text(lines[0])
+        else:
+            first.append(str(lines[0]))
+        yield first
+        for line in lines[1:]:
+            nested = Text()
+            nested.append("    ", style=self.RICH_TREE_STYLE)
+            if isinstance(line, Text):
+                nested.append_text(line)
+            else:
+                nested.append(str(line))
+            yield nested

@@ -178,7 +178,7 @@ trainer = lit.Trainer(
 )
 
 trainer.fit(model=model, datamodule=datamodule)
-model.plot(detail=True)
+model
 predictions = model.predict(records.to_dicts()[:2])
 
 digit = predictions[j2v.Address("digit")]["embedding"]

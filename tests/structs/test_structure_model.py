@@ -123,9 +123,11 @@ def test_hyperparameters_depthwise_contains_array_levels():
 def test_hyperparameters_string_representation_contains_tree_nodes():
     structure = Hyperparameters.model_validate(_payload())
     rendered = str(structure)
-    assert "hyperparameters (hyperparameters)" in rendered
-    assert "root (array)" in rendered
-    assert "category_leaf (category)" in rendered
+    assert "hyperparameters [hyperparameters]" in rendered
+    root_line = next(line for line in rendered.splitlines() if "root [root]" in line)
+    assert "max_length=" not in root_line
+    assert "overflow=" not in root_line
+    assert "category_leaf [category]" in rendered
 
 
 def test_hyperparameters_preserves_field_and_array_descriptions():

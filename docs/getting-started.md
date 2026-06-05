@@ -67,10 +67,10 @@ model = j2v.Model.from_schema(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
 
-model.plot()
+model
 ```
 
-The plot is the fastest way to verify the tree that was built: root array,
+The Rich display is the fastest way to verify the tree that was built: root array,
 numeric input leaves, target leaf, inferred queries, and root embedding.
 
 Schema roles control what the model sees and what prediction can emit:
@@ -203,7 +203,7 @@ model = j2v.Model.from_schema(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
 )
 
-model.plot()
+model
 ```
 
 The inferred child queries are `[*].measurements[*].name` and

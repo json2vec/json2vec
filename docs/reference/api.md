@@ -50,7 +50,6 @@ Learning-oriented entry points:
         - delete
         - reset
         - override
-        - plot
         - save
         - load
         - predict

@@ -12,7 +12,6 @@ from beartype import beartype
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.plot import Pane
 from json2vec.data.processing import apply, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
@@ -436,24 +435,3 @@ def write(module: Model, prediction: Prediction):
             TensorKey.topk.name: topk_payload,
         },
     }
-
-
-@category.register
-def plot(
-    module: Model,
-    address: Address,
-    branch: Pane,
-    detail: bool,
-):
-    if not detail:
-        return
-
-    embedder: Embedder = module.nodes[address].embedder
-    vocabulary = embedder.vocab.snapshot()
-    branch.add_section(
-        "state",
-        {
-            "vocabulary_size": len(vocabulary),
-            "vocabulary": vocabulary,
-        },
-    )

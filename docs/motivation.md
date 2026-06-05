@@ -85,7 +85,7 @@ types need different tensorization, masking, decoding, loss, and output behavior
 They should share a training loop without being forced into one crude representation.
 
 Fifth, model inspection should be part of the modeling surface. A nested model
-should expose nested embeddings, schema-level plots, field pruning operations,
+should expose nested embeddings, schema-level displays, field pruning operations,
 and "what if" workflows that operate on the original observation shape.
 
 Finally, querying and preprocessing should live in the same path used for

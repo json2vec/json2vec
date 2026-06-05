@@ -19,7 +19,6 @@ from json2vec.structs.tree import Address, Leaf, Node
 from json2vec.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
-    from json2vec.architecture.plot import Pane
     from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
@@ -31,15 +30,6 @@ RequestBase: TypeAlias = Leaf
 CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
 RegisterT = TypeVar("RegisterT", bound=ComponentValue)
-
-
-def default_plot(
-    module: "Model",
-    address: Address,
-    branch: "Pane",
-    detail: bool,
-) -> None:
-    return None
 
 
 def default_write(module: "Model", prediction: Prediction) -> None:
@@ -146,7 +136,7 @@ TENSORFIELDS: dict[str, "Plugin"] = {}
 class Plugin:
     """Registry object for a tensorfield implementation.
 
-    Register request, tensorfield, embedder, decoder, loss, write, and plot
+    Register request, tensorfield, embedder, decoder, loss, and write
     components with `@plugin.register`. Creating a plugin with an existing
     name replaces the registry entry and emits a warning.
     """
@@ -189,8 +179,8 @@ class Plugin:
                 raise TypeError("component must be provided when registering None")
 
             key = Component(component)
-            if key not in {Component.write, Component.plot}:
-                raise TypeError("only write and plot may be registered as None")
+            if key != Component.write:
+                raise TypeError("only write may be registered as None")
 
             if key in self.components:
                 raise ValueError(f"Component '{key}' already registered in plugin '{self.name}'")
@@ -273,18 +263,6 @@ class Plugin:
                         f"Write function must accept the following parameters: {expected_params}, got {func_params}"
                     )
 
-            case Component.plot:
-                if obj is not None and not callable(obj):
-                    raise TypeError("Plot must be a callable function")
-
-                expected_params: list[str] = ["module", "address", "branch", "detail"]
-                func_params: list[str] = list(obj.__annotations__.keys())
-
-                if func_params != expected_params:
-                    raise TypeError(
-                        f"Plot function must accept the following parameters: {expected_params}, got {func_params}"
-                    )
-
         self.components[key] = obj
 
         return obj
@@ -308,9 +286,6 @@ class Plugin:
             value = self.components[component]
             if value is not None:
                 return value
-
-        if component == Component.plot:
-            return default_plot
 
         if component == Component.write:
             return default_write
@@ -340,10 +315,6 @@ class Plugin:
     @property
     def write(self) -> Callable[..., Any]:
         return cast(Callable[..., Any], self._component(Component.write))
-
-    @property
-    def plot(self) -> Callable[..., Any]:
-        return cast(Callable[..., Any], self._component(Component.plot))
 
     def __getattr__(self, key: str) -> ComponentValue:
         try:

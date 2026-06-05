@@ -885,7 +885,7 @@ The resulting embeddings form a tree that mirrors the schema. This gives downstr
 This is particularly useful for nested business data because the relevant signal is often not located at one level.
 For example, a model may identify two customers as similar because their login-session trees are similar, not because their transaction amounts are similar. The embedding tree makes that distinction observable.
 
-The model also exposes a structure plot that follows the same tree. Datatype plugins can attach their own details to this view, so diagnostics can remain local to the datatype that owns the representation.
+The model also exposes a Rich representation that follows the same tree, so diagnostics can stay aligned with the schema that owns the representation.
 
 #sidenote[
   This capability has yet to be tested.
