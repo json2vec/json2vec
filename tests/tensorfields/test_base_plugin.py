@@ -53,12 +53,8 @@ def _build_plugin() -> Plugin:
     def write(module: object, prediction: object):
         return None
 
-    def plot(module: object, address: object, branch: object, detail: bool):
-        return None
-
     plugin.register(loss)
     plugin.register(write)
-    plugin.register(plot)
 
     return plugin
 
@@ -90,7 +86,6 @@ def test_plugin_registers_components_and_wraps_loss():
         assert Component.Decoder in plugin.components
         assert Component.loss in plugin.components
         assert Component.write in plugin.components
-        assert Component.plot in plugin.components
 
         class DummyModule:
             def __init__(self):
@@ -110,15 +105,6 @@ def test_plugin_registers_components_and_wraps_loss():
         TENSORFIELDS.pop(plugin.name, None)
 
 
-def test_plugin_plot_defaults_when_unregistered():
-    plugin = Plugin(name=_plugin_name("defaultplot"))
-    try:
-        assert callable(plugin.plot)
-        assert Component.plot not in plugin.components
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
 def test_plugin_write_defaults_to_no_output_when_unregistered():
     plugin = Plugin(name=_plugin_name("defaultwrite"))
     try:
@@ -128,14 +114,12 @@ def test_plugin_write_defaults_to_no_output_when_unregistered():
         TENSORFIELDS.pop(plugin.name, None)
 
 
-def test_plugin_accepts_explicit_none_write_and_plot():
+def test_plugin_accepts_explicit_none_write():
     plugin = Plugin(name=_plugin_name("nonehooks"))
     try:
         plugin.register(None, component=Component.write)
-        plugin.register(None, component=Component.plot)
 
         assert plugin.write(module=object(), prediction=object()) is None
-        assert callable(plugin.plot)
     finally:
         TENSORFIELDS.pop(plugin.name, None)
 

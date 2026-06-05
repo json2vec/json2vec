@@ -10,7 +10,6 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.architecture.plot import Pane
 from json2vec.data.processing import pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
@@ -21,9 +20,6 @@ from json2vec.tensorfields.base import (
     Plugin,
     RequestBase,
     TensorFieldBase,
-)
-from json2vec.tensorfields.extensions.category import (
-    UNAVAILABLE_LABEL,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
@@ -384,25 +380,3 @@ def write(module: Model, prediction: Prediction):
         TensorKey.state.name: state_payload,
         TensorKey.content.name: content_payload,
     }
-
-
-@sets.register
-def plot(
-    module: Model,
-    address: Address,
-    branch: Pane,
-    detail: bool,
-):
-    if not detail:
-        return
-
-    embedder: Embedder = module.nodes[address].embedder
-    vocabulary = embedder.vocab.snapshot()
-    branch.add_section(
-        "state",
-        {
-            "vocabulary_size": len(vocabulary),
-            "vocabulary": vocabulary,
-            "unavailable_label": UNAVAILABLE_LABEL,
-        },
-    )

@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias, Union
 
 import pydantic
+from rich.text import Text
 
 from json2vec.structs.enums import AttentionMode, Overflow
 from json2vec.structs.tree import Leaf, Node, Rate
@@ -57,3 +58,53 @@ class Array(Node):
             seen.add(field.name)
 
         return self
+
+    def __rich_console__(self, console, options):
+        is_root = getattr(getattr(self, "parent", None), "type", None) == "hyperparameters"
+        display_type = "root" if is_root else self.type
+        attributes = ("attention", "n_layers", "n_heads", "n_linear", "dropout")
+        if not is_root:
+            attributes = ("max_length", "overflow", *attributes)
+
+        heading = Text()
+        heading.append(self.name, style=self.RICH_NAME_STYLE)
+        heading.append(" ")
+        heading.append(f"[{display_type}]", style=self.RICH_TYPE_STYLE)
+        if self.embed:
+            heading.append(" ")
+            heading.append("embed", style="bold #065f46")
+        for name in attributes:
+            value = getattr(self, name, None)
+            if value is None:
+                continue
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            elif hasattr(value, "value"):
+                value = value.value
+            heading.append(" ")
+            heading.append(f"{name}=", style="dim")
+            heading.append(str(value), style="cyan")
+
+        yield heading
+
+        for index, child in enumerate(self.fields):
+            connector = "`-- " if index == len(self.fields) - 1 else "|-- "
+            continuation = "    " if index == len(self.fields) - 1 else "|   "
+            lines = list(child.__rich_console__(console, options))
+            if not lines:
+                continue
+            first = Text()
+            first.append(connector, style=self.RICH_TREE_STYLE)
+            if isinstance(lines[0], Text):
+                first.append_text(lines[0])
+            else:
+                first.append(str(lines[0]))
+            yield first
+            for line in lines[1:]:
+                nested = Text()
+                nested.append(continuation, style=self.RICH_TREE_STYLE)
+                if isinstance(line, Text):
+                    nested.append_text(line)
+                else:
+                    nested.append(str(line))
+                yield nested

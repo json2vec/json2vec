@@ -134,4 +134,3 @@ class Component(enum.StrEnum):
     TensorField = "TensorField"
     loss = "loss"
     write = "write"
-    plot = "plot"

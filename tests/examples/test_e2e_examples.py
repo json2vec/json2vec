@@ -30,19 +30,19 @@ def _execute_notebook(path: str) -> nbformat.NotebookNode:
 def test_pretraining_example_runs() -> None:
     notebook = _execute_notebook("docs/tutorials/pretraining.ipynb")
 
-    assert _plot_output(notebook)
+    assert _model_display_output(notebook)
 
 
 def test_supervised_tabular_example_runs() -> None:
     notebook = _execute_notebook("docs/tutorials/supervised-tabular-training.ipynb")
 
-    assert _plot_output(notebook)
+    assert _model_display_output(notebook)
 
 
 def test_serving_example_configures_without_starting_server() -> None:
     notebook = _execute_notebook("docs/tutorials/serving.ipynb")
 
-    assert _plot_output(notebook)
+    assert _model_display_output(notebook)
 
 
 def test_custom_tensorfield_example_runs() -> None:
@@ -51,7 +51,7 @@ def test_custom_tensorfield_example_runs() -> None:
 
     assert 'Plugin(name="bucket")' in source
     assert "Boolean" not in source
-    assert _plot_output(notebook)
+    assert _model_display_output(notebook)
 
 
 def test_field_importance_example_runs() -> None:
@@ -66,12 +66,12 @@ def test_standalone_examples_directory_is_absent() -> None:
     assert not (_repo_root() / "examples").exists()
 
 
-def _plot_output(notebook: nbformat.NotebookNode) -> str:
+def _model_display_output(notebook: nbformat.NotebookNode) -> str:
     for cell in notebook.cells:
-        if cell.cell_type != "code" or "model.plot(" not in cell.source:
+        if cell.cell_type != "code" or cell.source.strip() != "model":
             continue
         text = "\n".join(_output_text(output) for output in cell.get("outputs", []))
-        if "Schema" in text:
+        if "[model]" in text:
             return text
     return ""
 

@@ -121,7 +121,7 @@ def test_counter_update_callback_syncs_counters_in_deterministic_order(monkeypat
     assert calls == ["root/a/content", "root/a/state", "root/z/counter"]
 
 
-def test_counter_str_exposes_plot_details():
+def test_counter_str_exposes_details():
     counter = Counter(address=Address("details"), size=3)
     counter.counts.copy_(torch.tensor([4, 2, 1], dtype=torch.int64))
 
