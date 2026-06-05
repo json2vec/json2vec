@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 class Output(TypedDict):
     loss: NotRequired[torch.Tensor]
     predictions: NotRequired[list[Prediction]]
+    losses: NotRequired[list[torch.Tensor]]
+    addresses: NotRequired[list[Address]]
 
 
 class ModelRuntime:
@@ -134,6 +136,7 @@ class ModelRuntime:
             return Output(predictions=predictions)
 
         losses: list[torch.Tensor] = []
+        addresses: list[Address] = []
 
         for prediction in predictions:
             if prediction.address not in module.schema.requests:
@@ -149,11 +152,18 @@ class ModelRuntime:
 
             loss: torch.Tensor = loss_fn(module=module, prediction=prediction, batch=batch[address], strata=strata)
             losses.append(loss * torch.tensor(request.weight))
+            addresses.append(address)
 
         if len(losses) == 0:
             logger.warning("no trainable fields in batch, returning zero loss")
             loss: torch.Tensor = torch.tensor(0.0, device=batch.device, requires_grad=True)
             return Output(loss=loss)
+        
+        if strata==Strata.train:
+            return Output(
+                losses=losses,
+                addresses=addresses
+            )
 
         loss: torch.Tensor = module.track((Metric.loss, strata), value=torch.stack(losses).sum())
         return Output(loss=loss)

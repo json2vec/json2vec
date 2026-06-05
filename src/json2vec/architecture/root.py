@@ -15,6 +15,8 @@ from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
+from torchjd.aggregation import UPGradWeighting
+from torchjd.autogram import Engine
 
 from json2vec.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from json2vec.architecture.contracts import ContractScheduler
@@ -28,7 +30,7 @@ from json2vec.architecture.mutations import (
 from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.logging.throughput import ThroughputLogger
-from json2vec.structs.enums import AttentionMode, Strata
+from json2vec.structs.enums import AttentionMode, Metric, Strata
 from json2vec.structs.experiment import (
     NodeAttribute,
     NodePredicate,
@@ -203,6 +205,9 @@ class Model(lit.LightningModule, Renderable):
         self.batch_size: int = batch_size
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
+        self.automatic_optimization: bool = False
+        self._autogram_engine = None
+        self._jd_weighting = None
         self.locks: Counter[str | Strata] = Counter()
         self.nodes: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self._schema_editor: SchemaEditor = SchemaEditor(self)
@@ -221,6 +226,7 @@ class Model(lit.LightningModule, Renderable):
 
     def _build(self) -> None:
         ModelGraph.install(self)
+        self._init_jd()
 
     def _rebuild(self) -> None:
         ModelGraph.rebuild(self)
@@ -268,6 +274,10 @@ class Model(lit.LightningModule, Renderable):
             else:
                 nested.append(str(line))
             yield nested
+
+    def _init_jd(self) -> None:
+        self._autogram_engine = Engine(*self.shared_submodules, batch_dim=None)
+        self._jd_weighting = UPGradWeighting()
 
     def select(
         self,
@@ -432,6 +442,20 @@ class Model(lit.LightningModule, Renderable):
         return value
 
     @property
+    def shared_submodules(self) -> list[Any]:
+        embedders = [
+            node.embedder
+            for node in self.nodes.values()
+            if hasattr(node,'embedder')
+        ]
+        encoders = [
+            node.encoder
+            for node in self.nodes.values()
+            if hasattr(node,'encoder')
+        ]
+        return embedders + encoders
+
+    @property
     def interprocess_encoding_context(self) -> dict[Address, Any]:
         return {
             Address(str(address)): node.embedder.interprocess_encoding_context
@@ -523,7 +547,30 @@ class Model(lit.LightningModule, Renderable):
             postprocess=postprocess,
         )
 
-    training_step = partialmethod(step, strata=Strata.train)
+    def training_step(self, batch, batch_idx):
+        opt = self.optimizers()
+        opt.zero_grad()
+        sch = self.lr_schedulers()
+
+        output = step(self, batch, batch_idx, strata=Strata.train)
+
+        output['losses']
+
+        loss_vec = torch.stack(output["losses"])
+
+        gramian = self._autogram_engine.compute_gramian(loss_vec)
+        weights = self._jd_weighting(gramian)
+
+        self.manual_backward(loss_vec, gradient=weights)
+
+        self.track((Metric.loss, Strata.train), value=loss_vec.detach().sum())
+        opt.step()
+
+        if sch is not None:
+            sch.step()
+
+        return {"loss":loss_vec}
+
     validation_step = partialmethod(step, strata=Strata.validate)
     test_step = partialmethod(step, strata=Strata.test)
     predict_step = partialmethod(step, strata=Strata.predict)
