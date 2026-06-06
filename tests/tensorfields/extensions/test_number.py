@@ -1,12 +1,13 @@
 from types import SimpleNamespace
 
 import torch
+from loguru import logger
 from tensordict import TensorDict
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.number import Decoder, Embedder, TensorField, loss, write
+from json2vec.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
 
 ADDRESS = "root/items/amount"
 
@@ -84,6 +85,96 @@ def test_number_loss_does_not_mutate_counter():
 
     expected_counts = torch.ones(len(Tokens), dtype=torch.int64)
     assert torch.equal(embedder.counter.counts, expected_counts)
+
+
+def test_number_normalizer_ignores_nonfinite_values_when_updating():
+    normalizer = GlobalOnlineNormalizer()
+    normalizer.train()
+    inputs = torch.tensor([1.0, float("inf"), float("-inf"), float("nan")])
+    mask = torch.ones_like(inputs, dtype=torch.bool)
+
+    output = normalizer(inputs=inputs, mask=mask)
+
+    assert torch.isfinite(normalizer.mean).all()
+    assert torch.isfinite(normalizer.var).all()
+    assert normalizer.count.item() == 1
+    assert torch.isfinite(output[0])
+    assert torch.isinf(output[1])
+    assert torch.isinf(output[2])
+    assert torch.isnan(output[3])
+
+
+def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
+    structure = Hyperparameters.model_validate(_structure_payload())
+    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    bound = embedder.max_fourier_input.detach()
+    content = torch.stack(
+        [
+            bound.mul(2),
+            bound.mul(-3),
+            torch.tensor(float("inf")),
+            torch.tensor(float("nan")),
+            bound.mul(4),
+        ]
+    )
+    state = torch.tensor(
+        [
+            Tokens.valued,
+            Tokens.valued,
+            Tokens.valued,
+            Tokens.valued,
+            Tokens.padded,
+        ],
+        dtype=torch.int64,
+    )
+    events: list[dict[str, object]] = []
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: (
+            events.append(dict(message.record["extra"])),
+            messages.append(message.record["message"]),
+        ),
+        level="WARNING",
+    )
+
+    try:
+        clamped = embedder.clamp(content=content, state=state)
+    finally:
+        logger.remove(sink_id)
+
+    assert torch.isfinite(clamped).all()
+    assert torch.allclose(clamped[:3], torch.stack([bound, -bound, bound]))
+    assert clamped[3].item() == 0.0
+    assert clamped[4].item() == bound.item()
+    assert any("number Fourier inputs exceed safe range" in message for message in messages)
+    assert any(
+        event.get("component") == "tensorfield"
+        and event.get("field_type") == "number"
+        and event.get("address") == ADDRESS
+        and event.get("count") == 5
+        and event.get("valued_count") == 4
+        and event.get("nonfinite_count") == 2
+        for event in events
+    )
+
+
+def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
+    structure = Hyperparameters.model_validate(_structure_payload())
+    field = TensorField.new(
+        values=[[[1.0, 2.0]]],
+        address=ADDRESS,
+        hyperparameters=structure,
+        strata=Strata.train,
+    )
+    field.content[0, 0, 0] = float("inf")
+
+    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    embedder.train()
+    parcel = embedder(field)
+
+    assert torch.isfinite(embedder.normalizer.mean).all()
+    assert torch.isfinite(embedder.normalizer.var).all()
+    assert torch.isfinite(parcel.payload).all()
 
 
 def test_number_write_emits_state_probability_map():
