@@ -264,7 +264,6 @@ class Model(lit.LightningModule):
     def _rebuild(self) -> None:
         ModelGraph.rebuild(self)
         self._reset_contracts()
-        self._build_jd_components()
 
     def _reset_contracts(self) -> None:
         self._contract_generation += 1
@@ -562,6 +561,10 @@ class Model(lit.LightningModule):
             preprocess=preprocess,
             postprocess=postprocess,
         )
+
+    def on_fit_start(self):
+        super().on_fit_start()
+        self._build_jd_components()
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
