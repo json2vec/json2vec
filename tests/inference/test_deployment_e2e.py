@@ -20,29 +20,20 @@ from json2vec.structs.experiment import Hyperparameters
 SERVER_SCRIPT = """
 import sys
 
-import litserve as ls
-
-from json2vec.inference.deployment import API
+from json2vec.inference.deployment import Deployment
 
 checkpoint = sys.argv[1]
 port = int(sys.argv[2])
 
-server = ls.LitServer(
-    lit_api=API(
-        checkpoint=checkpoint,
-        max_batch_size=1,
-        batch_timeout=0.0,
-    ),
+Deployment(
+    checkpoint=checkpoint,
     accelerator="cpu",
-    workers_per_device=1,
-    track_requests=False,
-)
-server.run(
+    max_batch_size=1,
+    batch_timeout=0.0,
     host="127.0.0.1",
     port=port,
     log_level="error",
-    generate_client_file=False,
-)
+).serve()
 """
 
 
@@ -116,7 +107,7 @@ def _stop_process(process: subprocess.Popen[str], timeout: float = 10.0) -> None
             log_handle.close()
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout: float = 30.0) -> tuple[int, dict[str, Any]]:
+def _post_json(url: str, payload: Any, timeout: float = 30.0) -> tuple[int, Any]:
     request = urllib.request.Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
@@ -213,6 +204,28 @@ def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) 
     embedding = payload["predictions"]["root/label"]["embedding"]
     assert len(embedding) == hyperparameters.d_model
     assert all(isinstance(value, float) for value in embedding)
+
+
+def test_deployment_accepts_multiple_inputs_in_one_request(tmp_path: Path) -> None:
+    checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
+    port = _free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    log_path = tmp_path / "deployment.log"
+    process = _launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
+
+    try:
+        _wait_for_server(base_url=base_url, process=process, log_path=log_path)
+        status, payload = _post_json(f"{base_url}/predict", [{"label": "alpha"}, {"label": "beta"}])
+    finally:
+        _stop_process(process)
+
+    assert status == 200
+    assert isinstance(payload, list)
+    assert len(payload) == 2
+    for item in payload:
+        assert "root/label" in item["predictions"]
+        embedding = item["predictions"]["root/label"]["embedding"]
+        assert len(embedding) == hyperparameters.d_model
 
 
 def test_deployment_accepts_unseen_category_values_at_runtime(tmp_path: Path) -> None:

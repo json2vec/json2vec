@@ -52,22 +52,16 @@ from json2vec.tensorfields.shared.vocabulary import VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.inference.deployment import (
-        API,
         Accelerator,
-        BatchItem,
         Deployment,
-        ErrorItem,
         Input,
         ModelSource,
         UpdateOperation,
     )
 
 _SERVING_EXPORTS = {
-    "API",
     "Accelerator",
-    "BatchItem",
     "Deployment",
-    "ErrorItem",
     "Input",
     "ModelSource",
     "UpdateOperation",
@@ -81,7 +75,7 @@ def __getattr__(name: str) -> Any:
     try:
         from json2vec.inference import deployment
     except ModuleNotFoundError as error:
-        if error.name in {"litserve", "pydantic_settings"}:
+        if error.name in {"fastapi", "pydantic_settings", "uvicorn"}:
             raise ModuleNotFoundError(
                 f"json2vec.{name} requires the serving extra; install with `pip install json2vec[serving]`."
             ) from error
@@ -98,11 +92,9 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "Address",
-    "API",
     "Accelerator",
     "Array",
     "AttentionMode",
-    "BatchItem",
     "Category",
     "Component",
     "CustomDataModule",
@@ -111,7 +103,6 @@ __all__ = [
     "Deployment",
     "EmbedderBase",
     "Entity",
-    "ErrorItem",
     "Hyperparameters",
     "Input",
     "Leaf",

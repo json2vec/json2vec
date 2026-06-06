@@ -206,6 +206,9 @@ def risk_response(context, predictions):
 ## Serve
 
 Serving helpers are top-level exports when the serving extra is installed.
+`Deployment.serve()` starts a FastAPI app with request batching. Send one JSON
+object to `/predict` for one response, or a JSON array of objects for aligned
+batch responses in one API call.
 
 ```python
 deployment = (

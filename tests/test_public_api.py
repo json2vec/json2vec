@@ -20,10 +20,7 @@ def test_common_resources_are_available_from_package_root():
     assert json2vec.Writer.__name__ == "Writer"
     assert json2vec.Postprocessor is not None
     assert json2vec.Deployment.__name__ == "Deployment"
-    assert json2vec.API.__name__ == "API"
     assert json2vec.Accelerator.cpu == "cpu"
-    assert json2vec.BatchItem.__name__ == "BatchItem"
-    assert json2vec.ErrorItem.__name__ == "ErrorItem"
     assert json2vec.Input is not None
     assert json2vec.ModelSource is not None
     assert json2vec.UpdateOperation is not None

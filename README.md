@@ -278,7 +278,7 @@ uv sync --extra docs
 ```
 
 The `text` extra installs Hugging Face `transformers`. The `serving` extra
-installs LitServe-backed deployment dependencies. The `docs` extra installs the
+installs FastAPI-backed deployment dependencies. The `docs` extra installs the
 MkDocs toolchain.
 
 ## Documentation Map

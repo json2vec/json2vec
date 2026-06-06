@@ -24,18 +24,20 @@ dependencies = [
 
 [project.optional-dependencies]
 serving = [
-    "litserve>=0.2.13",
+    "fastapi>=0.124.0",
     "pydantic-settings>=2.10.1",
+    "uvicorn>=0.38.0",
 ]
 text = [
     "transformers>=4.55.0",
 ]
 docs = [
-    "litserve>=0.2.13",
+    "fastapi>=0.124.0",
     "mkdocs-material>=9.6",
     "mkdocs-jupyter>=0.26.3",
     "mkdocstrings[python]>=0.27",
     "pydantic-settings>=2.10.1",
+    "uvicorn>=0.38.0",
 ]
 
 [dependency-groups]
@@ -47,8 +49,9 @@ dev = [
     "ipykernel>=6.29.5",
     "nbclient>=0.10.2",
     "nbformat>=5.10.4",
-    "litserve>=0.2.13",
+    "fastapi>=0.124.0",
     "pydantic-settings>=2.10.1",
+    "uvicorn>=0.38.0",
     "ty>=0.0.1a20",
     "pre-commit>=4.3.0",
 ]
