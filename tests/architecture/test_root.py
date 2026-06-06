@@ -922,6 +922,7 @@ def test_init_jd_replaces_engine_after_schema_update() -> None:
     previous_weighting = model._jd_weighting
 
     model.update(j2v.where("name") == "label", weight=2.0)
+    model.on_fit_start()
 
     assert model._autogram_engine is not previous_engine
     assert model._jd_weighting is not previous_weighting
@@ -935,6 +936,7 @@ def test_init_jd_replaces_engine_after_schema_extend() -> None:
     previous_weighting = model._jd_weighting
 
     model.extend(j2v.where("name") == "root", j2v.Number("risk_score"))
+    model.on_fit_start()
 
     assert "root/risk_score" in model.nodes
     assert model._autogram_engine is not previous_engine
@@ -949,6 +951,7 @@ def test_init_jd_replaces_engine_after_schema_delete() -> None:
     previous_weighting = model._jd_weighting
 
     model.delete(j2v.where("name") == "color")
+    model.on_fit_start()
 
     assert "root/color" not in model.nodes
     assert model._autogram_engine is not previous_engine
@@ -963,6 +966,7 @@ def test_init_jd_replaces_engine_after_reset() -> None:
     previous_weighting = model._jd_weighting
 
     model.reset(j2v.where("name") == "label")
+    model.on_fit_start()
 
     assert model._autogram_engine is not previous_engine
     assert model._jd_weighting is not previous_weighting
@@ -1105,11 +1109,12 @@ def test_training_step_after_schema_update_lands_grads_on_new_parameters(monkeyp
 
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
     model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model.on_fit_start()
     model.training_step(_multi_loss_batch(model), 0)
 
     parameter_ids_before_update = {id(parameter) for parameter in model.parameters()}
     model.update(j2v.where("name") == "label", weight=2.0)
-
+    model.on_fit_start()
     output = model.training_step(_multi_loss_batch(model), 0)
 
     assert output["loss"].shape[0] == 2
@@ -1136,6 +1141,7 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
 
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
     model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model.on_fit_start()
     baseline = model.training_step(_multi_loss_batch(model), 0)
     assert baseline["loss"].shape[0] == 2
 
@@ -1153,6 +1159,7 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
+    model.on_fit_start()
     output = model.training_step(inputs, 0)
 
     assert output["loss"].shape[0] == baseline["loss"].shape[0] + 1
@@ -1180,6 +1187,7 @@ def test_training_step_after_load_checkpoint_runs(tmp_path: Path, monkeypatch) -
     source.save(checkpoint_path)
 
     loaded = Model.load(checkpoint_path)
+    loaded.on_fit_start()
     output = loaded.training_step(_multi_loss_batch(loaded), 0)
 
     assert output["loss"].shape[0] == 2
