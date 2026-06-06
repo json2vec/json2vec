@@ -91,8 +91,8 @@ class CheckpointState:
         if isinstance(device, torch.device):
             module.to(device=device)
         module.load_state_dict(state_dict=checkpoint["state_dict"])
-        module._init_jd()
         module.train(was_training)
+        module._build_jd_components()
 
     @staticmethod
     def load(model_cls: type["Model"], checkpoint: str | Path) -> "Model":

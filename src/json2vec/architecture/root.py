@@ -206,8 +206,6 @@ class Model(lit.LightningModule, Renderable):
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
         self.automatic_optimization: bool = False
-        self._autogram_engine = None
-        self._jd_weighting = None
         self.locks: Counter[str | Strata] = Counter()
         self.nodes: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self._schema_editor: SchemaEditor = SchemaEditor(self)
@@ -215,6 +213,7 @@ class Model(lit.LightningModule, Renderable):
         self._contract_scheduler: ContractScheduler = ContractScheduler()
 
         self._build()
+        self._build_jd_components()
 
         logger.bind(
             component="model",
@@ -226,11 +225,11 @@ class Model(lit.LightningModule, Renderable):
 
     def _build(self) -> None:
         ModelGraph.install(self)
-        self._init_jd()
 
     def _rebuild(self) -> None:
         ModelGraph.rebuild(self)
         self._reset_contracts()
+        self._build_jd_components()
 
     def _reset_contracts(self) -> None:
         self._contract_generation += 1
@@ -275,7 +274,7 @@ class Model(lit.LightningModule, Renderable):
                 nested.append(str(line))
             yield nested
 
-    def _init_jd(self) -> None:
+    def _build_jd_components(self) -> None:
         self._autogram_engine = Engine(*self.shared_submodules, batch_dim=None)
         self._jd_weighting = UPGradWeighting()
 
