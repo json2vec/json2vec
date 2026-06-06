@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 
 def is_distributed() -> bool:
@@ -33,6 +34,26 @@ def all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
 
     return tensor
+
+
+def mean_all_reduce_grads(module: torch.nn.Module) -> None:
+    if not is_distributed():
+        return
+
+    size = world_size()
+    buckets: dict[tuple[torch.dtype, torch.device], list[torch.Tensor]] = {}
+    for parameter in module.parameters():
+        grad = parameter.grad
+        if grad is None:
+            continue
+        buckets.setdefault((grad.dtype, grad.device), []).append(grad)
+
+    for grads in buckets.values():
+        flat = _flatten_dense_tensors(grads)
+        all_reduce_sum(flat)
+        flat.div_(size)
+        for original, synced in zip(grads, _unflatten_dense_tensors(flat, grads), strict=True):
+            original.copy_(synced)
 
 
 def all_gather_object(value: Any) -> list[Any]:

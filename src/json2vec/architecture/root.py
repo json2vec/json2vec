@@ -5,12 +5,12 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partialmethod
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import Any, Literal, Self, cast
 
 import lightning.pytorch as lit
 import torch
 from beartype import beartype
-from lightning.pytorch import Callback
+from lightning.pytorch import Callback, strategies
 from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
@@ -30,6 +30,7 @@ from json2vec.architecture.mutations import (
 from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.logging.throughput import ThroughputLogger
+from json2vec.distributed import is_distributed, mean_all_reduce_grads
 from json2vec.structs.enums import AttentionMode, Metric, Strata
 from json2vec.structs.experiment import (
     NodeAttribute,
@@ -44,6 +45,15 @@ from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
+DistributedJDMode = Literal["auto", "manual_allreduce", "off"]
+
+
+def _ddp_bypass_incompatible_strategies() -> tuple[type, ...]:
+    names = ("FSDPStrategy", "DeepSpeedStrategy", "ModelParallelStrategy", "XLAFSDPStrategy")
+    return tuple(cls for name in names if isinstance(cls := getattr(strategies, name, None), type))
+
+
+_DDP_BYPASS_INCOMPATIBLE_STRATEGIES: tuple[type, ...] = _ddp_bypass_incompatible_strategies()
 
 __all__ = [
     "Model",
@@ -51,6 +61,163 @@ __all__ = [
     "RollbackCheckpoint",
     "RuntimePlacementCallback",
 ]
+
+def immutable(name: str | Strata) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(method)
+        def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            locks = self.locks
+            locks[name] += 1
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                if locks[name] <= 1:
+                    locks.pop(name, None)
+                else:
+                    locks[name] -= 1
+
+        return wrapped
+
+    return decorator
+
+
+class MutationLockCallback(Callback):
+    """Prevent runtime schema mutations while Lightning owns an active loop."""
+
+    locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
+
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        pl_module.locks[strata] += 1
+
+    def _on_loop_end(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        locks = pl_module.locks
+        if locks[strata] <= 1:
+            locks.pop(strata, None)
+        else:
+            locks[strata] -= 1
+
+    def on_exception(self, trainer: lit.Trainer, pl_module: "Model", exception: BaseException) -> None:  # ty:ignore[invalid-method-override]
+        for lock in self.locks:
+            pl_module.locks.pop(lock, None)
+
+    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
+    on_train_end = partialmethod(_on_loop_end, strata=Strata.train)
+    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
+    on_validation_end = partialmethod(_on_loop_end, strata=Strata.validate)
+    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
+    on_test_end = partialmethod(_on_loop_end, strata=Strata.test)
+    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
+    on_predict_end = partialmethod(_on_loop_end, strata=Strata.predict)
+
+
+class RuntimePlacementCallback(Callback):
+    """Move late-created modules onto the Lightning module's active device."""
+
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
+        device = getattr(pl_module, "device", None)
+        if isinstance(device, torch.device):
+            pl_module.to(device=device)
+
+    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
+    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
+    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
+    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
+
+
+class _BypassDDPWrappingCallback(Callback):
+    """Bypass Lightning's DDP wrapping so TorchJD's vmap'd autograd is unblocked.
+
+    ``DistributedDataParallel`` installs C++ post-hooks on every parameter's
+    ``AccumulateGrad`` node; those hooks call ``.data_ptr()`` on the gradient
+    and fail when ``torchjd``'s autogram engine assembles Jacobians under
+    ``torch.vmap`` (TorchJD #154 / PyTorch #138422). ``Model.training_step``
+    performs the equivalent mean gradient all-reduce manually via
+    ``mean_all_reduce_grads``.
+    """
+
+    def setup(self, trainer: lit.Trainer, pl_module: lit.LightningModule, stage: str) -> None:
+        from lightning.pytorch.strategies import DDPStrategy
+
+        strategy = trainer.strategy
+        if isinstance(strategy, _DDP_BYPASS_INCOMPATIBLE_STRATEGIES):
+            name = type(strategy).__name__
+            raise RuntimeError(
+                f"json2vec Model with distributed_jd != 'off' is incompatible with {name}; "
+                "use a default DDPStrategy or pass distributed_jd='off'."
+            )
+        if not isinstance(strategy, DDPStrategy):
+            return
+        if getattr(strategy, "_ddp_comm_hook", None) is not None:
+            raise RuntimeError(
+                "DDPStrategy.ddp_comm_hook is wired into the C++ reducer that the json2vec "
+                "Jacobian-descent bypass replaces; drop the hook or pass distributed_jd='off'."
+            )
+
+        strategy_name = type(strategy).__name__
+        original_configure_ddp = strategy.configure_ddp
+
+        def _bypass_configure_ddp() -> None:
+            logger.bind(
+                component="ddp",
+                strategy=strategy_name,
+                stage=stage,
+            ).info("bypassing DDP wrapping for Jacobian descent (manual gradient all-reduce)")
+            if is_distributed():
+                # DDP normally broadcasts rank-0 parameters in its constructor;
+                # mirror that here so ranks start from identical state.
+                from lightning.pytorch.overrides.distributed import _sync_module_states
+
+                _sync_module_states(strategy.model)
+
+        strategy.configure_ddp = _bypass_configure_ddp  # type: ignore[method-assign]
+        self._original_configure_ddp = original_configure_ddp
+        self._patched_strategy = strategy
+
+    def teardown(self, trainer: lit.Trainer, pl_module: lit.LightningModule, stage: str) -> None:
+        strategy = getattr(self, "_patched_strategy", None)
+        original = getattr(self, "_original_configure_ddp", None)
+        if strategy is not None and original is not None:
+            strategy.configure_ddp = original  # type: ignore[method-assign]
+        self._patched_strategy = None
+        self._original_configure_ddp = None
+
+
+class RollbackCheckpoint(ModelCheckpoint):
+    """Checkpoint the best model during fit and restore it into the module at fit end."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self.save_weights_only:
+            raise ValueError("RollbackCheckpoint requires full checkpoints; set save_weights_only=False")
+        if self.save_top_k == 0:
+            raise ValueError("RollbackCheckpoint requires at least one saved checkpoint; set save_top_k != 0")
+
+    def on_fit_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule) -> None:
+        super().on_fit_end(trainer=trainer, pl_module=pl_module)
+        if not isinstance(pl_module, Model):
+            raise TypeError("RollbackCheckpoint can only restore json2vec Model instances")
+
+        best_model_path = self.best_model_path
+        if not best_model_path:
+            raise RuntimeError("RollbackCheckpoint did not find a best checkpoint to restore")
+
+        strategy = getattr(trainer, "strategy", None)
+        if strategy is not None:
+            strategy.barrier("rollback_checkpoint_load")
+            checkpoint = strategy.checkpoint_io.load_checkpoint(
+                best_model_path,
+                map_location=pl_module.device,
+                weights_only=False,
+            )
+        else:
+            checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
+
+        pl_module.restore_checkpoint_state(checkpoint)
+        logger.bind(
+            component="checkpoint",
+            checkpoint=best_model_path,
+            score=self.best_model_score,
+        ).info("rolled back Model to best checkpoint")
 
 
 class Model(lit.LightningModule, Renderable):
@@ -93,6 +260,7 @@ class Model(lit.LightningModule, Renderable):
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
+        distributed_jd: DistributedJDMode = "auto",
         **field_kwargs: TreeFieldInput,
     ) -> Self:
         """Compatibility wrapper for constructing a model from tree fields.
@@ -116,6 +284,13 @@ class Model(lit.LightningModule, Renderable):
             dropout: Optional dropout rate on the generated root branch.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
+            distributed_jd: Multi-rank Jacobian-descent mode.
+                ``\"auto\"`` / ``\"manual_allreduce\"`` bypass Lightning's DDP
+                wrapping and manually all-reduce gradients (required because
+                TorchJD is incompatible with the DDP reducer). ``\"off\"`` disables
+                JD and falls back to ``loss.sum()`` backward with stock DDP / FSDP.
+                #TODO Ensure opt-in and opt-out is cleanly configurable
+                #TODO Examine UPGrad implementation for whether user-configured weighting of loss has any impact on descent
 
         Returns:
             A compiled `Model` with modules built for the schema.
@@ -135,6 +310,7 @@ class Model(lit.LightningModule, Renderable):
             dropout=dropout,
             optimizer=optimizer,
             scheduler=scheduler,
+            distributed_jd=distributed_jd,
             **field_kwargs,
         )
 
@@ -156,6 +332,7 @@ class Model(lit.LightningModule, Renderable):
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
+        distributed_jd: DistributedJDMode = "auto",
         **field_kwargs: Any,
     ):
         """Build a model from tree fields, or from an existing ``schema``.
@@ -205,6 +382,7 @@ class Model(lit.LightningModule, Renderable):
         self.batch_size: int = batch_size
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
+        self.distributed_jd: DistributedJDMode = distributed_jd
         self.automatic_optimization: bool = False
         self.locks: Counter[str | Strata] = Counter()
         self.nodes: torch.nn.ModuleDict = torch.nn.ModuleDict()
@@ -390,6 +568,8 @@ class Model(lit.LightningModule, Renderable):
             callbacks.append(MutationLockCallback())
         if ThroughputLogger not in attached_callback_types:
             callbacks.append(ThroughputLogger())
+        if self.distributed_jd != "off" and _BypassDDPWrappingCallback not in attached_callback_types:
+            callbacks.append(_BypassDDPWrappingCallback())
 
         for request in self.schema.active_requests.values():
             plugin: Plugin = TENSORFIELDS[request.type]
@@ -551,27 +731,34 @@ class Model(lit.LightningModule, Renderable):
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
-        opt.zero_grad()
         sch = self.lr_schedulers()
 
+        trainer = getattr(self, "_trainer", None)
+        accumulate = getattr(trainer, "accumulate_grad_batches", 1)
+        is_accumulation_boundary = (batch_idx + 1) % accumulate == 0
+
         output = step(self, batch, batch_idx, strata=Strata.train)
+        losses: list[torch.Tensor] = output["losses"]
+        loss_vec = torch.stack(losses)
 
-        output['losses']
-
-        loss_vec = torch.stack(output["losses"])
-
-        gramian = self._autogram_engine.compute_gramian(loss_vec)
-        weights = self._jd_weighting(gramian)
-
-        self.manual_backward(loss_vec, gradient=weights)
+        if self.distributed_jd == "off":
+            self.manual_backward(loss_vec.sum())
+        else:
+            gramian = self._autogram_engine.compute_gramian(loss_vec)
+            weights = self._jd_weighting(gramian)
+            self.manual_backward(loss_vec, gradient=weights)
 
         self.track((Metric.loss, Strata.train), value=loss_vec.detach().sum())
-        opt.step()
 
-        if sch is not None:
-            sch.step()
+        if is_accumulation_boundary:
+            if self.distributed_jd != "off":
+                mean_all_reduce_grads(self)
+            opt.step()
+            opt.zero_grad()
+            if sch is not None:
+                sch.step()
 
-        return {"loss":loss_vec}
+        return {"loss": loss_vec}
 
     validation_step = partialmethod(step, strata=Strata.validate)
     test_step = partialmethod(step, strata=Strata.test)
