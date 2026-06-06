@@ -81,7 +81,6 @@ class ModelGraph:
 
         module.load_state_dict(compatible, strict=False)
         module.train(was_training)
-        module._build_jd_components()
 
     @staticmethod
     def reset_selected(module: "Model", selected: list[Node], *, descendants: bool = False) -> None:
@@ -112,4 +111,3 @@ class ModelGraph:
         device = module.device
         if isinstance(device, torch.device):
             module.to(device=device)
-        module._build_jd_components()
