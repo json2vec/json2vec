@@ -7,7 +7,17 @@ from tensordict import TensorDict
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Schema
 from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
+from json2vec.structs.tree import Address
+from json2vec.tensorfields.base import TENSORFIELDS
+from json2vec.tensorfields.extensions.number import (
+    Decoder,
+    Embedder,
+    GlobalOnlineNormalizer,
+    NormalizerSyncCallback,
+    TensorField,
+    loss,
+    write,
+)
 
 ADDRESS = "root/items/amount"
 
@@ -201,3 +211,156 @@ def test_number_write_emits_state_probability_map():
     assert state_payload[Tokens.valued.name][0, 0] > 0.99
     assert state_payload[Tokens.null.name][1, 0] > 0.99
     assert output[TensorKey.content.name].shape == (2, 1, 1)
+
+
+def test_normalizer_update_accumulates_pending_raw_stats():
+    normalizer = GlobalOnlineNormalizer()
+    normalizer.train()
+    values = torch.tensor([1.0, 2.0, 3.0, 4.0])
+
+    normalizer.update(values)
+
+    assert normalizer._pending_count.item() == 4  # noqa: SLF001
+    assert torch.isclose(normalizer._pending_sum, torch.tensor([10.0]))  # noqa: SLF001
+    assert torch.isclose(normalizer._pending_sumsq, torch.tensor([30.0]))  # noqa: SLF001
+    assert torch.isclose(normalizer.count, torch.tensor([4.0]))
+
+
+def test_normalizer_forward_does_not_call_distributed_collective(monkeypatch):
+    def fail_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        raise AssertionError("GlobalOnlineNormalizer.forward must not call all_reduce_sum")
+
+    monkeypatch.setattr("json2vec.tensorfields.extensions.number.all_reduce_sum", fail_all_reduce)
+    normalizer = GlobalOnlineNormalizer()
+    normalizer.train()
+
+    values = torch.tensor([0.5, 1.5])
+    mask = torch.ones_like(values, dtype=torch.bool)
+    normalizer(values, mask=mask)
+
+
+def test_normalizer_sync_folds_others_contribution_via_chan(monkeypatch):
+    # Local rank saw [1.0, 3.0]; the simulated peer saw [5.0, 7.0, 9.0]. Globals
+    # are (n=5, sum=25, sumsq=165). `sync()` reduces count, sum, sumsq in order.
+    normalizer = GlobalOnlineNormalizer()
+    normalizer.train()
+    normalizer.update(torch.tensor([1.0, 3.0]))
+
+    globals_in_order = [torch.tensor([5.0]), torch.tensor([25.0]), torch.tensor([165.0])]
+    reduced: list[torch.Tensor] = []
+
+    def fake_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        reduced.append(tensor.clone())
+        return globals_in_order[len(reduced) - 1].clone()
+
+    monkeypatch.setattr("json2vec.tensorfields.extensions.number.all_reduce_sum", fake_all_reduce)
+
+    normalizer.sync()
+
+    assert len(reduced) == 3
+    assert normalizer._pending_count.item() == 0  # noqa: SLF001
+    assert normalizer._pending_sum.item() == 0  # noqa: SLF001
+    assert normalizer._pending_sumsq.item() == 0  # noqa: SLF001
+
+    expected_values = torch.tensor([1.0, 3.0, 5.0, 7.0, 9.0])
+    assert torch.isclose(normalizer.count, torch.tensor([5.0]))
+    assert torch.isclose(normalizer.mean, expected_values.mean().unsqueeze(0))
+    assert torch.isclose(normalizer.var, expected_values.var(unbiased=False).unsqueeze(0))
+
+
+def test_normalizer_sync_is_noop_when_others_have_no_data(monkeypatch):
+    def identity_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor
+
+    monkeypatch.setattr("json2vec.tensorfields.extensions.number.all_reduce_sum", identity_all_reduce)
+    normalizer = GlobalOnlineNormalizer()
+    normalizer.train()
+    normalizer.update(torch.tensor([1.0, 3.0, 5.0]))
+
+    snapshot_mean = normalizer.mean.clone()
+    snapshot_var = normalizer.var.clone()
+    snapshot_count = normalizer.count.clone()
+
+    normalizer.sync()
+
+    assert torch.equal(normalizer.mean, snapshot_mean)
+    assert torch.equal(normalizer.var, snapshot_var)
+    assert torch.equal(normalizer.count, snapshot_count)
+    assert normalizer._pending_count.item() == 0  # noqa: SLF001
+
+
+def test_normalizer_sync_alpha_mode_applies_one_ema_step_for_others(monkeypatch):
+    # Local saw [1.0, 3.0] (n=2, sum=4, sumsq=10). Simulated globals add a peer
+    # rank with n=2, sum=8, sumsq=46 so others_mean=4 and others_var=7.
+    globals_in_order = [torch.tensor([4.0]), torch.tensor([12.0]), torch.tensor([56.0])]
+    reduced: list[torch.Tensor] = []
+
+    def fake_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        reduced.append(tensor.clone())
+        return globals_in_order[len(reduced) - 1].clone()
+
+    monkeypatch.setattr("json2vec.tensorfields.extensions.number.all_reduce_sum", fake_all_reduce)
+
+    normalizer = GlobalOnlineNormalizer(alpha=0.5)
+    normalizer.train()
+    pre_mean = normalizer.mean.clone()
+    pre_var = normalizer.var.clone()
+    normalizer.update(torch.tensor([1.0, 3.0]))
+
+    after_local_mean = normalizer.mean.clone()
+    after_local_var = normalizer.var.clone()
+    assert torch.isclose(after_local_mean, 0.5 * pre_mean + 0.5 * torch.tensor([2.0]))
+    assert torch.isclose(after_local_var, 0.5 * pre_var + 0.5 * torch.tensor([1.0]))
+
+    normalizer.sync()
+
+    expected_mean = 0.5 * after_local_mean + 0.5 * torch.tensor([4.0])
+    expected_var = 0.5 * after_local_var + 0.5 * torch.tensor([7.0])
+
+    assert torch.isclose(normalizer.mean, expected_mean)
+    assert torch.isclose(normalizer.var, expected_var)
+    assert normalizer.count.item() == 0
+
+
+def test_normalizer_pending_buffers_are_not_persistent():
+    normalizer = GlobalOnlineNormalizer()
+    state = normalizer.state_dict()
+
+    assert "mean" in state
+    assert "var" in state
+    assert "count" in state
+    assert "_pending_count" not in state
+    assert "_pending_sum" not in state
+    assert "_pending_sumsq" not in state
+
+
+def test_normalizer_sync_callback_syncs_in_deterministic_address_order(monkeypatch):
+    calls: list[str] = []
+
+    def record(self: GlobalOnlineNormalizer) -> None:
+        calls.append(self._tag)  # type: ignore[attr-defined]  # noqa: SLF001
+
+    def tagged(tag: str) -> GlobalOnlineNormalizer:
+        normalizer = GlobalOnlineNormalizer()
+        normalizer._tag = tag  # type: ignore[attr-defined]  # noqa: SLF001
+        return normalizer
+
+    module = SimpleNamespace(
+        nodes={
+            Address("root", "z"): SimpleNamespace(embedder=SimpleNamespace(normalizer=tagged("z"))),
+            Address("root", "a"): SimpleNamespace(embedder=SimpleNamespace(normalizer=tagged("a"))),
+            Address("root", "m"): SimpleNamespace(embedder=SimpleNamespace(normalizer=tagged("m"))),
+            Address("root", "skip"): SimpleNamespace(embedder=SimpleNamespace()),  # no normalizer
+            Address("root", "noembed"): SimpleNamespace(embedder=None),
+        }
+    )
+    monkeypatch.setattr(GlobalOnlineNormalizer, "sync", record)
+
+    NormalizerSyncCallback().on_train_epoch_end(trainer=None, pl_module=module)
+
+    assert calls == ["a", "m", "z"]
+
+
+def test_normalizer_sync_callback_is_registered_on_number_plugin():
+    assert NormalizerSyncCallback in TENSORFIELDS["number"].callback_factories
+

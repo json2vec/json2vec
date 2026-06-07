@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import lightning.pytorch as lit
 import lightning.pytorch.overrides.distributed as lit_overrides_distributed
@@ -1730,23 +1731,39 @@ def test_mean_all_reduce_grads_averages_across_ranks(monkeypatch) -> None:
     for parameter in module.parameters():
         parameter.grad = torch.full_like(parameter, 4.0)
 
-    all_reduce_calls: list[torch.Tensor] = []
+    all_reduce_calls: list[tuple[torch.Tensor, bool]] = []
 
-    def fake_all_reduce(tensor: torch.Tensor, op=None) -> None:
-        all_reduce_calls.append(tensor)
+    class _WorkStub:
+        def __init__(self) -> None:
+            self.waited = False
+
+        def wait(self) -> None:
+            self.waited = True
+
+    works: list[_WorkStub] = []
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None, async_op: bool = False):
+        all_reduce_calls.append((tensor, async_op))
         tensor.mul_(2.0)
+        work = _WorkStub()
+        works.append(work)
+        return work
 
     monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
     monkeypatch.setattr(j2v_distributed, "world_size", lambda: 2)
+    monkeypatch.setattr(j2v_distributed, "_backend_supports_avg", lambda: False)
     monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
 
     j2v_distributed.mean_all_reduce_grads(module)
 
-    # All parameters share ``(float32, cpu)`` so coalescing collapses the
-    # per-parameter sequence into a single ``all_reduce`` over one flat buffer.
+    # All parameters share (float32, cpu) and fit under the default cap, so
+    # coalescing collapses the per-parameter sequence into one collective.
     assert len(all_reduce_calls) == 1
-    # ``fake_all_reduce`` doubles the buffer; we then divide by ``world_size``
-    # and copy back, giving 4.0 * 2.0 / 2 == 4.0 per element.
+    tensor, async_op = all_reduce_calls[0]
+    assert async_op is True
+    assert all(work.waited for work in works)
+    # fake_all_reduce doubles the buffer; we then divide by world_size and copy
+    # back, giving 4.0 * 2.0 / 2 == 4.0 per element.
     for parameter in module.parameters():
         assert torch.equal(parameter.grad, torch.full_like(parameter, 4.0))
 
@@ -1764,34 +1781,36 @@ def test_mean_all_reduce_grads_buckets_by_dtype(monkeypatch) -> None:
 
     bucket_sizes: list[int] = []
 
-    def fake_all_reduce(tensor: torch.Tensor, op=None) -> None:
+    def fake_all_reduce(tensor: torch.Tensor, op=None, async_op: bool = False):
         bucket_sizes.append(tensor.numel())
+        return None
 
     monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
     monkeypatch.setattr(j2v_distributed, "world_size", lambda: 2)
+    monkeypatch.setattr(j2v_distributed, "_backend_supports_avg", lambda: False)
     monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
 
     j2v_distributed.mean_all_reduce_grads(module)
 
-    # One bucket per dtype: float32 and float64 grads cannot share a flat
-    # buffer because collective ops require a uniform dtype.
+    # One bucket per dtype: collective ops require a uniform dtype.
     assert len(bucket_sizes) == 2
     assert sorted(bucket_sizes) == [4, 4]
 
 
 def test_mean_all_reduce_grads_skips_parameters_without_grad(monkeypatch) -> None:
     module = torch.nn.Linear(2, 3)
-    # ``bias.grad`` left as None to confirm we don't reduce it.
     module.weight.grad = torch.full_like(module.weight, 1.0)
     assert module.bias.grad is None
 
     all_reduce_calls: list[torch.Tensor] = []
 
-    def fake_all_reduce(tensor: torch.Tensor, op=None) -> None:
+    def fake_all_reduce(tensor: torch.Tensor, op=None, async_op: bool = False):
         all_reduce_calls.append(tensor)
+        return None
 
     monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
     monkeypatch.setattr(j2v_distributed, "world_size", lambda: 1)
+    monkeypatch.setattr(j2v_distributed, "_backend_supports_avg", lambda: False)
     monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
 
     j2v_distributed.mean_all_reduce_grads(module)
@@ -1799,4 +1818,105 @@ def test_mean_all_reduce_grads_skips_parameters_without_grad(monkeypatch) -> Non
     assert len(all_reduce_calls) == 1
     assert all_reduce_calls[0].numel() == module.weight.numel()
     assert module.bias.grad is None
+
+
+def test_mean_all_reduce_grads_splits_large_dtype_group_by_bucket_bytes(monkeypatch) -> None:
+    class WideModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.a = torch.nn.Parameter(torch.zeros(64, dtype=torch.float32))
+            self.b = torch.nn.Parameter(torch.zeros(64, dtype=torch.float32))
+            self.c = torch.nn.Parameter(torch.zeros(64, dtype=torch.float32))
+
+    module = WideModule()
+    for parameter in module.parameters():
+        parameter.grad = torch.full_like(parameter, 1.0)
+
+    bucket_sizes: list[int] = []
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None, async_op: bool = False):
+        bucket_sizes.append(tensor.numel())
+        return None
+
+    monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
+    monkeypatch.setattr(j2v_distributed, "world_size", lambda: 1)
+    monkeypatch.setattr(j2v_distributed, "_backend_supports_avg", lambda: False)
+    monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
+
+    # Each float32 tensor is 64 * 4 = 256 bytes; a 300-byte cap forces one
+    # grad per bucket.
+    j2v_distributed.mean_all_reduce_grads(module, bucket_bytes=300)
+
+    assert bucket_sizes == [64, 64, 64]
+    for parameter in module.parameters():
+        assert torch.equal(parameter.grad, torch.full_like(parameter, 1.0))
+
+
+def test_mean_all_reduce_grads_uses_avg_op_when_backend_supports_it(monkeypatch) -> None:
+    module = torch.nn.Linear(2, 3)
+    for parameter in module.parameters():
+        parameter.grad = torch.full_like(parameter, 6.0)
+
+    captured_ops: list[Any] = []
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None, async_op: bool = False):
+        captured_ops.append(op)
+        # AVG semantics: simulate division by world_size inside the collective.
+        tensor.div_(2.0)
+        return None
+
+    monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
+    monkeypatch.setattr(j2v_distributed, "world_size", lambda: 2)
+    monkeypatch.setattr(j2v_distributed, "_backend_supports_avg", lambda: True)
+    monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
+
+    j2v_distributed.mean_all_reduce_grads(module)
+
+    assert captured_ops == [j2v_distributed.dist.ReduceOp.AVG]
+    # Divided exactly once (inside the collective), not twice.
+    for parameter in module.parameters():
+        assert torch.equal(parameter.grad, torch.full_like(parameter, 3.0))
+
+
+def test_mean_all_reduce_grads_submits_all_buckets_async_before_waiting(monkeypatch) -> None:
+    class WideModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.a = torch.nn.Parameter(torch.zeros(64, dtype=torch.float32))
+            self.b = torch.nn.Parameter(torch.zeros(64, dtype=torch.float32))
+            self.c = torch.nn.Parameter(torch.zeros(64, dtype=torch.float32))
+
+    module = WideModule()
+    for parameter in module.parameters():
+        parameter.grad = torch.full_like(parameter, 1.0)
+
+    events: list[str] = []
+
+    class _WorkStub:
+        def __init__(self, tag: str) -> None:
+            self.tag = tag
+
+        def wait(self) -> None:
+            events.append(f"wait:{self.tag}")
+
+    counter = {"n": 0}
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None, async_op: bool = False):
+        tag = str(counter["n"])
+        counter["n"] += 1
+        events.append(f"submit:{tag}")
+        return _WorkStub(tag)
+
+    monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
+    monkeypatch.setattr(j2v_distributed, "world_size", lambda: 1)
+    monkeypatch.setattr(j2v_distributed, "_backend_supports_avg", lambda: False)
+    monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
+
+    j2v_distributed.mean_all_reduce_grads(module, bucket_bytes=300)
+
+    submits = [event for event in events if event.startswith("submit:")]
+    waits = [event for event in events if event.startswith("wait:")]
+    assert submits == ["submit:0", "submit:1", "submit:2"]
+    assert waits == ["wait:0", "wait:1", "wait:2"]
+    assert events.index("submit:2") < events.index("wait:0")
 

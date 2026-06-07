@@ -10,9 +10,11 @@ import pydantic
 import torch
 from beartype import beartype
 from loguru import logger
+from lightning.pytorch import Callback
 from tensordict import TensorDict, tensorclass
 
 from json2vec.data.nested import extract_mask_literals, pad
+from json2vec.distributed import all_reduce_sum
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -27,6 +29,8 @@ from json2vec.tensorfields.base import (
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
+    from lightning.pytorch import Trainer
+
     from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Schema
 
@@ -176,9 +180,20 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         self.epsilon: float = epsilon
         self.alpha: float | None = alpha
 
+        self.mean: torch.Tensor
+        self.var: torch.Tensor
+        self.count: torch.Tensor
+        # Pending raw stats since the last `sync()`
+        self._pending_count: torch.Tensor
+        self._pending_sum: torch.Tensor
+        self._pending_sumsq: torch.Tensor
+
         self.register_buffer("mean", torch.zeros(1))
         self.register_buffer("var", torch.ones(1))
         self.register_buffer("count", torch.zeros(1))
+        self.register_buffer("_pending_count", torch.zeros(1), persistent=False)
+        self.register_buffer("_pending_sum", torch.zeros(1), persistent=False)
+        self.register_buffer("_pending_sumsq", torch.zeros(1), persistent=False)
 
     @torch.no_grad()
     def update(self, values: torch.Tensor):
@@ -188,6 +203,12 @@ class GlobalOnlineNormalizer(torch.nn.Module):
 
         batch_mean = values.mean()
         batch_var = values.var(unbiased=False)
+
+        # Track raw stats so `sync()` can reconcile across ranks.
+        flat = values.detach().reshape(-1)
+        self._pending_count += float(numel)
+        self._pending_sum += flat.sum()
+        self._pending_sumsq += flat.pow(2).sum()
 
         if self.alpha is not None:
             alpha: float = self.alpha
@@ -219,6 +240,56 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         self.var = new_var
         self.count = new_count
 
+    @torch.no_grad()
+    def sync(self) -> None:
+        # Subtract our local pending stats from the all-reduced totals to
+        # isolate other ranks' contributions, then merge via Chan's parallel
+        # algorithm (Welford) or one EMA step. No-op on a single rank.
+        local_count = self._pending_count.clone()
+        local_sum = self._pending_sum.clone()
+        local_sumsq = self._pending_sumsq.clone()
+
+        # Always reduce all three so collective ordering matches across ranks.
+        global_count = all_reduce_sum(self._pending_count.clone())
+        global_sum = all_reduce_sum(self._pending_sum.clone())
+        global_sumsq = all_reduce_sum(self._pending_sumsq.clone())
+
+        self._pending_count.zero_()
+        self._pending_sum.zero_()
+        self._pending_sumsq.zero_()
+
+        others_count = global_count - local_count
+        others_sum = global_sum - local_sum
+        others_sumsq = global_sumsq - local_sumsq
+
+        if float(others_count.item()) <= 0.0:
+            return
+
+        others_mean = others_sum / others_count
+        others_var = (others_sumsq / others_count - others_mean.pow(2)).clamp_min(0.0)
+
+        if self.alpha is not None:
+            alpha = self.alpha
+            self.mean = (1 - alpha) * self.mean + alpha * others_mean
+            self.var = (1 - alpha) * self.var + alpha * others_var
+            return
+
+        n_a = self.count
+        n_b = others_count.to(dtype=self.count.dtype)
+        n = n_a + n_b
+
+        delta = others_mean - self.mean
+        new_mean = self.mean + delta * (n_b / n)
+
+        m_a = self.var * n_a
+        m_b = others_var * n_b
+        m_c = delta.pow(2) * n_a * n_b / n
+        new_var = (m_a + m_b + m_c) / n
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = n
+
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor, update=True) -> torch.Tensor:
         finite_mask = mask & torch.isfinite(inputs)
         if self.training and update:
@@ -229,6 +300,30 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         out[finite_mask] = (inputs[finite_mask] - self.mean) / std
 
         return out
+
+
+class NormalizerSyncCallback(Callback):
+    """Reconcile `GlobalOnlineNormalizer` buffers across ranks at epoch end."""
+
+    @torch.no_grad()
+    def on_train_epoch_end(
+        self,
+        trainer: Trainer,
+        pl_module: Model,
+    ) -> None:  # ty:ignore[invalid-method-override]
+        resources: dict[Address, GlobalOnlineNormalizer] = {}
+
+        for address, node in pl_module.nodes.items():
+            embedder = getattr(node, "embedder", None)
+            normalizer = getattr(embedder, "normalizer", None)
+            if isinstance(normalizer, GlobalOnlineNormalizer):
+                resources[address] = normalizer
+
+        for _, normalizer in sorted(resources.items(), key=lambda item: str(item[0])):
+            normalizer.sync()
+
+
+number.callback(NormalizerSyncCallback)
 
 
 @number.register
