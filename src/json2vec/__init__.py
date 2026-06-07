@@ -38,6 +38,7 @@ from json2vec.structs.experiment import (
     predicate,
     where,
 )
+from json2vec.structs.inference import InferenceConfig, infer_schema
 from json2vec.structs.structure import Array
 from json2vec.structs.tree import Address, Leaf
 from json2vec.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
@@ -106,6 +107,7 @@ __all__ = [
     "EmbedderBase",
     "Entity",
     "Hyperparameters",
+    "InferenceConfig",
     "Input",
     "JSONBackend",
     "Leaf",
@@ -143,6 +145,7 @@ __all__ = [
     "Vector",
     "VocabularySyncCallback",
     "Writer",
+    "infer_schema",
     "predicate",
     "preprocess",
     "where",
