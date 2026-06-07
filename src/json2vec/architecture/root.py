@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from functools import partialmethod, wraps
 from pathlib import Path
-from typing import Any, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import lightning.pytorch as lit
 import torch
@@ -33,6 +33,9 @@ from json2vec.structs.experiment import (
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address, Node, Rate, Renderable
 from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
+
+if TYPE_CHECKING:
+    from json2vec.structs.inference import InferenceConfig
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
@@ -218,6 +221,77 @@ class Model(lit.LightningModule, Renderable):
         return cls(
             hyperparameters=hyperparameters,
             batch_size=batch_size,
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
+
+    @classmethod
+    def from_records(
+        cls,
+        records: Any,
+        *,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        batch_size: int = 1,
+        name: str = "record",
+        description: str | None = None,
+        embed: bool = False,
+        attention: AttentionMode | str = AttentionMode.mha,
+        n_linear: int = 1,
+        dropout: Rate | None = None,
+        optimizer: OptimizerConfig | None = None,
+        scheduler: SchedulerConfig | None = None,
+        infer: "InferenceConfig | None" = None,
+        explain: bool = False,
+        **infer_overrides: Any,
+    ) -> Self:
+        """Build a model from sample records by inferring the schema.
+
+        Convenience wrapper that runs :func:`json2vec.infer_schema` over the
+        records and feeds the inferred field constructors to
+        :meth:`from_schema`. The inferred schema is a best-effort starting
+        point; correct any guesses afterwards with ``model.update(...)``.
+
+        Args:
+            records: A sequence of dict-like records, an iterable of them, or a
+                frame exposing ``.to_dicts()`` (e.g. a Polars ``DataFrame``).
+            d_model: Shared model width.
+            n_layers: Number of encoder layers on generated array nodes.
+            n_heads: Attention heads used by generated nodes.
+            batch_size: Batch size used by data modules and mocked input arrays.
+            name: Root array name. Defaults to ``record``.
+            description: Optional description on the generated root array.
+            embed: Configure the generated root array as an embedding output.
+            attention: Attention mode for the generated root array.
+            n_linear: Feed-forward block count on the generated root array.
+            dropout: Optional dropout rate on the generated root array.
+            optimizer: Optimizer instance or factory used by Lightning training.
+            scheduler: Optional scheduler config or factory.
+            infer: Full :class:`~json2vec.InferenceConfig`. When omitted a
+                default config is built from ``infer_overrides``.
+            explain: When ``True``, print the inferred type of each column.
+            **infer_overrides: Convenience overrides for individual
+                :class:`~json2vec.InferenceConfig` fields.
+
+        Returns:
+            A compiled `Model` built for the inferred schema.
+        """
+        from json2vec.structs.inference import infer_schema
+
+        fields = infer_schema(records, config=infer, explain=explain, **infer_overrides)
+        return cls.from_schema(
+            *fields,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            batch_size=batch_size,
+            name=name,
+            description=description,
+            embed=embed,
+            attention=attention,
+            n_linear=n_linear,
+            dropout=dropout,
             optimizer=optimizer,
             scheduler=scheduler,
         )
