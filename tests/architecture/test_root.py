@@ -3,11 +3,25 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
+import lightning.pytorch as lit
+import lightning.pytorch.overrides.distributed as lit_overrides_distributed
+import polars as pl
 import pytest
 import torch
+from beartype.roar import BeartypeCallHintParamViolation
+from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
+from torchjd.aggregation import UPGradWeighting
+from torchjd.autogram import Engine
 
 import json2vec as j2v
-from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
+from json2vec import distributed as j2v_distributed
+from json2vec.architecture.root import (
+    Model,
+    MutationLockCallback,
+    RollbackCheckpoint,
+    RuntimePlacementCallback,
+    _BypassDDPWrappingCallback,
+)
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
@@ -340,6 +354,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
             "callbacks": [
                 RuntimePlacementCallback(),
                 MutationLockCallback(),
+                _BypassDDPWrappingCallback(),
                 VocabularySyncCallback(),
                 CounterUpdateCallback(),
             ]
@@ -490,7 +505,30 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
 
 
 def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(monkeypatch) -> None:
-    monkeypatch.setattr(Model, "log", lambda self, **kwargs: None)
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    def log(self, **kwargs):
+        return None
+
+    def optimizers(self):
+        return OptimizerStub()
+
+    def lr_schedulers(self):
+        return None
+
+    def manual_backward(self, loss, gradient=None, *args, **kwargs):
+        loss.backward(gradient=gradient)
+
+    monkeypatch.setattr(Model, "log", log)
+    monkeypatch.setattr(Model, "optimizers", optimizers)
+    monkeypatch.setattr(Model, "lr_schedulers", lr_schedulers)
+    monkeypatch.setattr(Model, "manual_backward", manual_backward)
+
     hyperparameters = _prediction_hyperparameters()
     model = Model(hyperparameters=hyperparameters, batch_size=2)
     inputs = encode(
@@ -806,3 +844,832 @@ def test_inference_helpers_accept_preprocess() -> None:
     )
 
     assert Address("root", "label") in supervised
+
+
+def _multi_loss_hyperparameters() -> Hyperparameters:
+    return Hyperparameters(
+        d_model=8,
+        fields={
+            "name": "root",
+            "type": "array",
+            "embed": True,
+            "max_length": 1,
+            "attention": "none",
+            "fields": [
+                {
+                    "name": "amount",
+                    "type": "number",
+                    "query": "[*].amount",
+                },
+                {
+                    "name": "color",
+                    "type": "category",
+                    "query": "[*].color",
+                    "embed": False,
+                    "p_prune": 1.0,
+                    "max_vocab_size": 16,
+                },
+                {
+                    "name": "label",
+                    "type": "category",
+                    "query": "[*].label",
+                    "embed": False,
+                    "p_prune": 1.0,
+                    "max_vocab_size": 16,
+                    "topk": [2],
+                },
+            ],
+        },
+    )
+
+
+def _multi_loss_batch(model: Model) -> dict:
+    return encode(
+        batch=[
+            [{"amount": 1.5, "color": "red", "label": "warm"}],
+            [{"amount": 2.0, "color": "blue", "label": "cool"}],
+        ],
+        hyperparameters=model.hyperparameters,
+        strata=Strata.train,
+        interprocess_encoding_context=model.interprocess_encoding_context,
+    )
+
+
+def _patch_manual_optimization(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    optimizer: object,
+    scheduler: object | None = None,
+) -> None:
+    def optimizers(self):
+        return optimizer
+
+    def lr_schedulers(self):
+        return scheduler
+
+    def log(self, **kwargs):
+        return None
+
+    def manual_backward(self, loss, gradient=None, *args, **kwargs):
+        loss.backward(gradient=gradient)
+
+    monkeypatch.setattr(Model, "optimizers", optimizers)
+    monkeypatch.setattr(Model, "lr_schedulers", lr_schedulers)
+    monkeypatch.setattr(Model, "log", log)
+    monkeypatch.setattr(Model, "manual_backward", manual_backward)
+
+
+def test_init_jd_sets_engine_and_weighting_on_construction() -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+
+    assert model.automatic_optimization is False
+    assert isinstance(model._autogram_engine, Engine)
+    assert isinstance(model._jd_weighting, UPGradWeighting)
+
+
+def test_init_jd_replaces_engine_after_schema_update() -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    previous_engine = model._autogram_engine
+    previous_weighting = model._jd_weighting
+
+    model.update(j2v.where("name") == "label", weight=2.0)
+    model.on_fit_start()
+
+    assert model._autogram_engine is not previous_engine
+    assert model._jd_weighting is not previous_weighting
+    assert isinstance(model._autogram_engine, Engine)
+    assert isinstance(model._jd_weighting, UPGradWeighting)
+
+
+def test_init_jd_replaces_engine_after_schema_extend() -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    previous_engine = model._autogram_engine
+    previous_weighting = model._jd_weighting
+
+    model.extend(j2v.where("name") == "root", j2v.Number("risk_score"))
+    model.on_fit_start()
+
+    assert "root/risk_score" in model.nodes
+    assert model._autogram_engine is not previous_engine
+    assert model._jd_weighting is not previous_weighting
+    assert isinstance(model._autogram_engine, Engine)
+    assert isinstance(model._jd_weighting, UPGradWeighting)
+
+
+def test_init_jd_replaces_engine_after_schema_delete() -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    previous_engine = model._autogram_engine
+    previous_weighting = model._jd_weighting
+
+    model.delete(j2v.where("name") == "color")
+    model.on_fit_start()
+
+    assert "root/color" not in model.nodes
+    assert model._autogram_engine is not previous_engine
+    assert model._jd_weighting is not previous_weighting
+    assert isinstance(model._autogram_engine, Engine)
+    assert isinstance(model._jd_weighting, UPGradWeighting)
+
+
+def test_init_jd_replaces_engine_after_reset() -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    previous_engine = model._autogram_engine
+    previous_weighting = model._jd_weighting
+
+    model.reset(j2v.where("name") == "label")
+    model.on_fit_start()
+
+    assert model._autogram_engine is not previous_engine
+    assert model._jd_weighting is not previous_weighting
+    assert isinstance(model._autogram_engine, Engine)
+    assert isinstance(model._jd_weighting, UPGradWeighting)
+
+
+def test_init_jd_runs_after_checkpoint_restore(tmp_path: Path) -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    original_engine = model._autogram_engine
+    original_weighting = model._jd_weighting
+    checkpoint_path = tmp_path / "model.ckpt"
+    model.save(checkpoint_path)
+
+    loaded = Model.load(checkpoint_path)
+
+    assert loaded.automatic_optimization is False
+    assert isinstance(loaded._autogram_engine, Engine)
+    assert isinstance(loaded._jd_weighting, UPGradWeighting)
+    assert loaded._autogram_engine is not original_engine
+    assert loaded._jd_weighting is not original_weighting
+
+
+def test_shared_submodules_tracks_runtime_node_set() -> None:
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    baseline = len(model.shared_submodules)
+    assert baseline > 0
+
+    model.extend(j2v.where("name") == "root", j2v.Number("risk_score"))
+    assert len(model.shared_submodules) > baseline
+
+    model.delete(j2v.where("name") == "risk_score")
+    assert len(model.shared_submodules) == baseline
+
+
+def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkeypatch) -> None:
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    class WeightingSpy(torch.nn.Module):
+        def __init__(self, inner: UPGradWeighting) -> None:
+            super().__init__()
+            self.inner = inner
+            self.gramians: list[torch.Tensor] = []
+            self.weights: list[torch.Tensor] = []
+
+        def forward(self, gramian: torch.Tensor) -> torch.Tensor:
+            weights = self.inner(gramian)
+            self.gramians.append(gramian.detach().clone())
+            self.weights.append(weights.detach().clone())
+            return weights
+
+    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    spy = WeightingSpy(model._jd_weighting)
+    model._jd_weighting = spy
+
+    output = model.training_step(_multi_loss_batch(model), 0)
+
+    loss_vec = output["loss"]
+    assert loss_vec.ndim == 1
+    assert loss_vec.shape[0] == 2
+    assert torch.isfinite(loss_vec).all()
+
+    assert len(spy.gramians) == 1
+    assert spy.gramians[0].shape == (loss_vec.shape[0], loss_vec.shape[0])
+    assert spy.weights[0].shape == loss_vec.shape
+    assert torch.isfinite(spy.weights[0]).all()
+    assert (spy.weights[0] >= 0).all()
+
+    grad_count = sum(
+        1
+        for parameter in model.parameters()
+        if parameter.requires_grad and parameter.grad is not None and torch.any(parameter.grad != 0)
+    )
+    assert grad_count > 0
+
+
+def test_training_step_steps_optimizer_then_zeros_grads(monkeypatch) -> None:
+    class RecordingOptimizer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def zero_grad(self) -> None:
+            self.calls.append("zero_grad")
+
+        def step(self) -> None:
+            self.calls.append("step")
+
+    optimizer = RecordingOptimizer()
+    _patch_manual_optimization(monkeypatch, optimizer=optimizer)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+
+    model.training_step(_multi_loss_batch(model), 0)
+
+    assert optimizer.calls == ["step", "zero_grad"]
+
+
+def test_training_step_steps_scheduler_after_optimizer(monkeypatch) -> None:
+    class RecordingOptimizer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def zero_grad(self) -> None:
+            self.calls.append("zero_grad")
+
+        def step(self) -> None:
+            self.calls.append("step")
+
+    class RecordingScheduler:
+        def __init__(self, optimizer: RecordingOptimizer) -> None:
+            self.optimizer = optimizer
+            self.optimizer_calls_at_step: list[str] = []
+
+        def step(self) -> None:
+            self.optimizer_calls_at_step = list(self.optimizer.calls)
+
+    optimizer = RecordingOptimizer()
+    scheduler = RecordingScheduler(optimizer)
+    _patch_manual_optimization(monkeypatch, optimizer=optimizer, scheduler=scheduler)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+
+    model.training_step(_multi_loss_batch(model), 0)
+
+    assert optimizer.calls == ["step", "zero_grad"]
+    assert scheduler.optimizer_calls_at_step == ["step", "zero_grad"]
+
+
+def test_training_step_accumulates_grads_across_micro_batches(monkeypatch) -> None:
+    class RecordingOptimizer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def zero_grad(self) -> None:
+            self.calls.append("zero_grad")
+
+        def step(self) -> None:
+            self.calls.append("step")
+
+    optimizer = RecordingOptimizer()
+    all_reduce_calls: list[torch.nn.Module] = []
+
+    def fake_all_reduce(module: torch.nn.Module) -> None:
+        all_reduce_calls.append(module)
+
+    monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
+    _patch_manual_optimization(monkeypatch, optimizer=optimizer)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model._trainer = type("TrainerStub", (), {"accumulate_grad_batches": 3})()  # noqa: SLF001
+
+    model.training_step(_multi_loss_batch(model), 0)
+    assert optimizer.calls == []
+    assert all_reduce_calls == []
+
+    model.training_step(_multi_loss_batch(model), 1)
+    assert optimizer.calls == []
+    assert all_reduce_calls == []
+
+    # Third micro-batch closes the accumulation window.
+    model.training_step(_multi_loss_batch(model), 2)
+    assert optimizer.calls == ["step", "zero_grad"]
+    assert all_reduce_calls == [model]
+
+
+def test_training_step_defaults_to_step_every_batch_without_trainer(monkeypatch) -> None:
+    class RecordingOptimizer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def zero_grad(self) -> None:
+            self.calls.append("zero_grad")
+
+        def step(self) -> None:
+            self.calls.append("step")
+
+    optimizer = RecordingOptimizer()
+    all_reduce_calls: list[torch.nn.Module] = []
+
+    def fake_all_reduce(module: torch.nn.Module) -> None:
+        all_reduce_calls.append(module)
+
+    monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
+    _patch_manual_optimization(monkeypatch, optimizer=optimizer)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    # No ``_trainer`` attached → ``accumulate_grad_batches`` defaults to 1.
+    assert getattr(model, "_trainer", None) is None
+
+    model.training_step(_multi_loss_batch(model), 0)
+    model.training_step(_multi_loss_batch(model), 1)
+
+    assert optimizer.calls == ["step", "zero_grad", "step", "zero_grad"]
+    assert all_reduce_calls == [model, model]
+
+
+def test_training_step_accumulates_grads_across_micro_batches_without_distributed_jd(monkeypatch) -> None:
+    class RecordingOptimizer:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def zero_grad(self) -> None:
+            self.calls.append("zero_grad")
+
+        def step(self) -> None:
+            self.calls.append("step")
+
+    optimizer = RecordingOptimizer()
+    all_reduce_calls: list[torch.nn.Module] = []
+
+    def fake_all_reduce(module: torch.nn.Module) -> None:
+        all_reduce_calls.append(module)
+
+    monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
+    _patch_manual_optimization(monkeypatch, optimizer=optimizer)
+    model = Model(
+        hyperparameters=_multi_loss_hyperparameters(),
+        batch_size=2,
+        distributed_jd="off",
+    )
+    model._trainer = type("TrainerStub", (), {"accumulate_grad_batches": 2})()  # noqa: SLF001
+
+    model.training_step(_multi_loss_batch(model), 0)
+    assert optimizer.calls == []
+
+    model.training_step(_multi_loss_batch(model), 1)
+    assert optimizer.calls == ["step", "zero_grad"]
+    # With JD disabled, gradient sync is the user's responsibility (stock DDP
+    # would have synced via its reducer); no manual all-reduce runs.
+    assert all_reduce_calls == []
+
+
+def test_training_step_after_schema_update_lands_grads_on_new_parameters(monkeypatch) -> None:
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model.on_fit_start()
+    model.training_step(_multi_loss_batch(model), 0)
+
+    parameter_ids_before_update = {id(parameter) for parameter in model.parameters()}
+    model.update(j2v.where("name") == "label", weight=2.0)
+    model.on_fit_start()
+    output = model.training_step(_multi_loss_batch(model), 0)
+
+    assert output["loss"].shape[0] == 2
+    assert torch.isfinite(output["loss"]).all()
+
+    new_parameters_with_grad = [
+        parameter
+        for parameter in model.parameters()
+        if parameter.requires_grad
+        and parameter.grad is not None
+        and torch.any(parameter.grad != 0)
+        and id(parameter) not in parameter_ids_before_update
+    ]
+    assert len(new_parameters_with_grad) > 0
+
+
+def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) -> None:
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model.on_fit_start()
+    baseline = model.training_step(_multi_loss_batch(model), 0)
+    assert baseline["loss"].shape[0] == 2
+
+    model.extend(
+        j2v.where("name") == "root",
+        j2v.Category("vehicle", p_prune=1.0, max_vocab_size=8),
+    )
+    inputs = encode(
+        batch=[
+            [{"amount": 1.5, "color": "red", "label": "warm", "vehicle": "car"}],
+            [{"amount": 2.0, "color": "blue", "label": "cool", "vehicle": "boat"}],
+        ],
+        hyperparameters=model.hyperparameters,
+        strata=Strata.train,
+        interprocess_encoding_context=model.interprocess_encoding_context,
+    )
+
+    model.on_fit_start()
+    output = model.training_step(inputs, 0)
+
+    assert output["loss"].shape[0] == baseline["loss"].shape[0] + 1
+    assert torch.isfinite(output["loss"]).all()
+
+    vehicle_grads = [
+        parameter.grad
+        for parameter in model.nodes["root/vehicle"].parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    ]
+    assert any(torch.any(grad != 0) for grad in vehicle_grads)
+
+
+def test_training_step_after_load_checkpoint_runs(tmp_path: Path, monkeypatch) -> None:
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
+    source = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    checkpoint_path = tmp_path / "model.ckpt"
+    source.save(checkpoint_path)
+
+    loaded = Model.load(checkpoint_path)
+    loaded.on_fit_start()
+    output = loaded.training_step(_multi_loss_batch(loaded), 0)
+
+    assert output["loss"].shape[0] == 2
+    assert torch.isfinite(output["loss"]).all()
+
+    grad_count = sum(
+        1
+        for parameter in loaded.parameters()
+        if parameter.requires_grad and parameter.grad is not None and torch.any(parameter.grad != 0)
+    )
+    assert grad_count > 0
+
+
+def test_trainer_fit_advances_parameters_under_jd_manual_optimization() -> None:
+    model = j2v.Model.from_schema(
+        j2v.Number("amount"),
+        j2v.Category("color", target=True, max_vocab_size=16),
+        j2v.Category("label", target=True, max_vocab_size=16),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+        optimizer=lambda module: torch.optim.SGD(module.parameters(), lr=1e-2),
+    )
+    frame = pl.DataFrame(
+        {
+            "amount": [1.5, 2.0, 0.75],
+            "color": ["red", "blue", "green"],
+            "label": ["warm", "cool", "warm"],
+        }
+    )
+    datamodule = j2v.PolarsDataModule(
+        model=model,
+        train=frame,
+        validate=frame,
+        num_workers=0,
+        persistent_workers=False,
+        pin_memory=False,
+    )
+    parameters_before_fit = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+
+    trainer = lit.Trainer(
+        accelerator="cpu",
+        devices=1,
+        max_epochs=1,
+        limit_train_batches=1,
+        limit_val_batches=1,
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        enable_checkpointing=False,
+    )
+    trainer.fit(model=model, datamodule=datamodule)
+
+    assert model.automatic_optimization is False
+    changed = [
+        name
+        for name, parameter in model.named_parameters()
+        if not torch.equal(parameter.detach(), parameters_before_fit[name])
+    ]
+    assert len(changed) > 0
+
+
+def test_distributed_jd_defaults_to_auto() -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+
+    assert model.distributed_jd == "auto"
+
+
+def test_distributed_jd_rejects_unknown_mode() -> None:
+    with pytest.raises(BeartypeCallHintParamViolation):
+        Model(hyperparameters=_hyperparameters(), batch_size=2, distributed_jd="invalid")  # type: ignore[arg-type]
+
+
+def test_configure_callbacks_attaches_bypass_callback_when_jd_enabled() -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+
+    callbacks = model.configure_callbacks()
+
+    assert sum(isinstance(callback, _BypassDDPWrappingCallback) for callback in callbacks) == 1
+
+
+def test_configure_callbacks_omits_bypass_callback_when_distributed_jd_off() -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2, distributed_jd="off")
+
+    callbacks = model.configure_callbacks()
+
+    assert all(not isinstance(callback, _BypassDDPWrappingCallback) for callback in callbacks)
+
+
+def test_configure_callbacks_skips_bypass_callback_already_attached_to_trainer() -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model._trainer = type(  # noqa: SLF001
+        "TrainerStub",
+        (),
+        {"callbacks": [_BypassDDPWrappingCallback()]},
+    )()
+
+    callbacks = model.configure_callbacks()
+
+    assert all(not isinstance(callback, _BypassDDPWrappingCallback) for callback in callbacks)
+
+
+def test_bypass_ddp_wrapping_callback_patches_configure_ddp() -> None:
+    strategy = DDPStrategy()
+    original_configure_ddp = strategy.configure_ddp
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+    callback = _BypassDDPWrappingCallback()
+
+    callback.setup(trainer=trainer, pl_module=module, stage="fit")
+
+    assert strategy.configure_ddp is not original_configure_ddp
+    # Calling the patched ``configure_ddp`` must not wrap the model or register
+    # comm hooks; both would re-introduce the BatchedTensor crash under JD.
+    strategy.model = module  # type: ignore[assignment]
+    strategy.configure_ddp()
+    assert strategy.model is module
+
+    callback.teardown(trainer=trainer, pl_module=module, stage="fit")
+
+    assert strategy.configure_ddp == original_configure_ddp
+
+
+def test_bypass_ddp_wrapping_callback_skips_setup_model_and_register_hooks(monkeypatch) -> None:
+    strategy = DDPStrategy()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+    strategy.model = module  # type: ignore[assignment]
+
+    setup_model_calls: list[torch.nn.Module] = []
+    register_hooks_calls: list[int] = []
+
+    def fake_setup_model(self, model):  # noqa: ARG001
+        setup_model_calls.append(model)
+        return model
+
+    def fake_register_hooks(self):  # noqa: ARG001
+        register_hooks_calls.append(1)
+
+    monkeypatch.setattr(DDPStrategy, "_setup_model", fake_setup_model)
+    monkeypatch.setattr(DDPStrategy, "_register_ddp_hooks", fake_register_hooks)
+
+    callback = _BypassDDPWrappingCallback()
+    callback.setup(trainer=trainer, pl_module=module, stage="fit")
+    strategy.configure_ddp()
+
+    assert setup_model_calls == []
+    assert register_hooks_calls == []
+
+
+def test_bypass_ddp_wrapping_callback_syncs_module_states(monkeypatch) -> None:
+    strategy = DDPStrategy()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+    strategy.model = module  # type: ignore[assignment]
+
+    sync_calls: list[torch.nn.Module] = []
+
+    monkeypatch.setattr("json2vec.architecture.root.is_distributed", lambda: True)
+    monkeypatch.setattr(lit_overrides_distributed, "_sync_module_states", sync_calls.append)
+
+    callback = _BypassDDPWrappingCallback()
+    callback.setup(trainer=trainer, pl_module=module, stage="fit")
+    strategy.configure_ddp()
+
+    assert sync_calls == [module]
+
+
+def test_bypass_ddp_wrapping_callback_skips_sync_outside_process_group(monkeypatch) -> None:
+    strategy = DDPStrategy()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+    strategy.model = module  # type: ignore[assignment]
+
+    sync_calls: list[torch.nn.Module] = []
+
+    monkeypatch.setattr("json2vec.architecture.root.is_distributed", lambda: False)
+    monkeypatch.setattr(lit_overrides_distributed, "_sync_module_states", sync_calls.append)
+
+    callback = _BypassDDPWrappingCallback()
+    callback.setup(trainer=trainer, pl_module=module, stage="fit")
+    strategy.configure_ddp()
+
+    assert sync_calls == []
+
+
+def test_bypass_ddp_wrapping_callback_is_noop_for_non_ddp_strategy() -> None:
+    class StrategyStub:
+        pass
+
+    strategy = StrategyStub()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+    callback = _BypassDDPWrappingCallback()
+
+    callback.setup(trainer=trainer, pl_module=module, stage="fit")
+    callback.teardown(trainer=trainer, pl_module=module, stage="fit")
+
+    assert not hasattr(strategy, "configure_ddp")
+
+
+def test_bypass_ddp_wrapping_callback_rejects_sharded_strategies() -> None:
+    trainer = type("TrainerStub", (), {"strategy": FSDPStrategy()})()
+    module = torch.nn.Linear(1, 1)
+
+    with pytest.raises(RuntimeError, match="FSDPStrategy"):
+        _BypassDDPWrappingCallback().setup(trainer=trainer, pl_module=module, stage="fit")
+
+
+def test_bypass_ddp_wrapping_callback_rejection_uses_isinstance_not_name() -> None:
+    # A local class whose ``__name__`` collides with a real incompatible
+    # strategy must not trigger rejection; matching is by ``isinstance``.
+    class FSDPStrategy:  # noqa: N801
+        pass
+
+    strategy = FSDPStrategy()
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+    callback = _BypassDDPWrappingCallback()
+
+    callback.setup(trainer=trainer, pl_module=module, stage="fit")
+
+    assert not hasattr(strategy, "configure_ddp")
+
+
+def test_bypass_ddp_wrapping_callback_rejects_ddp_with_comm_hook() -> None:
+    strategy = DDPStrategy()
+    strategy._ddp_comm_hook = lambda state, bucket: None  # noqa: SLF001
+    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    module = torch.nn.Linear(1, 1)
+
+    with pytest.raises(RuntimeError, match="ddp_comm_hook"):
+        _BypassDDPWrappingCallback().setup(trainer=trainer, pl_module=module, stage="fit")
+
+
+def test_training_step_calls_mean_all_reduce_grads(monkeypatch) -> None:
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    calls: list[torch.nn.Module] = []
+
+    def fake_all_reduce(module: torch.nn.Module) -> None:
+        calls.append(module)
+
+    monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
+    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+
+    model.training_step(_multi_loss_batch(model), 0)
+
+    assert calls == [model]
+
+
+def test_training_step_skips_all_reduce_when_distributed_jd_off(monkeypatch) -> None:
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    calls: list[torch.nn.Module] = []
+
+    def fake_all_reduce(module: torch.nn.Module) -> None:
+        calls.append(module)
+
+    monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
+    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
+    model = Model(
+        hyperparameters=_multi_loss_hyperparameters(),
+        batch_size=2,
+        distributed_jd="off",
+    )
+
+    output = model.training_step(_multi_loss_batch(model), 0)
+
+    assert calls == []
+    assert set(output) == {"loss"}
+    assert output["loss"].requires_grad
+
+
+def test_mean_all_reduce_grads_is_noop_without_process_group() -> None:
+    module = torch.nn.Linear(2, 3)
+    for parameter in module.parameters():
+        parameter.grad = torch.ones_like(parameter)
+
+    j2v_distributed.mean_all_reduce_grads(module)
+
+    for parameter in module.parameters():
+        assert torch.equal(parameter.grad, torch.ones_like(parameter))
+
+
+def test_mean_all_reduce_grads_averages_across_ranks(monkeypatch) -> None:
+    module = torch.nn.Linear(2, 3)
+    for parameter in module.parameters():
+        parameter.grad = torch.full_like(parameter, 4.0)
+
+    all_reduce_calls: list[torch.Tensor] = []
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None) -> None:
+        all_reduce_calls.append(tensor)
+        tensor.mul_(2.0)
+
+    monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
+    monkeypatch.setattr(j2v_distributed, "world_size", lambda: 2)
+    monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
+
+    j2v_distributed.mean_all_reduce_grads(module)
+
+    # All parameters share ``(float32, cpu)`` so coalescing collapses the
+    # per-parameter sequence into a single ``all_reduce`` over one flat buffer.
+    assert len(all_reduce_calls) == 1
+    # ``fake_all_reduce`` doubles the buffer; we then divide by ``world_size``
+    # and copy back, giving 4.0 * 2.0 / 2 == 4.0 per element.
+    for parameter in module.parameters():
+        assert torch.equal(parameter.grad, torch.full_like(parameter, 4.0))
+
+
+def test_mean_all_reduce_grads_buckets_by_dtype(monkeypatch) -> None:
+    class MixedModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.f32 = torch.nn.Parameter(torch.zeros(4, dtype=torch.float32))
+            self.f64 = torch.nn.Parameter(torch.zeros(4, dtype=torch.float64))
+
+    module = MixedModule()
+    for parameter in module.parameters():
+        parameter.grad = torch.full_like(parameter, 3.0)
+
+    bucket_sizes: list[int] = []
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None) -> None:
+        bucket_sizes.append(tensor.numel())
+
+    monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
+    monkeypatch.setattr(j2v_distributed, "world_size", lambda: 2)
+    monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
+
+    j2v_distributed.mean_all_reduce_grads(module)
+
+    # One bucket per dtype: float32 and float64 grads cannot share a flat
+    # buffer because collective ops require a uniform dtype.
+    assert len(bucket_sizes) == 2
+    assert sorted(bucket_sizes) == [4, 4]
+
+
+def test_mean_all_reduce_grads_skips_parameters_without_grad(monkeypatch) -> None:
+    module = torch.nn.Linear(2, 3)
+    # ``bias.grad`` left as None to confirm we don't reduce it.
+    module.weight.grad = torch.full_like(module.weight, 1.0)
+    assert module.bias.grad is None
+
+    all_reduce_calls: list[torch.Tensor] = []
+
+    def fake_all_reduce(tensor: torch.Tensor, op=None) -> None:
+        all_reduce_calls.append(tensor)
+
+    monkeypatch.setattr(j2v_distributed, "is_distributed", lambda: True)
+    monkeypatch.setattr(j2v_distributed, "world_size", lambda: 1)
+    monkeypatch.setattr(j2v_distributed.dist, "all_reduce", fake_all_reduce)
+
+    j2v_distributed.mean_all_reduce_grads(module)
+
+    assert len(all_reduce_calls) == 1
+    assert all_reduce_calls[0].numel() == module.weight.numel()
+    assert module.bias.grad is None
+
