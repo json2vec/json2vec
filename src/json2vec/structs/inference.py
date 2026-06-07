@@ -73,12 +73,13 @@ class InferenceConfig:
     """Maximum number of top-level records profiled. Type inference is stable
     on a few thousand rows, so large datasets are sampled from the front."""
 
-    category_max_cardinality: int = 50
-    """Integer/ambiguous columns with at most this many distinct values are
-    treated as categorical rather than numeric."""
-
-    category_cardinality_ratio: float = 0.05
-    """Alternative categorical test for larger samples: distinct / observed."""
+    category_max_cardinality: int = 16
+    """Integer columns are treated as quantities (``Number``) by default; one is
+    only made ``Category`` when it is id-named or has at most this many distinct
+    values. The threshold is deliberately small: ordinal/count integers such as
+    ranks, positions, or lap counts carry magnitude that ``Category`` discards,
+    so only genuinely low-cardinality codes should flip. (Strings are always
+    categorical regardless of this value.)"""
 
     id_name_hints: tuple[str, ...] = _DEFAULT_ID_HINTS
     """Source-key substrings that force an integer column to ``Category``."""
@@ -286,10 +287,20 @@ def _kind_counts(values: list[Any]) -> Counter:
     return Counter(_kind(v) for v in values)
 
 
-def _looks_categorical(distinct: int, observed: int, config: InferenceConfig) -> bool:
+def _int_is_categorical(name: str, distinct: int, config: InferenceConfig) -> tuple[bool, str]:
+    """Decide whether an integer column is a code/category vs. a quantity.
+
+    Conservative on purpose: an integer is only categorical when its name marks
+    it as an identifier, or its absolute distinct count is small. A
+    distinct/rows *ratio* test is deliberately NOT used — on relational data it
+    mislabels ordinal integers (grid position, lap count, finishing position)
+    as categories because they have few distinct values across many rows.
+    """
+    if any(hint in name.casefold() for hint in config.id_name_hints):
+        return True, "id-like name"
     if distinct <= config.category_max_cardinality:
-        return True
-    return observed > 0 and (distinct / observed) <= config.category_cardinality_ratio
+        return True, f"low-cardinality int ({distinct} distinct)"
+    return False, ""
 
 
 def _decide_scalar(
@@ -329,16 +340,17 @@ def _decide_scalar(
             reason=f"datetime objects ({n_datetime}/{observed}){' with time' if has_time else ''}",
         )
 
-    # Numeric columns: decide quantity vs. coded identifier.
+    # Numeric columns: floats are always quantities; integers are quantities
+    # unless they look like codes (id-named or very low cardinality).
     if n_str == 0 and (n_int + n_float) == observed and observed:
-        id_hint = any(hint in name.casefold() for hint in config.id_name_hints)
         integral = n_float == 0
-        if integral and (id_hint or _looks_categorical(distinct, observed, config)):
-            why = "id-like name" if id_hint else f"low-cardinality int ({distinct} distinct)"
-            return _Decision(
-                Category(name=name, query=query, max_vocab_size=_vocab_size(distinct, config), p_prune=p_prune),
-                reason=f"integer treated as category: {why}",
-            )
+        if integral:
+            categorical, why = _int_is_categorical(name, distinct, config)
+            if categorical:
+                return _Decision(
+                    Category(name=name, query=query, max_vocab_size=_vocab_size(distinct, config), p_prune=p_prune),
+                    reason=f"integer treated as category: {why}",
+                )
         return _Decision(
             Number(name=name, query=query, p_prune=p_prune),
             reason=f"numeric column ({'int' if integral else 'float'}, {distinct} distinct)",
