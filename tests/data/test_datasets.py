@@ -22,6 +22,7 @@ from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
 from json2vec.preprocessors.base import Preprocessor, PreprocessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.tree import Address
 
 
 def _datamodule_hyperparameters():
@@ -912,9 +913,43 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
 
     after = module.interprocess_encoding_context["record/code"]
     current = model.interprocess_encoding_context["record/code"]
-    assert after.master._id == current.master._id
-    assert after.master._id != before.master._id
+    assert after.master is current.master
+    assert after.master is not before.master
     assert after is not before
+
+
+def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
+    model = j2v.Model.from_schema(
+        j2v.Category("code", max_vocab_size=16),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    address = Address("record/code")
+    vocab = model.nodes[address].embedder.vocab
+    module = PolarsDataModule(
+        model=model,
+        train=pl.DataFrame({"code": ["a"]}),
+        predict=pl.DataFrame({"code": ["b"]}),
+        num_workers={Strata.train: 1, Strata.predict: 1},
+        persistent_workers=False,
+    )
+
+    assert vocab.is_shared is False
+
+    predict_loader = module.predict_dataloader()
+
+    assert predict_loader is not None
+    assert vocab.is_shared is False
+
+    train_loader = module.train_dataloader()
+
+    assert train_loader is not None
+    assert vocab.is_shared is True
+
+    vocab.freeze()
+    assert vocab.is_shared is False
 
 
 def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():

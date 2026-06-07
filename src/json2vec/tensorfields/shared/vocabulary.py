@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from multiprocessing import Manager
 from multiprocessing.managers import ListProxy, SyncManager
-from typing import TYPE_CHECKING, Any, cast
+from threading import RLock
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import torch
 from lightning.pytorch import Callback, Trainer
@@ -16,27 +17,63 @@ if TYPE_CHECKING:
     from json2vec.architecture.root import Model
 
 
+class _LocalLock:
+    """Pickle-friendly local lock used outside multiprocessing data workers."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+
+    def __enter__(self):
+        return self._lock.__enter__()
+
+    def __exit__(self, *args):
+        return self._lock.__exit__(*args)
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self._lock = RLock()
+
+
 class Vocabulary:
     def __init__(
         self,
-        master: ListProxy,
+        master: list[str] | ListProxy,
         lock: Any,
-        proposals: ListProxy,
+        proposals: list[str] | ListProxy,
         proposal_lock: Any,
         max_vocab_size: int,
+        share: Callable[[], tuple[list[str] | ListProxy[str], Any, list[str] | ListProxy[str], Any]] | None = None,
     ):
-        self.master: ListProxy[str] = master
+        self.master: list[str] | ListProxy[str] = master
         self.lock: Any = lock
-        self.proposals: ListProxy[str] = proposals
+        self.proposals: list[str] | ListProxy[str] = proposals
         self.proposal_lock: Any = proposal_lock
         self.max_vocab_size: int = max_vocab_size
+        self._share = share
         self.vocab: OrderedSet[str] = OrderedSet(list(master))
         self.global_rank: int = 0
         self.world_size: int = 1
 
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["_share"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
     def configure_distributed(self, global_rank: int = 0, world_size: int = 1) -> None:
         self.global_rank = global_rank
         self.world_size = world_size
+
+    def share(self) -> None:
+        if self._share is None:
+            return
+
+        self.master, self.lock, self.proposals, self.proposal_lock = self._share()
+        self.refresh(force=True)
 
     def refresh(self, force: bool = False) -> None:
         if not force and len(self.master) == len(self.vocab):
@@ -99,13 +136,51 @@ class OnlineVocabularyModel(torch.nn.Module):
         super().__init__()
 
         self.max_vocab_size: int = max_vocab_size
-        self.manager: SyncManager = Manager()
-        self.master: ListProxy[str] = self.manager.list()
-        self.lock: Any = self.manager.Lock()
-        self.proposals: ListProxy[str] = self.manager.list()
-        self.proposal_lock: Any = self.manager.Lock()
+        self.manager: SyncManager | None = None
+        self.master: list[str] | ListProxy[str] = []
+        self.lock: Any = _LocalLock()
+        self.proposals: list[str] | ListProxy[str] = []
+        self.proposal_lock: Any = _LocalLock()
         self._snapshot_cache: list[str] | None = None
         self._snapshot_size: int = -1
+
+    @property
+    def is_shared(self) -> bool:
+        return self.manager is not None
+
+    def share(self) -> None:
+        """Move vocabulary state into multiprocessing-safe storage."""
+        if self.manager is not None:
+            return
+
+        master = list(self.master)
+        proposals = list(self.proposals)
+        self.manager = Manager()
+        self.master = self.manager.list(master)
+        self.lock = self.manager.Lock()
+        self.proposals = self.manager.list(proposals)
+        self.proposal_lock = self.manager.Lock()
+        self._snapshot_cache = None
+        self._snapshot_size = -1
+
+    def freeze(self) -> None:
+        """Snapshot vocabulary state back into local, read-optimized storage."""
+        if self.manager is None:
+            return
+
+        manager = self.manager
+        self.master = list(self.master)
+        self.lock = _LocalLock()
+        self.proposals = []
+        self.proposal_lock = _LocalLock()
+        self.manager = None
+        self._snapshot_cache = None
+        self._snapshot_size = -1
+        manager.shutdown()
+
+    def _shared_state(self) -> tuple[list[str] | ListProxy[str], Any, list[str] | ListProxy[str], Any]:
+        self.share()
+        return self.master, self.lock, self.proposals, self.proposal_lock
 
     def _save_to_state_dict(self, state_dict, prefix, keep_vars):  # ty:ignore[invalid-method-override]
         super()._save_to_state_dict(state_dict, prefix, keep_vars)
@@ -124,8 +199,7 @@ class OnlineVocabularyModel(torch.nn.Module):
         key = prefix + "vocabulary"
         if key in state_dict:
             vocab: list[str] = state_dict.pop(key)
-            self.master: ListProxy[str] = self.manager.list(vocab)
-            self.proposals: ListProxy[str] = self.manager.list()
+            self.load_snapshot(vocab)
             self._snapshot_cache = None
             self._snapshot_size = -1
         else:
@@ -149,6 +223,7 @@ class OnlineVocabularyModel(torch.nn.Module):
             proposals=self.proposals,
             proposal_lock=self.proposal_lock,
             max_vocab_size=self.max_vocab_size,
+            share=self._shared_state,
         )
 
     def snapshot(self) -> list[str]:
@@ -273,6 +348,12 @@ class VocabularySyncCallback(Callback):
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
         self._sync(trainer=trainer, pl_module=pl_module, reason="train_epoch_end")
+
+    def on_fit_end(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
+        for vocabulary in vocabularies(pl_module).values():
+            freeze = getattr(vocabulary, "freeze", None)
+            if callable(freeze):
+                freeze()
 
 
 __all__ = [

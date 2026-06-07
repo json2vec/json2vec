@@ -13,7 +13,10 @@ from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.shared.counter import CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import (
+    OnlineVocabularyModel,
+    VocabularySyncCallback,
+)
 
 
 def _hyperparameters() -> Hyperparameters:
@@ -356,6 +359,50 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
     assert TensorKey.state.name in model.nodes[address].embedder.counters
     assert TensorKey.content.name in model.nodes[address].embedder.counters
+
+
+def test_online_vocabulary_model_uses_local_storage_until_shared():
+    vocab = OnlineVocabularyModel(max_vocab_size=8)
+
+    assert vocab.manager is None
+    assert vocab.is_shared is False
+
+    local_state = vocab.state
+    assert isinstance(local_state.master, list)
+    assert local_state("ALPHA", update=True) == 0
+    assert vocab.snapshot() == ["ALPHA"]
+
+    vocab.share()
+
+    assert vocab.manager is not None
+    assert vocab.is_shared is True
+    assert not isinstance(vocab.state.master, list)
+
+    shared_state = vocab.state
+    assert shared_state("BETA", update=True) == 1
+    assert vocab.snapshot() == ["ALPHA", "BETA"]
+
+    vocab.freeze()
+
+    assert vocab.manager is None
+    assert vocab.is_shared is False
+    assert isinstance(vocab.state.master, list)
+    assert vocab.snapshot() == ["ALPHA", "BETA"]
+
+
+def test_vocabulary_callback_freezes_model_vocabularies_on_fit_end():
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    address = Address("root", "label")
+    vocab = model.nodes[address].embedder.vocab
+
+    vocab.share()
+
+    assert vocab.is_shared is True
+
+    VocabularySyncCallback().on_fit_end(trainer=None, pl_module=model)
+
+    assert vocab.is_shared is False
+    assert isinstance(vocab.state.master, list)
 
 
 def test_runtime_placement_callback_moves_module_to_root_device() -> None:
