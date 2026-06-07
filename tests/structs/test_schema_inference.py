@@ -215,8 +215,22 @@ def test_object_inside_array_keeps_one_array_selector():
 
 def test_category_threshold_override_switches_to_number():
     records = [{"n": i % 5} for i in range(100)]
-    fields = _by_name(infer_schema(records, category_max_cardinality=2, category_cardinality_ratio=0.0))
+    fields = _by_name(infer_schema(records, category_max_cardinality=2))
     assert fields["n"].type == "number"
+
+
+def test_ordinal_integer_stays_number_despite_low_distinct_over_many_rows():
+    # 24 distinct values over 5000 rows: a distinct/rows ratio test would call
+    # this categorical, but an ordinal integer should stay a Number.
+    records = [{"finishing_position": i % 24} for i in range(5000)]
+    fields = _by_name(infer_schema(records))
+    assert fields["finishing_position"].type == "number"
+
+
+def test_id_named_integer_is_category_regardless_of_cardinality():
+    records = [{"raceId": i} for i in range(5000)]
+    fields = _by_name(infer_schema(records))
+    assert fields["raceId"].type == "category"
 
 
 def test_target_marks_field_as_supervised():
