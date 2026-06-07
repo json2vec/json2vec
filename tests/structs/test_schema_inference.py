@@ -77,6 +77,39 @@ def test_iso_date_column_becomes_dateparts():
     assert "hour_of_day" not in [str(p) for p in fields["d"].dateparts]
 
 
+def test_native_date_objects_become_dateparts():
+    import datetime
+
+    records = [{"d": datetime.date(2023, 1, 5)}, {"d": datetime.date(2024, 6, 30)}]
+    fields = _by_name(infer_schema(records))
+    assert fields["d"].type == "dateparts"
+
+
+def test_native_datetime_objects_with_time_add_hour_part():
+    import datetime
+
+    records = [
+        {"ts": datetime.datetime(2023, 1, 5, 8, 30)},
+        {"ts": datetime.datetime(2024, 6, 30, 17, 45)},
+    ]
+    fields = _by_name(infer_schema(records))
+    assert fields["ts"].type == "dateparts"
+    assert any("hour_of_day" in str(p) for p in fields["ts"].dateparts)
+
+
+def test_numpy_scalar_types_are_recognized():
+    np = pytest.importorskip("numpy")
+    # numpy.int64 is NOT a Python int subclass; numpy.bool_ is not a Python bool.
+    records = [
+        {"i": np.int64(i % 4), "f": np.float64(i) + 0.5, "b": np.bool_(i % 2)}
+        for i in range(100)
+    ]
+    fields = _by_name(infer_schema(records))
+    assert fields["i"].type == "category"  # low-cardinality integer
+    assert fields["f"].type == "number"
+    assert fields["b"].type == "category" and fields["b"].max_vocab_size == 2
+
+
 def test_iso_datetime_with_time_adds_hour_part():
     records = [{"ts": "2023-01-05T08:30:00"}, {"ts": "2024-06-30T17:45:00"}]
     fields = _by_name(infer_schema(records))
