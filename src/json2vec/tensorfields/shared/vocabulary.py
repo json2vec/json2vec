@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import partialmethod
 from multiprocessing import Manager
 from multiprocessing.managers import ListProxy, SyncManager
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 from lightning.pytorch import Callback, Trainer
 from loguru import logger
-from ordered_set import OrderedSet
 
 from json2vec.distributed import all_gather_object, broadcast_object, is_distributed, is_rank_zero
 from json2vec.structs.tree import Address
@@ -36,25 +37,29 @@ class _LocalLock:
         self._lock = RLock()
 
 
-class Vocabulary:
+@dataclass
+class _VocabularyStorage:
+    master: list[str] | ListProxy[str]
+    lock: Any
+    proposals: list[str] | ListProxy[str]
+    proposal_lock: Any
+
+
+class VocabularyState:
     def __init__(
         self,
-        master: list[str] | ListProxy,
-        lock: Any,
-        proposals: list[str] | ListProxy,
-        proposal_lock: Any,
+        storage: _VocabularyStorage,
         max_vocab_size: int,
-        share: Callable[[], tuple[list[str] | ListProxy[str], Any, list[str] | ListProxy[str], Any]] | None = None,
+        share: Callable[[], _VocabularyStorage] | None = None,
     ):
-        self.master: list[str] | ListProxy[str] = master
-        self.lock: Any = lock
-        self.proposals: list[str] | ListProxy[str] = proposals
-        self.proposal_lock: Any = proposal_lock
+        self.storage = storage
         self.max_vocab_size: int = max_vocab_size
         self._share = share
-        self.vocab: OrderedSet[str] = OrderedSet(list(master))
+        self.vocab: list[str] = []
+        self.index: dict[str, int] = {}
         self.global_rank: int = 0
         self.world_size: int = 1
+        self.refresh(force=True)
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
@@ -72,14 +77,31 @@ class Vocabulary:
         if self._share is None:
             return
 
-        self.master, self.lock, self.proposals, self.proposal_lock = self._share()
+        self.storage = self._share()
         self.refresh(force=True)
 
     def refresh(self, force: bool = False) -> None:
         if not force and len(self.master) == len(self.vocab):
             return
 
-        self.vocab = OrderedSet(list(self.master))
+        self.vocab = list(self.master)
+        self.index = {word: index for index, word in enumerate(self.vocab)}
+
+    @property
+    def master(self) -> list[str] | ListProxy[str]:
+        return self.storage.master
+
+    @property
+    def lock(self) -> Any:
+        return self.storage.lock
+
+    @property
+    def proposals(self) -> list[str] | ListProxy[str]:
+        return self.storage.proposals
+
+    @property
+    def proposal_lock(self) -> Any:
+        return self.storage.proposal_lock
 
     @property
     def unavailable_index(self) -> int:
@@ -89,13 +111,13 @@ class Vocabulary:
         if word is None:
             return None
 
-        if word in self.vocab:
-            return cast(int, self.vocab.index(word))
+        if word in self.index:
+            return self.index[word]
 
         if not update:
             self.refresh()
-            if word in self.vocab:
-                return cast(int, self.vocab.index(word))
+            if word in self.index:
+                return self.index[word]
 
             # Validation/test/inference should preserve "field exists" semantics even when
             # the label was never seen during training.
@@ -112,8 +134,8 @@ class Vocabulary:
         with self.lock:
             self.refresh(force=True)
 
-            if word in self.vocab:
-                return cast(int, self.vocab.index(word))
+            if word in self.index:
+                return self.index[word]
 
             if len(self.vocab) >= self.max_vocab_size:
                 # Once the learned vocabulary is full, new labels also fall back to the
@@ -121,10 +143,11 @@ class Vocabulary:
                 return self.unavailable_index
 
             if word not in self.vocab:
-                self.vocab.add(word)
+                self.vocab.append(word)
+                self.index[word] = len(self.vocab) - 1
                 self.master.append(word)
 
-        return cast(int, self.vocab.index(word))
+        return self.index[word]
 
     def __len__(self) -> int:
         self.refresh()
@@ -132,6 +155,18 @@ class Vocabulary:
 
 
 class OnlineVocabularyModel(torch.nn.Module):
+    @classmethod
+    def from_model(cls, module: Model) -> dict[Address, OnlineVocabularyModel]:
+        resources: dict[Address, OnlineVocabularyModel] = {}
+
+        for address, node in module.nodes.items():
+            embedder = getattr(node, "embedder", None)
+            vocabulary = getattr(embedder, "vocab", None)
+            if isinstance(vocabulary, cls):
+                resources[address] = vocabulary
+
+        return resources
+
     def __init__(self, max_vocab_size: int):
         super().__init__()
 
@@ -143,6 +178,15 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.proposal_lock: Any = _LocalLock()
         self._snapshot_cache: list[str] | None = None
         self._snapshot_size: int = -1
+
+    @property
+    def storage(self) -> _VocabularyStorage:
+        return _VocabularyStorage(
+            master=self.master,
+            lock=self.lock,
+            proposals=self.proposals,
+            proposal_lock=self.proposal_lock,
+        )
 
     @property
     def is_shared(self) -> bool:
@@ -178,9 +222,9 @@ class OnlineVocabularyModel(torch.nn.Module):
         self._snapshot_size = -1
         manager.shutdown()
 
-    def _shared_state(self) -> tuple[list[str] | ListProxy[str], Any, list[str] | ListProxy[str], Any]:
+    def _shared_state(self) -> _VocabularyStorage:
         self.share()
-        return self.master, self.lock, self.proposals, self.proposal_lock
+        return self.storage
 
     def _save_to_state_dict(self, state_dict, prefix, keep_vars):  # ty:ignore[invalid-method-override]
         super()._save_to_state_dict(state_dict, prefix, keep_vars)
@@ -216,12 +260,9 @@ class OnlineVocabularyModel(torch.nn.Module):
         )
 
     @property
-    def state(self) -> Vocabulary:
-        return Vocabulary(
-            master=self.master,
-            lock=self.lock,
-            proposals=self.proposals,
-            proposal_lock=self.proposal_lock,
+    def state(self) -> VocabularyState:
+        return VocabularyState(
+            storage=self.storage,
             max_vocab_size=self.max_vocab_size,
             share=self._shared_state,
         )
@@ -246,16 +287,18 @@ class OnlineVocabularyModel(torch.nn.Module):
         rejected = 0
 
         with self.lock:
-            vocab = OrderedSet(list(self.master))
+            vocab = list(self.master)
+            index = set(vocab)
             for word in proposals:
-                if word in vocab:
+                if word in index:
                     continue
 
                 if len(vocab) >= self.max_vocab_size:
                     rejected += 1
                     continue
 
-                vocab.add(word)
+                vocab.append(word)
+                index.add(word)
                 self.master.append(word)
                 accepted += 1
 
@@ -276,89 +319,70 @@ class OnlineVocabularyModel(torch.nn.Module):
         self._snapshot_size = -1
 
 
-def vocabularies(module: Model) -> dict[Address, Any]:
-    resources: dict[Address, Any] = {}
+def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -> None:
+    if not is_distributed():
+        return
 
-    for address, node in module.nodes.items():
-        embedder = getattr(node, "embedder", None)
-        vocabulary = getattr(embedder, "vocab", None)
-        if vocabulary is not None and all(
-            hasattr(vocabulary, method) for method in ("drain_proposals", "extend", "snapshot", "load_snapshot")
-        ):
-            resources[address] = vocabulary
+    resources = OnlineVocabularyModel.from_model(pl_module)
+    if not resources:
+        return
 
-    return resources
+    local_proposals = {address: vocab.drain_proposals() for address, vocab in resources.items()}
+    gathered = all_gather_object(local_proposals)
+
+    payload = None
+    if is_rank_zero():
+        snapshots = {}
+        stats = {}
+        for address, vocab in resources.items():
+            proposals = []
+            for rank_proposals in gathered:
+                proposals.extend(rank_proposals.get(address, []))
+
+            accepted, rejected = vocab.extend(proposals)
+            snapshot = vocab.snapshot()
+            snapshots[address] = snapshot
+            stats[address] = {
+                "proposed": len(proposals),
+                "accepted": accepted,
+                "rejected_full": rejected,
+                "size": len(snapshot),
+                "max": vocab.max_vocab_size,
+            }
+
+        payload = {"snapshots": snapshots, "stats": stats}
+
+    payload = broadcast_object(payload, src=0)
+
+    for address, snapshot in payload["snapshots"].items():
+        resources[address].load_snapshot(snapshot)
+
+    trainer.strategy.barrier(name=f"vocabulary-sync-{reason}")
+
+    if is_rank_zero():
+        for address, stats in payload["stats"].items():
+            if stats["max"] > 0 and stats["size"] / stats["max"] >= 0.95:
+                logger.bind(
+                    component="vocabulary",
+                    address=address,
+                    size=stats["size"],
+                    max=stats["max"],
+                ).warning("vocabulary is near capacity")
 
 
 class VocabularySyncCallback(Callback):
     """Synchronize online vocabularies registered by tensorfield extensions."""
 
-    def _sync(self, trainer: Trainer, pl_module: Model, reason: str) -> None:
-        if not is_distributed():
-            return
-
-        resources = vocabularies(pl_module)
-        if not resources:
-            return
-
-        local_proposals = {address: vocab.drain_proposals() for address, vocab in resources.items()}
-        gathered = all_gather_object(local_proposals)
-
-        payload = None
-        if is_rank_zero():
-            snapshots = {}
-            stats = {}
-            for address, vocab in resources.items():
-                proposals = []
-                for rank_proposals in gathered:
-                    proposals.extend(rank_proposals.get(address, []))
-
-                accepted, rejected = vocab.extend(proposals)
-                snapshot = vocab.snapshot()
-                snapshots[address] = snapshot
-                stats[address] = {
-                    "proposed": len(proposals),
-                    "accepted": accepted,
-                    "rejected_full": rejected,
-                    "size": len(snapshot),
-                    "max": vocab.max_vocab_size,
-                }
-
-            payload = {"snapshots": snapshots, "stats": stats}
-
-        payload = broadcast_object(payload, src=0)
-
-        for address, snapshot in payload["snapshots"].items():
-            resources[address].load_snapshot(snapshot)
-
-        trainer.strategy.barrier(name=f"vocabulary-sync-{reason}")
-
-        if is_rank_zero():
-            for address, stats in payload["stats"].items():
-                if stats["max"] > 0 and stats["size"] / stats["max"] >= 0.95:
-                    logger.bind(
-                        component="vocabulary",
-                        address=address,
-                        size=stats["size"],
-                        max=stats["max"],
-                    ).warning("vocabulary is near capacity")
-
-    def on_fit_start(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
-        self._sync(trainer=trainer, pl_module=pl_module, reason="fit_start")
-
-    def on_train_epoch_end(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
-        self._sync(trainer=trainer, pl_module=pl_module, reason="train_epoch_end")
+    on_fit_start = partialmethod(sync, reason="fit_start")
+    on_train_epoch_end = partialmethod(sync, reason="train_epoch_end")
 
     def on_fit_end(self, trainer: Trainer, pl_module: Model) -> None:  # ty:ignore[invalid-method-override]
-        for vocabulary in vocabularies(pl_module).values():
-            freeze = getattr(vocabulary, "freeze", None)
-            if callable(freeze):
-                freeze()
+        for vocabulary in OnlineVocabularyModel.from_model(pl_module).values():
+            vocabulary.freeze()
 
 
 __all__ = [
     "OnlineVocabularyModel",
-    "Vocabulary",
+    "VocabularyState",
     "VocabularySyncCallback",
-    "vocabularies",
 ]

@@ -1,4 +1,3 @@
-from threading import Lock
 from types import SimpleNamespace
 
 import polars as pl
@@ -13,10 +12,10 @@ from json2vec.tensorfields.extensions.category import (
     Decoder,
     Embedder,
     TensorField,
-    Vocabulary,
     loss,
     write,
 )
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel
 
 ADDRESS = "root/items/category"
 
@@ -77,24 +76,9 @@ class _DummyState:
 
 
 def test_category_vocabulary_refreshes_stale_validation_snapshot():
-    master: list[str] = []
-    lock = Lock()
-    proposals: list[str] = []
-    proposal_lock = Lock()
-    validation_state = Vocabulary(
-        master=master,
-        lock=lock,
-        proposals=proposals,
-        proposal_lock=proposal_lock,
-        max_vocab_size=8,
-    )
-    training_state = Vocabulary(
-        master=master,
-        lock=lock,
-        proposals=proposals,
-        proposal_lock=proposal_lock,
-        max_vocab_size=8,
-    )
+    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    validation_state = vocabulary.state
+    training_state = vocabulary.state
 
     assert training_state("ALPHA", update=True) == 0
     assert validation_state("ALPHA", update=False) == 0
@@ -102,20 +86,13 @@ def test_category_vocabulary_refreshes_stale_validation_snapshot():
 
 
 def test_category_vocabulary_nonzero_rank_proposes_unseen_tokens():
-    master: list[str] = []
-    proposals: list[str] = []
-    state = Vocabulary(
-        master=master,
-        lock=Lock(),
-        proposals=proposals,
-        proposal_lock=Lock(),
-        max_vocab_size=8,
-    )
+    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    state = vocabulary.state
     state.configure_distributed(global_rank=1, world_size=2)
 
     assert state("ALPHA", update=True) == state.unavailable_index
-    assert master == []
-    assert proposals == ["ALPHA"]
+    assert vocabulary.snapshot() == []
+    assert list(vocabulary.proposals) == ["ALPHA"]
 
 
 def test_category_tensorfield_separates_state_and_content():

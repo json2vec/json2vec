@@ -22,15 +22,14 @@ from json2vec.tensorfields.base import (
     TensorFieldBase,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 sets: Plugin = Plugin(name="set")
-sets.callback(VocabularySyncCallback)
-sets.callback(CounterUpdateCallback)
+sets.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
 @sets.register
@@ -56,7 +55,7 @@ def _items(value: Any) -> Iterable[Any]:
     return (value,)
 
 
-def _encode_set(value: Any, state: Vocabulary, update: bool, n_tokens: int) -> np.ndarray:
+def _encode_set(value: Any, state: VocabularyState, update: bool, n_tokens: int) -> np.ndarray:
     encoded = np.zeros(n_tokens, dtype=np.float32)
 
     for item in _items(value):
@@ -85,7 +84,7 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        interprocess_encoding_context: Vocabulary,
+        interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         request: Request = hyperparameters.requests[address]
         shape: tuple[int, ...] = (len(values), *hyperparameters.shapes[address])
@@ -248,7 +247,7 @@ class Embedder(EmbedderBase):
         )
 
     @property
-    def interprocess_encoding_context(self) -> Vocabulary:
+    def interprocess_encoding_context(self) -> VocabularyState:
         return self.vocab.state
 
 

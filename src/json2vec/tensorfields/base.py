@@ -267,15 +267,24 @@ class Plugin:
 
         return obj
 
-    def callback(self, factory: CallbackFactory) -> CallbackFactory:
-        """Register a Lightning callback factory for this tensorfield."""
-        callback = factory()
-        if not isinstance(callback, Callback):
-            raise TypeError(f"Plugin callback factory for '{self.name}' must produce a Lightning Callback")
+    @overload
+    def callback(self, factory: CallbackFactory, /) -> CallbackFactory: ...
 
-        self.callback_factories.append(factory)
-        return factory
+    @overload
+    def callback(self, factory: CallbackFactory, *factories: CallbackFactory) -> tuple[CallbackFactory, ...]: ...
 
+    def callback(self, factory: CallbackFactory, *factories: CallbackFactory):
+        """Register one or more Lightning callback factories for this tensorfield."""
+        registered = (factory, *factories)
+        for callback_factory in registered:
+            callback = callback_factory()
+            if not isinstance(callback, Callback):
+                raise TypeError(f"Plugin callback factory for '{self.name}' must produce a Lightning Callback")
+
+        self.callback_factories.extend(registered)
+        return factory if len(registered) == 1 else registered
+
+    @property
     def callbacks(self) -> list[Callback]:
         """Instantiate all registered callback factories."""
         return [factory() for factory in self.callback_factories]

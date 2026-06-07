@@ -24,7 +24,7 @@ from json2vec.tensorfields.base import (
     TensorFieldBase,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
@@ -36,8 +36,7 @@ category: Plugin = Plugin(name="category")
 # collapsing it into state=`null`.
 UNAVAILABLE_LABEL = "<unavailable>"
 
-category.callback(VocabularySyncCallback)
-category.callback(CounterUpdateCallback)
+category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
 @category.register
@@ -96,7 +95,7 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        interprocess_encoding_context: Vocabulary,
+        interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
 
@@ -259,7 +258,7 @@ class Embedder(EmbedderBase):
         )
 
     @property
-    def interprocess_encoding_context(self) -> Vocabulary:
+    def interprocess_encoding_context(self) -> VocabularyState:
         return self.vocab.state
 
 
