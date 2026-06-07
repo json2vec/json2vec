@@ -17,6 +17,7 @@ from json2vec.structs.packages import Prediction
 class _DummyModel:
     def __init__(self):
         self.calls = 0
+        self.write_calls = 0
         self.hyperparameters = object()
         self.interprocess_encoding_context = {}
 
@@ -41,7 +42,9 @@ class _DummyModel:
         ]
 
     def write(self, predictions: list[Prediction]):
-        return {"root/label": {"value": ["ok"]}}
+        self.write_calls += 1
+        batch_size = int(predictions[0].payload.batch_size[0]) if predictions else 0
+        return {"root/label": {"value": ["ok"] * batch_size}}
 
 
 def _runtime(model=None, **kwargs) -> deployment_module.FastAPIRuntime:
@@ -104,10 +107,12 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     runtime.setup()
 
     captured_batches = []
+    captured_monitors = []
     real_encode = deployment_module.encode
 
     def spy_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         captured_batches.append(batch)
+        captured_monitors.append(jmespath_resolution_monitor)
         return real_encode(
             batch=batch,
             hyperparameters=hyperparameters,
@@ -121,6 +126,7 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     outputs = runtime.predict_payloads([{"amount": 1.5}, {"amount": 2.5}])
 
     assert captured_batches == [[[{"amount": 1.5}], [{"amount": 2.5}]]]
+    assert captured_monitors == [None]
     assert len(outputs) == 2
     assert all("predictions" in output for output in outputs)
 
@@ -156,6 +162,7 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
     assert captured["batch"] == [[{"color": "red"}], [{"color": "blue"}]]
     assert captured["strata"] == Strata.predict
     assert model.calls == 1
+    assert model.write_calls == 1
     assert outputs[0]["predictions"]["root/label"]["value"] == "ok"
     assert outputs[1]["predictions"] == {}
     assert outputs[1]["error"]["status_code"] == 422
@@ -184,6 +191,7 @@ def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
 
     assert seen["context"]["request"] == {"color": "r"}
     assert seen["context"]["observations"] == [[{"color": "r"}]]
+    assert "input" in seen["context"]
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
     assert output["predictions"]["root/label"]["value"] == "rewritten"
     assert output["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
@@ -247,6 +255,20 @@ def test_fastapi_runtime_decode_validates_pydantic_request_model():
     assert context["request"] == {"hue": "red"}
 
 
+def test_fastapi_runtime_setup_can_enable_query_monitor():
+    runtime = deployment_module.FastAPIRuntime(
+        checkpoint=Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
+        accelerator=deployment_module.Accelerator.cpu,
+        monitor_queries=True,
+        query_monitor_every=7,
+    )
+
+    runtime.setup()
+
+    assert runtime.jmespath_resolution_monitor is not None
+    assert runtime.jmespath_resolution_monitor.every == 7
+
+
 def test_deployment_launcher_configures_fastapi_app(monkeypatch):
     class Request(pydantic.BaseModel):
         color: str
@@ -279,6 +301,38 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8765
     assert captured["log_level"] == "error"
+
+
+def test_deployment_launcher_configures_worker_import_string(monkeypatch):
+    captured = {}
+
+    def fake_run(app, *, factory, workers, host, port, log_level):
+        captured["app"] = app
+        captured["factory"] = factory
+        captured["workers"] = workers
+        captured["host"] = host
+        captured["port"] = port
+        captured["log_level"] = log_level
+
+    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
+
+    Deployment(checkpoint="model.ckpt", workers=2, accelerator="cpu", port=8765).serve()
+
+    assert captured == {
+        "app": "json2vec.inference.deployment:create_app",
+        "factory": True,
+        "workers": 2,
+        "host": "0.0.0.0",
+        "port": 8765,
+        "log_level": "info",
+    }
+
+
+def test_deployment_launcher_rejects_workers_with_model_instance():
+    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+
+    with pytest.raises(ValueError, match="workers > 1"):
+        Deployment(model=model, workers=2).serve()
 
 
 def test_deployment_launcher_accepts_model_instance(monkeypatch):

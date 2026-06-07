@@ -960,11 +960,13 @@ docs = [
     { name = "mkdocs-jupyter" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
+    { name = "orjson" },
     { name = "pydantic-settings" },
     { name = "uvicorn" },
 ]
 serving = [
     { name = "fastapi" },
+    { name = "orjson" },
     { name = "pydantic-settings" },
     { name = "uvicorn" },
 ]
@@ -979,6 +981,7 @@ dev = [
     { name = "ipython" },
     { name = "nbclient" },
     { name = "nbformat" },
+    { name = "orjson" },
     { name = "pre-commit" },
     { name = "pydantic-settings" },
     { name = "pytest" },
@@ -1002,6 +1005,8 @@ requires-dist = [
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.27" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "ordered-set", specifier = ">=4.1.0" },
+    { name = "orjson", marker = "extra == 'docs'", specifier = ">=3.10.0" },
+    { name = "orjson", marker = "extra == 'serving'", specifier = ">=3.10.0" },
     { name = "pluggy", specifier = ">=1.6.0" },
     { name = "polars", specifier = ">=1.35.2" },
     { name = "pyarrow", specifier = ">=21.0.0" },
@@ -1024,6 +1029,7 @@ dev = [
     { name = "ipython", specifier = ">=9.9.0" },
     { name = "nbclient", specifier = ">=0.10.2" },
     { name = "nbformat", specifier = ">=5.10.4" },
+    { name = "orjson", specifier = ">=3.10.0" },
     { name = "pre-commit", specifier = ">=4.3.0" },
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pytest", specifier = ">=8.4.1" },

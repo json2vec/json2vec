@@ -9,6 +9,7 @@ if TYPE_CHECKING:
         Accelerator,
         Deployment,
         Input,
+        JSONBackend,
         ModelSource,
         UpdateOperation,
     )
@@ -17,6 +18,7 @@ _DEPLOYMENT_EXPORTS = {
     "Accelerator",
     "Deployment",
     "Input",
+    "JSONBackend",
     "ModelSource",
     "UpdateOperation",
 }
@@ -29,7 +31,7 @@ def __getattr__(name: str) -> Any:
     try:
         from json2vec.inference import deployment
     except ModuleNotFoundError as error:
-        if error.name in {"fastapi", "pydantic_settings", "uvicorn"}:
+        if error.name in {"fastapi", "orjson", "pydantic_settings", "uvicorn"}:
             raise ModuleNotFoundError(
                 f"json2vec.inference.{name} requires the serving extra; install with `pip install json2vec[serving]`."
             ) from error
@@ -48,6 +50,7 @@ __all__ = [
     "Accelerator",
     "Deployment",
     "Input",
+    "JSONBackend",
     "ModelSource",
     "Postprocessor",
     "UpdateOperation",

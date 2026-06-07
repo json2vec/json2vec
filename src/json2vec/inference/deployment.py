@@ -2,6 +2,7 @@
 
 import asyncio
 import functools
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, TypeAlias, cast
 
 import fastapi
+import orjson
 import pydantic
 import torch
 import uvicorn
@@ -50,6 +52,22 @@ class Accelerator(StrEnum):
         return cast(Accelerator | None, cls._value2member_map_.get(normalized))
 
 
+class JSONBackend(StrEnum):
+    orjson = "orjson"
+    stdlib = "stdlib"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "JSONBackend | None":
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+        if normalized == "":
+            raise ValueError("json_backend must not be blank")
+
+        return cast(JSONBackend | None, cls._value2member_map_.get(normalized))
+
+
 class ErrorItem(pydantic.BaseModel):
     status_code: int
     message: str
@@ -80,6 +98,8 @@ class FastAPIRuntime:
         update_operations: list[UpdateOperation] | None = None,
         request_signature: type[pydantic.BaseModel] | None = None,
         response_signature: type[pydantic.BaseModel] | None = None,
+        monitor_queries: bool = False,
+        query_monitor_every: int = 1000,
     ) -> None:
         self.model_source: ModelSource = checkpoint
         self.accelerator = accelerator
@@ -88,6 +108,8 @@ class FastAPIRuntime:
         self.update_operations = list(update_operations or [])
         self.request_signature = request_signature
         self.response_signature = response_signature
+        self.monitor_queries = monitor_queries
+        self.query_monitor_every = query_monitor_every
         self.device: torch.device = torch.device("cpu")
 
     def setup(self) -> None:
@@ -107,7 +129,9 @@ class FastAPIRuntime:
 
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
-        self.jmespath_resolution_monitor = JMESPathResolutionMonitor()
+        self.jmespath_resolution_monitor = (
+            JMESPathResolutionMonitor(every=self.query_monitor_every) if self.monitor_queries else None
+        )
 
     def decode_payload(self, payload: dict[str, Any], context: dict[str, Any]) -> RequestItem | ErrorItem:
         try:
@@ -171,6 +195,40 @@ class FastAPIRuntime:
 
         return cast(dict[str, Any], encoded)
 
+    def encode_written_response(self, predictions: dict[Address, dict[str, Any]]) -> dict[str, Any]:
+        encoded = Prediction.denest(dict(predictions=predictions))
+        if self.response_signature is not None:
+            return self.response_signature.model_validate(encoded).model_dump(mode="json")
+
+        return cast(dict[str, Any], encoded)
+
+    def split_written_responses(
+        self,
+        predictions: dict[Address, dict[str, Any]],
+        batch_size: int,
+    ) -> list[dict[str, Any]]:
+        responses: list[dict[str, Any]] = []
+
+        def select(value: Any, index: int) -> Any:
+            if isinstance(value, dict):
+                return {key: select(item, index) for key, item in value.items()}
+
+            if isinstance(value, list):
+                if len(value) != batch_size:
+                    raise ValueError(
+                        f"cannot split batched prediction payload with leading dimension {len(value)} "
+                        f"for batch size {batch_size}"
+                    )
+                return [value[index]]
+
+            return value
+
+        for index in range(batch_size):
+            item_predictions = {address: select(payload, index) for address, payload in predictions.items()}
+            responses.append(self.encode_written_response(item_predictions))
+
+        return responses
+
     def predict_payloads(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
         contexts: list[dict[str, Any]] = [{} for _ in payloads]
         outputs: list[dict[str, Any] | None] = [None for _ in payloads]
@@ -213,6 +271,13 @@ class FastAPIRuntime:
 
             with torch.inference_mode():
                 predictions = self.model(model_input.to(self.device), strata=Strata.predict)
+
+            if self.postprocessor is None:
+                written = self.model.write(predictions=predictions)
+                for index, response in zip(valid_indices, self.split_written_responses(written, len(valid_indices))):
+                    outputs[index] = response
+
+                return [cast(dict[str, Any], output) for output in outputs]
 
             unbatched = Prediction.unbatch(predictions=predictions)
             for index, (start, stop) in zip(valid_indices, spans):
@@ -358,6 +423,11 @@ class Deployment(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("JSON2VEC_BATCH_TIMEOUT", "BATCH_TIMEOUT"),
     )
+    workers: int = Field(
+        default=1,
+        ge=1,
+        validation_alias=AliasChoices("JSON2VEC_WORKERS", "WORKERS"),
+    )
     accelerator: Accelerator = Field(
         default=Accelerator.auto,
         validation_alias=AliasChoices("JSON2VEC_ACCELERATOR", "ACCELERATOR"),
@@ -375,6 +445,19 @@ class Deployment(BaseSettings):
     log_level: str = Field(
         default="info",
         validation_alias=AliasChoices("JSON2VEC_LOG_LEVEL", "LOG_LEVEL"),
+    )
+    monitor_queries: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("JSON2VEC_MONITOR_QUERIES", "MONITOR_QUERIES"),
+    )
+    query_monitor_every: int = Field(
+        default=1000,
+        gt=0,
+        validation_alias=AliasChoices("JSON2VEC_QUERY_MONITOR_EVERY", "QUERY_MONITOR_EVERY"),
+    )
+    json_backend: JSONBackend = Field(
+        default=JSONBackend.orjson,
+        validation_alias=AliasChoices("JSON2VEC_JSON_BACKEND", "JSON_BACKEND"),
     )
 
     _request_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
@@ -470,6 +553,8 @@ class Deployment(BaseSettings):
             update_operations=self._update_operations,
             request_signature=self._request_signature,
             response_signature=self._response_signature,
+            monitor_queries=self.monitor_queries,
+            query_monitor_every=self.query_monitor_every,
         )
         batcher = FastAPIBatcher(
             runtime=runtime,
@@ -493,12 +578,25 @@ class Deployment(BaseSettings):
         async def health() -> dict[str, str]:
             return {"status": "ok"}
 
+        def json_response(content: Any, status_code: int = 200) -> fastapi.Response:
+            if self.json_backend == JSONBackend.orjson:
+                return fastapi.Response(
+                    content=orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS),
+                    status_code=status_code,
+                    media_type="application/json",
+                )
+
+            return JSONResponse(content=content, status_code=status_code)
+
         @app.post("/predict")
-        async def predict(request: fastapi.Request) -> JSONResponse:
+        async def predict(request: fastapi.Request) -> fastapi.Response:
             try:
-                payload = await request.json()
+                if self.json_backend == JSONBackend.orjson:
+                    payload = orjson.loads(await request.body())
+                else:
+                    payload = await request.json()
             except Exception as exception:
-                return JSONResponse(
+                return json_response(
                     status_code=400,
                     content={
                         "predictions": {},
@@ -511,12 +609,12 @@ class Deployment(BaseSettings):
 
             if isinstance(payload, dict):
                 response = await batcher.submit(cast(dict[str, Any], payload))
-                return JSONResponse(content=response)
+                return json_response(content=response)
 
             if isinstance(payload, list):
                 for index, item in enumerate(payload):
                     if not isinstance(item, dict):
-                        return JSONResponse(
+                        return json_response(
                             status_code=422,
                             content={
                                 "predictions": {},
@@ -531,9 +629,9 @@ class Deployment(BaseSettings):
                         )
 
                 responses = await batcher.submit_many(cast(list[dict[str, Any]], payload))
-                return JSONResponse(content=responses)
+                return json_response(content=responses)
 
-            return JSONResponse(
+            return json_response(
                 status_code=422,
                 content={
                     "predictions": {},
@@ -548,9 +646,46 @@ class Deployment(BaseSettings):
 
     def serve(self) -> None:
         """Start the FastAPI server for the configured checkpoint or model."""
+        if self.workers > 1:
+            if self.model is not None or isinstance(self.checkpoint, Model):
+                raise ValueError("workers > 1 requires a checkpoint path, not an in-memory model")
+
+            env_updates = {
+                "JSON2VEC_CHECKPOINT": str(self.checkpoint),
+                "JSON2VEC_MAX_BATCH_SIZE": str(self.max_batch_size),
+                "JSON2VEC_BATCH_TIMEOUT": str(self.batch_timeout),
+                "JSON2VEC_ACCELERATOR": self.accelerator.value,
+                "JSON2VEC_MONITOR_QUERIES": str(self.monitor_queries),
+                "JSON2VEC_QUERY_MONITOR_EVERY": str(self.query_monitor_every),
+                "JSON2VEC_JSON_BACKEND": self.json_backend.value,
+            }
+            previous = {key: os.environ.get(key) for key in env_updates}
+            try:
+                os.environ.update(env_updates)
+                uvicorn.run(
+                    "json2vec.inference.deployment:create_app",
+                    factory=True,
+                    workers=self.workers,
+                    host=self.host,
+                    port=self.port,
+                    log_level=self.log_level,
+                )
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            return
+
         uvicorn.run(
             self.app(),
             host=self.host,
             port=self.port,
             log_level=self.log_level,
         )
+
+
+def create_app() -> fastapi.FastAPI:
+    """Build a FastAPI app from deployment environment variables."""
+    return Deployment().app()

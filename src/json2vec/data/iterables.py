@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import inspect
 import random
+import re
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from functools import cache
 from typing import Annotated, Any, TypeVar, cast
 
@@ -138,6 +139,56 @@ def query(expression: str) -> jmespath.parser.ParsedResult:
     return jmespath.compile(expression=f"[*]{expression}")
 
 
+@cache
+def compile_query_extractor(expression: str) -> Callable[[Any], Any] | None:
+    """Compile a direct extractor for simple JMESPath projection queries."""
+    if not expression.startswith("[*]"):
+        return None
+
+    operations: list[tuple[str, str | None]] = [("projection", None), ("projection", None)]
+    index = 3
+    while index < len(expression):
+        if expression.startswith("[*]", index):
+            operations.append(("projection", None))
+            index += 3
+            continue
+
+        if not expression.startswith(".", index):
+            return None
+
+        match = re.match(r"\.([A-Za-z_][A-Za-z0-9_]*)", expression[index:])
+        if match is None:
+            return None
+
+        operations.append(("field", match.group(1)))
+        index += len(match.group(0))
+
+    def search(value: Any) -> Any:
+        def apply(item: Any, operation_index: int) -> Any:
+            if operation_index == len(operations):
+                return item
+
+            operation, key = operations[operation_index]
+            if operation == "field":
+                if not isinstance(item, dict) or key not in item:
+                    return None
+                return apply(item[key], operation_index + 1)
+
+            if not isinstance(item, list):
+                return None
+
+            out = []
+            for child in item:
+                result = apply(child, operation_index + 1)
+                if result is not None:
+                    out.append(result)
+            return out
+
+        return apply(value, 0)
+
+    return search
+
+
 class JMESPathResolutionMonitor(pydantic.BaseModel):
     every: Annotated[int, pydantic.Field(gt=0)] = 1000
 
@@ -192,9 +243,11 @@ def encode(
         if expression is None:
             raise ValueError(f"request '{address}' must define query")
 
-        # `request.query` is relative to a processed observation. `query(...)`
-        # adds the outer batch selector before JMESPath searches `batch`.
-        result = query(expression).search(batch)
+        # `request.query` is relative to a processed observation. Direct
+        # extractors add the outer batch selector; `query(...)` does the same
+        # before JMESPath searches `batch`.
+        extractor = compile_query_extractor(expression)
+        result = extractor(batch) if extractor is not None else query(expression).search(batch)
         if jmespath_resolution_monitor is not None:
             jmespath_resolution_monitor.observe(address=address, expression=expression, result=result)
 

@@ -21,6 +21,7 @@ def test_common_resources_are_available_from_package_root():
     assert json2vec.Postprocessor is not None
     assert json2vec.Deployment.__name__ == "Deployment"
     assert json2vec.Accelerator.cpu == "cpu"
+    assert json2vec.JSONBackend.orjson == "orjson"
     assert json2vec.Input is not None
     assert json2vec.ModelSource is not None
     assert json2vec.UpdateOperation is not None
