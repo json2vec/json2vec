@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import datetime as _datetime
 import json
+import numbers
 import re
 import warnings
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -251,13 +253,37 @@ class _Decision:
     query: str | None = None
 
 
-def _scalar_type_breakdown(values: list[Any]) -> tuple[int, int, int, int]:
-    """Return counts of (bool, int, float, str) among scalar values."""
-    n_bool = sum(1 for v in values if isinstance(v, bool))
-    n_int = sum(1 for v in values if isinstance(v, int) and not isinstance(v, bool))
-    n_float = sum(1 for v in values if isinstance(v, float))
-    n_str = sum(1 for v in values if isinstance(v, str))
-    return n_bool, n_int, n_float, n_str
+_DTYPE_KIND = {"b": "bool", "i": "int", "u": "int", "f": "float", "c": "float", "M": "datetime", "U": "str", "S": "str"}
+
+
+def _kind(value: Any) -> str:
+    """Classify a scalar as bool / int / float / str / datetime / other.
+
+    numpy and pandas scalars (``numpy.int64``, ``numpy.float64``,
+    ``numpy.bool_``, ``numpy.datetime64``) are recognized via their ``dtype``
+    kind code, and ``pandas.Timestamp`` via ``datetime.date``, so data read from
+    frames classifies the same as plain Python values — real datasets are rarely
+    made of bare ``int``/``float``.
+    """
+    kind_code = getattr(getattr(value, "dtype", None), "kind", None)
+    if kind_code in _DTYPE_KIND:
+        return _DTYPE_KIND[kind_code]
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, _datetime.date):
+        return "datetime"
+    if isinstance(value, numbers.Integral):
+        return "int"
+    if isinstance(value, numbers.Real):
+        return "float"
+    return "other"
+
+
+def _kind_counts(values: list[Any]) -> Counter:
+    """Count value kinds (see :func:`_kind`) across a column."""
+    return Counter(_kind(v) for v in values)
 
 
 def _looks_categorical(distinct: int, observed: int, config: InferenceConfig) -> bool:
@@ -276,7 +302,10 @@ def _decide_scalar(
     values = column.scalars
     observed = len(values)
     distinct = len({v for v in values})
-    n_bool, n_int, n_float, n_str = _scalar_type_breakdown(values)
+    counts = _kind_counts(values)
+    n_bool, n_int, n_float, n_str, n_datetime = (
+        counts["bool"], counts["int"], counts["float"], counts["str"], counts["datetime"]
+    )
     # `target=True` is exactly `p_prune=1.0`; set the declared field directly.
     p_prune = 1.0 if column.key in config._targets else 0.0
 
@@ -285,6 +314,19 @@ def _decide_scalar(
         return _Decision(
             Category(name=name, query=query, max_vocab_size=2, p_prune=p_prune),
             reason=f"boolean column ({observed} values)",
+        )
+
+    # Native datetime/date objects (Polars/pandas frames, RelBench records).
+    if n_datetime and n_datetime / observed >= config.date_parse_min_ratio:
+        has_time = any(
+            isinstance(v, _datetime.datetime) and (v.hour or v.minute or v.second) for v in values
+        )
+        parts = ["month_of_year", "day_of_month", "day_of_week"]
+        if has_time:
+            parts.append("hour_of_day")
+        return _Decision(
+            DateParts(name=name, query=query, dateparts=parts, p_prune=p_prune),
+            reason=f"datetime objects ({n_datetime}/{observed}){' with time' if has_time else ''}",
         )
 
     # Numeric columns: decide quantity vs. coded identifier.
@@ -335,7 +377,7 @@ def _decide_scalar(
             reason=f"string category ({distinct} distinct)",
         )
 
-    return _Decision(None, reason=f"mixed/empty scalar types (bool={n_bool} int={n_int} float={n_float} str={n_str})")
+    return _Decision(None, reason=f"mixed/empty scalar types ({dict(counts)})")
 
 
 def _decide_scalar_list(
@@ -348,8 +390,9 @@ def _decide_scalar_list(
     items = column.list_scalar_items
     if not items:
         return _Decision(None, reason="empty scalar lists")
-    n_bool, n_int, n_float, n_str = _scalar_type_breakdown(items)
-    numeric = (n_int + n_float)
+    counts = _kind_counts(items)
+    n_str = counts["str"]
+    numeric = counts["int"] + counts["float"]
     p_prune = 1.0 if column.key in config._targets else 0.0
 
     # All-strings (or string-dominant) lists become a multi-label Set.
