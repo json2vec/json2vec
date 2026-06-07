@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from multiprocessing import Manager
+import multiprocessing
 from multiprocessing.managers import ListProxy, SyncManager
 from typing import TYPE_CHECKING, Any, cast
 
@@ -14,6 +14,21 @@ from json2vec.structs.tree import Address
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
+
+_manager: SyncManager | None = None
+
+
+def shared_manager() -> SyncManager:
+    """Return the process-wide manager backing every online vocabulary.
+
+    A manager exists so that DataLoader workers share one growing vocabulary.
+    A single manager process can host the proxies for every field, so it is
+    created lazily and reused instead of spawning one manager per field.
+    """
+    global _manager
+    if _manager is None:
+        _manager = multiprocessing.Manager()
+    return _manager
 
 
 class Vocabulary:
@@ -71,9 +86,10 @@ class Vocabulary:
 
             return self.unavailable_index
 
-        # OK, it is not known locally... We will lock the global state and update the local vocab
+        # Not known locally: take the shared lock and reconcile against any words
+        # other workers appended (refresh copies only when the master grew).
         with self.lock:
-            self.refresh(force=True)
+            self.refresh()
 
             if word in self.vocab:
                 return cast(int, self.vocab.index(word))
@@ -98,12 +114,12 @@ class OnlineVocabularyModel(torch.nn.Module):
     def __init__(self, max_vocab_size: int):
         super().__init__()
 
+        manager = shared_manager()
         self.max_vocab_size: int = max_vocab_size
-        self.manager: SyncManager = Manager()
-        self.master: ListProxy[str] = self.manager.list()
-        self.lock: Any = self.manager.Lock()
-        self.proposals: ListProxy[str] = self.manager.list()
-        self.proposal_lock: Any = self.manager.Lock()
+        self.master: ListProxy[str] = manager.list()
+        self.lock: Any = manager.Lock()
+        self.proposals: ListProxy[str] = manager.list()
+        self.proposal_lock: Any = manager.Lock()
         self._snapshot_cache: list[str] | None = None
         self._snapshot_size: int = -1
 
@@ -124,8 +140,9 @@ class OnlineVocabularyModel(torch.nn.Module):
         key = prefix + "vocabulary"
         if key in state_dict:
             vocab: list[str] = state_dict.pop(key)
-            self.master: ListProxy[str] = self.manager.list(vocab)
-            self.proposals: ListProxy[str] = self.manager.list()
+            manager = shared_manager()
+            self.master: ListProxy[str] = manager.list(vocab)
+            self.proposals: ListProxy[str] = manager.list()
             self._snapshot_cache = None
             self._snapshot_size = -1
         else:
