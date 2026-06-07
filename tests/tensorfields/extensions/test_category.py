@@ -50,29 +50,8 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
     }
 
 
-class _DummyState:
-    def __init__(self, max_vocab_size: int = 8):
-        self.vocab: list[str] = []
-        self.max_vocab_size = max_vocab_size
-
-    def __call__(self, word: str, update: bool = True) -> int:
-        if word is None:
-            return None
-
-        if word in self.vocab:
-            return self.vocab.index(word)
-
-        if not update:
-            return self.max_vocab_size
-
-        if len(self.vocab) >= self.max_vocab_size:
-            return self.max_vocab_size
-
-        self.vocab.append(word)
-        return self.vocab.index(word)
-
-    def __len__(self) -> int:
-        return len(self.vocab)
+def _state(max_vocab_size: int = 8):
+    return OnlineVocabularyModel(max_vocab_size=max_vocab_size).state
 
 
 def test_category_vocabulary_refreshes_stale_validation_snapshot():
@@ -80,8 +59,11 @@ def test_category_vocabulary_refreshes_stale_validation_snapshot():
     validation_state = vocabulary.state
     training_state = vocabulary.state
 
-    assert training_state("ALPHA", update=True) == 0
-    assert validation_state("ALPHA", update=False) == 0
+    training_state.reserve("ALPHA", learn=True)
+    validation_state.reserve("ALPHA", learn=False)
+
+    assert training_state.encode("ALPHA") == 0
+    assert validation_state.encode("ALPHA") == 0
     assert len(validation_state) == 1
 
 
@@ -90,15 +72,40 @@ def test_category_vocabulary_nonzero_rank_proposes_unseen_tokens():
     state = vocabulary.state
     state.configure_distributed(global_rank=1, world_size=2)
 
-    assert state("ALPHA", update=True) == state.unavailable_index
+    state.reserve("ALPHA", learn=True)
+
+    assert state.encode("ALPHA") == state.unavailable_index
     assert vocabulary.snapshot() == []
     assert list(vocabulary.proposals) == ["ALPHA"]
+
+
+def test_category_vocabulary_reserves_nested_tokens_in_batch():
+    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    state = vocabulary.state
+
+    state.reserve([[["ALPHA", None, "BETA"], ["ALPHA"]]], learn=True)
+
+    assert vocabulary.snapshot() == ["ALPHA", "BETA"]
+    assert state.encode("ALPHA") == 0
+    assert state.encode("BETA") == 1
+
+
+def test_category_vocabulary_batch_proposals_are_unique_per_call():
+    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    state = vocabulary.state
+    state.configure_distributed(global_rank=1, world_size=2)
+
+    state.reserve([["ALPHA", "ALPHA"], ["BETA"]], learn=True)
+
+    assert state.encode("ALPHA") == state.unavailable_index
+    assert vocabulary.snapshot() == []
+    assert list(vocabulary.proposals) == ["ALPHA", "BETA"]
 
 
 def test_category_tensorfield_separates_state_and_content():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     hyperparameters = structure
-    state = _DummyState()
+    state = _state()
 
     field = TensorField.new(
         values=[[["ALPHA", None]], [["BETA"]]],
@@ -133,7 +140,7 @@ def test_category_tensorfield_separates_state_and_content():
 def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     hyperparameters = structure
-    state = _DummyState(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
     TensorField.new(
         values=[[["ALPHA"]]],
@@ -164,7 +171,7 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
 def test_category_tensorfield_can_simulate_unavailable_during_training():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=1.0))
     hyperparameters = structure
-    state = _DummyState(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
     field = TensorField.new(
         values=[[["ALPHA", None]], [["BETA"]]],
@@ -293,7 +300,7 @@ class _TrackingModule:
 def test_category_loss_does_not_mutate_counters():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     hyperparameters = structure
-    state = _DummyState()
+    state = _state()
 
     field = TensorField.new(
         values=[[["ALPHA", None]], [["BETA"]]],

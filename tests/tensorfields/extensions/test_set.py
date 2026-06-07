@@ -5,6 +5,7 @@ from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel
 
 ADDRESS = "root/items/tags"
 
@@ -43,26 +44,8 @@ def _structure_payload(
     }
 
 
-class _DummyState:
-    def __init__(self, max_vocab_size: int = 8):
-        self.vocab: list[str] = []
-        self.max_vocab_size = max_vocab_size
-
-    def __call__(self, word: str, update: bool = True) -> int:
-        if word in self.vocab:
-            return self.vocab.index(word)
-
-        if not update:
-            return self.max_vocab_size
-
-        if len(self.vocab) >= self.max_vocab_size:
-            return self.max_vocab_size
-
-        self.vocab.append(word)
-        return self.vocab.index(word)
-
-    def __len__(self) -> int:
-        return len(self.vocab)
+def _state(max_vocab_size: int = 8):
+    return OnlineVocabularyModel(max_vocab_size=max_vocab_size).state
 
 
 def test_set_request_is_available_in_hyperparameters():
@@ -81,7 +64,7 @@ def test_set_request_accepts_threshold():
 
 def test_set_tensorfield_encodes_multi_hot_content():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _DummyState()
+    state = _state()
 
     field = TensorField.new(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
@@ -108,9 +91,24 @@ def test_set_tensorfield_encodes_multi_hot_content():
     assert field.content[1, 0, 0, 1] == 1.0
 
 
+def test_set_tensorfield_reserves_real_vocabulary_in_batch():
+    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    vocabulary = OnlineVocabularyModel(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+
+    TensorField.new(
+        values=[[[["ALPHA", "BETA"], ["ALPHA"]]], [[["BETA"]]]],
+        address=ADDRESS,
+        hyperparameters=structure,
+        strata=Strata.train,
+        interprocess_encoding_context=vocabulary.state,
+    )
+
+    assert vocabulary.snapshot() == ["ALPHA", "BETA"]
+
+
 def test_set_tensorfield_marks_oov_as_unavailable_without_changing_state():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _DummyState(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
     TensorField.new(
         values=[[[["ALPHA"]]]],
@@ -222,7 +220,7 @@ def test_set_write_filters_content_when_threshold_is_configured():
 
 def test_set_loss_does_not_mutate_counter():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _DummyState()
+    state = _state()
     field = TensorField.new(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
         address=ADDRESS,

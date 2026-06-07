@@ -55,14 +55,14 @@ def _items(value: Any) -> Iterable[Any]:
     return (value,)
 
 
-def _encode_set(value: Any, state: VocabularyState, update: bool, n_tokens: int) -> np.ndarray:
+def _encode_set(value: Any, state: VocabularyState, n_tokens: int) -> np.ndarray:
     encoded = np.zeros(n_tokens, dtype=np.float32)
 
     for item in _items(value):
         if item is None:
             continue
 
-        index = state(item, update=update)
+        index = state.encode(item)
         if index is not None:
             encoded[index] = 1.0
 
@@ -89,6 +89,9 @@ class TensorField(TensorFieldBase):
         request: Request = hyperparameters.requests[address]
         shape: tuple[int, ...] = (len(values), *hyperparameters.shapes[address])
         n_tokens: int = request.max_vocab_size + 1
+        learn = strata == Strata.train
+
+        interprocess_encoding_context.reserve(values, learn=learn)
 
         data, states = pad(
             nested=values,
@@ -101,7 +104,6 @@ class TensorField(TensorFieldBase):
             encode=lambda value: _encode_set(
                 value=value,
                 state=interprocess_encoding_context,
-                update=(strata == Strata.train),
                 n_tokens=n_tokens,
             ),
         )

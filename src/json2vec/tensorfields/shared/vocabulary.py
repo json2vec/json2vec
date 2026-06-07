@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partialmethod
 from multiprocessing import Manager
@@ -39,9 +40,9 @@ class _LocalLock:
 
 @dataclass
 class _VocabularyStorage:
-    master: list[str] | ListProxy[str]
+    master: list[Any] | ListProxy[Any]
     lock: Any
-    proposals: list[str] | ListProxy[str]
+    proposals: list[Any] | ListProxy[Any]
     proposal_lock: Any
 
 
@@ -55,10 +56,10 @@ class VocabularyState:
         self.storage = storage
         self.max_vocab_size: int = max_vocab_size
         self._share = share
-        self.vocab: list[str] = []
-        self.index: dict[str, int] = {}
+        self.vocab: list[Any] = []
+        self.index: dict[Any, int] = {}
+        self._proposed: set[Any] = set()
         self.global_rank: int = 0
-        self.world_size: int = 1
         self.refresh(force=True)
 
     def __getstate__(self) -> dict[str, Any]:
@@ -71,7 +72,6 @@ class VocabularyState:
 
     def configure_distributed(self, global_rank: int = 0, world_size: int = 1) -> None:
         self.global_rank = global_rank
-        self.world_size = world_size
 
     def share(self) -> None:
         if self._share is None:
@@ -81,14 +81,29 @@ class VocabularyState:
         self.refresh(force=True)
 
     def refresh(self, force: bool = False) -> None:
-        if not force and len(self.master) == len(self.vocab):
+        master_size = len(self.master)
+        vocab_size = len(self.vocab)
+
+        if not force and master_size == vocab_size:
             return
 
-        self.vocab = list(self.master)
-        self.index = {word: index for index, word in enumerate(self.vocab)}
+        if force or master_size < vocab_size:
+            self.vocab = list(self.master)
+            self.index = {word: index for index, word in enumerate(self.vocab)}
+            self._proposed.difference_update(self.index)
+            return
+
+        for word in self.master[vocab_size:]:
+            if word in self.index:
+                continue
+
+            self.index[word] = len(self.vocab)
+            self.vocab.append(word)
+
+        self._proposed.difference_update(self.index)
 
     @property
-    def master(self) -> list[str] | ListProxy[str]:
+    def master(self) -> list[Any] | ListProxy[Any]:
         return self.storage.master
 
     @property
@@ -96,7 +111,7 @@ class VocabularyState:
         return self.storage.lock
 
     @property
-    def proposals(self) -> list[str] | ListProxy[str]:
+    def proposals(self) -> list[Any] | ListProxy[Any]:
         return self.storage.proposals
 
     @property
@@ -107,47 +122,80 @@ class VocabularyState:
     def unavailable_index(self) -> int:
         return self.max_vocab_size
 
-    def __call__(self, word: str, update: bool) -> int | None:
+    def reserve(self, values: Any, *, learn: bool) -> None:
+        """Reserve every scalar token found in a JSON-like nested value."""
+        if not learn:
+            self.refresh()
+            return
+
+        candidates: list[Any] = []
+        seen: set[Any] = set()
+        for word in self._tokens(values):
+            if word is None or word in self.index or word in seen:
+                continue
+
+            seen.add(word)
+            candidates.append(word)
+
+        if not candidates:
+            return
+
+        if self.global_rank != 0:
+            proposals = []
+            for word in candidates:
+                if word in self._proposed:
+                    continue
+
+                self._proposed.add(word)
+                proposals.append(word)
+
+            if not proposals:
+                return
+
+            with self.proposal_lock:
+                self.proposals.extend(proposals)
+
+            return
+
+        with self.lock:
+            self.refresh()
+            for word in candidates:
+                if word in self.index:
+                    continue
+
+                if len(self.vocab) >= self.max_vocab_size:
+                    break
+
+                self.index[word] = len(self.vocab)
+                self.vocab.append(word)
+                self.master.append(word)
+
+    def encode(self, word: Any) -> int | None:
         if word is None:
             return None
 
-        if word in self.index:
-            return self.index[word]
+        if word in self._proposed:
+            return self.unavailable_index
 
-        if not update:
+        if word not in self.index:
             self.refresh()
-            if word in self.index:
-                return self.index[word]
 
-            # Validation/test/inference should preserve "field exists" semantics even when
-            # the label was never seen during training.
-            return self.unavailable_index
+        return self.index.get(word, self.unavailable_index)
 
-        if self.global_rank != 0:
-            with self.proposal_lock:
-                if word not in self.proposals:
-                    self.proposals.append(word)
+    def _tokens(self, values: Any) -> Iterable[Any]:
+        if values is None:
+            return
 
-            return self.unavailable_index
+        if isinstance(values, str | bytes):
+            yield values
+            return
 
-        # OK, it is not known locally... We will lock the global state and update the local vocab
-        with self.lock:
-            self.refresh(force=True)
+        if isinstance(values, Iterable):
+            for value in values:
+                yield from self._tokens(value)
+            return
 
-            if word in self.index:
-                return self.index[word]
-
-            if len(self.vocab) >= self.max_vocab_size:
-                # Once the learned vocabulary is full, new labels also fall back to the
-                # reserved unavailable bucket instead of evicting existing ids.
-                return self.unavailable_index
-
-            if word not in self.vocab:
-                self.vocab.append(word)
-                self.index[word] = len(self.vocab) - 1
-                self.master.append(word)
-
-        return self.index[word]
+        yield values
 
     def __len__(self) -> int:
         self.refresh()
@@ -172,11 +220,11 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         self.max_vocab_size: int = max_vocab_size
         self.manager: SyncManager | None = None
-        self.master: list[str] | ListProxy[str] = []
+        self.master: list[Any] | ListProxy[Any] = []
         self.lock: Any = _LocalLock()
-        self.proposals: list[str] | ListProxy[str] = []
+        self.proposals: list[Any] | ListProxy[Any] = []
         self.proposal_lock: Any = _LocalLock()
-        self._snapshot_cache: list[str] | None = None
+        self._snapshot_cache: list[Any] | None = None
         self._snapshot_size: int = -1
 
     @property
@@ -242,7 +290,7 @@ class OnlineVocabularyModel(torch.nn.Module):
     ):
         key = prefix + "vocabulary"
         if key in state_dict:
-            vocab: list[str] = state_dict.pop(key)
+            vocab: list[Any] = state_dict.pop(key)
             self.load_snapshot(vocab)
             self._snapshot_cache = None
             self._snapshot_size = -1
@@ -267,7 +315,7 @@ class OnlineVocabularyModel(torch.nn.Module):
             share=self._shared_state,
         )
 
-    def snapshot(self) -> list[str]:
+    def snapshot(self) -> list[Any]:
         size = len(self.master)
         if self._snapshot_cache is None or self._snapshot_size != size:
             self._snapshot_cache = list(self.master)
@@ -275,14 +323,14 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         return self._snapshot_cache
 
-    def drain_proposals(self) -> list[str]:
+    def drain_proposals(self) -> list[Any]:
         with self.proposal_lock:
             proposals = list(self.proposals)
             self.proposals[:] = []
 
         return proposals
 
-    def extend(self, proposals: list[str]) -> tuple[int, int]:
+    def extend(self, proposals: list[Any]) -> tuple[int, int]:
         accepted = 0
         rejected = 0
 
@@ -308,7 +356,7 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         return accepted, rejected
 
-    def load_snapshot(self, vocabulary: list[str]) -> None:
+    def load_snapshot(self, vocabulary: list[Any]) -> None:
         with self.lock:
             self.master[:] = vocabulary[: self.max_vocab_size]
 

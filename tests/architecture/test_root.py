@@ -369,7 +369,8 @@ def test_online_vocabulary_model_uses_local_storage_until_shared():
 
     local_state = vocab.state
     assert isinstance(local_state.master, list)
-    assert local_state("ALPHA", update=True) == 0
+    local_state.reserve("ALPHA", learn=True)
+    assert local_state.encode("ALPHA") == 0
     assert vocab.snapshot() == ["ALPHA"]
 
     vocab.share()
@@ -379,7 +380,8 @@ def test_online_vocabulary_model_uses_local_storage_until_shared():
     assert not isinstance(vocab.state.master, list)
 
     shared_state = vocab.state
-    assert shared_state("BETA", update=True) == 1
+    shared_state.reserve("BETA", learn=True)
+    assert shared_state.encode("BETA") == 1
     assert vocab.snapshot() == ["ALPHA", "BETA"]
 
     vocab.freeze()

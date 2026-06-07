@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
@@ -98,8 +97,10 @@ class TensorField(TensorFieldBase):
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        learn = strata == Strata.train
 
-        tokens = apply(values, partial(interprocess_encoding_context, update=(strata == Strata.train)))
+        interprocess_encoding_context.reserve(values, learn=learn)
+        tokens = apply(values, interprocess_encoding_context.encode)
 
         if len(interprocess_encoding_context) > (max_vocab_size := hyperparameters.requests[address].max_vocab_size):
             logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
