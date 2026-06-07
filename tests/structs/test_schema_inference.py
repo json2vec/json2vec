@@ -118,6 +118,20 @@ def test_variable_width_numeric_list_is_skipped_with_warning():
     assert any(field.name == "ok" for field in fields)
 
 
+def test_fixed_length_array_is_not_padded_to_a_power_of_two():
+    # Every record has exactly 5 items; max_length should be 5, not rounded to 8.
+    records = [{"m": [{"v": float(j)} for j in range(5)]} for _ in range(20)]
+    fields = _by_name(infer_schema(records))
+    assert fields["m"].max_length == 5
+
+
+def test_array_length_uses_the_configured_quantile():
+    # Lengths 1..10 uniformly; the p50 length is 5-6, well under the max of 10.
+    records = [{"m": [{"v": 1.0}] * n} for n in range(1, 11)]
+    fields = _by_name(infer_schema(records, array_length_quantile=0.5))
+    assert fields["m"].max_length <= 6
+
+
 def test_list_of_objects_becomes_array_with_inferred_queries():
     records = [
         {"items": [{"sku": "A", "price": 1.0}, {"sku": "B", "price": 2.0}]},

@@ -425,8 +425,12 @@ def _infer_array_length(lengths: list[int], config: InferenceConfig) -> int:
         return 1
     ordered = sorted(lengths)
     index = min(len(ordered) - 1, int(round(config.array_length_quantile * (len(ordered) - 1))))
+    # Use the observed quantile length directly. Sequence length does not need to
+    # be a power of two (that only matters for d_model / heads), so rounding up
+    # would only pad fixed-length arrays — e.g. a constant length of 5 should be
+    # max_length=5, not 8.
     chosen = max(1, ordered[index])
-    return max(1, min(config.max_array_length, _next_power_of_two(chosen)))
+    return max(1, min(config.max_array_length, chosen))
 
 
 # --------------------------------------------------------------------------- #
