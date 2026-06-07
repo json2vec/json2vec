@@ -81,11 +81,13 @@ def test_category_vocabulary_refreshes_stale_validation_snapshot():
     lock = Lock()
     proposals: list[str] = []
     proposal_lock = Lock()
+    revision = SimpleNamespace(value=0)
     validation_state = Vocabulary(
         master=master,
         lock=lock,
         proposals=proposals,
         proposal_lock=proposal_lock,
+        revision=revision,
         max_vocab_size=8,
     )
     training_state = Vocabulary(
@@ -93,6 +95,7 @@ def test_category_vocabulary_refreshes_stale_validation_snapshot():
         lock=lock,
         proposals=proposals,
         proposal_lock=proposal_lock,
+        revision=revision,
         max_vocab_size=8,
     )
 
@@ -109,6 +112,7 @@ def test_category_vocabulary_nonzero_rank_proposes_unseen_tokens():
         lock=Lock(),
         proposals=proposals,
         proposal_lock=Lock(),
+        revision=SimpleNamespace(value=0),
         max_vocab_size=8,
     )
     state.configure_distributed(global_rank=1, world_size=2)

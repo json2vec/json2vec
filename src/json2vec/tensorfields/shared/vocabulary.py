@@ -38,14 +38,17 @@ class Vocabulary:
         lock: Any,
         proposals: ListProxy,
         proposal_lock: Any,
+        revision: Any,
         max_vocab_size: int,
     ):
         self.master: ListProxy[str] = master
         self.lock: Any = lock
         self.proposals: ListProxy[str] = proposals
         self.proposal_lock: Any = proposal_lock
+        self.revision: Any = revision
         self.max_vocab_size: int = max_vocab_size
         self.vocab: OrderedSet[str] = OrderedSet(list(master))
+        self.seen_revision: int = revision.value
         self.global_rank: int = 0
         self.world_size: int = 1
 
@@ -54,10 +57,14 @@ class Vocabulary:
         self.world_size = world_size
 
     def refresh(self, force: bool = False) -> None:
-        if not force and len(self.master) == len(self.vocab):
+        # The revision bumps on every write to `master`, so it detects content
+        # changes that length alone misses (e.g. a same-length `load_snapshot`).
+        revision = self.revision.value
+        if not force and revision == self.seen_revision:
             return
 
         self.vocab = OrderedSet(list(self.master))
+        self.seen_revision = revision
 
     @property
     def unavailable_index(self) -> int:
@@ -102,6 +109,8 @@ class Vocabulary:
             if word not in self.vocab:
                 self.vocab.add(word)
                 self.master.append(word)
+                self.seen_revision = self.revision.value + 1
+                self.revision.value = self.seen_revision
 
         return cast(int, self.vocab.index(word))
 
@@ -120,6 +129,7 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.lock: Any = manager.Lock()
         self.proposals: ListProxy[str] = manager.list()
         self.proposal_lock: Any = manager.Lock()
+        self.revision: Any = manager.Value("q", 0)
         self._snapshot_cache: list[str] | None = None
         self._snapshot_size: int = -1
 
@@ -143,6 +153,7 @@ class OnlineVocabularyModel(torch.nn.Module):
             manager = shared_manager()
             self.master: ListProxy[str] = manager.list(vocab)
             self.proposals: ListProxy[str] = manager.list()
+            self.revision.value += 1
             self._snapshot_cache = None
             self._snapshot_size = -1
         else:
@@ -165,6 +176,7 @@ class OnlineVocabularyModel(torch.nn.Module):
             lock=self.lock,
             proposals=self.proposals,
             proposal_lock=self.proposal_lock,
+            revision=self.revision,
             max_vocab_size=self.max_vocab_size,
         )
 
@@ -201,6 +213,9 @@ class OnlineVocabularyModel(torch.nn.Module):
                 self.master.append(word)
                 accepted += 1
 
+            if accepted:
+                self.revision.value += 1
+
         if accepted:
             self._snapshot_cache = None
             self._snapshot_size = -1
@@ -210,6 +225,7 @@ class OnlineVocabularyModel(torch.nn.Module):
     def load_snapshot(self, vocabulary: list[str]) -> None:
         with self.lock:
             self.master[:] = vocabulary[: self.max_vocab_size]
+            self.revision.value += 1
 
         with self.proposal_lock:
             self.proposals[:] = []

@@ -21,6 +21,18 @@ def test_full_vocabulary_falls_back_to_unavailable_bucket():
     assert vocab("overflow", update=True) == vocab.unavailable_index
 
 
+def test_refresh_detects_same_length_snapshot_replacement():
+    # load_snapshot can replace the vocabulary with a different list of the same
+    # length; a length-only staleness check would miss it and double-append.
+    model = OnlineVocabularyModel(max_vocab_size=8)
+    state = model.state
+
+    assert state("A", update=True) == 0
+    model.load_snapshot(["B"])
+    assert state("B", update=True) == 0
+    assert list(model.master) == ["B"]
+
+
 def test_all_vocabularies_share_one_manager():
     a = OnlineVocabularyModel(max_vocab_size=8)
     b = OnlineVocabularyModel(max_vocab_size=8)
