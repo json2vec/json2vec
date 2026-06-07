@@ -289,8 +289,6 @@ class Model(lit.LightningModule, Renderable):
                 wrapping and manually all-reduce gradients (required because
                 TorchJD is incompatible with the DDP reducer). ``\"off\"`` disables
                 JD and falls back to ``loss.sum()`` backward with stock DDP / FSDP.
-                #TODO Ensure opt-in and opt-out is cleanly configurable
-                #TODO Examine UPGrad implementation for whether user-configured weighting of loss has any impact on descent
 
         Returns:
             A compiled `Model` with modules built for the schema.
