@@ -1,7 +1,6 @@
 # ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -321,6 +320,10 @@ def loss(
         (prediction.address, strata, Metric.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
+    module.track(
+        (prediction.address, strata, "vocabulary", "size"),
+        value=state_inputs.new_tensor(len(embedder.vocab.snapshot()), dtype=torch.float32),
+    )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
@@ -336,11 +339,6 @@ def loss(
     known = valued & content_targets.lt(n_content_tokens)
     unavailable = valued & content_targets.eq(n_content_tokens)
 
-    module.track(
-        (prediction.address, strata, Metric.accuracy, "unavailable_rate"),
-        value=unavailable.float().sum() / valued.float().sum().clamp_min(1.0),
-    )
-
     content_loss_sum = content_inputs.new_zeros(())
     if known.any():
         known_losses = torch.nn.functional.cross_entropy(
@@ -349,25 +347,11 @@ def loss(
             weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
             reduction="none",
         )
-        module.track(
-            (prediction.address, strata, Metric.loss, "content_known"),
-            value=known_losses.mean(),
-        )
         content_loss_sum = content_loss_sum + known_losses.sum()
 
     if unavailable.any():
         unavailable_losses = -torch.nn.functional.log_softmax(content_inputs[unavailable], dim=1).mean(dim=1)
-        unavailable_loss = unavailable_losses.mean()
-        module.track(
-            (prediction.address, strata, Metric.loss, "content_unavailable"),
-            value=unavailable_loss,
-        )
         content_loss_sum = content_loss_sum + unavailable_losses.sum()
-
-        module.track(
-            (prediction.address, strata, Metric.loss, "content_unavailable_kl"),
-            value=unavailable_loss - math.log(n_content_tokens),
-        )
 
     content_loss = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),

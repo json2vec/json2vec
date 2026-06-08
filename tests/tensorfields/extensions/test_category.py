@@ -4,7 +4,7 @@ import polars as pl
 import torch
 from tensordict import TensorDict
 
-from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
+from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.category import (
@@ -405,6 +405,6 @@ def test_category_loss_uses_uniform_target_for_unavailable_content():
 
     assert torch.isfinite(result)
     assert torch.allclose(
-        module.tracked[(ADDRESS, Strata.validate, Metric.loss, "content_unavailable_kl")],
+        module.tracked[(ADDRESS, Strata.validate, "vocabulary", "size")],
         torch.tensor(0.0),
     )

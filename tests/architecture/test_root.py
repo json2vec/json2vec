@@ -9,6 +9,7 @@ import torch
 import json2vec as j2v
 from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from json2vec.data.iterables import encode
+from json2vec.logging.throughput import ThroughputLogger
 from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
@@ -273,6 +274,7 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
 
     assert any(isinstance(callback, RuntimePlacementCallback) for callback in callbacks)
     assert any(isinstance(callback, MutationLockCallback) for callback in callbacks)
+    assert any(isinstance(callback, ThroughputLogger) for callback in callbacks)
     assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
     assert any(isinstance(callback, CounterUpdateCallback) for callback in callbacks)
     assert callback_types == sorted(
@@ -324,9 +326,13 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     runtime_placement_callbacks = [
         callback for callback in model.configure_callbacks() if isinstance(callback, RuntimePlacementCallback)
     ]
+    throughput_callbacks = [
+        callback for callback in model.configure_callbacks() if isinstance(callback, ThroughputLogger)
+    ]
 
     assert len(runtime_placement_callbacks) == 1
     assert len(mutation_lock_callbacks) == 1
+    assert len(throughput_callbacks) == 1
     assert len(vocabulary_callbacks) == 1
     assert len(counter_callbacks) == 1
 
@@ -343,6 +349,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
             "callbacks": [
                 RuntimePlacementCallback(),
                 MutationLockCallback(),
+                ThroughputLogger(),
                 VocabularySyncCallback(),
                 CounterUpdateCallback(),
             ]
