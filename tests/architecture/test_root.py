@@ -450,12 +450,12 @@ def test_training_counters_observe_all_encoded_fields() -> None:
 
     valued = field.state.eq(Tokens.valued.value)
     expected_content_counts = torch.ones(
-        hyperparameters.requests[address].max_vocab_size + 1,
+        hyperparameters.requests[address].max_vocab_size,
         dtype=torch.int64,
     )
     expected_content_counts += torch.bincount(
         field.content.masked_select(valued).reshape(-1),
-        minlength=hyperparameters.requests[address].max_vocab_size + 1,
+        minlength=hyperparameters.requests[address].max_vocab_size,
     )
     assert torch.equal(embedder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
 
@@ -472,12 +472,12 @@ def test_training_counters_observe_all_encoded_fields() -> None:
 
     target_valued = target_field.targets[TensorKey.state].eq(Tokens.valued.value)
     expected_target_content_counts = torch.ones(
-        hyperparameters.requests[target_address].max_vocab_size + 1,
+        hyperparameters.requests[target_address].max_vocab_size,
         dtype=torch.int64,
     )
     expected_target_content_counts += torch.bincount(
         target_field.targets[TensorKey.content].masked_select(target_valued).reshape(-1),
-        minlength=hyperparameters.requests[target_address].max_vocab_size + 1,
+        minlength=hyperparameters.requests[target_address].max_vocab_size,
     )
     assert torch.equal(
         target_embedder.counters[TensorKey.content.name].counts.cpu(),

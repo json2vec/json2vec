@@ -84,7 +84,7 @@ def test_set_tensorfield_encodes_multi_hot_content():
             dtype=torch.int64,
         ),
     )
-    assert field.content.shape == (2, 1, 2, structure.requests[ADDRESS].max_vocab_size + 1)
+    assert field.content.shape == (2, 1, 2, structure.requests[ADDRESS].max_vocab_size)
     assert field.content[0, 0, 0, 0] == 1.0
     assert field.content[0, 0, 0, 1] == 1.0
     assert field.content[0, 0, 1].sum() == 0.0
@@ -106,7 +106,7 @@ def test_set_tensorfield_reserves_real_vocabulary_in_batch():
     assert vocabulary.snapshot() == ["ALPHA", "BETA"]
 
 
-def test_set_tensorfield_marks_oov_as_unavailable_without_changing_state():
+def test_set_tensorfield_zeros_oov_content_without_changing_state():
     structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
 
@@ -126,10 +126,24 @@ def test_set_tensorfield_marks_oov_as_unavailable_without_changing_state():
         interprocess_encoding_context=state,
     )
 
-    unavailable = structure.requests[ADDRESS].max_vocab_size
     assert field.state[0, 0, 0] == Tokens.valued.value
-    assert field.content[0, 0, 0, unavailable] == 1.0
-    assert field.content[0, 0, 0, :unavailable].sum() == 0.0
+    assert field.content[0, 0, 0].sum() == 0.0
+
+
+def test_set_tensorfield_simulated_unavailable_zeros_content():
+    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=1.0))
+    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+
+    field = TensorField.new(
+        values=[[[["ALPHA", "BETA"]]]],
+        address=ADDRESS,
+        hyperparameters=structure,
+        strata=Strata.train,
+        interprocess_encoding_context=state,
+    )
+
+    assert field.content.shape[-1] == structure.requests[ADDRESS].max_vocab_size
+    assert field.content[0, 0, 0].sum() == 0.0
 
 
 class _DummyVocab:

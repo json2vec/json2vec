@@ -44,7 +44,9 @@ class Counter(torch.nn.Module):
     @torch.no_grad()
     def observe(self, values: torch.Tensor) -> torch.Tensor:
         if self.training and not self.is_full:
-            update = torch.bincount(values.view(-1), minlength=self.counts.shape[0]).to(self.counts.dtype)
+            observed = values.view(-1)
+            observed = observed.masked_select(observed.ge(0) & observed.lt(self.size))
+            update = torch.bincount(observed, minlength=self.counts.shape[0]).to(self.counts.dtype)
 
             remaining = torch.iinfo(self.counts.dtype).max - self.counts
             could_overflow = bool((update >= remaining).any().item())

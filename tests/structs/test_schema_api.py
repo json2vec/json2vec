@@ -260,7 +260,7 @@ def test_model_update_applies_validated_values_before_rebuilding_modules():
     assert request.topk == [2, 3]
     assert model.nodes[address] is not before
     assert model.nodes[address].embedder.max_vocab_size == 16
-    assert model.nodes[address].embedder.embeddings[TensorKey.content.name].num_embeddings == 17
+    assert model.nodes[address].embedder.embeddings[TensorKey.content.name].num_embeddings == 16
 
 
 def test_model_update_uses_current_schema_when_selection_cache_is_stale():
