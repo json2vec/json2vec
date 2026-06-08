@@ -90,5 +90,13 @@ def _is_assigned_to_worker(shard_key: str, worker_id: int, num_workers: int) -> 
     return owner == worker_id
 
 
+def share_interprocess_encoding_context(context: InterprocessEncodingContext) -> None:
+    """Opt encoding context resources into multiprocessing-safe storage."""
+    for field_context in context.values():
+        share = getattr(field_context, "share", None)
+        if callable(share):
+            share()
+
+
 def identity(data: Any) -> Any:
     return data

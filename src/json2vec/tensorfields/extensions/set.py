@@ -22,15 +22,14 @@ from json2vec.tensorfields.base import (
     TensorFieldBase,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 sets: Plugin = Plugin(name="set")
-sets.callback(VocabularySyncCallback)
-sets.callback(CounterUpdateCallback)
+sets.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
 @sets.register
@@ -43,28 +42,25 @@ class Request(RequestBase):
     threshold: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
 
 
-def _items(value: Any) -> Iterable[Any]:
-    if value is None:
-        return ()
-
-    if isinstance(value, str):
-        return (value,)
-
-    if isinstance(value, Iterable):
-        return value
-
-    return (value,)
-
-
-def _encode_set(value: Any, state: Vocabulary, update: bool, n_tokens: int) -> np.ndarray:
+def _encode_set_content(value: Any, state: VocabularyState, n_tokens: int) -> np.ndarray:
     encoded = np.zeros(n_tokens, dtype=np.float32)
 
-    for item in _items(value):
+    if value is None:
+        return encoded
+
+    if isinstance(value, str):
+        items = (value,)
+    elif isinstance(value, Iterable):
+        items = value
+    else:
+        items = (value,)
+
+    for item in items:
         if item is None:
             continue
 
-        index = state(item, update=update)
-        if index is not None:
+        index = state.encode(item)
+        if index is not None and index < n_tokens:
             encoded[index] = 1.0
 
     return encoded
@@ -85,11 +81,14 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        interprocess_encoding_context: Vocabulary,
+        interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         request: Request = hyperparameters.requests[address]
         shape: tuple[int, ...] = (len(values), *hyperparameters.shapes[address])
-        n_tokens: int = request.max_vocab_size + 1
+        n_tokens: int = request.max_vocab_size
+        learn = strata == Strata.train
+
+        interprocess_encoding_context.reserve(values, learn=learn)
 
         data, states = pad(
             nested=values,
@@ -99,10 +98,9 @@ class TensorField(TensorFieldBase):
             overflows=hyperparameters.overflows(address),
             address=address,
             value_shape=(n_tokens,),
-            encode=lambda value: _encode_set(
+            encode=lambda value: _encode_set_content(
                 value=value,
                 state=interprocess_encoding_context,
-                update=(strata == Strata.train),
                 n_tokens=n_tokens,
             ),
         )
@@ -111,17 +109,12 @@ class TensorField(TensorFieldBase):
         content = torch.tensor(data=data, dtype=torch.float32)
 
         if strata == Strata.train and request.p_unavailable > 0.0:
-            known = content[..., : request.max_vocab_size].bool()
-            simulated = torch.rand_like(content[..., : request.max_vocab_size]).lt(request.p_unavailable) & known
+            # Training learns vocabulary online, so known set labels rarely look OOV.
+            # Simulate partial observation by randomly dropping positive labels.
+            known = content.bool()
+            simulated = torch.rand_like(content).lt(request.p_unavailable) & known
             if simulated.any():
-                content[..., : request.max_vocab_size] = content[..., : request.max_vocab_size].masked_fill(
-                    simulated,
-                    0.0,
-                )
-                content[..., request.max_vocab_size] = torch.maximum(
-                    content[..., request.max_vocab_size],
-                    simulated.any(dim=-1).to(dtype=content.dtype),
-                )
+                content = content.masked_fill(simulated, 0.0)
 
         return cls(
             state=state_tensor,
@@ -177,7 +170,7 @@ class TensorField(TensorFieldBase):
         shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
 
         state = torch.full(shape, Tokens.masked)
-        content = torch.zeros((*shape, request.max_vocab_size + 1), dtype=torch.float32)
+        content = torch.zeros((*shape, request.max_vocab_size), dtype=torch.float32)
 
         return cls(
             state=state,
@@ -199,7 +192,6 @@ class Embedder(EmbedderBase):
         self.max_vocab_size: int = request.max_vocab_size
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(max_vocab_size=request.max_vocab_size)
-        self.n_content_tokens: int = request.max_vocab_size + 1
 
         self.embeddings = torch.nn.ModuleDict(
             {
@@ -208,7 +200,7 @@ class Embedder(EmbedderBase):
                     embedding_dim=hyperparameters.d_model,
                 ),
                 TensorKey.content.name: torch.nn.Embedding(
-                    num_embeddings=self.n_content_tokens,
+                    num_embeddings=self.max_vocab_size,
                     embedding_dim=hyperparameters.d_model,
                 ),
             }
@@ -225,7 +217,7 @@ class Embedder(EmbedderBase):
         dims: list[int]
 
         N, *dims, n_tokens = inputs.content.shape
-        if n_tokens != self.n_content_tokens:
+        if n_tokens != self.max_vocab_size:
             raise ValueError(f"Set in address {self.origin} has invalid vocabulary width")
 
         state = inputs.state.reshape(-1)
@@ -248,7 +240,7 @@ class Embedder(EmbedderBase):
         )
 
     @property
-    def interprocess_encoding_context(self) -> Vocabulary:
+    def interprocess_encoding_context(self) -> VocabularyState:
         return self.vocab.state
 
 
@@ -267,7 +259,7 @@ class Decoder(DecoderBase):
                 ),
                 TensorKey.content.name: torch.nn.Linear(
                     in_features=hyperparameters.d_model,
-                    out_features=request.max_vocab_size + 1,
+                    out_features=request.max_vocab_size,
                 ),
             }
         )

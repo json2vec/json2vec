@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
@@ -24,20 +23,15 @@ from json2vec.tensorfields.base import (
     TensorFieldBase,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabulary, VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
 
 category: Plugin = Plugin(name="category")
-# This is a content-level fallback for OOV categories. The field is still present,
-# so we keep state=`valued` and route the content into a reserved bucket instead of
-# collapsing it into state=`null`.
-UNAVAILABLE_LABEL = "<unavailable>"
 
-category.callback(VocabularySyncCallback)
-category.callback(CounterUpdateCallback)
+category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
 @category.register
@@ -96,11 +90,13 @@ class TensorField(TensorFieldBase):
         address: Address,
         hyperparameters: Hyperparameters,
         strata: Strata,
-        interprocess_encoding_context: Vocabulary,
+        interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        learn = strata == Strata.train
 
-        tokens = apply(values, partial(interprocess_encoding_context, update=(strata == Strata.train)))
+        interprocess_encoding_context.reserve(values, learn=learn)
+        tokens = apply(values, interprocess_encoding_context.encode)
 
         if len(interprocess_encoding_context) > (max_vocab_size := hyperparameters.requests[address].max_vocab_size):
             logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
@@ -209,8 +205,6 @@ class Embedder(EmbedderBase):
         self.max_vocab_size: int = request.max_vocab_size
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(max_vocab_size=request.max_vocab_size)
-        # One extra slot is reserved for UNAVAILABLE_LABEL on top of the learned vocabulary.
-        self.n_content_tokens: int = request.max_vocab_size + 1
 
         self.embeddings = torch.nn.ModuleDict(
             {
@@ -219,7 +213,7 @@ class Embedder(EmbedderBase):
                     embedding_dim=hyperparameters.d_model,
                 ),
                 TensorKey.content.name: torch.nn.Embedding(
-                    num_embeddings=self.n_content_tokens,
+                    num_embeddings=self.max_vocab_size,
                     embedding_dim=hyperparameters.d_model,
                 ),
             }
@@ -227,7 +221,7 @@ class Embedder(EmbedderBase):
         self.counters = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: Counter(address=address, size=len(Tokens)),
-                TensorKey.content.name: Counter(address=address, size=request.max_vocab_size + 1),
+                TensorKey.content.name: Counter(address=address, size=request.max_vocab_size),
             }
         )
 
@@ -241,15 +235,16 @@ class Embedder(EmbedderBase):
         content = inputs.content.reshape(-1)
         valued = state.eq(Tokens.valued.value)
 
-        if valued.any() and (content.masked_select(valued) >= self.n_content_tokens).any().item():
+        if valued.any() and (content.masked_select(valued) > self.max_vocab_size).any().item():
             raise ValueError(f"Token in address {self.origin} exceeds max vocab size of {self.max_vocab_size}")
 
-        safe_content = content.masked_fill(~valued, 0)
+        known = valued & content.lt(self.max_vocab_size)
+        safe_content = content.masked_fill(~known, 0)
+        content_embedding = self.embeddings[TensorKey.content.name](safe_content) * known.unsqueeze(-1)
 
-        embeddings: torch.Tensor = (
-            self.embeddings[TensorKey.state.name](state)
-            + self.embeddings[TensorKey.content.name](safe_content) * valued.unsqueeze(-1)
-        ).reshape(N, *dims, -1)
+        embeddings: torch.Tensor = (self.embeddings[TensorKey.state.name](state) + content_embedding).reshape(
+            N, *dims, -1
+        )
 
         return Parcel(
             payload=embeddings,
@@ -259,7 +254,7 @@ class Embedder(EmbedderBase):
         )
 
     @property
-    def interprocess_encoding_context(self) -> Vocabulary:
+    def interprocess_encoding_context(self) -> VocabularyState:
         return self.vocab.state
 
 
@@ -278,7 +273,7 @@ class Decoder(DecoderBase):
                 ),
                 TensorKey.content.name: torch.nn.Linear(
                     in_features=hyperparameters.d_model,
-                    out_features=request.max_vocab_size + 1,
+                    out_features=request.max_vocab_size,
                 ),
             }
         )
@@ -325,6 +320,10 @@ def loss(
         (prediction.address, strata, Metric.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
+    module.track(
+        (prediction.address, strata, "vocabulary", "size"),
+        value=state_inputs.new_tensor(len(embedder.vocab.snapshot()), dtype=torch.float32),
+    )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
@@ -332,20 +331,36 @@ def loss(
 
     content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
     content_targets = batch.targets[TensorKey.content].reshape(N)
+    n_content_tokens = content_inputs.shape[-1]
+    invalid = valued & content_targets.gt(n_content_tokens)
+    if invalid.any():
+        raise ValueError(f"Token in address {prediction.address} exceeds max vocab size")
 
-    loss += module.track(
+    known = valued & content_targets.lt(n_content_tokens)
+    unavailable = valued & content_targets.eq(n_content_tokens)
+
+    content_loss_sum = content_inputs.new_zeros(())
+    if known.any():
+        known_losses = torch.nn.functional.cross_entropy(
+            input=content_inputs[known],
+            target=content_targets[known],
+            weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
+            reduction="none",
+        )
+        content_loss_sum = content_loss_sum + known_losses.sum()
+
+    if unavailable.any():
+        unavailable_losses = -torch.nn.functional.log_softmax(content_inputs[unavailable], dim=1).mean(dim=1)
+        content_loss_sum = content_loss_sum + unavailable_losses.sum()
+
+    content_loss = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=content_inputs,
-                target=content_targets,
-                weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
-                reduction="none",
-            )
-            .masked_select(valued)
-            .mean()
-        ),
+        value=content_loss_sum / valued.float().sum().clamp_min(1.0),
     )
+    loss += content_loss
+
+    if not known.any():
+        return loss
 
     for topk in module.hyperparameters.requests[prediction.address].topk:
         module.track(
@@ -354,7 +369,7 @@ def loss(
                 content_inputs.topk(k=topk, dim=1)
                 .indices.eq(content_targets.unsqueeze(1))
                 .any(dim=1)
-                .masked_select(valued)
+                .masked_select(known)
                 .float()
                 .mean()
             ),
@@ -362,7 +377,7 @@ def loss(
 
     module.track(
         (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=content_inputs.argmax(dim=1).eq(content_targets).masked_select(valued).float().mean(),
+        value=content_inputs.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
     )
 
     return loss

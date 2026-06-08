@@ -1,15 +1,22 @@
-"""LitServe deployment wrappers for `json2vec` checkpoints."""
+"""Realtime deployment wrappers for `json2vec` checkpoints."""
 
+import asyncio
 import functools
+import os
 from collections.abc import Callable
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, TypeAlias, cast
 
-import litserve as ls
+import fastapi
+import orjson
 import pydantic
 import torch
+import uvicorn
 from beartype import beartype
+from fastapi.responses import JSONResponse
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
@@ -45,121 +52,104 @@ class Accelerator(StrEnum):
         return cast(Accelerator | None, cls._value2member_map_.get(normalized))
 
 
+class JSONBackend(StrEnum):
+    orjson = "orjson"
+    stdlib = "stdlib"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "JSONBackend | None":
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+        if normalized == "":
+            raise ValueError("json_backend must not be blank")
+
+        return cast(JSONBackend | None, cls._value2member_map_.get(normalized))
+
+
 class ErrorItem(pydantic.BaseModel):
     status_code: int
     message: str
 
 
-class BatchItem(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
-
-    data: Input | None
-    valid_indices: list[int]
-    items: list[Input | ErrorItem]
+@dataclass
+class RequestItem:
+    observations: list[Any]
 
 
-def _input_batch_size(item: Input) -> int:
-    if len(item.batch_size) > 0:
-        return int(item.batch_size[0])
-
-    for key, value in item.items():
-        if key == TensorKey.metadata:
-            continue
-
-        batch_size = getattr(value, "batch_size", ())
-        if len(batch_size) > 0:
-            return int(batch_size[0])
-
-        if torch.is_tensor(value) and value.ndim > 0:
-            return int(value.shape[0])
-
-    return 1
+@dataclass
+class ResponseItem:
+    predictions: list[Prediction]
+    input: Input | None = None
+    observations: list[Any] | None = None
 
 
-def _cat_inputs(inputs: list[Input]) -> Input:
-    out: dict[Address, TensorFieldBase] = {}
+class FastAPIRuntime:
+    """Load a json2vec model and execute batched request prediction."""
 
-    for key in inputs[0].keys():
-        if key == TensorKey.metadata:
-            continue
-
-        address = Address(str(key))
-        out[address] = torch.cat([item[key] for item in inputs], dim=0)
-
-    batch_size = sum(_input_batch_size(item) for item in inputs)
-    return cast(Input, TensorDict(source=cast(Any, out), batch_size=[batch_size]))
-
-
-class API(ls.LitAPI):
     def __init__(
         self,
-        checkpoint: ModelSource | None = None,
-        model: Model | None = None,
+        *,
+        checkpoint: ModelSource,
+        accelerator: Accelerator,
         preprocessor=None,
         postprocessor=None,
         update_operations: list[UpdateOperation] | None = None,
-        *args,
-        **kwargs,
+        request_signature: type[pydantic.BaseModel] | None = None,
+        response_signature: type[pydantic.BaseModel] | None = None,
+        monitor_queries: bool = False,
+        query_monitor_every: int = 1000,
     ) -> None:
-        super().__init__(*args, **kwargs)
-        if isinstance(checkpoint, Model):
-            if model is not None:
-                raise ValueError("pass either checkpoint or model, not both")
-            self._model_source: ModelSource = checkpoint
-            self.checkpoint: str | None = None
-        elif model is not None:
-            if checkpoint is not None:
-                raise ValueError("pass either checkpoint or model, not both")
-            self._model_source = model
-            self.checkpoint = None
-        else:
-            if checkpoint is None:
-                raise ValueError("checkpoint or model is required")
-            self._model_source = checkpoint
-            self.checkpoint = str(checkpoint)
-
+        self.model_source: ModelSource = checkpoint
+        self.accelerator = accelerator
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.update_operations = list(update_operations or [])
+        self.request_signature = request_signature
+        self.response_signature = response_signature
+        self.monitor_queries = monitor_queries
+        self.query_monitor_every = query_monitor_every
+        self.device: torch.device = torch.device("cpu")
 
-    @property
-    def model_source(self) -> ModelSource:
-        return self._model_source
+    def setup(self) -> None:
+        if self.accelerator == Accelerator.auto:
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            else:
+                mps = getattr(torch.backends, "mps", None)
+                self.device = torch.device("mps" if mps is not None and mps.is_available() else "cpu")
+        else:
+            self.device = torch.device(self.accelerator.value)
 
-    def _load_model(self) -> Model:
-        if isinstance(self._model_source, Model):
-            return self._model_source
-
-        return Model.load(self._model_source)
-
-    def setup(self, device: str) -> None:
-        self.model: Model = self._load_model().to(device)
+        model = self.model_source if isinstance(self.model_source, Model) else Model.load(self.model_source)
+        self.model: Model = model.to(self.device)
         for predicates, values in self.update_operations:
             self.model.update(*predicates, **values)
 
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
-        self.jmespath_resolution_monitor = JMESPathResolutionMonitor()
+        self.jmespath_resolution_monitor = (
+            JMESPathResolutionMonitor(every=self.query_monitor_every) if self.monitor_queries else None
+        )
 
-    @beartype
-    def decode_request(
-        self,
-        request: dict[str, Any] | pydantic.BaseModel,
-        context: dict[str, Any] | None = None,
-    ) -> Input | ErrorItem:  # ty:ignore[invalid-method-override]
-        if isinstance(request, pydantic.BaseModel):
-            request = request.model_dump()
+    def decode_payload(self, payload: dict[str, Any], context: dict[str, Any]) -> RequestItem | ErrorItem:
+        try:
+            request: dict[str, Any] | pydantic.BaseModel
+            if self.request_signature is None:
+                request = payload
+            else:
+                request = self.request_signature.model_validate(payload)
 
-        if context is not None:
+            if isinstance(request, pydantic.BaseModel):
+                request = request.model_dump()
+
             context["request"] = request
 
-        try:
             if self.preprocessor is None:
                 observations: list[Any] = [[request]]
-
             else:
                 observation = self.preprocessor(request)
-
                 if not isinstance(observation, dict):
                     raise TypeError(f"preprocessor must return a dict object, got {type(observation).__name__}")
 
@@ -171,76 +161,14 @@ class API(ls.LitAPI):
         if len(observations) == 0 or any(x is None for x in observations):
             return ErrorItem(status_code=422, message="preprocessor returned no observations for request")
 
-        if context is not None:
-            context["observations"] = observations
+        context["observations"] = observations
+        return RequestItem(observations=observations)
 
-        encoded = encode(
-            batch=observations,
-            hyperparameters=self.model.hyperparameters,
-            strata=Strata.predict,
-            interprocess_encoding_context=self.interprocess_encoding_context,
-            jmespath_resolution_monitor=getattr(self, "jmespath_resolution_monitor", None),
-        )
-
-        if encoded is None:
-            return ErrorItem(status_code=422, message="preprocessor eliminated observation (filter)")
-
-        if context is not None:
-            context["input"] = encoded
-
-        return encoded
-
-    @beartype
-    def batch(self, inputs: list[Input | ErrorItem]) -> BatchItem:
-        valid_indices: list[int] = []
-        valid_inputs: list[Input] = []
-
-        for index, item in enumerate(inputs):
-            if isinstance(item, ErrorItem):
-                continue
-
-            valid_indices.append(index)
-            valid_inputs.append(item)
-
-        data = _cat_inputs(valid_inputs) if valid_inputs else None
-        return BatchItem(data=data, valid_indices=valid_indices, items=inputs)
-
-    @beartype
-    def unbatch(self, outputs: list[Any]) -> list[Any]:  # ty:ignore[invalid-method-override]
-        return list(outputs)
-
-    @beartype
-    def predict(
-        self, data: BatchItem | Input | ErrorItem
-    ) -> list[list[Prediction] | ErrorItem] | list[Prediction] | ErrorItem:  # ty:ignore[invalid-method-override]
-        if isinstance(data, ErrorItem):
-            return data
-
-        if isinstance(data, TensorDict):
-            with torch.inference_mode():
-                return self.model(data.to(self.device), strata=Strata.predict)
-
-        outputs: list[Any] = list(data.items)
-
-        if data.data is None:
-            return outputs
-
-        with torch.inference_mode():
-            predictions = self.model(data.data.to(self.device), strata=Strata.predict)
-
-        unbatched = Prediction.unbatch(predictions=predictions)
-
-        for index, item_predictions in zip(data.valid_indices, unbatched):
-            outputs[index] = item_predictions
-
-        return outputs
-
-    @beartype
     def encode_response(
         self,
-        response: list[Prediction] | ErrorItem,
-        context: dict[str, Any] | None = None,
-    ) -> dict[str, Any] | pydantic.BaseModel:  # ty:ignore[invalid-method-override]
+        response: ResponseItem | ErrorItem,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         if isinstance(response, ErrorItem):
             return {
                 "predictions": {},
@@ -250,20 +178,218 @@ class API(ls.LitAPI):
                 },
             }
 
-        predictions = self.model.write(predictions=response)
-        postprocessor = self.postprocessor
+        if response.input is not None:
+            context["input"] = response.input
+        if response.observations is not None:
+            context["observations"] = response.observations
 
-        if postprocessor is not None:
-            processed = postprocessor({} if context is None else context, predictions)
-
+        predictions = self.model.write(predictions=response.predictions)
+        if self.postprocessor is not None:
+            processed = self.postprocessor(context, predictions)
             if processed is not None:
                 predictions = processed
 
-        return Prediction.denest(dict(predictions=predictions))
+        encoded = Prediction.denest(dict(predictions=predictions))
+        if self.response_signature is not None:
+            return self.response_signature.model_validate(encoded).model_dump(mode="json")
+
+        return cast(dict[str, Any], encoded)
+
+    def encode_written_response(self, predictions: dict[Address, dict[str, Any]]) -> dict[str, Any]:
+        encoded = Prediction.denest(dict(predictions=predictions))
+        if self.response_signature is not None:
+            return self.response_signature.model_validate(encoded).model_dump(mode="json")
+
+        return cast(dict[str, Any], encoded)
+
+    def split_written_responses(
+        self,
+        predictions: dict[Address, dict[str, Any]],
+        batch_size: int,
+    ) -> list[dict[str, Any]]:
+        responses: list[dict[str, Any]] = []
+
+        def select(value: Any, index: int) -> Any:
+            if isinstance(value, dict):
+                return {key: select(item, index) for key, item in value.items()}
+
+            if isinstance(value, list):
+                if len(value) != batch_size:
+                    raise ValueError(
+                        f"cannot split batched prediction payload with leading dimension {len(value)} "
+                        f"for batch size {batch_size}"
+                    )
+                return [value[index]]
+
+            return value
+
+        for index in range(batch_size):
+            item_predictions = {address: select(payload, index) for address, payload in predictions.items()}
+            responses.append(self.encode_written_response(item_predictions))
+
+        return responses
+
+    def predict_payloads(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contexts: list[dict[str, Any]] = [{} for _ in payloads]
+        outputs: list[dict[str, Any] | None] = [None for _ in payloads]
+        valid_indices: list[int] = []
+        observations: list[Any] = []
+        spans: list[tuple[int, int]] = []
+
+        for index, payload in enumerate(payloads):
+            decoded = self.decode_payload(payload, contexts[index])
+            if isinstance(decoded, ErrorItem):
+                outputs[index] = self.encode_response(decoded, contexts[index])
+                continue
+
+            start = len(observations)
+            observations.extend(decoded.observations)
+            spans.append((start, len(observations)))
+            valid_indices.append(index)
+
+        if observations:
+            encoded = encode(
+                batch=observations,
+                hyperparameters=self.model.hyperparameters,
+                strata=Strata.predict,
+                interprocess_encoding_context=self.interprocess_encoding_context,
+                jmespath_resolution_monitor=getattr(self, "jmespath_resolution_monitor", None),
+            )
+
+            model_input = encoded
+            if TensorKey.metadata in encoded.keys():
+                model_input = cast(
+                    Input,
+                    TensorDict(
+                        source=cast(
+                            Any,
+                            {Address(str(key)): value for key, value in encoded.items() if key != TensorKey.metadata},
+                        ),
+                        batch_size=encoded.batch_size,
+                    ),
+                )
+
+            with torch.inference_mode():
+                predictions = self.model(model_input.to(self.device), strata=Strata.predict)
+
+            if self.postprocessor is None:
+                written = self.model.write(predictions=predictions)
+                for index, response in zip(valid_indices, self.split_written_responses(written, len(valid_indices))):
+                    outputs[index] = response
+
+                return [cast(dict[str, Any], output) for output in outputs]
+
+            unbatched = Prediction.unbatch(predictions=predictions)
+            for index, (start, stop) in zip(valid_indices, spans):
+                if stop - start != 1:
+                    raise ValueError("deployment requests must encode exactly one observation")
+
+                input_slice: dict[Address, TensorFieldBase] = {}
+                for key, value in encoded.items():
+                    if key == TensorKey.metadata:
+                        continue
+
+                    input_slice[Address(str(key))] = value[start:stop]
+
+                sliced = cast(Input, TensorDict(source=cast(Any, input_slice), batch_size=[stop - start]))
+                if TensorKey.metadata in encoded.keys():
+                    sliced[TensorKey.metadata] = encoded[TensorKey.metadata][start:stop]
+
+                response = ResponseItem(
+                    predictions=unbatched[start] if unbatched else [],
+                    input=sliced,
+                    observations=observations[start:stop],
+                )
+                outputs[index] = self.encode_response(response, contexts[index])
+
+        return [cast(dict[str, Any], output) for output in outputs]
 
 
-_DEFAULT_DECODE_REQUEST_ANNOTATIONS = dict(API.decode_request.__annotations__)
-_DEFAULT_ENCODE_RESPONSE_ANNOTATIONS = dict(API.encode_response.__annotations__)
+@dataclass
+class _QueuedRequest:
+    payload: dict[str, Any]
+    future: asyncio.Future[dict[str, Any]]
+
+
+class FastAPIBatcher:
+    """Single-model async request batcher for FastAPI endpoints."""
+
+    def __init__(
+        self,
+        runtime: FastAPIRuntime,
+        *,
+        max_batch_size: int,
+        batch_timeout: float,
+    ) -> None:
+        self.runtime = runtime
+        self.max_batch_size = max_batch_size
+        self.batch_timeout = batch_timeout
+        self.queue: asyncio.Queue[_QueuedRequest] = asyncio.Queue()
+        self.task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        self.runtime.setup()
+        self.task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        if self.task is None:
+            return
+
+        self.task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self.task
+
+    async def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return (await self.submit_many([payload]))[0]
+
+    async def submit_many(self, payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not payloads:
+            return []
+
+        loop = asyncio.get_running_loop()
+        items = [_QueuedRequest(payload=payload, future=loop.create_future()) for payload in payloads]
+        for item in items:
+            await self.queue.put(item)
+
+        return list(await asyncio.gather(*(item.future for item in items)))
+
+    async def _run(self) -> None:
+        while True:
+            first = await self.queue.get()
+            batch = [first]
+            self._drain_ready(batch)
+
+            if len(batch) < self.max_batch_size and self.batch_timeout > 0.0:
+                deadline = asyncio.get_running_loop().time() + self.batch_timeout
+                while len(batch) < self.max_batch_size:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0.0:
+                        break
+                    try:
+                        batch.append(await asyncio.wait_for(self.queue.get(), timeout=remaining))
+                    except TimeoutError:
+                        break
+                    self._drain_ready(batch)
+
+            try:
+                payloads = [item.payload for item in batch]
+                responses = await asyncio.to_thread(self.runtime.predict_payloads, payloads)
+            except Exception as exception:
+                for item in batch:
+                    if not item.future.cancelled():
+                        item.future.set_exception(exception)
+                continue
+
+            for item, response in zip(batch, responses):
+                if not item.future.cancelled():
+                    item.future.set_result(response)
+
+    def _drain_ready(self, batch: list[_QueuedRequest]) -> None:
+        while len(batch) < self.max_batch_size:
+            try:
+                batch.append(self.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return
 
 
 class Deployment(BaseSettings):
@@ -271,7 +397,7 @@ class Deployment(BaseSettings):
 
     `Deployment` queues request/response schemas, optional preprocessors,
     optional postprocessors, and `update(...)` mutations before the model is
-    loaded by LitServe workers.
+    loaded by FastAPI application startup.
     """
 
     model_config = SettingsConfigDict(
@@ -297,18 +423,41 @@ class Deployment(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("JSON2VEC_BATCH_TIMEOUT", "BATCH_TIMEOUT"),
     )
-    workers_per_device: int = Field(
+    workers: int = Field(
         default=1,
         ge=1,
-        validation_alias=AliasChoices("JSON2VEC_WORKERS_PER_DEVICE", "JSON2VEC_N_WORKERS", "N_WORKERS"),
+        validation_alias=AliasChoices("JSON2VEC_WORKERS", "WORKERS"),
     )
     accelerator: Accelerator = Field(
         default=Accelerator.auto,
         validation_alias=AliasChoices("JSON2VEC_ACCELERATOR", "ACCELERATOR"),
     )
-    track_requests: bool = Field(
+    host: str = Field(
+        default="0.0.0.0",
+        validation_alias=AliasChoices("JSON2VEC_HOST", "HOST"),
+    )
+    port: int = Field(
+        default=8000,
+        ge=1,
+        le=65535,
+        validation_alias=AliasChoices("JSON2VEC_PORT", "PORT"),
+    )
+    log_level: str = Field(
+        default="info",
+        validation_alias=AliasChoices("JSON2VEC_LOG_LEVEL", "LOG_LEVEL"),
+    )
+    monitor_queries: bool = Field(
         default=False,
-        validation_alias=AliasChoices("JSON2VEC_TRACK_REQUESTS", "TRACK_REQUESTS"),
+        validation_alias=AliasChoices("JSON2VEC_MONITOR_QUERIES", "MONITOR_QUERIES"),
+    )
+    query_monitor_every: int = Field(
+        default=1000,
+        gt=0,
+        validation_alias=AliasChoices("JSON2VEC_QUERY_MONITOR_EVERY", "QUERY_MONITOR_EVERY"),
+    )
+    json_backend: JSONBackend = Field(
+        default=JSONBackend.orjson,
+        validation_alias=AliasChoices("JSON2VEC_JSON_BACKEND", "JSON_BACKEND"),
     )
 
     _request_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
@@ -394,29 +543,149 @@ class Deployment(BaseSettings):
 
         return self
 
-    def serve(self) -> None:
-        """Start the LitServe server for the configured checkpoint or model."""
-        API.decode_request.__annotations__ = dict(_DEFAULT_DECODE_REQUEST_ANNOTATIONS)
-        API.encode_response.__annotations__ = dict(_DEFAULT_ENCODE_RESPONSE_ANNOTATIONS)
-
-        if self._request_signature is not None:
-            API.decode_request.__annotations__["request"] = self._request_signature
-
-        if self._response_signature is not None:
-            API.encode_response.__annotations__["return"] = self._response_signature
-
-        server: ls.LitServer = ls.LitServer(
-            lit_api=API(
-                checkpoint=self.model if self.model is not None else self.checkpoint,
-                max_batch_size=self.max_batch_size,
-                batch_timeout=self.batch_timeout,
-                preprocessor=self._preprocessor,
-                postprocessor=self._postprocessor,
-                update_operations=self._update_operations,
-            ),
-            accelerator=self.accelerator.value,
-            workers_per_device=self.workers_per_device,
-            track_requests=self.track_requests,
+    def app(self) -> fastapi.FastAPI:
+        """Build a FastAPI app for the configured checkpoint or model."""
+        runtime = FastAPIRuntime(
+            checkpoint=self.model if self.model is not None else self.checkpoint,
+            accelerator=self.accelerator,
+            preprocessor=self._preprocessor,
+            postprocessor=self._postprocessor,
+            update_operations=self._update_operations,
+            request_signature=self._request_signature,
+            response_signature=self._response_signature,
+            monitor_queries=self.monitor_queries,
+            query_monitor_every=self.query_monitor_every,
+        )
+        batcher = FastAPIBatcher(
+            runtime=runtime,
+            max_batch_size=self.max_batch_size,
+            batch_timeout=self.batch_timeout,
         )
 
-        server.run(generate_client_file=False)
+        @asynccontextmanager
+        async def lifespan(app: fastapi.FastAPI):
+            await batcher.start()
+            app.state.json2vec_runtime = runtime
+            app.state.json2vec_batcher = batcher
+            try:
+                yield
+            finally:
+                await batcher.stop()
+
+        app = fastapi.FastAPI(lifespan=lifespan)
+
+        @app.get("/health")
+        async def health() -> dict[str, str]:
+            return {"status": "ok"}
+
+        def json_response(content: Any, status_code: int = 200) -> fastapi.Response:
+            if self.json_backend == JSONBackend.orjson:
+                return fastapi.Response(
+                    content=orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS),
+                    status_code=status_code,
+                    media_type="application/json",
+                )
+
+            return JSONResponse(content=content, status_code=status_code)
+
+        @app.post("/predict")
+        async def predict(request: fastapi.Request) -> fastapi.Response:
+            try:
+                if self.json_backend == JSONBackend.orjson:
+                    payload = orjson.loads(await request.body())
+                else:
+                    payload = await request.json()
+            except Exception as exception:
+                return json_response(
+                    status_code=400,
+                    content={
+                        "predictions": {},
+                        "error": {
+                            "status_code": 400,
+                            "message": str(exception),
+                        },
+                    },
+                )
+
+            if isinstance(payload, dict):
+                response = await batcher.submit(cast(dict[str, Any], payload))
+                return json_response(content=response)
+
+            if isinstance(payload, list):
+                for index, item in enumerate(payload):
+                    if not isinstance(item, dict):
+                        return json_response(
+                            status_code=422,
+                            content={
+                                "predictions": {},
+                                "error": {
+                                    "status_code": 422,
+                                    "message": (
+                                        "request body must be a JSON object or an array of JSON objects; "
+                                        f"item {index} is {type(item).__name__}"
+                                    ),
+                                },
+                            },
+                        )
+
+                responses = await batcher.submit_many(cast(list[dict[str, Any]], payload))
+                return json_response(content=responses)
+
+            return json_response(
+                status_code=422,
+                content={
+                    "predictions": {},
+                    "error": {
+                        "status_code": 422,
+                        "message": f"request body must be a JSON object or an array of JSON objects, got {type(payload).__name__}",
+                    },
+                },
+            )
+
+        return app
+
+    def serve(self) -> None:
+        """Start the FastAPI server for the configured checkpoint or model."""
+        if self.workers > 1:
+            if self.model is not None or isinstance(self.checkpoint, Model):
+                raise ValueError("workers > 1 requires a checkpoint path, not an in-memory model")
+
+            env_updates = {
+                "JSON2VEC_CHECKPOINT": str(self.checkpoint),
+                "JSON2VEC_MAX_BATCH_SIZE": str(self.max_batch_size),
+                "JSON2VEC_BATCH_TIMEOUT": str(self.batch_timeout),
+                "JSON2VEC_ACCELERATOR": self.accelerator.value,
+                "JSON2VEC_MONITOR_QUERIES": str(self.monitor_queries),
+                "JSON2VEC_QUERY_MONITOR_EVERY": str(self.query_monitor_every),
+                "JSON2VEC_JSON_BACKEND": self.json_backend.value,
+            }
+            previous = {key: os.environ.get(key) for key in env_updates}
+            try:
+                os.environ.update(env_updates)
+                uvicorn.run(
+                    "json2vec.inference.deployment:create_app",
+                    factory=True,
+                    workers=self.workers,
+                    host=self.host,
+                    port=self.port,
+                    log_level=self.log_level,
+                )
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            return
+
+        uvicorn.run(
+            self.app(),
+            host=self.host,
+            port=self.port,
+            log_level=self.log_level,
+        )
+
+
+def create_app() -> fastapi.FastAPI:
+    """Build a FastAPI app from deployment environment variables."""
+    return Deployment().app()

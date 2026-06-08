@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import asyncio
 
 import pydantic
 import pytest
@@ -9,18 +9,23 @@ from tensordict import TensorDict
 
 import json2vec.inference.deployment as deployment_module
 from json2vec import Model, Number, where
-from json2vec.inference.deployment import API, Deployment, ErrorItem
+from json2vec.inference.deployment import Deployment, ErrorItem, RequestItem
 from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.packages import Prediction
-
-
-def _input(value: int) -> TensorDict:
-    return TensorDict({"dummy": torch.tensor([value])}, batch_size=[1])
 
 
 class _DummyModel:
     def __init__(self):
         self.calls = 0
+        self.write_calls = 0
+        self.hyperparameters = object()
+        self.interprocess_encoding_context = {}
+
+    def to(self, device):
+        return self
+
+    def eval(self):
+        return self
 
     def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
         assert Strata.normalize(strata) == Strata.predict
@@ -37,42 +42,56 @@ class _DummyModel:
         ]
 
     def write(self, predictions: list[Prediction]):
-        return {"root/label": {"value": ["ok"]}}
+        self.write_calls += 1
+        batch_size = int(predictions[0].payload.batch_size[0]) if predictions else 0
+        return {"root/label": {"value": ["ok"] * batch_size}}
 
 
-def _api(**kwargs) -> tuple[API, _DummyModel]:
-    model = _DummyModel()
-    deployment = API(checkpoint="unused", **kwargs)
-    deployment.model = model
-    deployment.device = "cpu"
-    return deployment, model
-
-
-def test_deployment_batches_only_valid_inputs_and_preserves_per_item_errors():
-    deployment, model = _api()
-
-    batch = deployment.batch(
-        [
-            _input(1),
-            ErrorItem(status_code=422, message="cxr DM not present"),
-            _input(2),
-        ]
+def _runtime(model=None, **kwargs) -> deployment_module.FastAPIRuntime:
+    runtime = deployment_module.FastAPIRuntime(
+        checkpoint="unused",
+        accelerator=deployment_module.Accelerator.cpu,
+        **kwargs,
     )
-
-    outputs = deployment.predict(batch)
-    encoded = [deployment.encode_response(item) for item in deployment.unbatch(outputs)]
-
-    assert model.calls == 1
-    assert encoded[0]["predictions"]["root/label"]["value"] == "ok"
-    assert encoded[1]["predictions"] == {}
-    assert encoded[1]["error"] == {
-        "status_code": 422,
-        "message": "cxr DM not present",
-    }
-    assert encoded[2]["predictions"]["root/label"]["value"] == "ok"
+    runtime.model = _DummyModel() if model is None else model
+    runtime.device = torch.device("cpu")
+    runtime.interprocess_encoding_context = {}
+    runtime.jmespath_resolution_monitor = None
+    return runtime
 
 
-def test_deployment_batches_real_encoded_requests_without_extra_tensor_rank():
+def test_fastapi_batcher_submit_many_splits_large_payload_by_max_batch_size():
+    class FakeRuntime:
+        def __init__(self):
+            self.started = False
+            self.batches = []
+
+        def setup(self):
+            self.started = True
+
+        def predict_payloads(self, payloads):
+            self.batches.append([payload["id"] for payload in payloads])
+            return [{"id": payload["id"]} for payload in payloads]
+
+    async def run():
+        runtime = FakeRuntime()
+        batcher = deployment_module.FastAPIBatcher(runtime=runtime, max_batch_size=2, batch_timeout=0.0)
+        await batcher.start()
+        try:
+            responses = await batcher.submit_many([{"id": 1}, {"id": 2}, {"id": 3}])
+        finally:
+            await batcher.stop()
+
+        return runtime, responses
+
+    runtime, responses = asyncio.run(run())
+
+    assert runtime.started is True
+    assert runtime.batches == [[1, 2], [3]]
+    assert responses == [{"id": 1}, {"id": 2}, {"id": 3}]
+
+
+def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     model = Model.from_schema(
         Number(name="amount"),
         d_model=8,
@@ -81,30 +100,81 @@ def test_deployment_batches_real_encoded_requests_without_extra_tensor_rank():
         batch_size=2,
         embed=True,
     )
-    deployment = API(model=model)
-    deployment.setup(device="cpu")
+    runtime = deployment_module.FastAPIRuntime(
+        checkpoint=model,
+        accelerator=deployment_module.Accelerator.cpu,
+    )
+    runtime.setup()
 
-    first = deployment.decode_request({"amount": 1.5})
-    second = deployment.decode_request({"amount": 2.5})
+    captured_batches = []
+    captured_monitors = []
+    real_encode = deployment_module.encode
 
-    assert isinstance(first, TensorDict)
-    assert isinstance(second, TensorDict)
+    def spy_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+        captured_batches.append(batch)
+        captured_monitors.append(jmespath_resolution_monitor)
+        return real_encode(
+            batch=batch,
+            hyperparameters=hyperparameters,
+            strata=strata,
+            interprocess_encoding_context=interprocess_encoding_context,
+            jmespath_resolution_monitor=jmespath_resolution_monitor,
+        )
 
-    batch = deployment.batch([first, second])
+    monkeypatch.setattr(deployment_module, "encode", spy_encode)
 
-    assert batch.data is not None
-    assert batch.data["record/amount"].state.shape == torch.Size([2, 1])
+    outputs = runtime.predict_payloads([{"amount": 1.5}, {"amount": 2.5}])
 
-    outputs = deployment.predict(batch)
-
+    assert captured_batches == [[[{"amount": 1.5}], [{"amount": 2.5}]]]
+    assert captured_monitors == [None]
     assert len(outputs) == 2
-    assert all(isinstance(item, list) for item in outputs)
+    assert all("predictions" in output for output in outputs)
 
 
-def test_deployment_postprocess_can_rewrite_encoded_response():
+def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_once(monkeypatch):
+    def __deployment_preprocess(observation: dict):
+        if observation["hue"] == "bad":
+            raise ValueError("bad hue")
+        return {"color": observation["hue"]}
+
+    captured = {"calls": 0}
+
+    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+        captured["calls"] += 1
+        captured["batch"] = batch
+        captured["strata"] = strata
+        return TensorDict({"dummy": torch.tensor([1, 2])}, batch_size=[2])
+
+    monkeypatch.setattr(deployment_module, "encode", fake_encode)
+
+    model = _DummyModel()
+    runtime = _runtime(model=model, preprocessor=__deployment_preprocess)
+
+    outputs = runtime.predict_payloads(
+        [
+            {"hue": "red"},
+            {"hue": "bad"},
+            {"hue": "blue"},
+        ]
+    )
+
+    assert captured["calls"] == 1
+    assert captured["batch"] == [[{"color": "red"}], [{"color": "blue"}]]
+    assert captured["strata"] == Strata.predict
+    assert model.calls == 1
+    assert model.write_calls == 1
+    assert outputs[0]["predictions"]["root/label"]["value"] == "ok"
+    assert outputs[1]["predictions"] == {}
+    assert outputs[1]["error"]["status_code"] == 422
+    assert "bad hue" in outputs[1]["error"]["message"]
+    assert outputs[2]["predictions"]["root/label"]["value"] == "ok"
+
+
+def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     seen = {}
 
-    context = {"request": {"color": "r"}, "input": _input(7)}
+    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+        return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     def processor(context, predictions):
         seen["context"] = context
@@ -114,82 +184,92 @@ def test_deployment_postprocess_can_rewrite_encoded_response():
             "root/vector": {"embedding": [[1.0, 2.0]]},
         }
 
-    deployment, _ = _api(postprocessor=processor)
+    monkeypatch.setattr(deployment_module, "encode", fake_encode)
 
-    encoded = deployment.encode_response([], context=context)
+    runtime = _runtime(postprocessor=processor)
+    output = runtime.predict_payloads([{"color": "r"}])[0]
 
-    assert seen["context"] is context
     assert seen["context"]["request"] == {"color": "r"}
+    assert seen["context"]["observations"] == [[{"color": "r"}]]
+    assert "input" in seen["context"]
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
-    assert encoded["predictions"]["root/label"]["value"] == "rewritten"
-    assert encoded["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
+    assert output["predictions"]["root/label"]["value"] == "rewritten"
+    assert output["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
 
 
-def test_deployment_preprocesses_decode_request(monkeypatch):
-    def __deployment_preprocess(observation: dict):
-        return {"color": observation["hue"]}
+def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch):
+    class EmptyModel(_DummyModel):
+        def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
+            assert Strata.normalize(strata) == Strata.predict
+            self.calls += 1
+            return []
 
-    captured = {}
+        def write(self, predictions: list[Prediction]):
+            assert predictions == []
+            return {}
 
     def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        captured["batch"] = batch
-        return _input(1)
+        return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
 
-    deployment = API(checkpoint="unused", preprocessor=__deployment_preprocess)
-    deployment.model = SimpleNamespace(hyperparameters=object())
-    deployment.interprocess_encoding_context = {}
-    context = {}
+    model = EmptyModel()
+    runtime = _runtime(model=model)
+    output = runtime.predict_payloads([{"amount": 1}])[0]
 
-    encoded = deployment.decode_request({"hue": "red"}, context=context)
-
-    assert isinstance(encoded, TensorDict)
-    assert captured["batch"] == [[{"color": "red"}]]
-    assert context["observations"] == [[{"color": "red"}]]
+    assert model.calls == 1
+    assert output == {"predictions": {}}
 
 
-def test_deployment_preprocess_generator_returns_error():
+def test_fastapi_runtime_decode_rejects_preprocessor_generator():
     def __deployment_generator(observation: dict):
         yield {"color": observation["hue"]}
 
-    deployment = API(checkpoint="unused", preprocessor=__deployment_generator)
-    deployment.interprocess_encoding_context = {}
+    runtime = _runtime(preprocessor=__deployment_generator)
+    context = {}
 
-    error = deployment.decode_request({"hue": "red"})
+    error = runtime.decode_payload({"hue": "red"}, context=context)
 
     assert isinstance(error, ErrorItem)
     assert error.status_code == 422
     assert "preprocessor must return a dict object" in error.message
 
 
-def test_deployment_skips_model_when_every_item_in_batch_is_invalid():
-    deployment, model = _api()
+def test_fastapi_runtime_decode_validates_pydantic_request_model():
+    class Request(pydantic.BaseModel):
+        hue: str
 
-    batch = deployment.batch(
-        [
-            ErrorItem(status_code=422, message="cxr DM not present"),
-            ErrorItem(status_code=422, message="cxr RJ not present"),
-        ]
+    def __deployment_preprocess(observation: dict):
+        return {"color": observation["hue"]}
+
+    runtime = _runtime(
+        request_signature=Request,
+        preprocessor=__deployment_preprocess,
+    )
+    context = {}
+
+    decoded = runtime.decode_payload({"hue": "red"}, context=context)
+
+    assert isinstance(decoded, RequestItem)
+    assert decoded.observations == [[{"color": "red"}]]
+    assert context["request"] == {"hue": "red"}
+
+
+def test_fastapi_runtime_setup_can_enable_query_monitor():
+    runtime = deployment_module.FastAPIRuntime(
+        checkpoint=Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
+        accelerator=deployment_module.Accelerator.cpu,
+        monitor_queries=True,
+        query_monitor_every=7,
     )
 
-    outputs = deployment.predict(batch)
-    encoded = [deployment.encode_response(item) for item in deployment.unbatch(outputs)]
+    runtime.setup()
 
-    assert model.calls == 0
-    assert encoded == [
-        {
-            "predictions": {},
-            "error": {"status_code": 422, "message": "cxr DM not present"},
-        },
-        {
-            "predictions": {},
-            "error": {"status_code": 422, "message": "cxr RJ not present"},
-        },
-    ]
+    assert runtime.jmespath_resolution_monitor is not None
+    assert runtime.jmespath_resolution_monitor.every == 7
 
 
-def test_deployment_launcher_configures_litserve_api(monkeypatch):
+def test_deployment_launcher_configures_fastapi_app(monkeypatch):
     class Request(pydantic.BaseModel):
         color: str
 
@@ -198,37 +278,61 @@ def test_deployment_launcher_configures_litserve_api(monkeypatch):
 
     captured = {}
 
-    class FakeServer:
-        def __init__(self, *, lit_api, accelerator, workers_per_device, track_requests):
-            captured["lit_api"] = lit_api
-            captured["accelerator"] = accelerator
-            captured["workers_per_device"] = workers_per_device
-            captured["track_requests"] = track_requests
+    def fake_run(app, *, host, port, log_level):
+        captured["app"] = app
+        captured["host"] = host
+        captured["port"] = port
+        captured["log_level"] = log_level
 
-        def run(self, *, generate_client_file):
-            captured["generate_client_file"] = generate_client_file
-
-    monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
+    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
 
     Deployment(
         checkpoint="unused",
         max_batch_size=16,
         batch_timeout=0.25,
-        workers_per_device=2,
         accelerator="cpu",
-        track_requests=True,
+        host="127.0.0.1",
+        port=8765,
+        log_level="error",
     ).update(where("name") == "label", target=False).forge(request=Request, response=Response).serve()
 
-    assert isinstance(captured["lit_api"], API)
-    assert captured["lit_api"].checkpoint == "unused"
-    assert captured["lit_api"].preprocessor is None
-    assert len(captured["lit_api"].update_operations) == 1
-    assert captured["accelerator"] == "cpu"
-    assert captured["workers_per_device"] == 2
-    assert captured["track_requests"] is True
-    assert captured["generate_client_file"] is False
-    assert API.decode_request.__annotations__["request"] is Request
-    assert API.encode_response.__annotations__["return"] is Response
+    assert isinstance(captured["app"], deployment_module.fastapi.FastAPI)
+    assert {route.path for route in captured["app"].routes} >= {"/health", "/predict"}
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8765
+    assert captured["log_level"] == "error"
+
+
+def test_deployment_launcher_configures_worker_import_string(monkeypatch):
+    captured = {}
+
+    def fake_run(app, *, factory, workers, host, port, log_level):
+        captured["app"] = app
+        captured["factory"] = factory
+        captured["workers"] = workers
+        captured["host"] = host
+        captured["port"] = port
+        captured["log_level"] = log_level
+
+    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
+
+    Deployment(checkpoint="model.ckpt", workers=2, accelerator="cpu", port=8765).serve()
+
+    assert captured == {
+        "app": "json2vec.inference.deployment:create_app",
+        "factory": True,
+        "workers": 2,
+        "host": "0.0.0.0",
+        "port": 8765,
+        "log_level": "info",
+    }
+
+
+def test_deployment_launcher_rejects_workers_with_model_instance():
+    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+
+    with pytest.raises(ValueError, match="workers > 1"):
+        Deployment(model=model, workers=2).serve()
 
 
 def test_deployment_launcher_accepts_model_instance(monkeypatch):
@@ -242,24 +346,17 @@ def test_deployment_launcher_accepts_model_instance(monkeypatch):
     )
     captured = []
 
-    class FakeServer:
-        def __init__(self, *, lit_api, accelerator, workers_per_device, track_requests):
-            captured.append({"lit_api": lit_api})
+    def fake_run(app, *, host, port, log_level):
+        captured.append({"app": app, "host": host, "port": port, "log_level": log_level})
 
-        def run(self, *, generate_client_file):
-            captured[-1]["generate_client_file"] = generate_client_file
+    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
 
-    monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
-
-    Deployment(model=model, accelerator="cpu").serve()
-    Deployment(checkpoint=model, accelerator="cpu").serve()
+    Deployment(model=model, accelerator="cpu", port=9001).serve()
+    Deployment(checkpoint=model, accelerator="cpu", port=9002).serve()
 
     assert len(captured) == 2
     for item in captured:
-        assert isinstance(item["lit_api"], API)
-        assert item["lit_api"].checkpoint is None
-        assert item["lit_api"].model_source is model
-        assert item["generate_client_file"] is False
+        assert isinstance(item["app"], deployment_module.fastapi.FastAPI)
 
 
 def test_deployment_rejects_explicit_checkpoint_and_model():
@@ -269,14 +366,14 @@ def test_deployment_rejects_explicit_checkpoint_and_model():
         Deployment(checkpoint="model.ckpt", model=model)
 
 
-def test_deployment_api_applies_queued_update_operations(monkeypatch):
+def test_fastapi_runtime_setup_applies_queued_update_operations(monkeypatch):
     calls = []
 
     class FakeModel:
         interprocess_encoding_context = {}
 
         def to(self, device):
-            calls.append(("to", device))
+            calls.append(("to", str(device)))
             return self
 
         def update(self, *predicates, **values):
@@ -291,21 +388,22 @@ def test_deployment_api_applies_queued_update_operations(monkeypatch):
     monkeypatch.setattr(deployment_module.Model, "load", classmethod(lambda cls, checkpoint: fake))
 
     predicate = where("name") == "label"
-    api = API(
+    runtime = deployment_module.FastAPIRuntime(
         checkpoint="unused",
+        accelerator=deployment_module.Accelerator.cpu,
         update_operations=[
             ((predicate,), {"target": False}),
         ],
     )
 
-    api.setup(device="cpu")
+    runtime.setup()
 
     assert calls[0] == ("to", "cpu")
     assert calls[1] == ("update", (predicate,), {"target": False})
     assert calls[2] == ("eval",)
 
 
-def test_deployment_api_setup_uses_model_instance(monkeypatch):
+def test_fastapi_runtime_setup_uses_model_instance(monkeypatch):
     model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
     monkeypatch.setattr(
         deployment_module.Model,
@@ -313,42 +411,30 @@ def test_deployment_api_setup_uses_model_instance(monkeypatch):
         classmethod(lambda cls, checkpoint: (_ for _ in ()).throw(AssertionError("checkpoint should not load"))),
     )
 
-    api = API(checkpoint=model)
+    runtime = deployment_module.FastAPIRuntime(
+        checkpoint=model,
+        accelerator=deployment_module.Accelerator.cpu,
+    )
 
-    api.setup(device="cpu")
+    runtime.setup()
 
-    assert api.model is model
-    assert api.checkpoint is None
+    assert runtime.model is model
 
 
-def test_deployment_launcher_binds_preprocessor_kwargs(monkeypatch):
+def test_deployment_binds_preprocessor_kwargs():
     def __deployment_preprocess(observation: dict, suffix: str):
         return {"color": observation["hue"] + suffix}
 
-    captured = {}
-
-    class FakeServer:
-        def __init__(self, *, lit_api, accelerator, workers_per_device, track_requests):
-            captured["lit_api"] = lit_api
-
-        def run(self, *, generate_client_file):
-            pass
-
-    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        captured["batch"] = batch
-        return _input(1)
-
-    monkeypatch.setattr(deployment_module.ls, "LitServer", FakeServer)
-    monkeypatch.setattr(deployment_module, "encode", fake_encode)
-
-    Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!").serve()
-    api = captured["lit_api"]
-    api.model = SimpleNamespace(hyperparameters=object())
-    api.interprocess_encoding_context = {}
+    deployment = Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!")
+    runtime = deployment_module.FastAPIRuntime(
+        checkpoint="unused",
+        accelerator=deployment_module.Accelerator.cpu,
+        preprocessor=deployment._preprocessor,
+    )
     context = {}
 
-    encoded = api.decode_request({"hue": "red"}, context=context)
+    decoded = runtime.decode_payload({"hue": "red"}, context=context)
 
-    assert isinstance(encoded, TensorDict)
-    assert captured["batch"] == [[{"color": "red!"}]]
+    assert isinstance(decoded, RequestItem)
+    assert decoded.observations == [[{"color": "red!"}]]
     assert context["observations"] == [[{"color": "red!"}]]

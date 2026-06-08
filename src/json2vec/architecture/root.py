@@ -22,6 +22,7 @@ from json2vec.architecture.graph import ModelGraph
 from json2vec.architecture.mutations import SchemaEditor
 from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
+from json2vec.logging.throughput import ThroughputLogger
 from json2vec.structs.enums import AttentionMode, Strata
 from json2vec.structs.experiment import (
     Hyperparameters,
@@ -421,6 +422,8 @@ class Model(lit.LightningModule, Renderable):
             callbacks.append(RuntimePlacementCallback())
         if MutationLockCallback not in attached_callback_types:
             callbacks.append(MutationLockCallback())
+        if ThroughputLogger not in attached_callback_types:
+            callbacks.append(ThroughputLogger())
 
         for request in self.hyperparameters.active_requests.values():
             plugin: Plugin = TENSORFIELDS[request.type]

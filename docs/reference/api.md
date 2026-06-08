@@ -16,7 +16,7 @@ This page is generated from public docstrings and is meant as a lookup companion
 - `Postprocessor` reshapes predictions after decoding; see
   [Postprocessors](../guides/postprocessors.md).
 - `Deployment` wraps a checkpoint or model instance for serving; install the
-  `serving` extra for LitServe-backed deployment paths.
+  `serving` extra for FastAPI-backed deployment paths.
 
 Learning-oriented entry points:
 

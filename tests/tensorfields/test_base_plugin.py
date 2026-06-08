@@ -1,6 +1,7 @@
 import uuid
 
 import pytest
+from lightning.pytorch import Callback
 
 from json2vec.structs.enums import Component, Strata
 from json2vec.structs.tree import Node
@@ -120,6 +121,38 @@ def test_plugin_accepts_explicit_none_write():
         plugin.register(None, component=Component.write)
 
         assert plugin.write(module=object(), prediction=object()) is None
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_registers_multiple_callback_factories():
+    class FirstCallback(Callback):
+        pass
+
+    class SecondCallback(Callback):
+        pass
+
+    plugin = Plugin(name=_plugin_name("callbacks"))
+    try:
+        result = plugin.callback(FirstCallback, SecondCallback)
+
+        assert result == (FirstCallback, SecondCallback)
+        assert plugin.callback_factories == [FirstCallback, SecondCallback]
+        assert [type(callback) for callback in plugin.callbacks] == [FirstCallback, SecondCallback]
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_rejects_invalid_callback_factory_without_registering():
+    class InvalidCallback:
+        pass
+
+    plugin = Plugin(name=_plugin_name("badcallbacks"))
+    try:
+        with pytest.raises(TypeError, match="must produce a Lightning Callback"):
+            plugin.callback(InvalidCallback)
+
+        assert plugin.callback_factories == []
     finally:
         TENSORFIELDS.pop(plugin.name, None)
 

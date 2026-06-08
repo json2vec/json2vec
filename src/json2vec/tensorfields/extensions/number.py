@@ -9,6 +9,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from json2vec.data.processing import pad
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 number: Plugin = Plugin(name="number")
 number.callback(CounterUpdateCallback)
+
+FOURIER_SAFE_MAX_ANGLE = float(1e4)
 
 
 def jitter(inputs: torch.Tensor, jitter_amount: torch.Tensor) -> torch.Tensor:
@@ -215,12 +218,13 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         self.count = new_count
 
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor, update=True) -> torch.Tensor:
+        finite_mask = mask & torch.isfinite(inputs)
         if self.training and update:
-            self.update(inputs[mask])
+            self.update(inputs[finite_mask])
 
         std = torch.sqrt(self.var + self.epsilon)
         out = inputs.clone()
-        out[mask] = (inputs[mask] - self.mean) / std
+        out[finite_mask] = (inputs[finite_mask] - self.mean) / std
 
         return out
 
@@ -244,24 +248,46 @@ class Embedder(EmbedderBase):
         self.linear = torch.nn.Linear(2 * len(weights), hyperparameters.d_model)
         self.register_buffer("weights", weights.mul(math.pi).unsqueeze(dim=0))
         self.register_buffer("jitter", torch.tensor(request.jitter))
+        self.register_buffer("max_fourier_input", torch.tensor(FOURIER_SAFE_MAX_ANGLE) / self.weights.abs().max())
 
         self.jitter: torch.Tensor
         self.weights: torch.Tensor
-
-        # # Define a safe maximum angle (radians) to avoid "soft overflow" / extreme inputs to sin/cos.
-        # # This scalar controls the largest magnitude of the weighted value that will be passed to sin/cos.
-        # # You can tune SAFE_MAX_ANGLE to be more or less restrictive.
-        # SAFE_MAX_ANGLE = float(1e4)
-        # # Compute the maximum absolute content value that will produce weighted inputs within SAFE_MAX_ANGLE.
-        # max_content = SAFE_MAX_ANGLE / self.weights.abs().max()
-        # # store as a buffer so it's moved with the module/device and dtype
-        # self.register_buffer("max_fourier_input", max_content)
-        # def fourier_input_bounds(self) -> tuple[float, float]:
-        #     """Return (min, max) allowed raw content values that will be passed to the Fourier transform."""
-        #     bound = float(self.max_fourier_input.item())
-        #     return (-bound, bound)
+        self.max_fourier_input: torch.Tensor
 
         self.normalizer: GlobalOnlineNormalizer = GlobalOnlineNormalizer(alpha=request.alpha)
+
+    def clamp(self, content: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        bound = self.max_fourier_input.to(device=content.device, dtype=content.dtype)
+        valued = state.eq(Tokens.valued)
+        finite = torch.isfinite(content)
+        out_of_range = content.abs().gt(bound)
+        unsafe = ~finite | out_of_range
+
+        if unsafe.any():
+            unsafe_values = content[unsafe].detach()
+            unsafe_abs = unsafe_values.abs()
+            finite_abs = unsafe_abs[torch.isfinite(unsafe_abs)]
+            if torch.isinf(unsafe_abs).any():
+                max_abs = math.inf
+            elif finite_abs.numel() > 0:
+                max_abs = float(finite_abs.max().cpu().item())
+            else:
+                max_abs = math.nan
+
+            logger.bind(
+                component="tensorfield",
+                field_type="number",
+                address=str(self.origin),
+                count=int(unsafe.sum().cpu().item()),
+                valued_count=int((unsafe & valued).sum().cpu().item()),
+                nonfinite_count=int((~torch.isfinite(unsafe_values)).sum().cpu().item()),
+                max_abs_normalized=max_abs,
+                bound=float(bound.detach().cpu().item()),
+                safe_max_angle=FOURIER_SAFE_MAX_ANGLE,
+            ).warning("number Fourier inputs exceed safe range; clamping normalized values")
+
+        clamped = content.clamp(min=-bound, max=bound)
+        return torch.where(torch.isnan(clamped), torch.zeros_like(clamped), clamped)
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -276,9 +302,7 @@ class Embedder(EmbedderBase):
         if self.training:
             content = jitter(content, jitter_amount=self.jitter)
 
-        # # clamp content to the theoretical bounds determined by the weights to avoid excessively large
-        # # angles passed into sin/cos (which can lead to numerical instability in practice)
-        # content = content.clamp(min=-self.max_fourier_input, max=self.max_fourier_input)
+        content = self.clamp(content=content, state=state)
 
         # weight inputs with buffers of precision bands
         weighted = content.unsqueeze(dim=1).mul(self.weights)

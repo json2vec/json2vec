@@ -31,6 +31,7 @@ from json2vec.data.datasets.base import (
     _is_assigned_to_worker,
     _worker_identity,
     identity,
+    share_interprocess_encoding_context,
 )
 from json2vec.data.iterables import (
     JMESPathResolutionMonitor,
@@ -500,6 +501,14 @@ class StreamingDataModule(lit.LightningDataModule):
         global_rank = getattr(trainer, "global_rank", None)
         world_size = getattr(trainer, "world_size", None)
 
+        workers = self.num_workers[strata]
+        if workers is None:
+            workers = os.cpu_count() or 0
+
+        interprocess_encoding_context = self.interprocess_encoding_context
+        if strata == Strata.train and workers > 0:
+            share_interprocess_encoding_context(interprocess_encoding_context)
+
         return dataloader(
             hyperparameters=self.hyperparameters,
             root=self.root,
@@ -507,10 +516,10 @@ class StreamingDataModule(lit.LightningDataModule):
             pattern=pattern,
             preprocessor=self.preprocessor,
             preprocessor_kwargs=self.preprocessor_kwargs,
-            interprocess_encoding_context=self.interprocess_encoding_context,
+            interprocess_encoding_context=interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,
-            num_workers=self.num_workers[strata],
+            num_workers=workers,
             persistent_workers=self.persistent_workers[strata],
             pin_memory=self.pin_memory[strata],
             sharding=self.sharding[strata],

@@ -1,6 +1,6 @@
 [project]
 name = "json2vec"
-version = "0.4.7"
+version = "0.4.8"
 description = "Schema-first PyTorch models for hierarchical / nested / sequence data structures"
 readme = "README.md"
 license = "Apache-2.0"
@@ -13,7 +13,6 @@ dependencies = [
     "jmespath>=1.0.1",
     "loguru>=0.7.3",
     "anytree>=2.13.0",
-    "ordered-set>=4.1.0",
     "pyarrow>=21.0.0",
     "polars>=1.35.2",
     "numpy>=2.2.6",
@@ -24,18 +23,22 @@ dependencies = [
 
 [project.optional-dependencies]
 serving = [
-    "litserve>=0.2.13",
+    "fastapi>=0.124.0",
+    "orjson>=3.10.0",
     "pydantic-settings>=2.10.1",
+    "uvicorn>=0.38.0",
 ]
 text = [
     "transformers>=4.55.0",
 ]
 docs = [
-    "litserve>=0.2.13",
+    "fastapi>=0.124.0",
     "mkdocs-material>=9.6",
     "mkdocs-jupyter>=0.26.3",
     "mkdocstrings[python]>=0.27",
+    "orjson>=3.10.0",
     "pydantic-settings>=2.10.1",
+    "uvicorn>=0.38.0",
 ]
 
 [dependency-groups]
@@ -47,8 +50,10 @@ dev = [
     "ipykernel>=6.29.5",
     "nbclient>=0.10.2",
     "nbformat>=5.10.4",
-    "litserve>=0.2.13",
+    "fastapi>=0.124.0",
+    "orjson>=3.10.0",
     "pydantic-settings>=2.10.1",
+    "uvicorn>=0.38.0",
     "ty>=0.0.1a20",
     "pre-commit>=4.3.0",
 ]

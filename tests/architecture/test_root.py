@@ -9,11 +9,15 @@ import torch
 import json2vec as j2v
 from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from json2vec.data.iterables import encode
+from json2vec.logging.throughput import ThroughputLogger
 from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.shared.counter import CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
+from json2vec.tensorfields.shared.vocabulary import (
+    OnlineVocabularyModel,
+    VocabularySyncCallback,
+)
 
 
 def _hyperparameters() -> Hyperparameters:
@@ -270,6 +274,7 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
 
     assert any(isinstance(callback, RuntimePlacementCallback) for callback in callbacks)
     assert any(isinstance(callback, MutationLockCallback) for callback in callbacks)
+    assert any(isinstance(callback, ThroughputLogger) for callback in callbacks)
     assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
     assert any(isinstance(callback, CounterUpdateCallback) for callback in callbacks)
     assert callback_types == sorted(
@@ -321,9 +326,13 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     runtime_placement_callbacks = [
         callback for callback in model.configure_callbacks() if isinstance(callback, RuntimePlacementCallback)
     ]
+    throughput_callbacks = [
+        callback for callback in model.configure_callbacks() if isinstance(callback, ThroughputLogger)
+    ]
 
     assert len(runtime_placement_callbacks) == 1
     assert len(mutation_lock_callbacks) == 1
+    assert len(throughput_callbacks) == 1
     assert len(vocabulary_callbacks) == 1
     assert len(counter_callbacks) == 1
 
@@ -340,6 +349,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
             "callbacks": [
                 RuntimePlacementCallback(),
                 MutationLockCallback(),
+                ThroughputLogger(),
                 VocabularySyncCallback(),
                 CounterUpdateCallback(),
             ]
@@ -356,6 +366,52 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
     assert TensorKey.state.name in model.nodes[address].embedder.counters
     assert TensorKey.content.name in model.nodes[address].embedder.counters
+
+
+def test_online_vocabulary_model_uses_local_storage_until_shared():
+    vocab = OnlineVocabularyModel(max_vocab_size=8)
+
+    assert vocab.manager is None
+    assert vocab.is_shared is False
+
+    local_state = vocab.state
+    assert isinstance(local_state.master, list)
+    local_state.reserve("ALPHA", learn=True)
+    assert local_state.encode("ALPHA") == 0
+    assert vocab.snapshot() == ["ALPHA"]
+
+    vocab.share()
+
+    assert vocab.manager is not None
+    assert vocab.is_shared is True
+    assert not isinstance(vocab.state.master, list)
+
+    shared_state = vocab.state
+    shared_state.reserve("BETA", learn=True)
+    assert shared_state.encode("BETA") == 1
+    assert vocab.snapshot() == ["ALPHA", "BETA"]
+
+    vocab.freeze()
+
+    assert vocab.manager is None
+    assert vocab.is_shared is False
+    assert isinstance(vocab.state.master, list)
+    assert vocab.snapshot() == ["ALPHA", "BETA"]
+
+
+def test_vocabulary_callback_freezes_model_vocabularies_on_fit_end():
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    address = Address("root", "label")
+    vocab = model.nodes[address].embedder.vocab
+
+    vocab.share()
+
+    assert vocab.is_shared is True
+
+    VocabularySyncCallback().on_fit_end(trainer=None, pl_module=model)
+
+    assert vocab.is_shared is False
+    assert isinstance(vocab.state.master, list)
 
 
 def test_runtime_placement_callback_moves_module_to_root_device() -> None:
@@ -401,12 +457,12 @@ def test_training_counters_observe_all_encoded_fields() -> None:
 
     valued = field.state.eq(Tokens.valued.value)
     expected_content_counts = torch.ones(
-        hyperparameters.requests[address].max_vocab_size + 1,
+        hyperparameters.requests[address].max_vocab_size,
         dtype=torch.int64,
     )
     expected_content_counts += torch.bincount(
         field.content.masked_select(valued).reshape(-1),
-        minlength=hyperparameters.requests[address].max_vocab_size + 1,
+        minlength=hyperparameters.requests[address].max_vocab_size,
     )
     assert torch.equal(embedder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
 
@@ -423,12 +479,12 @@ def test_training_counters_observe_all_encoded_fields() -> None:
 
     target_valued = target_field.targets[TensorKey.state].eq(Tokens.valued.value)
     expected_target_content_counts = torch.ones(
-        hyperparameters.requests[target_address].max_vocab_size + 1,
+        hyperparameters.requests[target_address].max_vocab_size,
         dtype=torch.int64,
     )
     expected_target_content_counts += torch.bincount(
         target_field.targets[TensorKey.content].masked_select(target_valued).reshape(-1),
-        minlength=hyperparameters.requests[target_address].max_vocab_size + 1,
+        minlength=hyperparameters.requests[target_address].max_vocab_size,
     )
     assert torch.equal(
         target_embedder.counters[TensorKey.content.name].counts.cpu(),

@@ -22,6 +22,7 @@ from json2vec.data.datasets.base import (
     SampleRate,
     StrataMap,
     identity,
+    share_interprocess_encoding_context,
 )
 from json2vec.data.iterables import (
     JMESPathResolutionMonitor,
@@ -299,15 +300,23 @@ class CustomDataModule(lit.LightningDataModule):
                 return None
             raise ValueError(f"no dataset configured for strata: {strata}")
 
+        workers = self.num_workers[strata]
+        if workers is None:
+            workers = os.cpu_count() or 0
+
+        interprocess_encoding_context = self.interprocess_encoding_context
+        if strata == Strata.train and workers > 0:
+            share_interprocess_encoding_context(interprocess_encoding_context)
+
         return custom_dataloader(
             hyperparameters=self.hyperparameters,
             dataset=self.datasets[strata],
             preprocessor=self.preprocessor,
             preprocessor_kwargs=self.preprocessor_kwargs,
-            interprocess_encoding_context=self.interprocess_encoding_context,
+            interprocess_encoding_context=interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,
-            num_workers=self.num_workers[strata],
+            num_workers=workers,
             persistent_workers=self.persistent_workers[strata],
             pin_memory=self.pin_memory[strata],
             observation_buffer_size=self.observation_buffer_size[strata],

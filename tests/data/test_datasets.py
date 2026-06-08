@@ -22,6 +22,7 @@ from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
 from json2vec.preprocessors.base import Preprocessor, PreprocessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.tree import Address
 
 
 def _datamodule_hyperparameters():
@@ -96,6 +97,35 @@ def test_query_prepends_outer_batch_selector():
     over_nested = iterables.query("[*][*].foo.bar")
     assert over_nested.expression == "[*][*][*].foo.bar"
     assert over_nested.search([[{"foo": {"bar": 42}}]]) == [[]]
+
+
+def test_simple_query_extractor_matches_jmespath_for_supported_expressions():
+    cases = [
+        (
+            "[*].amount",
+            [[{"amount": 1.0}], [{"missing": 2.0}]],
+        ),
+        (
+            "[*].transactions[*].amount",
+            [[{"transactions": [{"amount": 1.0}, {"missing": 2.0}]}], [{"transactions": []}]],
+        ),
+        (
+            "[*].transactions[*].amount",
+            [[{"transactions": None}], [{"transactions": [None, {"amount": 3.0}]}]],
+        ),
+    ]
+
+    for expression, batch in cases:
+        extractor = iterables.compile_query_extractor(expression)
+
+        assert extractor is not None
+        assert extractor(batch) == iterables.query(expression).search(batch)
+
+
+def test_simple_query_extractor_falls_back_for_unsupported_expressions():
+    assert iterables.compile_query_extractor("[*].items[?amount > `1`].amount") is None
+    assert iterables.compile_query_extractor("[*].items[0].amount") is None
+    assert iterables.compile_query_extractor('[*]."hyphen-name"') is None
 
 
 def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -883,9 +913,43 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
 
     after = module.interprocess_encoding_context["record/code"]
     current = model.interprocess_encoding_context["record/code"]
-    assert after.master._id == current.master._id
-    assert after.master._id != before.master._id
+    assert after.master is current.master
+    assert after.master is not before.master
     assert after is not before
+
+
+def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
+    model = j2v.Model.from_schema(
+        j2v.Category("code", max_vocab_size=16),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    address = Address("record/code")
+    vocab = model.nodes[address].embedder.vocab
+    module = PolarsDataModule(
+        model=model,
+        train=pl.DataFrame({"code": ["a"]}),
+        predict=pl.DataFrame({"code": ["b"]}),
+        num_workers={Strata.train: 1, Strata.predict: 1},
+        persistent_workers=False,
+    )
+
+    assert vocab.is_shared is False
+
+    predict_loader = module.predict_dataloader()
+
+    assert predict_loader is not None
+    assert vocab.is_shared is False
+
+    train_loader = module.train_dataloader()
+
+    assert train_loader is not None
+    assert vocab.is_shared is True
+
+    vocab.freeze()
+    assert vocab.is_shared is False
 
 
 def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():

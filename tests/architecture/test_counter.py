@@ -48,6 +48,15 @@ def test_counter_forward_does_not_call_distributed_collective(monkeypatch):
     assert torch.equal(counter._pending_counts, torch.tensor([1, 2, 0], dtype=torch.int64))  # noqa: SLF001
 
 
+def test_counter_ignores_values_outside_counter_size():
+    counter = Counter(address=Address("sentinel"), size=3)
+
+    counter(torch.tensor([0, 1, 3, 4], dtype=torch.int64))
+
+    assert torch.equal(counter.counts, torch.tensor([2, 2, 1], dtype=torch.int64))
+    assert torch.equal(counter._pending_counts, torch.tensor([1, 1, 0], dtype=torch.int64))  # noqa: SLF001
+
+
 def test_counter_sync_reduces_pending_delta_only(monkeypatch):
     reduced = []
 
