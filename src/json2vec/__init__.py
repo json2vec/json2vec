@@ -38,7 +38,7 @@ from json2vec.structs.experiment import (
     predicate,
     where,
 )
-from json2vec.structs.inference import InferenceConfig, infer_schema
+from json2vec.helpers.inference import InferenceConfig, infer_schema
 from json2vec.structs.structure import Array
 from json2vec.structs.tree import Address, Leaf
 from json2vec.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase

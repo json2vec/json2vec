@@ -35,7 +35,7 @@ from json2vec.structs.tree import Address, Node, Rate, Renderable
 from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
 if TYPE_CHECKING:
-    from json2vec.structs.inference import InferenceConfig
+    from json2vec.helpers.inference import InferenceConfig
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
@@ -277,7 +277,7 @@ class Model(lit.LightningModule, Renderable):
         Returns:
             A compiled `Model` built for the inferred schema.
         """
-        from json2vec.structs.inference import infer_schema
+        from json2vec.helpers.inference import infer_schema
 
         fields = infer_schema(records, config=infer, explain=explain, **infer_overrides)
         return cls.from_schema(

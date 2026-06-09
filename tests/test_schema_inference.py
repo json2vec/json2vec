@@ -5,7 +5,7 @@ import warnings
 import pytest
 
 import json2vec as j2v
-from json2vec.structs.inference import InferenceConfig, infer_schema
+from json2vec.helpers.inference import InferenceConfig, infer_schema
 
 
 def _by_name(fields):
