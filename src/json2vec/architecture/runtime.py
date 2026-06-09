@@ -14,8 +14,9 @@ from json2vec.architecture.contracts import sanitize
 from json2vec.architecture.encoder import ArrayEncoder
 from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
-from json2vec.data.iterables import encode
-from json2vec.structs.enums import Metric, Strata, TensorKey
+from json2vec.data.iterables import encode as encode_batch
+from json2vec.data.iterables import mask as apply_mask
+from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import (
@@ -99,8 +100,10 @@ class ModelRuntime:
                     )
 
         for address in module.hyperparameters.active_requests.keys():
+            has_masked_input = inputs[address].state.eq(Tokens.masked.value).any()
             if (
                 torch.any(inputs[address].trainable)
+                or (strata == Strata.predict and has_masked_input)
                 or (address in module.hyperparameters.target)
                 or (address in module.hyperparameters.embed)
             ):
@@ -193,6 +196,7 @@ class ModelRuntime:
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
+        mask: bool = True,
     ) -> EncodedInput:
         strata = Strata.normalize(strata)
 
@@ -209,12 +213,17 @@ class ModelRuntime:
         elif batch and isinstance(batch[0], dict):
             batch = [[request] for request in cast(list[dict[str, Any]], batch)]
 
-        return encode(
+        inputs = encode_batch(
             batch=cast(EncodedBatch, batch),
             hyperparameters=module.hyperparameters,
             strata=strata,
             interprocess_encoding_context=module.interprocess_encoding_context,
+            defer_target_masking=True,
         )
+        if mask:
+            return next(apply_mask([inputs], module.hyperparameters, strata=strata))
+
+        return inputs
 
     @staticmethod
     def predict(

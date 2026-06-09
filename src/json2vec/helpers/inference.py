@@ -127,11 +127,7 @@ class InferenceConfig:
         if self.vocab_cap < 2:
             raise ValueError("vocab_cap must be at least 2")
         self._targets: set[str] = (
-            set()
-            if self.target is None
-            else {self.target}
-            if isinstance(self.target, str)
-            else set(self.target)
+            set() if self.target is None else {self.target} if isinstance(self.target, str) else set(self.target)
         )
 
 
@@ -174,9 +170,7 @@ def _parse_iso(value: str) -> _datetime.datetime | None:
         return _datetime.datetime.fromisoformat(candidate)
     except ValueError:
         try:
-            return _datetime.datetime.combine(
-                _datetime.date.fromisoformat(text[:10]), _datetime.time()
-            )
+            return _datetime.datetime.combine(_datetime.date.fromisoformat(text[:10]), _datetime.time())
         except ValueError:
             return None
 
@@ -315,7 +309,11 @@ def _decide_scalar(
     distinct = len({v for v in values})
     counts = _kind_counts(values)
     n_bool, n_int, n_float, n_str, n_datetime = (
-        counts["bool"], counts["int"], counts["float"], counts["str"], counts["datetime"]
+        counts["bool"],
+        counts["int"],
+        counts["float"],
+        counts["str"],
+        counts["datetime"],
     )
     # `target=True` is exactly `p_prune=1.0`; set the declared field directly.
     p_prune = 1.0 if column.key in config._targets else 0.0
@@ -329,9 +327,7 @@ def _decide_scalar(
 
     # Native datetime/date objects (Polars/pandas frames, RelBench records).
     if n_datetime and n_datetime / observed >= config.date_parse_min_ratio:
-        has_time = any(
-            isinstance(v, _datetime.datetime) and (v.hour or v.minute or v.second) for v in values
-        )
+        has_time = any(isinstance(v, _datetime.datetime) and (v.hour or v.minute or v.second) for v in values)
         parts = ["month_of_year", "day_of_month", "day_of_week"]
         if has_time:
             parts.append("hour_of_day")
@@ -361,9 +357,7 @@ def _decide_scalar(
         parsed = [_parse_iso(v) for v in values]
         n_dates = sum(1 for p in parsed if p is not None)
         if n_dates / observed >= config.date_parse_min_ratio:
-            has_time = any(
-                p is not None and (p.hour or p.minute or p.second) for p in parsed
-            )
+            has_time = any(p is not None and (p.hour or p.minute or p.second) for p in parsed)
             parts = ["month_of_year", "day_of_month", "day_of_week"]
             if has_time:
                 parts.append("hour_of_day")
@@ -532,7 +526,7 @@ def _build_fields(
 
         if decision.node is None:
             warnings.warn(
-                f"json2vec.infer_schema: skipping '{column.key}' — {decision.reason}",
+                f"json2vec.helpers.infer_schema: skipping '{column.key}' — {decision.reason}",
                 UserWarning,
                 stacklevel=2,
             )

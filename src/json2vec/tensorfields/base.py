@@ -4,23 +4,25 @@ from __future__ import annotations
 
 import re
 import warnings
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overload
 
 import pluggy
 import torch
 from lightning.pytorch import Callback
+from rich.text import Text
 from tensordict import TensorDict
 
 from json2vec.architecture.pool import LearnedQueryCrossAttention, MeanPool
-from json2vec.structs.enums import Component, Strata, TensorKey
+from json2vec.structs.enums import Component, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
-from json2vec.structs.tree import Address, Leaf, Node
+from json2vec.structs.tree import Address, Leaf, Node, Renderable
 from json2vec.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
     from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.structure import Mask
 
 pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
 
@@ -30,6 +32,7 @@ RequestBase: TypeAlias = Leaf
 CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
 RegisterT = TypeVar("RegisterT", bound=ComponentValue)
+ArrayMaskApplication: TypeAlias = tuple[Address, "Mask"]
 
 
 def default_write(module: "Model", prediction: Prediction) -> None:
@@ -92,8 +95,24 @@ class DecoderBase(torch.nn.Module):
         )
 
 
-class TensorFieldBase(ABC):
+class TensorFieldBase(Renderable):
     """Tensorized field values plus trainable target state."""
+
+    STATE_PREVIEW_LIMIT: int = 80
+    STATE_LABELS: dict[int, str] = {
+        Tokens.valued.value: "V",
+        Tokens.null.value: "N",
+        Tokens.padded.value: "P",
+        Tokens.masked.value: "M",
+        Tokens.other.value: "O",
+    }
+    STATE_STYLES: dict[int, str] = {
+        Tokens.valued.value: "bold green",
+        Tokens.null.value: "bold yellow",
+        Tokens.padded.value: "dim",
+        Tokens.masked.value: "bold magenta",
+        Tokens.other.value: "bold cyan",
+    }
 
     content: torch.Tensor
     state: torch.Tensor
@@ -122,12 +141,222 @@ class TensorFieldBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def mask(self, p_mask: float):
+    def mask(self, p_mask: float = 0.0, **kwargs: Any):
         raise NotImplementedError
 
     @abstractmethod
-    def target(self, p_prune: float):
+    def target(self, p_prune: float = 1.0):
         raise NotImplementedError
+
+    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True) -> None:
+        raise NotImplementedError
+
+    def __rich_console__(self, console, options):
+        state = getattr(self, TensorKey.state, None)
+        trainable = getattr(self, TensorKey.trainable, None)
+        targets = getattr(self, TensorKey.targets, None)
+
+        heading = Text()
+        heading.append(type(self).__name__, style=self.RICH_NAME_STYLE)
+        heading.append(" ")
+        heading.append("[tensorfield]", style=self.RICH_TYPE_STYLE)
+
+        if torch.is_tensor(state):
+            heading.append(" ")
+            heading.append("state=", style="dim")
+            heading.append(str(tuple(state.shape)), style="cyan")
+            heading.append(" ")
+            heading.append("device=", style="dim")
+            heading.append(str(state.device), style="cyan")
+
+        if torch.is_tensor(trainable):
+            heading.append(" ")
+            heading.append("trainable=", style="dim")
+            heading.append(str(int(trainable.sum().item())), style="cyan")
+
+        yield heading
+
+        if torch.is_tensor(state):
+            yield self._state_counts_text(state)
+            yield self._state_preview_text(state)
+
+        if isinstance(targets, TensorDict) and targets.keys():
+            text = Text(" targets=", style="dim")
+            text.append(", ".join(str(key) for key in sorted(targets.keys(), key=str)), style="cyan")
+            yield text
+
+    def _state_counts_text(self, state: torch.Tensor) -> Text:
+        values = state.detach().reshape(-1).to(device="cpu", dtype=torch.int64)
+        text = Text(" counts ", style="dim")
+        for token in Tokens:
+            count = int(values.eq(token.value).sum().item())
+            text.append(self.STATE_LABELS[token.value], style=self.STATE_STYLES[token.value])
+            text.append(f"={count} ", style="dim")
+
+        return text
+
+    def _state_preview_text(self, state: torch.Tensor) -> Text:
+        preview = self._first_root_slice(state)
+        text = Text(" state ", style="dim")
+
+        if preview.ndim <= 1:
+            rows = preview.reshape(1, -1)
+            row_prefix = " "
+        else:
+            rows = preview.reshape(-1, preview.shape[-1])
+            row_prefix = "\n       "
+
+        limit = min(int(preview.numel()), self.STATE_PREVIEW_LIMIT)
+        count = 0
+
+        for row_index, row in enumerate(rows):
+            if count >= limit:
+                break
+            if row_index:
+                text.append(row_prefix, style="dim")
+
+            for column_index, value in enumerate(row.tolist()):
+                if count >= limit:
+                    break
+                if column_index:
+                    text.append(" ")
+
+                token = int(value)
+                text.append(self.STATE_LABELS.get(token, str(token)), style=self.STATE_STYLES.get(token, "bold red"))
+                count += 1
+
+        if int(preview.numel()) > limit:
+            text.append(" ...", style="dim")
+
+        return text
+
+    def _first_root_slice(self, tensor: torch.Tensor) -> torch.Tensor:
+        values = tensor.detach().to(device="cpu")
+        if values.ndim > 0:
+            values = values[0]
+        if values.ndim > 0:
+            values = values[0]
+
+        return values.to(dtype=torch.int64)
+
+
+def _broadcast_to_state(selected: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    while selected.ndim < state.ndim:
+        selected = selected.unsqueeze(-1)
+
+    return selected.expand_as(state)
+
+
+def _array_mask_candidates(
+    state: torch.Tensor,
+    *,
+    address: Address,
+    array_address: Address,
+    mask: Mask,
+    hyperparameters: Hyperparameters,
+) -> torch.Tensor:
+    occupied = state.ne(torch.as_tensor(Tokens.padded.value, device=state.device, dtype=state.dtype))
+    request = hyperparameters.requests[address]
+    array_nodes = [node for node in request.path if getattr(node, "type", None) == "array"]
+    array_index = next(
+        index for index, array in enumerate(array_nodes) if Address(str(array.address)) == Address(str(array_address))
+    )
+    array_dim = array_index + 1
+
+    occupied_at_array = occupied
+    while occupied_at_array.ndim > array_dim + 1:
+        occupied_at_array = occupied_at_array.any(dim=-1)
+
+    slot_count = occupied_at_array.shape[-1]
+    positions = torch.arange(slot_count, device=state.device).reshape(
+        *((1,) * (occupied_at_array.ndim - 1)),
+        slot_count,
+    )
+    lengths = occupied_at_array.sum(dim=-1, keepdim=True)
+
+    if mask.array:
+        extent = torch.full_like(lengths, slot_count)
+    else:
+        extent = lengths
+
+    offset = torch.as_tensor(mask.offset, device=state.device, dtype=positions.dtype)
+    if mask.window is None:
+        if mask.start:
+            lower = torch.full_like(extent, mask.offset)
+            upper = extent
+        else:
+            lower = torch.zeros_like(extent)
+            upper = extent - offset
+    elif mask.start:
+        lower = torch.full_like(extent, mask.offset)
+        upper = lower + mask.window
+    else:
+        upper = extent - offset
+        lower = upper - mask.window
+
+    lower = lower.clamp(min=0, max=slot_count)
+    upper = upper.clamp(min=0, max=slot_count)
+    candidates = (positions >= lower) & (positions < upper) & occupied_at_array
+
+    if mask.rate is not None:
+        selected_at_array = torch.rand(candidates.shape, device=state.device, dtype=torch.float).lt(mask.rate)
+        selected_at_array &= candidates
+    else:
+        selected_at_array = torch.zeros_like(candidates, dtype=torch.bool)
+        count = int(mask.count or 0)
+        if count > 0 and candidates.any():
+            flattened = candidates.reshape(-1, slot_count)
+            selected_flat = selected_at_array.reshape(-1, slot_count)
+            for row_index, row in enumerate(flattened):
+                candidate_indexes = torch.nonzero(row, as_tuple=False).reshape(-1)
+                if candidate_indexes.numel() == 0:
+                    continue
+
+                chosen_count = min(count, int(candidate_indexes.numel()))
+                permutation = torch.randperm(candidate_indexes.numel(), device=state.device)[:chosen_count]
+                selected_flat[row_index, candidate_indexes[permutation]] = True
+
+    selected = _broadcast_to_state(selected_at_array, state)
+    return selected & state.ne(torch.as_tensor(Tokens.padded.value, device=state.device, dtype=state.dtype))
+
+
+def _prune_selection(state: torch.Tensor, p_prune: float) -> torch.Tensor:
+    return torch.rand(state.size(0), *([1] * (len(state.shape) - 1)), device=state.device).lt(p_prune).expand_as(state)
+
+
+def apply_mask_policies(
+    tensorfield: TensorFieldBase,
+    p_mask: float = 0.0,
+    *,
+    p_prune: float = 0.0,
+    array_masks: tuple[ArrayMaskApplication, ...] = (),
+    address: Address | None = None,
+    hyperparameters: Hyperparameters | None = None,
+) -> None:
+    """Apply array masks, random masks, and prune masks from one snapshot."""
+    state = tensorfield.state.clone()
+
+    if array_masks and (address is None or hyperparameters is None):
+        raise ValueError("array masks require address and hyperparameters")
+
+    for array_address, mask in array_masks:
+        selected = _array_mask_candidates(
+            state,
+            address=cast(Address, address),
+            array_address=array_address,
+            mask=mask,
+            hyperparameters=hyperparameters,
+        )
+        if selected.any():
+            tensorfield.hide(selected, cache_targets=True, trainable=True)
+
+    if p_mask > 0.0:
+        selected = torch.rand_like(input=state, dtype=torch.float).lt(other=p_mask)
+        tensorfield.hide(selected, cache_targets=True, trainable=True)
+
+    if p_prune > 0.0:
+        selected = _prune_selection(state, p_prune=p_prune)
+        tensorfield.hide(selected, cache_targets=True, trainable=True)
 
 
 TENSORFIELDS: dict[str, "Plugin"] = {}

@@ -12,7 +12,7 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.data.processing import apply, pad
+from json2vec.data.processing import apply, extract_mask_literals, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -22,6 +22,7 @@ from json2vec.tensorfields.base import (
     Plugin,
     RequestBase,
     TensorFieldBase,
+    apply_mask_policies,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
@@ -196,6 +197,12 @@ class TensorField(TensorFieldBase):
         request: Request = hyperparameters.requests[address]
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
         leading_shape: tuple[int, ...] = (len(values), *array_shape)
+        values, literal_masks = extract_mask_literals(
+            values,
+            strata=strata,
+            address=address,
+            leaf_depth=len(leading_shape),
+        )
 
         coerced = apply(
             values,
@@ -212,10 +219,19 @@ class TensorField(TensorFieldBase):
             overflows=hyperparameters.overflows(address),
             address=address,
         )
+        literal_data, _ = pad(
+            nested=literal_masks,
+            shape=leading_shape,
+            dtype=bool,
+            pad_value=False,
+            overflows=hyperparameters.overflows(address),
+            address=address,
+        )
 
         token_ids = torch.zeros((*leading_shape, request.max_length), dtype=torch.int64)
         attention_mask = torch.zeros_like(token_ids)
-        state_tensor = torch.tensor(state, dtype=torch.int64)
+        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
+        state_tensor = torch.tensor(state, dtype=torch.int64).masked_fill(literal_mask_tensor, Tokens.masked.value)
 
         valued = state == Tokens.valued.value
         if valued.any():
@@ -266,30 +282,24 @@ class TensorField(TensorFieldBase):
                 torch.zeros_like(input=self.content[key]),
             )
 
-    def mask(self, p_mask: float):
+    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
+        selected = selected.to(device=self.state.device, dtype=torch.bool)
         mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-        is_masked = torch.rand_like(input=self.state, dtype=torch.float).lt(other=p_mask)
 
-        self._cache_targets()
+        if cache_targets:
+            self._cache_targets()
 
-        self.state = self.state.masked_scatter(is_masked, mask_token)
-        self._zero_content(is_masked)
+        self.state = self.state.masked_scatter(selected, mask_token)
+        self._zero_content(selected)
 
-        self.trainable |= is_masked
+        if trainable:
+            self.trainable |= selected
+
+    def mask(self, p_mask: float = 0.0, **kwargs: Any):
+        apply_mask_policies(self, p_mask=p_mask, **kwargs)
 
     def target(self, p_prune: float = 1.0):
-        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-        is_targeted = (
-            torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
-            .expand_as(self.state)
-        )
-        self._cache_targets()
-
-        self.state = self.state.masked_scatter(is_targeted, mask_token)
-        self._zero_content(is_targeted)
-
-        self.trainable |= is_targeted
+        apply_mask_policies(self, p_prune=p_prune)
 
     @classmethod
     def empty(

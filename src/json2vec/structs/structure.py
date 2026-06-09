@@ -22,6 +22,55 @@ else:
 Dropout: TypeAlias = Rate
 
 
+class Mask(pydantic.BaseModel):
+    """Structured masking policy attached to an `Array`."""
+
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+    name: str | None = None
+    rate: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] | None = None
+    count: Annotated[int, pydantic.Field(ge=0)] | None = None
+    window: Annotated[int, pydantic.Field(gt=0)] | None = None
+    array: bool = False
+    start: bool = False
+    offset: Annotated[int, pydantic.Field(ge=0)] = 0
+    exclude: Any = None
+
+    @pydantic.model_validator(mode="after")
+    def check_rate_or_count(self):
+        if (self.rate is None) == (self.count is None):
+            raise ValueError("Mask requires exactly one of rate or count")
+
+        return self
+
+    @pydantic.field_validator("exclude", mode="before")
+    @classmethod
+    def normalize_exclude(cls, value: Any) -> Any:
+        if value is None:
+            return None
+
+        if isinstance(value, (list, tuple)):
+            values = tuple(value)
+        else:
+            values = (value,)
+
+        if any(isinstance(item, dict) and {"func", "key"}.issubset(item) for item in values):
+            from json2vec.structs.selectors import NodePredicate
+
+            return tuple(
+                NodePredicate.model_validate(item)
+                if isinstance(item, dict) and {"func", "key"}.issubset(item)
+                else item
+                for item in values
+            )
+
+        return values
+
+    @pydantic.field_serializer("exclude")
+    def serialize_exclude(self, value: Any) -> Any:
+        return value
+
+
 class Array(Node):
     """Repeated nested object group in a `json2vec` schema.
 
@@ -35,6 +84,7 @@ class Array(Node):
     overflow: Overflow = Overflow.head
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    masks: list[Mask] = pydantic.Field(default_factory=list)
     fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)
 
     def __init__(self, *children: Self | RequestTypes | Leaf, **data):
@@ -44,6 +94,23 @@ class Array(Node):
             data["fields"] = list(children)
 
         super().__init__(**data)
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def normalize_mask_shorthand(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        values = dict(data)
+        mask = values.pop("mask", None)
+        if mask is None:
+            return values
+
+        if "masks" in values:
+            raise ValueError("pass either mask or masks, not both")
+
+        values["masks"] = [mask]
+        return values
 
     def model_post_init(self, __context):
         for field in self.fields:
@@ -58,6 +125,53 @@ class Array(Node):
             seen.add(field.name)
 
         return self
+
+    def post_bind_validate(self):
+        if len(self.masks) == 0:
+            return None
+
+        is_root = getattr(getattr(self, "parent", None), "type", None) == "hyperparameters"
+        if is_root:
+            raise ValueError("Mask on the generated root array is not supported")
+
+        active_leaves = [
+            descendant
+            for descendant in getattr(self, "descendants", ())
+            if isinstance(descendant, Leaf) and getattr(descendant, "active", True)
+        ]
+        if not active_leaves:
+            raise ValueError(f"array '{self.address}' has masks but no active descendant leaves")
+
+        names = [mask.name for mask in self.masks if mask.name is not None]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"array '{self.address}' has duplicate mask name(s): {duplicates}")
+
+        for mask in self.masks:
+            if mask.offset >= self.max_length:
+                raise ValueError(f"array '{self.address}' mask offset must be less than max_length={self.max_length}")
+
+            excluded = self.excluded_leaves(mask)
+            if len(excluded) == len(active_leaves):
+                label = f" '{mask.name}'" if mask.name is not None else ""
+                raise ValueError(f"array '{self.address}' mask{label} excludes every active descendant leaf")
+
+        return None
+
+    def excluded_leaves(self, mask: Mask) -> tuple[Leaf, ...]:
+        if mask.exclude is None:
+            return ()
+
+        from json2vec.structs.selectors import NodePredicate
+
+        predicates = tuple(NodePredicate.from_selector(item) for item in mask.exclude)
+        return tuple(
+            descendant
+            for descendant in getattr(self, "descendants", ())
+            if isinstance(descendant, Leaf)
+            if getattr(descendant, "active", True)
+            if any(predicate(descendant) for predicate in predicates)
+        )
 
     def __rich_console__(self, console, options):
         is_root = getattr(getattr(self, "parent", None), "type", None) == "hyperparameters"
@@ -84,6 +198,10 @@ class Array(Node):
             heading.append(" ")
             heading.append(f"{name}=", style="dim")
             heading.append(str(value), style="cyan")
+        if self.masks:
+            heading.append(" ")
+            heading.append("masks=", style="dim")
+            heading.append(str(len(self.masks)), style="cyan")
 
         yield heading
 

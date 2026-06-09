@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from functools import partialmethod, wraps
 from typing import TYPE_CHECKING, Any
 
+import lightning.pytorch as lit
 import pydantic
+import torch
+from lightning.pytorch import Callback
 from loguru import logger
 
 from json2vec.architecture.graph import ModelGraph
+from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import NodeAttribute, NodePredicate, SchemaField
 from json2vec.structs.structure import Array
 from json2vec.structs.tree import Leaf, Node
@@ -18,6 +23,73 @@ if TYPE_CHECKING:
     from json2vec.architecture.root import Model
 
 _MISSING = object()
+
+
+def immutable(name: str | Strata) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(method)
+        def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            locks = self.locks
+            locks[name] += 1
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                if locks[name] <= 1:
+                    locks.pop(name, None)
+                else:
+                    locks[name] -= 1
+
+        return wrapped
+
+    return decorator
+
+
+class MutationLockCallback(Callback):
+    """Prevent runtime schema mutations while Lightning owns an active loop."""
+
+    locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
+
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        pl_module.locks[strata] += 1
+
+    def _on_loop_end(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        locks = pl_module.locks
+        if locks[strata] <= 1:
+            locks.pop(strata, None)
+        else:
+            locks[strata] -= 1
+
+    def on_exception(
+        self,
+        trainer: lit.Trainer,
+        pl_module: "Model",
+        exception: BaseException,
+    ) -> None:  # ty:ignore[invalid-method-override]
+        for lock in self.locks:
+            pl_module.locks.pop(lock, None)
+
+    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
+    on_train_end = partialmethod(_on_loop_end, strata=Strata.train)
+    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
+    on_validation_end = partialmethod(_on_loop_end, strata=Strata.validate)
+    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
+    on_test_end = partialmethod(_on_loop_end, strata=Strata.test)
+    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
+    on_predict_end = partialmethod(_on_loop_end, strata=Strata.predict)
+
+
+class RuntimePlacementCallback(Callback):
+    """Move late-created modules onto the Lightning module's active device."""
+
+    def _on_loop_start(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
+        device = getattr(pl_module, "device", None)
+        if isinstance(device, torch.device):
+            pl_module.to(device=device)
+
+    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
+    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
+    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
+    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
 
 
 class AttributeChange(pydantic.BaseModel):
@@ -39,6 +111,12 @@ class SchemaEditor:
 
     def __init__(self, module: "Model") -> None:
         self.module = module
+
+    def _assert_mutation_allowed(self, action: str) -> None:
+        active = tuple(name for name, count in self.module.locks.items() if count > 0)
+        if active:
+            labels = ", ".join(active)
+            raise RuntimeError(f"model.{action}(...) cannot run while the model is in an active loop: {labels}")
 
     def select(
         self,
@@ -62,7 +140,7 @@ class SchemaEditor:
         use_cache: bool = False,
         **values: Any,
     ) -> None:
-        self.module._assert_mutation_allowed("update")
+        self._assert_mutation_allowed("update")
         values = self.module.hyperparameters.update_values(values)
         changes = self._attribute_changes(
             values=values,
@@ -90,7 +168,7 @@ class SchemaEditor:
         include_root: bool = True,
         use_cache: bool = True,
     ) -> None:
-        self.module._assert_mutation_allowed("extend")
+        self._assert_mutation_allowed("extend")
         parent, field_count = self._extend_target(*args, include_root=include_root, use_cache=use_cache)
         self.module.hyperparameters.extend(*args, include_root=include_root, use_cache=use_cache)
         ModelGraph.rebuild(self.module)
@@ -109,7 +187,7 @@ class SchemaEditor:
         include_root: bool = False,
         use_cache: bool = True,
     ) -> None:
-        self.module._assert_mutation_allowed("delete")
+        self._assert_mutation_allowed("delete")
         roots = self._delete_roots(*predicates, include_root=include_root, use_cache=use_cache)
         self.module.hyperparameters.delete(*predicates, include_root=include_root, use_cache=use_cache)
         ModelGraph.rebuild(self.module)
@@ -129,7 +207,7 @@ class SchemaEditor:
         use_cache: bool = True,
         descendants: bool = False,
     ) -> None:
-        self.module._assert_mutation_allowed("reset")
+        self._assert_mutation_allowed("reset")
         selected = self.module.hyperparameters.select(
             *predicates,
             include_root=include_root,
@@ -160,7 +238,7 @@ class SchemaEditor:
         use_cache: bool = False,
         **values: Any,
     ) -> Iterator[None]:
-        self.module._assert_mutation_allowed("override")
+        self._assert_mutation_allowed("override")
         values = self.module.hyperparameters.update_values(values)
         changes = self._attribute_changes(
             values=values,

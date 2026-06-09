@@ -26,7 +26,7 @@ from json2vec.structs.selectors import (
     predicate,
     where,
 )
-from json2vec.structs.structure import Array, RequestTypes
+from json2vec.structs.structure import Array, Mask, RequestTypes
 from json2vec.structs.tree import Address, Leaf, Node, Rate, Selection
 
 __all__ = [
@@ -125,8 +125,8 @@ class Hyperparameters(Node):
         if isinstance(node, Array):
             child_path = (*array_path, node.name)
             fields = [cls.from_schema_node(field, array_path=child_path) for field in node.fields]
-            payload = node.model_dump(mode="python", round_trip=True, exclude={"fields"})
-            return Array(*fields, **payload)
+            payload = node.model_dump(mode="python", round_trip=True, exclude={"fields", "masks"})
+            return Array(*fields, masks=list(node.masks), **payload)
 
         raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
 
@@ -202,8 +202,7 @@ class Hyperparameters(Node):
         self.fields.max_length = 1
         self.fields.overflow = Overflow.error
         self.fields.parent: Self = self
-        for request in self.requests.values():
-            request.post_bind_validate()
+        self._post_bind_validate()
 
     @property
     def target(self) -> list[Address]:
@@ -240,6 +239,18 @@ class Hyperparameters(Node):
     def overflows(self, address: Address) -> tuple[Overflow, ...]:
         return (Overflow.error, *self.requests[Address(str(address))].overflows)
 
+    def array_masks_for(self, address: Address) -> tuple[tuple[Address, Mask], ...]:
+        request = self.requests[Address(str(address))]
+        applications: list[tuple[Address, Mask]] = []
+        for array in [node for node in request.path if isinstance(node, Array)]:
+            for mask in array.masks:
+                if any(leaf is request for leaf in array.excluded_leaves(mask)):
+                    continue
+
+                applications.append((array.address, mask))
+
+        return tuple(applications)
+
     @functools.cached_property
     def depthwise(self) -> list[list[Address]]:
         out: list[list[Address]] = []
@@ -275,6 +286,13 @@ class Hyperparameters(Node):
             )
             for key, entry in self._selection_cache.items()
         }
+
+    def _post_bind_validate(self) -> None:
+        for array in self.arrays.values():
+            array.post_bind_validate()
+
+        for request in self.requests.values():
+            request.post_bind_validate()
 
     def select(
         self,
@@ -344,6 +362,8 @@ class Hyperparameters(Node):
 
             if validate and applicable_values:
                 payload = node.model_dump(mode="python", round_trip=True)
+                if isinstance(node, Array) and "masks" not in applicable_values:
+                    payload["masks"] = list(node.masks)
                 if "target" in applicable_values and "p_prune" not in applicable_values:
                     payload.pop("p_prune", None)
                 payload.update(applicable_values)
@@ -356,6 +376,7 @@ class Hyperparameters(Node):
                     node.model_fields_set.add(name)
 
         self._clear_tree_caches()
+        self._post_bind_validate()
         self.refresh_selection_cache()
 
     def extend(
@@ -416,21 +437,13 @@ class Hyperparameters(Node):
                 field.parent = parent
 
             self._clear_tree_caches()
-            for field in new_fields:
-                requests = (
-                    [field]
-                    if isinstance(field, Leaf)
-                    else [
-                        descendant for descendant in getattr(field, "descendants", ()) if isinstance(descendant, Leaf)
-                    ]
-                )
-                for request in requests:
-                    request.post_bind_validate()
+            self._post_bind_validate()
         except Exception:
             parent.fields = original_fields
             for field in new_fields:
                 field.parent = None
             self._clear_tree_caches()
+            self._post_bind_validate()
             self.refresh_selection_cache()
             raise
 
@@ -483,6 +496,7 @@ class Hyperparameters(Node):
             node.parent = None
 
         self._clear_tree_caches()
+        self._post_bind_validate()
         self.refresh_selection_cache()
 
     @contextmanager
@@ -538,6 +552,7 @@ class Hyperparameters(Node):
                             node.model_fields_set.discard(name)
 
             self._clear_tree_caches()
+            self._post_bind_validate()
             self.refresh_selection_cache()
 
     def __rich_console__(self, console, options):

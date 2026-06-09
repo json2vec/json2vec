@@ -97,6 +97,77 @@ def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
     assert merchant.max_vocab_size == 32
 
 
+def test_array_mask_shorthand_normalizes_and_exports_public_api():
+    policy = j2v.Mask(name="recent", count=1, window=2)
+    array = j2v.Array(
+        j2v.Number("amount"),
+        name="transactions",
+        max_length=4,
+        mask=policy,
+    )
+    model = j2v.Model.from_schema(array, d_model=16, n_layers=1, n_heads=4)
+
+    bound = model.hyperparameters.arrays["record/transactions"]
+    assert bound.masks == [policy]
+    assert j2v.MASK_LITERAL == "<MASK>"
+    assert j2v.MaskLiteral is not None
+
+
+def test_array_mask_validation_rejects_invalid_bound_configs():
+    with pytest.raises(ValueError, match="root array"):
+        j2v.Hyperparameters.model_validate(
+            {
+                "d_model": 16,
+                "fields": {
+                    "name": "record",
+                    "type": "array",
+                    "max_length": 1,
+                    "masks": [{"count": 1}],
+                    "fields": [{"name": "amount", "type": "number", "query": "[*].amount"}],
+                },
+            }
+        )
+
+    with pytest.raises(ValueError, match="offset must be less than max_length=2"):
+        j2v.Model.from_schema(
+            j2v.Array(
+                j2v.Number("amount"),
+                name="transactions",
+                max_length=2,
+                masks=[j2v.Mask(count=1, offset=2)],
+            ),
+            d_model=16,
+            n_layers=1,
+            n_heads=4,
+        )
+
+    with pytest.raises(ValueError, match="duplicate mask name"):
+        j2v.Model.from_schema(
+            j2v.Array(
+                j2v.Number("amount"),
+                name="transactions",
+                max_length=2,
+                masks=[j2v.Mask(name="same", count=1), j2v.Mask(name="same", rate=0.5)],
+            ),
+            d_model=16,
+            n_layers=1,
+            n_heads=4,
+        )
+
+    with pytest.raises(ValueError, match="excludes every active descendant leaf"):
+        j2v.Model.from_schema(
+            j2v.Array(
+                j2v.Number("amount"),
+                name="transactions",
+                max_length=2,
+                masks=[j2v.Mask(count=1, exclude=j2v.where("type") == "number")],
+            ),
+            d_model=16,
+            n_layers=1,
+            n_heads=4,
+        )
+
+
 def test_model_from_schema_accepts_root_array_options():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),

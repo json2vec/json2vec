@@ -821,12 +821,8 @@ def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest
     def mask(pipe, hyperparameters):
         yield from pipe
 
-    def target(pipe, hyperparameters):
-        yield from pipe
-
     monkeypatch.setattr(custom, "transform", transform)
     monkeypatch.setattr(custom, "mask", mask)
-    monkeypatch.setattr(custom, "target", target)
 
     batch_dataset = CustomBatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
@@ -1038,12 +1034,8 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
     def mask(pipe, hyperparameters):
         yield from pipe
 
-    def target(pipe, hyperparameters):
-        yield from pipe
-
     monkeypatch.setattr(polars, "transform", transform)
     monkeypatch.setattr(polars, "mask", mask)
-    monkeypatch.setattr(polars, "target", target)
 
     batch_dataset = PolarsBatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
@@ -1087,16 +1079,12 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     def mask(pipe, hyperparameters):
         yield from pipe
 
-    def target(pipe, hyperparameters):
-        yield from pipe
-
     monkeypatch.setattr(streaming, "observe", observe)
     monkeypatch.setattr(streaming, "process", process)
     monkeypatch.setattr(streaming, "sample", sample)
     monkeypatch.setattr(streaming, "batch", batch)
     monkeypatch.setattr(streaming, "transform", transform)
     monkeypatch.setattr(streaming, "mask", mask)
-    monkeypatch.setattr(streaming, "target", target)
 
     batch_dataset = BatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
@@ -1147,16 +1135,12 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     def mask(pipe, hyperparameters):
         yield from pipe
 
-    def target(pipe, hyperparameters):
-        yield from pipe
-
     monkeypatch.setattr(streaming, "observe", observe)
     monkeypatch.setattr(streaming, "process", process)
     monkeypatch.setattr(streaming, "sample", sample)
     monkeypatch.setattr(streaming, "batch", batch)
     monkeypatch.setattr(streaming, "transform", transform)
     monkeypatch.setattr(streaming, "mask", mask)
-    monkeypatch.setattr(streaming, "target", target)
 
     batch_dataset = BatchDataset(
         hyperparameters=SimpleNamespace(requests={}),
@@ -1186,22 +1170,36 @@ def test_mask_uses_direct_field_rates():
         def __init__(self):
             self.calls = []
 
-        def mask(self, p_mask: float):
-            self.calls.append(p_mask)
+        def mask(self, p_mask: float, **kwargs):
+            self.calls.append((p_mask, kwargs))
+
+    class Hyperparameters(SimpleNamespace):
+        def array_masks_for(self, address):
+            return ()
 
     first = Field()
     second = Field()
-    hyperparameters = SimpleNamespace(
+    hyperparameters = Hyperparameters(
         active_requests={
-            "root/first": SimpleNamespace(p_mask=0.25),
-            "root/second": SimpleNamespace(p_mask=0.0),
+            "root/first": SimpleNamespace(p_mask=0.25, p_prune=0.0),
+            "root/second": SimpleNamespace(p_mask=0.0, p_prune=0.0),
         },
     )
 
     output = list(iterables.mask.__wrapped__([{"root/first": first, "root/second": second}], hyperparameters))
 
     assert output == [{"root/first": first, "root/second": second}]
-    assert first.calls == [0.25]
+    assert first.calls == [
+        (
+            0.25,
+            {
+                "p_prune": 0.0,
+                "array_masks": (),
+                "address": "root/first",
+                "hyperparameters": hyperparameters,
+            },
+        )
+    ]
     assert second.calls == []
 
 

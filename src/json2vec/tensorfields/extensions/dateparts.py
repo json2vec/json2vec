@@ -14,7 +14,7 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.data.processing import apply, pad
+from json2vec.data.processing import apply, extract_mask_literals, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -24,6 +24,7 @@ from json2vec.tensorfields.base import (
     Plugin,
     RequestBase,
     TensorFieldBase,
+    apply_mask_policies,
 )
 
 if TYPE_CHECKING:
@@ -221,6 +222,13 @@ class TensorField(TensorFieldBase):
         strata: Strata,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        leading_shape: tuple[int, ...] = (len(values), *array_shape)
+        values, literal_masks = extract_mask_literals(
+            values,
+            strata=strata,
+            address=address,
+            leaf_depth=len(leading_shape),
+        )
 
         request: RequestBase = hyperparameters.requests[address]
 
@@ -229,14 +237,24 @@ class TensorField(TensorFieldBase):
 
         data, state = pad(
             nested=values,
-            shape=(len(values), *array_shape),
+            shape=leading_shape,
             dtype="datetime64[m]",
             pad_value=np.nan,
             overflows=hyperparameters.overflows(address),
             address=address,
         )
+        literal_data, _ = pad(
+            nested=literal_masks,
+            shape=leading_shape,
+            dtype=bool,
+            pad_value=False,
+            overflows=hyperparameters.overflows(address),
+            address=address,
+        )
 
         state: torch.Tensor = torch.tensor(data=state, dtype=torch.int64)
+        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
+        state = state.masked_fill(literal_mask_tensor, Tokens.masked.value)
 
         dateparts: dict[DatePart, torch.Tensor] = {}
 
@@ -257,44 +275,29 @@ class TensorField(TensorFieldBase):
             batch_size=len(values),
         )
 
-    def mask(self, p_mask: float):
+    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
+        selected = selected.to(device=self.state.device, dtype=torch.bool)
         mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-        is_masked: torch.Tensor = torch.rand_like(input=self.state, dtype=torch.float).lt(other=p_mask)
 
-        if TensorKey.state not in self.targets.keys():
+        if cache_targets and TensorKey.state not in self.targets.keys():
             self.targets[TensorKey.state] = self.state.clone()
 
-        if TensorKey.content not in self.targets.keys():
+        if cache_targets and TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
-        self.state: torch.Tensor = self.state.masked_scatter(is_masked, mask_token)
+        self.state: torch.Tensor = self.state.masked_scatter(selected, mask_token)
 
         for datepart in self.content.keys():
-            self.content[datepart] = self.content[datepart].masked_scatter(is_masked, mask_token)
+            self.content[datepart] = self.content[datepart].masked_scatter(selected, mask_token)
 
-        self.trainable |= is_masked
+        if trainable:
+            self.trainable |= selected
 
-    def target(self, p_prune: float):
-        mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked)
+    def mask(self, p_mask: float = 0.0, **kwargs: Any):
+        apply_mask_policies(self, p_mask=p_mask, **kwargs)
 
-        is_targeted = (
-            torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
-            .expand_as(self.state)
-        )
-
-        if TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state: torch.Tensor = self.state.masked_scatter(is_targeted, mask_tokens)
-
-        for datepart in self.content.keys():
-            self.content[datepart] = self.content[datepart].masked_scatter(is_targeted, mask_tokens)
-
-        self.trainable |= is_targeted
+    def target(self, p_prune: float = 1.0):
+        apply_mask_policies(self, p_prune=p_prune)
 
     @classmethod
     def empty(

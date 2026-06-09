@@ -11,7 +11,7 @@ from beartype import beartype
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
-from json2vec.data.processing import apply, pad
+from json2vec.data.processing import apply, extract_mask_literals, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -21,6 +21,7 @@ from json2vec.tensorfields.base import (
     Plugin,
     RequestBase,
     TensorFieldBase,
+    apply_mask_policies,
 )
 from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
@@ -93,6 +94,13 @@ class TensorField(TensorFieldBase):
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        leading_shape: tuple[int, ...] = (len(values), *array_shape)
+        values, literal_masks = extract_mask_literals(
+            values,
+            strata=strata,
+            address=address,
+            leaf_depth=len(leading_shape),
+        )
         learn = strata == Strata.train
 
         interprocess_encoding_context.reserve(values, learn=learn)
@@ -105,15 +113,26 @@ class TensorField(TensorFieldBase):
 
         data, states = pad(
             nested=tokens,
-            shape=(len(values), *array_shape),
+            shape=leading_shape,
             dtype=np.int64,
             pad_value=0,
             overflows=hyperparameters.overflows(address),
             address=address,
         )
+        literal_data, _ = pad(
+            nested=literal_masks,
+            shape=leading_shape,
+            dtype=bool,
+            pad_value=False,
+            overflows=hyperparameters.overflows(address),
+            address=address,
+        )
 
         state_tensor = torch.tensor(states, dtype=torch.int64)
+        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
+        state_tensor = state_tensor.masked_fill(literal_mask_tensor, Tokens.masked.value)
         content = torch.tensor(data=data, dtype=torch.int64)
+        content = content.masked_fill(literal_mask_tensor, 0)
         if strata == Strata.train:
             p_unavailable: float = hyperparameters.requests[address].p_unavailable
             unavailable_index: int = hyperparameters.requests[address].max_vocab_size
@@ -138,40 +157,27 @@ class TensorField(TensorFieldBase):
             batch_size=len(values),
         )
 
-    def mask(self, p_mask: float):
+    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
+        selected = selected.to(device=self.state.device, dtype=torch.bool)
         mask_token = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-        is_masked = torch.rand_like(input=self.state, dtype=torch.float).lt(other=p_mask)
 
-        if TensorKey.state not in self.targets.keys():
+        if cache_targets and TensorKey.state not in self.targets.keys():
             self.targets[TensorKey.state] = self.state.clone()
 
-        if TensorKey.content not in self.targets.keys():
+        if cache_targets and TensorKey.content not in self.targets.keys():
             self.targets[TensorKey.content] = self.content.clone()
 
-        self.state = self.state.masked_scatter(is_masked, mask_token)
-        self.content = self.content.masked_scatter(is_masked, torch.zeros_like(input=self.content))
+        self.state = self.state.masked_scatter(selected, mask_token)
+        self.content = self.content.masked_fill(selected, 0)
 
-        self.trainable |= is_masked
+        if trainable:
+            self.trainable |= selected
+
+    def mask(self, p_mask: float = 0.0, **kwargs: Any):
+        apply_mask_policies(self, p_mask=p_mask, **kwargs)
 
     def target(self, p_prune: float = 1.0):
-        mask_tokens = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        is_targeted = (
-            torch.rand(self.state.size(0), *([1] * (len(self.state.shape) - 1)), device=self.state.device)
-            .lt(p_prune)
-            .expand_as(self.state)
-        )
-
-        if TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_scatter(is_targeted, mask_tokens)
-        self.content = self.content.masked_scatter(is_targeted, torch.zeros_like(input=self.content))
-
-        self.trainable |= is_targeted
+        apply_mask_policies(self, p_prune=p_prune)
 
     @classmethod
     def empty(
