@@ -1,5 +1,6 @@
 from pprint import pformat
 
+import torch
 from rich.console import Console
 from rich.pretty import Pretty
 
@@ -260,6 +261,66 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
         assert " max_vocab_size=4 p_unavailable=0.01 topk=[]" in output
         assert "Request(name=" not in output
         assert "Selection(" not in output
+
+
+def test_tensorfield_rich_display_previews_state_tokens() -> None:
+    model = j2v.Model.from_schema(
+        j2v.Array(
+            j2v.Category("letter", max_vocab_size=4, p_unavailable=0.0),
+            name="letters",
+            max_length=4,
+        ),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+    field = model.encode(
+        [{"letters": [{"letter": "A"}, {"letter": "B"}]}],
+        strata=j2v.Strata.train,
+    )["record/letters/letter"]
+
+    field.hide(torch.tensor([[[False, True, False, False]]]))
+    rendered = render_text(field)
+
+    assert isinstance(field, Renderable)
+    assert "TensorField [tensorfield] state=(1, 1, 4) device=cpu trainable=1" in rendered
+    assert "counts V=1 N=0 P=2 M=1 O=0" in rendered
+    assert "state V M P P" in rendered
+    assert "targets=content, state" in rendered
+
+
+def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
+    model = j2v.Model.from_schema(
+        j2v.Array(
+            j2v.Array(
+                j2v.Category("letter", max_vocab_size=8, p_unavailable=0.0),
+                name="letters",
+                max_length=3,
+            ),
+            name="words",
+            max_length=2,
+        ),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+    field = model.encode(
+        [
+            {
+                "words": [
+                    {"letters": [{"letter": "A"}]},
+                    {"letters": [{"letter": "B"}, {"letter": "C"}]},
+                ]
+            }
+        ],
+        strata=j2v.Strata.train,
+        mask=False,
+    )["record/words/letters/letter"]
+
+    rendered = render_text(field)
+
+    assert "TensorField [tensorfield] state=(1, 1, 2, 3) device=cpu trainable=0" in rendered
+    assert "state V P P\n       V V P" in rendered
 
 
 def test_rich_display_does_not_replace_repr_or_mutate_serialization() -> None:

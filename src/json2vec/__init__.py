@@ -8,15 +8,15 @@ mutation predicates, and the `@preprocess` decorator.
 
 from typing import TYPE_CHECKING, Any
 
+from json2vec.architecture.checkpoint import RollbackCheckpoint
+from json2vec.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
 from json2vec.architecture.root import (
     Model,
-    MutationLockCallback,
     OptimizerConfig,
-    RollbackCheckpoint,
-    RuntimePlacementCallback,
     SchedulerConfig,
 )
 from json2vec.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule
+from json2vec.data.processing import MASK_LITERAL, MaskLiteral
 from json2vec.inference.callback import Postprocessor, Writer
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
 from json2vec.structs.enums import (
@@ -38,7 +38,7 @@ from json2vec.structs.experiment import (
     predicate,
     where,
 )
-from json2vec.structs.structure import Array
+from json2vec.structs.structure import Array, Mask
 from json2vec.structs.tree import Address, Leaf
 from json2vec.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
 from json2vec.tensorfields.extensions.category import Request as Category
@@ -110,6 +110,9 @@ __all__ = [
     "JSONBackend",
     "Leaf",
     "Metric",
+    "MASK_LITERAL",
+    "Mask",
+    "MaskLiteral",
     "Model",
     "ModelSource",
     "MutationLockCallback",

@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import lightning.pytorch as lit
 import torch
+from lightning.pytorch.callbacks import ModelCheckpoint
 from loguru import logger
 
 from json2vec.architecture.graph import ModelGraph
@@ -13,6 +15,46 @@ from json2vec.structs.experiment import Hyperparameters
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
+
+
+class RollbackCheckpoint(ModelCheckpoint):
+    """Checkpoint the best model during fit and restore it into the module at fit end."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        if self.save_weights_only:
+            raise ValueError("RollbackCheckpoint requires full checkpoints; set save_weights_only=False")
+        if self.save_top_k == 0:
+            raise ValueError("RollbackCheckpoint requires at least one saved checkpoint; set save_top_k != 0")
+
+    def on_fit_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule) -> None:
+        from json2vec.architecture.root import Model
+
+        super().on_fit_end(trainer=trainer, pl_module=pl_module)
+        if not isinstance(pl_module, Model):
+            raise TypeError("RollbackCheckpoint can only restore json2vec Model instances")
+
+        best_model_path = self.best_model_path
+        if not best_model_path:
+            raise RuntimeError("RollbackCheckpoint did not find a best checkpoint to restore")
+
+        strategy = getattr(trainer, "strategy", None)
+        if strategy is not None:
+            strategy.barrier("rollback_checkpoint_load")
+            checkpoint = strategy.checkpoint_io.load_checkpoint(
+                best_model_path,
+                map_location=pl_module.device,
+                weights_only=False,
+            )
+        else:
+            checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
+
+        pl_module.restore_checkpoint_state(checkpoint)
+        logger.bind(
+            component="checkpoint",
+            checkpoint=best_model_path,
+            score=self.best_model_score,
+        ).info("rolled back Model to best checkpoint")
 
 
 class CheckpointState:

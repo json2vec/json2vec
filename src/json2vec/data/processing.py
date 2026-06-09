@@ -1,13 +1,16 @@
 import inspect
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 from beartype import beartype
 
-from json2vec.structs.enums import Overflow, Tokens
+from json2vec.structs.enums import Overflow, Strata, Tokens
 from json2vec.structs.tree import Address
+
+MASK_LITERAL = "<MASK>"
+MaskLiteral: TypeAlias = Literal["<MASK>"]
 
 
 def apply(
@@ -49,6 +52,87 @@ def apply(
         return node
 
     return walk(values, depth=0)
+
+
+def contains_mask_literal(value: Any) -> bool:
+    """Return whether a JSON-like value contains the predict-time mask sentinel."""
+    if isinstance(value, str):
+        return value == MASK_LITERAL
+
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return bool(value.item() == MASK_LITERAL)
+        return any(contains_mask_literal(item) for item in value.tolist())
+
+    if isinstance(value, (list, tuple)):
+        return any(contains_mask_literal(item) for item in value)
+
+    return False
+
+
+def extract_mask_literals(
+    values: Any,
+    *,
+    strata: Strata,
+    address: Address,
+    leaf_depth: int,
+) -> tuple[Any, Any]:
+    """Replace whole-leaf ``"<MASK>"`` values with ``None`` plus boolean flags.
+
+    The sentinel is only accepted in predict strata. Structured leaf values
+    such as vectors and sets may use ``"<MASK>"`` as the whole field value, but
+    not as one item inside the vector or set payload.
+    """
+    if leaf_depth < 0:
+        raise ValueError("leaf_depth must be >= 0")
+
+    found = False
+
+    def walk(node: Any, depth: int) -> tuple[Any, Any]:
+        nonlocal found
+
+        if depth == leaf_depth:
+            if isinstance(node, str) and node == MASK_LITERAL:
+                found = True
+                return None, True
+
+            if contains_mask_literal(node):
+                raise ValueError(
+                    f"input for address '{address}' may only use {MASK_LITERAL!r} as the whole field value"
+                )
+
+            return node, False
+
+        if isinstance(node, list):
+            cleaned: list[Any] = []
+            flags: list[Any] = []
+            for item in node:
+                child_value, child_flag = walk(item, depth + 1)
+                cleaned.append(child_value)
+                flags.append(child_flag)
+            return cleaned, flags
+
+        if isinstance(node, tuple):
+            cleaned_items: list[Any] = []
+            flag_items: list[Any] = []
+            for item in node:
+                child_value, child_flag = walk(item, depth + 1)
+                cleaned_items.append(child_value)
+                flag_items.append(child_flag)
+            return tuple(cleaned_items), tuple(flag_items)
+
+        if contains_mask_literal(node):
+            raise ValueError(
+                f"input for address '{address}' may only use {MASK_LITERAL!r} at the configured field depth"
+            )
+
+        return node, False
+
+    cleaned_values, mask_flags = walk(values, depth=0)
+    if found and strata != Strata.predict:
+        raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata for address '{address}'")
+
+    return cleaned_values, mask_flags
 
 
 def _iter_leaf_nodes(

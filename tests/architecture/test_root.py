@@ -764,6 +764,28 @@ def test_encode_accepts_strata_for_testing_training_inputs() -> None:
     )
 
 
+def test_encode_mask_false_skips_training_target_masking() -> None:
+    model = _primed_prediction_model()
+
+    inputs = model.encode(
+        batch=[
+            {"color": "red", "label": "warm"},
+            {"color": "blue", "label": "cool"},
+        ],
+        strata=Strata.train,
+        mask=False,
+    )
+    label = inputs[Address("root", "label")]
+
+    assert TensorKey.metadata not in inputs.keys()
+    assert list(label.targets.keys()) == []
+    assert not label.trainable.any()
+    assert torch.equal(
+        label.state,
+        torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
+    )
+
+
 def test_predict_encodes_batch_and_returns_embedding_outputs() -> None:
     model = _primed_prediction_model()
 

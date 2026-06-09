@@ -31,7 +31,6 @@ from json2vec.data.iterables import (
     process,
     sample,
     shuffle,
-    target,
     transform,
 )
 from json2vec.data.processing import Pipeline
@@ -130,7 +129,6 @@ class CustomBatchDataset(IterableDataset):
             | batch
             | transform
             | mask
-            | target
         )
 
 

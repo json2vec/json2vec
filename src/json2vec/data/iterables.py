@@ -224,6 +224,7 @@ def encode(
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
     jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
+    defer_target_masking: bool = False,
 ) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
     target_addresses = set(hyperparameters.target)
@@ -262,8 +263,8 @@ def encode(
 
         out[address] = TensorField.new(**kwargs)
 
-        if address in target_addresses:
-            out[address].target(p_prune=1.0)
+        if not defer_target_masking and strata != Strata.predict and address in target_addresses:
+            out[address].mask(p_prune=1.0)
 
     inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
 
@@ -288,21 +289,69 @@ def transform(
             strata=strata,
             interprocess_encoding_context=interprocess_encoding_context,
             jmespath_resolution_monitor=jmespath_resolution_monitor,
+            defer_target_masking=True,
         )
+
+
+def _apply_mask_policy(
+    field: TensorFieldBase,
+    *,
+    p_mask: float,
+    p_prune: float,
+    array_masks: tuple[Any, ...],
+    address: Address,
+    hyperparameters: Hyperparameters,
+) -> None:
+    parameters = inspect.signature(field.mask).parameters
+    supports_policy_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    supports_policy_kwargs |= any(name in parameters for name in ("p_prune", "array_masks", "hyperparameters"))
+
+    if supports_policy_kwargs:
+        field.mask(
+            p_mask=p_mask,
+            p_prune=p_prune,
+            array_masks=array_masks,
+            address=address,
+            hyperparameters=hyperparameters,
+        )
+        return
+
+    if array_masks:
+        raise TypeError(f"tensorfield at '{address}' must accept mask(..., array_masks=...) to use Array masks")
+
+    if p_mask > 0.0:
+        field.mask(p_mask=p_mask)
+
+    if p_prune > 0.0:
+        field.target(p_prune=p_prune)
 
 
 @beartype
 def mask(
     pipe: Iterable[EncodedInput],
     hyperparameters: Hyperparameters,
+    strata: Strata = Strata.train,
 ) -> Iterator[EncodedInput]:
     for item in pipe:
+        if strata == Strata.predict:
+            yield item
+            continue
+
         for address, request in hyperparameters.active_requests.items():
             p_mask = float(request.p_mask or 0.0)
-            if p_mask <= 0.0:
+            p_prune = float(request.p_prune or 0.0)
+            array_masks = hyperparameters.array_masks_for(address)
+            if p_mask <= 0.0 and p_prune <= 0.0 and not array_masks:
                 continue
 
-            item[address].mask(p_mask=p_mask)
+            _apply_mask_policy(
+                item[address],
+                p_mask=p_mask,
+                p_prune=p_prune,
+                array_masks=array_masks,
+                address=address,
+                hyperparameters=hyperparameters,
+            )
 
         yield item
 

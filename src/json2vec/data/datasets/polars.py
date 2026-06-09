@@ -35,7 +35,6 @@ from json2vec.data.iterables import (
     process,
     sample,
     shuffle,
-    target,
     transform,
 )
 from json2vec.data.processing import Pipeline
@@ -183,7 +182,6 @@ class PolarsBatchDataset(IterableDataset):
             | batch
             | transform
             | mask
-            | target
         )
 
 

@@ -62,8 +62,17 @@ def test_field_importance_example_runs() -> None:
     assert "trainer.test" in source
 
 
-def test_standalone_examples_directory_is_absent() -> None:
-    assert not (_repo_root() / "examples").exists()
+def test_only_allowed_standalone_examples_are_present() -> None:
+    root = _repo_root()
+    examples = root / "examples"
+    if not examples.exists():
+        return
+
+    discovered = {path.relative_to(root).as_posix() for path in examples.rglob("*") if path.is_file()}
+    assert discovered == {
+        "examples/dynamic-masking/run.py",
+        "examples/inference-masking/run.py",
+    }
 
 
 def _model_display_output(notebook: nbformat.NotebookNode) -> str:

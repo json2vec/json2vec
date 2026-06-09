@@ -69,6 +69,7 @@ nav:
       - Query Paths: core-concepts/querypaths.md
       - Data Types: core-concepts/data-types.md
       - Learning Modes & Embeddings: core-concepts/embeddings.md
+      - Dynamic Masking: core-concepts/dynamic-masking.md
       - Mutations: core-concepts/mutations.ipynb
   - Data Types:
       - Array: data-types/array.md

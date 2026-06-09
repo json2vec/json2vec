@@ -3,7 +3,7 @@
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from functools import partialmethod, wraps
+from functools import partialmethod
 from pathlib import Path
 from typing import Any, Self, cast
 
@@ -11,15 +11,19 @@ import lightning.pytorch as lit
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
-from lightning.pytorch.callbacks import ModelCheckpoint
 from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
 
-from json2vec.architecture.checkpoint import CheckpointState
+from json2vec.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from json2vec.architecture.contracts import ContractScheduler
 from json2vec.architecture.graph import ModelGraph
-from json2vec.architecture.mutations import SchemaEditor
+from json2vec.architecture.mutations import (
+    MutationLockCallback,
+    RuntimePlacementCallback,
+    SchemaEditor,
+    immutable,
+)
 from json2vec.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.logging.throughput import ThroughputLogger
@@ -37,105 +41,12 @@ from json2vec.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
 
-
-def immutable(name: str | Strata) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(method)
-        def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
-            locks = self.locks
-            locks[name] += 1
-            try:
-                return method(self, *args, **kwargs)
-            finally:
-                if locks[name] <= 1:
-                    locks.pop(name, None)
-                else:
-                    locks[name] -= 1
-
-        return wrapped
-
-    return decorator
-
-
-class MutationLockCallback(Callback):
-    """Prevent runtime schema mutations while Lightning owns an active loop."""
-
-    locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
-
-    def _on_loop_start(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
-        pl_module.locks[strata] += 1
-
-    def _on_loop_end(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
-        locks = pl_module.locks
-        if locks[strata] <= 1:
-            locks.pop(strata, None)
-        else:
-            locks[strata] -= 1
-
-    def on_exception(self, trainer: lit.Trainer, pl_module: "Model", exception: BaseException) -> None:  # ty:ignore[invalid-method-override]
-        for lock in self.locks:
-            pl_module.locks.pop(lock, None)
-
-    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
-    on_train_end = partialmethod(_on_loop_end, strata=Strata.train)
-    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
-    on_validation_end = partialmethod(_on_loop_end, strata=Strata.validate)
-    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
-    on_test_end = partialmethod(_on_loop_end, strata=Strata.test)
-    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
-    on_predict_end = partialmethod(_on_loop_end, strata=Strata.predict)
-
-
-class RuntimePlacementCallback(Callback):
-    """Move late-created modules onto the Lightning module's active device."""
-
-    def _on_loop_start(self, trainer: lit.Trainer, pl_module: lit.LightningModule, strata: Strata) -> None:
-        device = getattr(pl_module, "device", None)
-        if isinstance(device, torch.device):
-            pl_module.to(device=device)
-
-    on_train_start = partialmethod(_on_loop_start, strata=Strata.train)
-    on_validation_start = partialmethod(_on_loop_start, strata=Strata.validate)
-    on_test_start = partialmethod(_on_loop_start, strata=Strata.test)
-    on_predict_start = partialmethod(_on_loop_start, strata=Strata.predict)
-
-
-class RollbackCheckpoint(ModelCheckpoint):
-    """Checkpoint the best model during fit and restore it into the module at fit end."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        if self.save_weights_only:
-            raise ValueError("RollbackCheckpoint requires full checkpoints; set save_weights_only=False")
-        if self.save_top_k == 0:
-            raise ValueError("RollbackCheckpoint requires at least one saved checkpoint; set save_top_k != 0")
-
-    def on_fit_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule) -> None:
-        super().on_fit_end(trainer=trainer, pl_module=pl_module)
-        if not isinstance(pl_module, Model):
-            raise TypeError("RollbackCheckpoint can only restore json2vec Model instances")
-
-        best_model_path = self.best_model_path
-        if not best_model_path:
-            raise RuntimeError("RollbackCheckpoint did not find a best checkpoint to restore")
-
-        strategy = getattr(trainer, "strategy", None)
-        if strategy is not None:
-            strategy.barrier("rollback_checkpoint_load")
-            checkpoint = strategy.checkpoint_io.load_checkpoint(
-                best_model_path,
-                map_location=pl_module.device,
-                weights_only=False,
-            )
-        else:
-            checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
-
-        pl_module.restore_checkpoint_state(checkpoint)
-        logger.bind(
-            component="checkpoint",
-            checkpoint=best_model_path,
-            score=self.best_model_score,
-        ).info("rolled back Model to best checkpoint")
+__all__ = [
+    "Model",
+    "MutationLockCallback",
+    "RollbackCheckpoint",
+    "RuntimePlacementCallback",
+]
 
 
 class Model(lit.LightningModule, Renderable):
@@ -406,12 +317,6 @@ class Model(lit.LightningModule, Renderable):
         ):
             yield
 
-    def _assert_mutation_allowed(self, action: str) -> None:
-        active = tuple(name for name, count in self.locks.items() if count > 0)
-        if active:
-            labels = ", ".join(active)
-            raise RuntimeError(f"model.{action}(...) cannot run while the model is in an active loop: {labels}")
-
     def configure_callbacks(self) -> list[Callback]:
         callbacks: list[Callback] = []
         factories: set[Any] = set()
@@ -538,6 +443,7 @@ class Model(lit.LightningModule, Renderable):
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
+        mask: bool = True,
     ) -> EncodedInput:
         """Return encoded tensorfield inputs for raw or processed observations."""
         return ModelRuntime.encode(
@@ -545,6 +451,7 @@ class Model(lit.LightningModule, Renderable):
             batch=batch,
             preprocess=preprocess,
             strata=strata,
+            mask=mask,
         )
 
     @immutable("inference")
