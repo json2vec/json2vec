@@ -526,7 +526,7 @@ def _build_fields(
 
         if decision.node is None:
             warnings.warn(
-                f"json2vec.infer_schema: skipping '{column.key}' — {decision.reason}",
+                f"json2vec.helpers.infer_schema: skipping '{column.key}' — {decision.reason}",
                 UserWarning,
                 stacklevel=2,
             )

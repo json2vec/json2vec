@@ -1,11 +1,11 @@
-"""Tests for schema inference (`json2vec.infer_schema` / `Model.from_records`)."""
+"""Tests for schema inference (`json2vec.helpers.infer_schema`)."""
 
 import warnings
 
 import pytest
 
 import json2vec as j2v
-from json2vec.helpers.inference import InferenceConfig, infer_schema
+from json2vec.helpers import InferenceConfig, infer_schema
 
 
 def _by_name(fields):
@@ -17,10 +17,14 @@ def _by_name(fields):
 # --------------------------------------------------------------------------- #
 
 
-def test_inference_helpers_exported_from_package_root():
-    assert j2v.infer_schema is infer_schema
-    assert j2v.InferenceConfig is InferenceConfig
-    assert hasattr(j2v.Model, "from_records")
+def test_inference_helpers_exported_from_helpers_namespace():
+    assert j2v.helpers.infer_schema is infer_schema
+    assert j2v.helpers.InferenceConfig is InferenceConfig
+    assert not hasattr(j2v, "infer_schema")
+    assert not hasattr(j2v, "create_model_from_records")
+    assert not hasattr(j2v, "InferenceConfig")
+    assert not hasattr(j2v.Model, "from_records")
+    assert not hasattr(j2v.helpers, "create_model_from_records")
 
 
 def test_empty_input_raises():
@@ -274,7 +278,7 @@ def test_polars_dataframe_input():
 # --------------------------------------------------------------------------- #
 
 
-def test_from_records_builds_a_working_model():
+def test_inferred_schema_builds_a_working_model():
     records = [
         {
             "tier": "gold",
@@ -298,12 +302,12 @@ def test_from_records_builds_a_working_model():
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = j2v.Model.from_records(
-            records,
+        fields = j2v.helpers.infer_schema(records, target="returned")
+        model = j2v.Model.from_schema(
+            *fields,
             d_model=16,
             n_layers=1,
             n_heads=4,
-            target="returned",
         )
 
     requests = model.hyperparameters.requests

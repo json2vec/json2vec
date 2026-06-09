@@ -8,6 +8,7 @@ mutation predicates, and the `@preprocess` decorator.
 
 from typing import TYPE_CHECKING, Any
 
+from json2vec import helpers as helpers
 from json2vec.architecture.checkpoint import RollbackCheckpoint
 from json2vec.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
 from json2vec.architecture.root import (
@@ -17,7 +18,6 @@ from json2vec.architecture.root import (
 )
 from json2vec.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule
 from json2vec.data.processing import MASK_LITERAL, MaskLiteral
-from json2vec.helpers.inference import InferenceConfig, infer_schema
 from json2vec.inference.callback import Postprocessor, Writer
 from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
 from json2vec.structs.enums import (
@@ -106,8 +106,8 @@ __all__ = [
     "Deployment",
     "EmbedderBase",
     "Entity",
+    "helpers",
     "Hyperparameters",
-    "InferenceConfig",
     "Input",
     "JSONBackend",
     "Leaf",
@@ -148,7 +148,6 @@ __all__ = [
     "Vector",
     "VocabularySyncCallback",
     "Writer",
-    "infer_schema",
     "predicate",
     "preprocess",
     "where",
