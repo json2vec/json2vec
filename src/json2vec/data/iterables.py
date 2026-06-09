@@ -23,6 +23,7 @@ from json2vec.data.datasets.base import (
     ProcessedObservation,
     RawObservation,
 )
+from json2vec.data.processing import MASK_LITERAL, contains_mask_literal
 from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor, PreprocessorMode
 from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.experiment import Hyperparameters
@@ -228,6 +229,9 @@ def encode(
 ) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
     target_addresses = set(hyperparameters.target)
+
+    if strata != Strata.predict and contains_mask_literal(batch):
+        raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata")
 
     for address, request in hyperparameters.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))

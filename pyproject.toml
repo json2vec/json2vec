@@ -1,6 +1,6 @@
 [project]
 name = "json2vec"
-version = "0.4.8"
+version = "0.4.9"
 description = "Schema-first PyTorch models for hierarchical / nested / sequence data structures"
 readme = "README.md"
 license = "Apache-2.0"

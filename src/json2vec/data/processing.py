@@ -1,5 +1,5 @@
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from typing import Any, Literal, TypeAlias
 
@@ -67,6 +67,9 @@ def contains_mask_literal(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(contains_mask_literal(item) for item in value)
 
+    if isinstance(value, Mapping):
+        return any(contains_mask_literal(item) for item in value.values())
+
     return False
 
 
@@ -85,6 +88,9 @@ def extract_mask_literals(
     """
     if leaf_depth < 0:
         raise ValueError("leaf_depth must be >= 0")
+
+    if strata != Strata.predict:
+        return values, False
 
     found = False
 
@@ -129,9 +135,6 @@ def extract_mask_literals(
         return node, False
 
     cleaned_values, mask_flags = walk(values, depth=0)
-    if found and strata != Strata.predict:
-        raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata for address '{address}'")
-
     return cleaned_values, mask_flags
 
 

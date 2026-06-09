@@ -3,8 +3,9 @@ from collections.abc import Iterable, Iterator
 import numpy as np
 import pytest
 
-from json2vec.data.processing import Pipeline, apply, pad
-from json2vec.structs.enums import Overflow, Tokens
+from json2vec.data.processing import Pipeline, apply, contains_mask_literal, extract_mask_literals, pad
+from json2vec.structs.enums import Overflow, Strata, Tokens
+from json2vec.structs.tree import Address
 
 
 def test_pipeline():
@@ -181,3 +182,21 @@ def test_apply_leaf_depth_maps_at_target_depth_only():
     output = apply(values, tuple, leaf_depth=2)
 
     assert output == [[(1, 2), (3, 4)], [(5, 6), None], 99]
+
+
+def test_contains_mask_literal_checks_mapping_values():
+    assert contains_mask_literal({"items": [{"code": "<MASK>"}]})
+    assert not contains_mask_literal({"items": [{"code": "MASK"}]})
+
+
+def test_extract_mask_literals_is_noop_outside_predict():
+    values = [[["A", "<MASK>"]]]
+    cleaned, literal_masks = extract_mask_literals(
+        values,
+        strata=Strata.train,
+        address=Address("record/items/code"),
+        leaf_depth=2,
+    )
+
+    assert cleaned is values
+    assert literal_masks is False
