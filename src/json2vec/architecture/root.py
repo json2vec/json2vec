@@ -349,6 +349,7 @@ class Model(lit.LightningModule, Renderable):
         self._schema_editor: SchemaEditor = SchemaEditor(self)
         self._contract_generation: int = 0
         self._contract_scheduler: ContractScheduler = ContractScheduler()
+        self._jd_aggregation = None
 
         self._build()
         self._build_jd_components()
@@ -733,7 +734,7 @@ class Model(lit.LightningModule, Renderable):
             jac_to_grad(
                 self.shared_params,
                 self._jd_aggregation,
-                optimize_gramian_computation=False,  # Memory efficiency (up to 50%) at the cost of CUDA speed (up to 15% reduction) if set to true. This happens by not holding full jacobian in memory, but instead recomputing relevant entries as needed.
+                optimize_gramian_computation=True
             )
 
         self.track((Metric.loss, Strata.train), value=loss_vec.detach().sum())
