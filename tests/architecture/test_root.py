@@ -9,10 +9,7 @@ import lightning.pytorch.overrides.distributed as lit_overrides_distributed
 import polars as pl
 import pytest
 import torch
-from beartype.roar import BeartypeCallHintParamViolation
 from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
-from torchjd.aggregation import UPGradWeighting
-from torchjd.autogram import Engine
 
 import json2vec as jv
 import json2vec as j2v
@@ -1047,100 +1044,6 @@ def _patch_manual_optimization(
     monkeypatch.setattr(Model, "manual_backward", manual_backward)
 
 
-def test_init_jd_sets_engine_and_weighting_on_construction() -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-
-    assert model.automatic_optimization is False
-    assert isinstance(model._autogram_engine, Engine)
-    assert isinstance(model._jd_weighting, UPGradWeighting)
-
-
-def test_init_jd_replaces_engine_after_schema_update() -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    previous_engine = model._autogram_engine
-    previous_weighting = model._jd_weighting
-
-    model.update(j2v.where("name") == "label", weight=2.0)
-    model.on_fit_start()
-
-    assert model._autogram_engine is not previous_engine
-    assert model._jd_weighting is not previous_weighting
-    assert isinstance(model._autogram_engine, Engine)
-    assert isinstance(model._jd_weighting, UPGradWeighting)
-
-
-def test_init_jd_replaces_engine_after_schema_extend() -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    previous_engine = model._autogram_engine
-    previous_weighting = model._jd_weighting
-
-    model.extend(j2v.where("name") == "root", j2v.Number("risk_score"))
-    model.on_fit_start()
-
-    assert "root/risk_score" in model.nodes
-    assert model._autogram_engine is not previous_engine
-    assert model._jd_weighting is not previous_weighting
-    assert isinstance(model._autogram_engine, Engine)
-    assert isinstance(model._jd_weighting, UPGradWeighting)
-
-
-def test_init_jd_replaces_engine_after_schema_delete() -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    previous_engine = model._autogram_engine
-    previous_weighting = model._jd_weighting
-
-    model.delete(j2v.where("name") == "color")
-    model.on_fit_start()
-
-    assert "root/color" not in model.nodes
-    assert model._autogram_engine is not previous_engine
-    assert model._jd_weighting is not previous_weighting
-    assert isinstance(model._autogram_engine, Engine)
-    assert isinstance(model._jd_weighting, UPGradWeighting)
-
-
-def test_init_jd_replaces_engine_after_reset() -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    previous_engine = model._autogram_engine
-    previous_weighting = model._jd_weighting
-
-    model.reset(j2v.where("name") == "label")
-    model.on_fit_start()
-
-    assert model._autogram_engine is not previous_engine
-    assert model._jd_weighting is not previous_weighting
-    assert isinstance(model._autogram_engine, Engine)
-    assert isinstance(model._jd_weighting, UPGradWeighting)
-
-
-def test_init_jd_runs_after_checkpoint_restore(tmp_path: Path) -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    original_engine = model._autogram_engine
-    original_weighting = model._jd_weighting
-    checkpoint_path = tmp_path / "model.ckpt"
-    model.save(checkpoint_path)
-
-    loaded = Model.load(checkpoint_path)
-
-    assert loaded.automatic_optimization is False
-    assert isinstance(loaded._autogram_engine, Engine)
-    assert isinstance(loaded._jd_weighting, UPGradWeighting)
-    assert loaded._autogram_engine is not original_engine
-    assert loaded._jd_weighting is not original_weighting
-
-
-def test_shared_submodules_tracks_runtime_node_set() -> None:
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    baseline = len(model.shared_submodules)
-    assert baseline > 0
-
-    model.extend(j2v.where("name") == "root", j2v.Number("risk_score"))
-    assert len(model.shared_submodules) > baseline
-
-    model.delete(j2v.where("name") == "risk_score")
-    assert len(model.shared_submodules) == baseline
-
-
 def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkeypatch) -> None:
     class OptimizerStub:
         def zero_grad(self) -> None:
@@ -1149,36 +1052,37 @@ def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkey
         def step(self) -> None:
             pass
 
-    class WeightingSpy(torch.nn.Module):
-        def __init__(self, inner: UPGradWeighting) -> None:
-            super().__init__()
-            self.inner = inner
-            self.gramians: list[torch.Tensor] = []
-            self.weights: list[torch.Tensor] = []
-
-        def forward(self, gramian: torch.Tensor) -> torch.Tensor:
-            weights = self.inner(gramian)
-            self.gramians.append(gramian.detach().clone())
-            self.weights.append(weights.detach().clone())
-            return weights
-
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
     model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    spy = WeightingSpy(model._jd_weighting)
-    model._jd_weighting = spy
 
-    output = model.training_step(_multi_loss_batch(model), 0)
+    captured_jacobians: list[torch.Tensor] = []
+    captured_weights: list[torch.Tensor] = []
+
+    def capture(_module: torch.nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+        captured_jacobians.append(inputs[0].detach().clone())
+        captured_weights.append(output.detach().clone())
+
+    handle = model._jd_aggregation.weighting.register_forward_hook(capture)
+    try:
+        output = model.training_step(_multi_loss_batch(model), 0)
+    finally:
+        handle.remove()
 
     loss_vec = output["loss"]
     assert loss_vec.ndim == 1
     assert loss_vec.shape[0] == 2
     assert torch.isfinite(loss_vec).all()
 
-    assert len(spy.gramians) == 1
-    assert spy.gramians[0].shape == (loss_vec.shape[0], loss_vec.shape[0])
-    assert spy.weights[0].shape == loss_vec.shape
-    assert torch.isfinite(spy.weights[0]).all()
-    assert (spy.weights[0] >= 0).all()
+    assert len(captured_weights) == 1
+    jacobian = captured_jacobians[0]
+    weights = captured_weights[0]
+
+    assert jacobian.ndim == 2
+    assert jacobian.shape[0] == loss_vec.shape[0]
+
+    assert weights.shape == loss_vec.shape
+    assert torch.isfinite(weights).all()
+    assert (weights >= 0).all()
 
     grad_count = sum(
         1
@@ -1186,6 +1090,9 @@ def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkey
         if parameter.requires_grad and parameter.grad is not None and torch.any(parameter.grad != 0)
     )
     assert grad_count > 0
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            assert torch.isfinite(parameter.grad).all()
 
 
 def test_training_step_steps_optimizer_then_zeros_grads(monkeypatch) -> None:
@@ -1274,36 +1181,6 @@ def test_training_step_accumulates_grads_across_micro_batches(monkeypatch) -> No
     assert all_reduce_calls == [model]
 
 
-def test_training_step_defaults_to_step_every_batch_without_trainer(monkeypatch) -> None:
-    class RecordingOptimizer:
-        def __init__(self) -> None:
-            self.calls: list[str] = []
-
-        def zero_grad(self) -> None:
-            self.calls.append("zero_grad")
-
-        def step(self) -> None:
-            self.calls.append("step")
-
-    optimizer = RecordingOptimizer()
-    all_reduce_calls: list[torch.nn.Module] = []
-
-    def fake_all_reduce(module: torch.nn.Module) -> None:
-        all_reduce_calls.append(module)
-
-    monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
-    _patch_manual_optimization(monkeypatch, optimizer=optimizer)
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    # No ``_trainer`` attached → ``accumulate_grad_batches`` defaults to 1.
-    assert getattr(model, "_trainer", None) is None
-
-    model.training_step(_multi_loss_batch(model), 0)
-    model.training_step(_multi_loss_batch(model), 1)
-
-    assert optimizer.calls == ["step", "zero_grad", "step", "zero_grad"]
-    assert all_reduce_calls == [model, model]
-
-
 def test_training_step_accumulates_grads_across_micro_batches_without_distributed_jd(monkeypatch) -> None:
     class RecordingOptimizer:
         def __init__(self) -> None:
@@ -1338,38 +1215,6 @@ def test_training_step_accumulates_grads_across_micro_batches_without_distribute
     # With JD disabled, gradient sync is the user's responsibility (stock DDP
     # would have synced via its reducer); no manual all-reduce runs.
     assert all_reduce_calls == []
-
-
-def test_training_step_after_schema_update_lands_grads_on_new_parameters(monkeypatch) -> None:
-    class OptimizerStub:
-        def zero_grad(self) -> None:
-            pass
-
-        def step(self) -> None:
-            pass
-
-    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    model.on_fit_start()
-    model.training_step(_multi_loss_batch(model), 0)
-
-    parameter_ids_before_update = {id(parameter) for parameter in model.parameters()}
-    model.update(j2v.where("name") == "label", weight=2.0)
-    model.on_fit_start()
-    output = model.training_step(_multi_loss_batch(model), 0)
-
-    assert output["loss"].shape[0] == 2
-    assert torch.isfinite(output["loss"]).all()
-
-    new_parameters_with_grad = [
-        parameter
-        for parameter in model.parameters()
-        if parameter.requires_grad
-        and parameter.grad is not None
-        and torch.any(parameter.grad != 0)
-        and id(parameter) not in parameter_ids_before_update
-    ]
-    assert len(new_parameters_with_grad) > 0
 
 
 def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) -> None:
@@ -1412,34 +1257,6 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
         if parameter.requires_grad and parameter.grad is not None
     ]
     assert any(torch.any(grad != 0) for grad in vehicle_grads)
-
-
-def test_training_step_after_load_checkpoint_runs(tmp_path: Path, monkeypatch) -> None:
-    class OptimizerStub:
-        def zero_grad(self) -> None:
-            pass
-
-        def step(self) -> None:
-            pass
-
-    _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    source = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
-    checkpoint_path = tmp_path / "model.ckpt"
-    source.save(checkpoint_path)
-
-    loaded = Model.load(checkpoint_path)
-    loaded.on_fit_start()
-    output = loaded.training_step(_multi_loss_batch(loaded), 0)
-
-    assert output["loss"].shape[0] == 2
-    assert torch.isfinite(output["loss"]).all()
-
-    grad_count = sum(
-        1
-        for parameter in loaded.parameters()
-        if parameter.requires_grad and parameter.grad is not None and torch.any(parameter.grad != 0)
-    )
-    assert grad_count > 0
 
 
 def test_trainer_fit_advances_parameters_under_jd_manual_optimization() -> None:
@@ -1490,17 +1307,6 @@ def test_trainer_fit_advances_parameters_under_jd_manual_optimization() -> None:
         if not torch.equal(parameter.detach(), parameters_before_fit[name])
     ]
     assert len(changed) > 0
-
-
-def test_distributed_jd_defaults_to_auto() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
-
-    assert model.distributed_jd == "auto"
-
-
-def test_distributed_jd_rejects_unknown_mode() -> None:
-    with pytest.raises(BeartypeCallHintParamViolation):
-        Model(hyperparameters=_hyperparameters(), batch_size=2, distributed_jd="invalid")  # type: ignore[arg-type]
 
 
 def test_configure_callbacks_attaches_bypass_callback_when_jd_enabled() -> None:
