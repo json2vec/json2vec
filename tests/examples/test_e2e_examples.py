@@ -72,6 +72,7 @@ def test_only_allowed_standalone_examples_are_present() -> None:
     assert discovered == {
         "examples/dynamic-masking/run.py",
         "examples/inference-masking/run.py",
+        "examples/optuna-tuning/run.py",
     }
 
 

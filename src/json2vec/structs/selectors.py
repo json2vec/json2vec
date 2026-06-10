@@ -105,6 +105,7 @@ _QUERYABLE_BUILTINS = frozenset(
         "children",
         "ancestors",
         "descendants",
+        "is_root",
         "target",
     }
 )
@@ -118,7 +119,7 @@ class NodeAttribute(pydantic.BaseModel):
     name: str = pydantic.Field(
         description=(
             "Queryable node attribute. Built-ins include name, type, address, parent, "
-            "children, ancestors, descendants, and target. Pydantic fields and "
+            "children, ancestors, descendants, is_root, and target. Pydantic fields and "
             "extra metadata fields are also queryable."
         )
     )
@@ -139,6 +140,8 @@ class NodeAttribute(pydantic.BaseModel):
             return tuple(str(parent.address) for parent in getattr(node, "ancestors", ()) if parent.address)
         if self.name == "descendants":
             return tuple(str(child.address) for child in getattr(node, "descendants", ()))
+        if self.name == "is_root":
+            return getattr(getattr(node, "parent", None), "type", None) == "hyperparameters"
         if self.name == "target":
             return isinstance(node, Leaf) and node.active and node.target
 

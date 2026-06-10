@@ -264,6 +264,18 @@ def test_schema_helper_classmethods_back_public_dsl():
     assert j2v.Hyperparameters.update_values({"target": True}) == {"target": True}
 
 
+def test_where_is_root_selects_generated_root_array():
+    params = j2v.Hyperparameters.from_schema(
+        j2v.Array(j2v.Number("amount"), name="transactions", max_length=4),
+        d_model=16,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    assert params.select(j2v.where("is_root")) == [params.fields]
+    assert params.select(j2v.where("is_root"), include_root=False) == []
+
+
 def test_hyperparameters_select_returns_nodes_and_accepts_boolean_predicates():
     model = j2v.Model.from_schema(
         j2v.Number("amount"),

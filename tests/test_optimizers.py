@@ -28,7 +28,8 @@ def test_adamw_groups_bias_1d_and_named_parameters_without_decay() -> None:
     optimizer = adamw(
         learning_rate=0.123,
         weight_decay=0.5,
-        betas=(0.8, 0.9),
+        beta1=0.8,
+        beta2=0.9,
         eps=1e-7,
     )(module)
 

@@ -22,6 +22,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+tuning = [
+    "optuna>=4.9.0",
+    "pydantic-optuna-bridge>=0.1.1",
+]
 serving = [
     "fastapi>=0.124.0",
     "orjson>=3.10.0",
@@ -56,6 +60,8 @@ dev = [
     "uvicorn>=0.38.0",
     "ty>=0.0.1a20",
     "pre-commit>=4.3.0",
+    "optuna>=4.9.0",
+    "pydantic-optuna-bridge>=0.1.1",
 ]
 
 [build-system]

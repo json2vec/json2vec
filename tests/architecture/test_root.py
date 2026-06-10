@@ -75,6 +75,17 @@ def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
             assert restored_state[key] == value
 
 
+def test_save_writes_weights_only_safe_checkpoint_metadata(tmp_path: Path) -> None:
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    pathname = tmp_path / "model.ckpt"
+
+    model.save(pathname=pathname)
+
+    checkpoint = torch.load(pathname, weights_only=True, map_location="cpu")
+    assert checkpoint["hyperparameters"]["fields"]["attention"] == AttentionMode.mha.value
+    assert Hyperparameters.model_validate(checkpoint["hyperparameters"]).fields.attention == AttentionMode.mha
+
+
 def _prediction_hyperparameters() -> Hyperparameters:
     return Hyperparameters(
         d_model=8,
@@ -199,7 +210,7 @@ def test_rollback_checkpoint_loads_schema_metadata_with_weights_only_disabled(tm
     best_path = tmp_path / "best.ckpt"
     model.save(best_path)
     checkpoint = torch.load(best_path, weights_only=False, map_location="cpu")
-    assert checkpoint["hyperparameters"]["fields"]["attention"] == AttentionMode.mha
+    assert checkpoint["hyperparameters"]["fields"]["attention"] == AttentionMode.mha.value
 
     with torch.no_grad():
         next(model.parameters()).add_(1.0)

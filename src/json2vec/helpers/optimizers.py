@@ -32,7 +32,8 @@ def adamw(
     learning_rate: float,
     *,
     weight_decay: float = 0.01,
-    betas: tuple[float, float] = (0.9, 0.95),
+    beta1: float = 0.9,
+    beta2: float = 0.95,
     eps: float = 1e-8,
     decay_bias: bool = False,
     decay_1d: bool = False,
@@ -70,7 +71,7 @@ def adamw(
         return torch.optim.AdamW(
             params=parameter_groups,
             lr=learning_rate,
-            betas=betas,
+            betas=(beta1, beta2),
             eps=eps,
             weight_decay=weight_decay,
         )

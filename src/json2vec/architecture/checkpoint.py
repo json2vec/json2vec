@@ -64,7 +64,7 @@ class CheckpointState:
 
     @staticmethod
     def dump(module: "Model", checkpoint: dict[str, Any]) -> None:
-        checkpoint["hyperparameters"] = module.hyperparameters.model_dump(mode="python")
+        checkpoint["hyperparameters"] = module.hyperparameters.model_dump(mode="json")
         checkpoint["batch_size"] = module.batch_size
 
     @staticmethod
