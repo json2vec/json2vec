@@ -707,14 +707,15 @@ class Model(lit.LightningModule, Renderable):
         is_accumulation_boundary = (batch_idx + 1) % accumulate == 0
 
         output = step(self, batch, batch_idx, strata=Strata.train)
-        losses: list[torch.Tensor] = output["losses"]
-        addresses: list[Address] = output["addresses"]
-        root_embedding: torch.Tensor = output['root_embedding']
+        no_losses: bool = "losses" not in output.keys()
+        losses: list[torch.Tensor] = output.get("losses", [output['loss'],])
         loss_vec = torch.stack(losses)
 
-        if self.distributed_jd == "off":
+        if self.distributed_jd == "off" or no_losses:
             self.manual_backward(loss_vec.sum())
         else:
+            addresses: list[Address] = output["addresses"]
+            root_embedding: torch.Tensor = output['root_embedding']
             shared_param_ids: set[int] = {id(parameter) for parameter in self.shared_params}
             tasks_params: list[list[torch.nn.Parameter]] = [
                 [
