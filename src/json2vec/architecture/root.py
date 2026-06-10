@@ -3,7 +3,7 @@
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from functools import partialmethod
+from functools import partialmethod, wraps
 from pathlib import Path
 from typing import Any, Literal, Self, cast
 
@@ -182,44 +182,6 @@ class _BypassDDPWrappingCallback(Callback):
         self._original_configure_ddp = None
 
 
-class RollbackCheckpoint(ModelCheckpoint):
-    """Checkpoint the best model during fit and restore it into the module at fit end."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        if self.save_weights_only:
-            raise ValueError("RollbackCheckpoint requires full checkpoints; set save_weights_only=False")
-        if self.save_top_k == 0:
-            raise ValueError("RollbackCheckpoint requires at least one saved checkpoint; set save_top_k != 0")
-
-    def on_fit_end(self, trainer: lit.Trainer, pl_module: lit.LightningModule) -> None:
-        super().on_fit_end(trainer=trainer, pl_module=pl_module)
-        if not isinstance(pl_module, Model):
-            raise TypeError("RollbackCheckpoint can only restore json2vec Model instances")
-
-        best_model_path = self.best_model_path
-        if not best_model_path:
-            raise RuntimeError("RollbackCheckpoint did not find a best checkpoint to restore")
-
-        strategy = getattr(trainer, "strategy", None)
-        if strategy is not None:
-            strategy.barrier("rollback_checkpoint_load")
-            checkpoint = strategy.checkpoint_io.load_checkpoint(
-                best_model_path,
-                map_location=pl_module.device,
-                weights_only=False,
-            )
-        else:
-            checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
-
-        pl_module.restore_checkpoint_state(checkpoint)
-        logger.bind(
-            component="checkpoint",
-            checkpoint=best_model_path,
-            score=self.best_model_score,
-        ).info("rolled back Model to best checkpoint")
-
-
 class Model(lit.LightningModule, Renderable):
     """Neural model generated from a `json2vec` schema tree.
 
@@ -260,7 +222,7 @@ class Model(lit.LightningModule, Renderable):
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
-        distributed_jd: DistributedJDMode = "auto",
+        distributed_jd: DistributedJDMode = "off",
         **field_kwargs: TreeFieldInput,
     ) -> Self:
         """Compatibility wrapper for constructing a model from tree fields.

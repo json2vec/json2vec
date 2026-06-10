@@ -1053,7 +1053,7 @@ def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkey
             pass
 
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
 
     captured_jacobians: list[torch.Tensor] = []
     captured_weights: list[torch.Tensor] = []
@@ -1164,7 +1164,7 @@ def test_training_step_accumulates_grads_across_micro_batches(monkeypatch) -> No
 
     monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
     _patch_manual_optimization(monkeypatch, optimizer=optimizer)
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
     model._trainer = type("TrainerStub", (), {"accumulate_grad_batches": 3})()  # noqa: SLF001
 
     model.training_step(_multi_loss_batch(model), 0)
@@ -1310,7 +1310,7 @@ def test_trainer_fit_advances_parameters_under_jd_manual_optimization() -> None:
 
 
 def test_configure_callbacks_attaches_bypass_callback_when_jd_enabled() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(hyperparameters=_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
 
     callbacks = model.configure_callbacks()
 
@@ -1486,7 +1486,7 @@ def test_training_step_calls_mean_all_reduce_grads(monkeypatch) -> None:
 
     monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
 
     model.training_step(_multi_loss_batch(model), 0)
 
