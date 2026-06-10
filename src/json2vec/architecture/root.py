@@ -15,8 +15,8 @@ from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
-from torchjd.aggregation import UPGradWeighting
-from torchjd.autogram import Engine
+from torchjd.aggregation import UPGrad
+from torchjd.autojac import jac_to_grad, mtl_backward
 
 from json2vec.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from json2vec.architecture.contracts import ContractScheduler
@@ -450,8 +450,8 @@ class Model(lit.LightningModule, Renderable):
             yield nested
 
     def _build_jd_components(self) -> None:
-        self._autogram_engine = Engine(*self.shared_submodules, batch_dim=None)
-        self._jd_weighting = UPGradWeighting()
+        if self.distributed_jd != "off":
+            self._jd_aggregation = UPGrad()
 
     def select(
         self,
@@ -630,6 +630,13 @@ class Model(lit.LightningModule, Renderable):
             if hasattr(node,'encoder')
         ]
         return embedders + encoders
+    
+    @property
+    def shared_params(self) -> list[Any]:
+        params = []
+        for module in self.shared_submodules:
+            params.extend([x for x in module.parameters() if x.requires_grad])
+        return params
 
     @property
     def interprocess_encoding_context(self) -> dict[Address, Any]:
@@ -655,7 +662,8 @@ class Model(lit.LightningModule, Renderable):
         strata: Strata | str,
         dataloader_idx: int = 0,
     ) -> list[Prediction]:
-        return ModelRuntime.forward(self, inputs, strata=strata, dataloader_idx=dataloader_idx)
+        predictions, _ = ModelRuntime.forward(self, inputs, strata=strata, dataloader_idx=dataloader_idx)
+        return predictions
 
     @beartype
     def configure_optimizers(self):
@@ -737,14 +745,34 @@ class Model(lit.LightningModule, Renderable):
 
         output = step(self, batch, batch_idx, strata=Strata.train)
         losses: list[torch.Tensor] = output["losses"]
+        addresses: list[Address] = output["addresses"]
+        root_embedding: torch.Tensor = output['root_embedding']
         loss_vec = torch.stack(losses)
 
         if self.distributed_jd == "off":
             self.manual_backward(loss_vec.sum())
         else:
-            gramian = self._autogram_engine.compute_gramian(loss_vec)
-            weights = self._jd_weighting(gramian)
-            self.manual_backward(loss_vec, gradient=weights)
+            shared_param_ids: set[int] = {id(parameter) for parameter in self.shared_params}
+            tasks_params: list[list[torch.nn.Parameter]] = [
+                [
+                    parameter
+                    for parameter in self.nodes[address].decoder.parameters()
+                    if parameter.requires_grad and id(parameter) not in shared_param_ids
+                ]
+                for address in addresses
+            ]
+            mtl_backward(
+                losses,
+                features=root_embedding,
+                tasks_params=tasks_params,
+                shared_params=self.shared_params,
+                parallel_chunk_size=None,
+            )
+            jac_to_grad(
+                self.shared_params,
+                self._jd_aggregation,
+                optimize_gramian_computation=False,  # Memory efficiency (up to 50%) at the cost of CUDA speed (up to 15% reduction) if set to true. This happens by not holding full jacobian in memory, but instead recomputing relevant entries as needed.
+            )
 
         self.track((Metric.loss, Strata.train), value=loss_vec.detach().sum())
 

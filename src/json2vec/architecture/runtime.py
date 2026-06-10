@@ -38,6 +38,7 @@ class Output(TypedDict):
     predictions: NotRequired[list[Prediction]]
     losses: NotRequired[list[torch.Tensor]]
     addresses: NotRequired[list[Address]]
+    root_embedding: NotRequired[torch.Tensor]
 
 
 class ModelRuntime:
@@ -50,7 +51,7 @@ class ModelRuntime:
         *,
         strata: Strata | str,
         dataloader_idx: int = 0,
-    ) -> list[Prediction]:
+    ) -> tuple[list[Prediction], dict[Address, Parcel]]:
         sanitize(module, inputs, strata=strata, dataloader_idx=dataloader_idx)
 
         processed: dict[Address, list[Parcel]] = defaultdict(list)
@@ -119,7 +120,20 @@ class ModelRuntime:
                     prediction.payload[TensorKey.inferred] = inputs[address].trainable.bool()
                 predictions.append(prediction)
 
-        return predictions
+        return predictions, outgoing
+
+    @staticmethod
+    def _root_encoding(
+        module: "Model", outgoing: dict[Address, Parcel]
+    ) -> torch.Tensor | None:
+        depthwise = module.hyperparameters.depthwise
+        if not depthwise or not depthwise[0]:
+            return None
+        root_address = depthwise[0][0]
+        parcel = outgoing.get(root_address)
+        if parcel is None:
+            return None
+        return parcel.payload
 
     @staticmethod
     def step(
@@ -130,7 +144,9 @@ class ModelRuntime:
         *,
         strata: Strata,
     ) -> Output:
-        predictions: list[Prediction] = module.forward(batch, strata=strata, dataloader_idx=dataloader_idx)
+        predictions, outgoing = ModelRuntime.forward(
+            module, batch, strata=strata, dataloader_idx=dataloader_idx
+        )
 
         if strata == Strata.predict:
             return Output(predictions=predictions)
@@ -158,11 +174,18 @@ class ModelRuntime:
             logger.warning("no trainable fields in batch, returning zero loss")
             loss: torch.Tensor = torch.tensor(0.0, device=batch.device, requires_grad=True)
             return Output(loss=loss)
-        
-        if strata==Strata.train:
+
+        if strata == Strata.train:
+            root_embedding = ModelRuntime._root_encoding(module, outgoing)
+            if root_embedding is None:
+                raise RuntimeError(
+                    "root array encoding not produced during forward; cannot expose "
+                    "shared features for Jacobian-descent training"
+                )
             return Output(
                 losses=losses,
-                addresses=addresses
+                addresses=addresses,
+                root_embedding=root_embedding,
             )
 
         loss: torch.Tensor = module.track((Metric.loss, strata), value=torch.stack(losses).sum())
