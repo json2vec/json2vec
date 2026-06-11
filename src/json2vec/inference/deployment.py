@@ -16,6 +16,7 @@ import pydantic
 import torch
 import uvicorn
 from beartype import beartype
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -642,7 +643,74 @@ class Deployment(BaseSettings):
                 },
             )
 
+        self._register_openapi_signatures(app)
         return app
+
+    def _register_openapi_signatures(self, app: fastapi.FastAPI) -> None:
+        if self._request_signature is None and self._response_signature is None:
+            return
+
+        def register_model(openapi_schema: dict[str, Any], model: type[pydantic.BaseModel]) -> str:
+            schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
+            definitions = schema.pop("$defs", {})
+
+            components = openapi_schema.setdefault("components", {}).setdefault("schemas", {})
+            for name, definition in definitions.items():
+                components.setdefault(name, definition)
+
+            name = str(schema.get("title") or model.__name__)
+            components.setdefault(name, schema)
+            return name
+
+        def single_or_batch_schema(name: str) -> dict[str, Any]:
+            item = {"$ref": f"#/components/schemas/{name}"}
+            return {
+                "anyOf": [
+                    item,
+                    {
+                        "type": "array",
+                        "items": item,
+                    },
+                ]
+            }
+
+        def custom_openapi() -> dict[str, Any]:
+            if app.openapi_schema is not None:
+                return app.openapi_schema
+
+            openapi_schema = get_openapi(
+                title=app.title,
+                version=app.version,
+                openapi_version=app.openapi_version,
+                summary=app.summary,
+                description=app.description,
+                routes=app.routes,
+            )
+            operation = openapi_schema["paths"]["/predict"]["post"]
+
+            if self._request_signature is not None:
+                request_name = register_model(openapi_schema, self._request_signature)
+                operation["requestBody"] = {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": single_or_batch_schema(request_name),
+                        }
+                    },
+                }
+
+            if self._response_signature is not None:
+                response_name = register_model(openapi_schema, self._response_signature)
+                operation.setdefault("responses", {}).setdefault("200", {}).setdefault("content", {})[
+                    "application/json"
+                ] = {
+                    "schema": single_or_batch_schema(response_name),
+                }
+
+            app.openapi_schema = openapi_schema
+            return app.openapi_schema
+
+        app.openapi = custom_openapi  # type: ignore[method-assign]
 
     def serve(self) -> None:
         """Start the FastAPI server for the configured checkpoint or model."""

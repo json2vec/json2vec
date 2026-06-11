@@ -303,6 +303,43 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
     assert captured["log_level"] == "error"
 
 
+def test_deployment_forge_registers_openapi_signatures():
+    class Request(pydantic.BaseModel):
+        amount: float
+
+    class Candidate(pydantic.BaseModel):
+        label: str
+        probability: float
+
+    class Response(pydantic.BaseModel):
+        predictions: list[Candidate]
+
+    app = Deployment(checkpoint="unused").forge(request=Request, response=Response).app()
+
+    schema = app.openapi()
+    components = schema["components"]["schemas"]
+    operation = schema["paths"]["/predict"]["post"]
+
+    assert {"Request", "Candidate", "Response"} <= set(components)
+
+    request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+    assert request_schema == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/Request"},
+            {"type": "array", "items": {"$ref": "#/components/schemas/Request"}},
+        ]
+    }
+
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/Response"},
+            {"type": "array", "items": {"$ref": "#/components/schemas/Response"}},
+        ]
+    }
+    assert components["Response"]["properties"]["predictions"]["items"] == {"$ref": "#/components/schemas/Candidate"}
+
+
 def test_deployment_launcher_configures_worker_import_string(monkeypatch):
     captured = {}
 

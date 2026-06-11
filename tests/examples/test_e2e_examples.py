@@ -68,10 +68,15 @@ def test_only_allowed_standalone_examples_are_present() -> None:
     if not examples.exists():
         return
 
-    discovered = {path.relative_to(root).as_posix() for path in examples.rglob("*") if path.is_file()}
+    discovered = {
+        path.relative_to(root).as_posix()
+        for path in examples.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    }
     assert discovered == {
         "examples/dynamic-masking/run.py",
         "examples/inference-masking/run.py",
+        "examples/realtime-serving/run.py",
     }
 
 
