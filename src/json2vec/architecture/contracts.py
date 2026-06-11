@@ -287,10 +287,27 @@ def require_tensor_devices(module: "Model", address: Address, tensorfield: Tenso
         raise ForwardContractError(f"forward input '{address}' tensors must share one device, got {formatted}")
 
     module_device = getattr(module, "device", None)
-    if isinstance(module_device, torch.device) and devices and next(iter(devices)) != module_device:
+    if isinstance(module_device, torch.device) and devices and not _same_device(next(iter(devices)), module_device):
         raise ForwardContractError(
             f"forward input '{address}' tensors must be on module device {module_device}, got {next(iter(devices))}"
         )
+
+
+def _canonical_device(device: torch.device) -> tuple[str, int | None]:
+    if device.type == "mps":
+        return (device.type, 0 if device.index is None else device.index)
+
+    if device.type == "cuda":
+        index = device.index
+        if index is None and torch.cuda.is_available():
+            index = torch.cuda.current_device()
+        return (device.type, index)
+
+    return (device.type, device.index)
+
+
+def _same_device(left: torch.device, right: torch.device) -> bool:
+    return _canonical_device(left) == _canonical_device(right)
 
 
 def require_mask_contract(module: "Model", address: Address, tensorfield: TensorFieldBase, *, strata: Strata) -> None:

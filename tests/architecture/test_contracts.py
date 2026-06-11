@@ -5,7 +5,7 @@ import torch
 from tensordict import TensorDict
 
 import json2vec as j2v
-from json2vec.architecture.contracts import ForwardContractError
+from json2vec.architecture.contracts import ForwardContractError, _same_device
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.tree import Address
@@ -34,6 +34,16 @@ def _inputs(model: j2v.Model, batch: list[list[dict]] | None = None, strata: Str
         strata=strata,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
+
+
+def test_forward_contract_canonicalizes_default_accelerator_device_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _same_device(torch.device("mps"), torch.device("mps:0"))
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
+    assert _same_device(torch.device("cuda"), torch.device("cuda:0"))
+    assert not _same_device(torch.device("cuda"), torch.device("cuda:1"))
 
 
 def test_forward_contract_rejects_missing_active_field() -> None:
