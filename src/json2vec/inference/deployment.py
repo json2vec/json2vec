@@ -124,10 +124,10 @@ class FastAPIRuntime:
             self.device = torch.device(self.accelerator.value)
 
         model = self.model_source if isinstance(self.model_source, Model) else Model.load(self.model_source)
-        self.model: Model = model.to(self.device)
         for predicates, values in self.update_operations:
-            self.model.update(*predicates, **values)
+            model.update(*predicates, **values)
 
+        self.model: Model = model.to(self.device)
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
         self.jmespath_resolution_monitor = (
@@ -270,8 +270,9 @@ class FastAPIRuntime:
                     ),
                 )
 
+            model_input = cast(Input, model_input.to(self.device))
             with torch.inference_mode():
-                predictions = self.model(model_input.to(self.device), strata=Strata.predict)
+                predictions = self.model(model_input, strata=Strata.predict)
 
             if self.postprocessor is None:
                 written = self.model.write(predictions=predictions)
@@ -286,10 +287,7 @@ class FastAPIRuntime:
                     raise ValueError("deployment requests must encode exactly one observation")
 
                 input_slice: dict[Address, TensorFieldBase] = {}
-                for key, value in encoded.items():
-                    if key == TensorKey.metadata:
-                        continue
-
+                for key, value in model_input.items():
                     input_slice[Address(str(key))] = value[start:stop]
 
                 sliced = cast(Input, TensorDict(source=cast(Any, input_slice), batch_size=[stop - start]))

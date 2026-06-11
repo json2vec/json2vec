@@ -197,6 +197,32 @@ def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     assert output["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
 
 
+def test_fastapi_runtime_postprocess_receives_device_moved_input(monkeypatch):
+    seen = {}
+
+    class DeviceCheckingModel(_DummyModel):
+        def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
+            assert data["dummy"].device == torch.device("meta")
+            return super().__call__(data, strata=strata)
+
+    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+        return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
+
+    def processor(context, predictions):
+        seen["input_device"] = context["input"]["dummy"].device
+        return predictions
+
+    monkeypatch.setattr(deployment_module, "encode", fake_encode)
+
+    runtime = _runtime(model=DeviceCheckingModel(), postprocessor=processor)
+    runtime.device = torch.device("meta")
+
+    output = runtime.predict_payloads([{"color": "r"}])[0]
+
+    assert seen["input_device"] == torch.device("meta")
+    assert output["predictions"]["root/label"]["value"] == "ok"
+
+
 def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch):
     class EmptyModel(_DummyModel):
         def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
@@ -409,15 +435,21 @@ def test_fastapi_runtime_setup_applies_queued_update_operations(monkeypatch):
     class FakeModel:
         interprocess_encoding_context = {}
 
+        def __init__(self):
+            self.placed = False
+
         def to(self, device):
             calls.append(("to", str(device)))
+            self.placed = True
             return self
 
         def update(self, *predicates, **values):
             calls.append(("update", predicates, values))
+            self.placed = False
             return self
 
         def eval(self):
+            assert self.placed is True
             calls.append(("eval",))
             return self
 
@@ -435,8 +467,8 @@ def test_fastapi_runtime_setup_applies_queued_update_operations(monkeypatch):
 
     runtime.setup()
 
-    assert calls[0] == ("to", "cpu")
-    assert calls[1] == ("update", (predicate,), {"target": False})
+    assert calls[0] == ("update", (predicate,), {"target": False})
+    assert calls[1] == ("to", "cpu")
     assert calls[2] == ("eval",)
 
 
