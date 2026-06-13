@@ -363,4 +363,3 @@ def test_normalizer_sync_callback_syncs_in_deterministic_address_order(monkeypat
 
 def test_normalizer_sync_callback_is_registered_on_number_plugin():
     assert NormalizerSyncCallback in TENSORFIELDS["number"].callback_factories
-

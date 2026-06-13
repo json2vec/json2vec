@@ -9,8 +9,8 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
-from loguru import logger
 from lightning.pytorch import Callback
+from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from json2vec.data.nested import extract_mask_literals, pad
