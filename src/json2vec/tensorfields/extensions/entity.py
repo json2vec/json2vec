@@ -33,22 +33,24 @@ entity: Plugin = Plugin(name="entity")
 
 
 def _local_reindex(data: np.ndarray, states: np.ndarray) -> np.ndarray:
-    vocab: dict[Hashable, int] = {}
     tokens = np.zeros_like(states, dtype=np.int64)
-    flat_values = data.reshape(-1)
-    flat_states = states.reshape(-1)
-    flat_tokens = tokens.reshape(-1)
 
-    for index, state in enumerate(flat_states):
-        if state != Tokens.valued.value:
-            continue
+    for observation_index in range(data.shape[0]):
+        vocab: dict[Hashable, int] = {}
+        flat_values = data[observation_index].reshape(-1)
+        flat_states = states[observation_index].reshape(-1)
+        flat_tokens = tokens[observation_index].reshape(-1)
 
-        value: Any = flat_values[index]
-        if not isinstance(value, Hashable):
-            raise TypeError(f"entity values must be hashable, got {type(value).__name__}")
+        for index, state in enumerate(flat_states):
+            if state != Tokens.valued.value:
+                continue
 
-        local_id = vocab.setdefault(value, len(vocab))
-        flat_tokens[index] = local_id
+            value: Any = flat_values[index]
+            if not isinstance(value, Hashable):
+                raise TypeError(f"entity values must be hashable, got {type(value).__name__}")
+
+            local_id = vocab.setdefault(value, len(vocab))
+            flat_tokens[index] = local_id
 
     return tokens
 
@@ -78,12 +80,16 @@ class Request(RequestBase):
         return self
 
     def post_bind_validate(self):
-        per_observation_count: int = math.prod(self.shape)
-        if per_observation_count <= 1:
+        max_slots: int = math.prod(self.shape)
+        if max_slots <= 1:
             raise ValueError(
                 f"entity field at '{self.address}' requires at least 2 elements per observation, "
-                f"but configured count is {per_observation_count}"
+                f"but configured count is {max_slots}"
             )
+
+        for topk in self.topk or []:
+            if topk >= max_slots:
+                raise ValueError("topk values must be less than the entity slot count")
 
 
 @entity.register
@@ -191,10 +197,10 @@ class TensorField(TensorFieldBase):
 
 @entity.register
 class Embedder(EmbedderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address, batch_size: int):
+    def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__(hyperparameters=hyperparameters, address=address)
 
-        self.max_slots: int = batch_size * math.prod(hyperparameters.shapes[address])
+        self.max_slots: int = math.prod(hyperparameters.shapes[address])
         self.origin: Address = address
         self.destination: Address = hyperparameters.requests[address].parent.address
         self.n_embeddings: int = self.max_slots + len(Tokens)
@@ -244,8 +250,9 @@ class Decoder(DecoderBase):
     def __init__(self, hyperparameters: Hyperparameters, address: Address):
         super().__init__(hyperparameters=hyperparameters, address=address)
 
+        self.max_slots: int = math.prod(hyperparameters.shapes[address])
         self.state_linear = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=len(Tokens))
-        self.projection = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=hyperparameters.d_model)
+        self.projection = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=self.max_slots)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -291,12 +298,12 @@ def loss(
     if not valued.any():
         return loss
 
-    features = prediction.payload[TensorKey.content].reshape(N, -1)
+    inputs = prediction.payload[TensorKey.content].reshape(N, -1)
     targets = batch.targets[TensorKey.content].reshape(N)
-
-    max_index = int(targets.masked_select(valued).max().item()) + 1
-    codebook = module.nodes[prediction.address].embedder.embeddings[TensorKey.content.name].weight[:max_index]
-    inputs = torch.matmul(features, codebook.transpose(0, 1))
+    n_content_tokens = inputs.shape[-1]
+    invalid = valued & targets.ge(n_content_tokens)
+    if invalid.any():
+        raise ValueError(f"Token in address {prediction.address} exceeds entity slot count")
 
     loss += module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),

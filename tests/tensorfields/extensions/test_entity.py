@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+import json2vec as j2v
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Hyperparameters
 from json2vec.tensorfields.extensions.entity import TensorField
@@ -47,11 +48,16 @@ def test_entity_topk_validation_rejects_one():
         Hyperparameters.model_validate(_structure_payload(topk=[1]))
 
 
-def test_entity_topk_validation_allows_batch_size_dependent_values():
-    Hyperparameters.model_validate(_structure_payload(topk=[4]))
+def test_entity_topk_validation_rejects_values_at_or_above_slot_count():
+    with pytest.raises(ValueError, match="less than the entity slot count"):
+        Hyperparameters.model_validate(_structure_payload(max_length=4, topk=[4]))
 
 
-def test_entity_tensorfield_uses_batch_local_unique_ids():
+def test_entity_topk_validation_allows_per_observation_values():
+    Hyperparameters.model_validate(_structure_payload(max_length=4, topk=[2, 3]))
+
+
+def test_entity_tensorfield_uses_observation_local_unique_ids():
     structure = Hyperparameters.model_validate(_structure_payload())
     hyperparameters = structure
 
@@ -69,8 +75,17 @@ def test_entity_tensorfield_uses_batch_local_unique_ids():
 
     unique_values = {token.item() for token in field.content.reshape(-1)}
 
-    # unique entities: alice, bob, carol -> 3 local IDs
-    assert unique_values == {0, 1, 2}
+    assert unique_values == {0, 1}
+    assert torch.equal(
+        field.content,
+        torch.tensor(
+            [
+                [[0, 1]],
+                [[0, 1]],
+            ],
+            dtype=torch.int64,
+        ),
+    )
     assert torch.all(field.state == Tokens.valued.value)
 
 
@@ -147,3 +162,64 @@ def test_entity_mask_preserves_targets_before_replacement():
     assert torch.equal(field.targets[TensorKey.content], original_content)
     assert torch.all(field.state == Tokens.masked.value)
     assert torch.all(field.content == 0)
+
+
+def test_entity_embedder_accepts_independent_observation_local_ids():
+    model = j2v.Model.from_schema(
+        j2v.Array(j2v.Entity("id"), name="items", max_length=2),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=2,
+    )
+
+    inputs = model.encode(
+        [
+            {"items": [{"id": "a"}, {"id": "b"}]},
+            {"items": [{"id": "c"}, {"id": "d"}]},
+        ],
+        strata=Strata.train,
+        mask=False,
+    )
+
+    assert torch.equal(
+        inputs["record/items/id"].content,
+        torch.tensor(
+            [
+                [[0, 1]],
+                [[0, 1]],
+            ],
+            dtype=torch.int64,
+        ),
+    )
+    model(inputs, strata=Strata.train)
+
+
+def test_entity_training_loss_consumes_decoder_slot_logits_directly():
+    model = j2v.Model.from_schema(
+        j2v.Array(j2v.Entity("id"), name="items", max_length=3),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=2,
+    )
+    address = "record/items/id"
+    inputs = model.encode(
+        [
+            {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+            {"items": [{"id": "d"}, {"id": "e"}, {"id": "f"}]},
+        ],
+        strata=Strata.train,
+        mask=False,
+    )
+    field = inputs[address]
+    field.hide(torch.ones_like(field.state, dtype=torch.bool))
+
+    predictions = model(inputs, strata=Strata.train)
+    prediction = next(prediction for prediction in predictions if prediction.address == address)
+    content = prediction.payload[TensorKey.content]
+
+    assert content.shape[-1] == 3
+    assert content[..., 0].numel() == field.content.numel()
+    output = model.training_step(inputs, batch_idx=0)
+    assert torch.isfinite(output["loss"])
