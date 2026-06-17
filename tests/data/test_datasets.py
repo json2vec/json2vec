@@ -649,6 +649,48 @@ def test_streaming_datamodule_accepts_raw_regex_string_patterns():
     assert module.predict.pattern == r"/predict/.*\.ndjson$"
 
 
+def test_streaming_datamodule_regex_patterns_keep_strata_disjoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    for split in ["train", "validate", "test"]:
+        split_dir = tmp_path / split
+        split_dir.mkdir()
+        for index in range(2):
+            record = {"id": f"{split}-{index}"}
+            (split_dir / f"part-{index}.ndjson").write_text(json.dumps(record), encoding="utf-8")
+
+    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+        yield from pipe
+
+    def mask(pipe, hyperparameters):
+        yield from pipe
+
+    monkeypatch.setattr(streaming, "transform", transform)
+    monkeypatch.setattr(streaming, "mask", mask)
+
+    module = StreamingDataModule(
+        model=_datamodule_model(batch_size=4),
+        root=tmp_path,
+        suffix=Suffix.ndjson,
+        train=r"(^|/)train/.*\.ndjson$",
+        validate=r"(^|/)validate/.*\.ndjson$",
+        test=r"(^|/)test/.*\.ndjson$",
+        num_workers=0,
+        replacement=False,
+        file_buffer_size=1,
+        observation_buffer_size=1,
+    )
+
+    def ids(loader):
+        assert loader is not None
+        return {observation[0]["id"] for batch in loader for observation in batch}
+
+    assert ids(module.train_dataloader()) == {"train-0", "train-1"}
+    assert ids(module.val_dataloader()) == {"validate-0", "validate-1"}
+    assert ids(module.test_dataloader()) == {"test-0", "test-1"}
+
+
 def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
     module = StreamingDataModule(
         model=_datamodule_model(),

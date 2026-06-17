@@ -61,6 +61,7 @@ class TensorKey(enum.StrEnum):
     probability = "probability"
     topk = "topk"
     embedding = "embedding"
+    inferred = "inferred"
 
 
 class Metric(enum.StrEnum):

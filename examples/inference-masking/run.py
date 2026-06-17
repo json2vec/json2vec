@@ -78,6 +78,10 @@ if __name__ == "__main__":
     print(predictions[ADDRESS]["content"]["value"])
     print()
 
+    print(f"inferred slots: {ADDRESS}")
+    print(predictions[ADDRESS]["inferred"])
+    print()
+
     print(f"decoded top-3 candidates for {MASK} slots: {ADDRESS}")
     topk = predictions[ADDRESS]["content"]["topk"][0]
     print({slot: topk[slot] for slot in masked_slots})

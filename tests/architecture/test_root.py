@@ -641,6 +641,7 @@ def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
         len(probabilities) == 2 and all(not isinstance(probability, list) for probability in probabilities)
         for probabilities in state.values()
     )
+    assert supervised[Address("root", "label")][TensorKey.inferred.name] == [True, True]
 
 
 def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:

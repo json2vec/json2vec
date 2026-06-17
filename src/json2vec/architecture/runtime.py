@@ -116,7 +116,12 @@ class ModelRuntime:
 
                 node_module = cast(NodeModule, module.nodes[address])
                 decoder: DecoderBase = node_module.decoder
-                predictions.append(decoder(parcels, embed=address in module.hyperparameters.embed))
+                prediction = decoder(parcels, embed=address in module.hyperparameters.embed)
+                if Strata.normalize(strata) == Strata.predict:
+                    prediction.payload[TensorKey.inferred] = inputs[address].state.eq(Tokens.masked.value)
+                else:
+                    prediction.payload[TensorKey.inferred] = inputs[address].trainable.bool()
+                predictions.append(prediction)
 
         return predictions
 
@@ -140,7 +145,7 @@ class ModelRuntime:
             if prediction.address not in module.hyperparameters.requests:
                 continue
 
-            if set(prediction.payload.keys()) <= {TensorKey.embedding}:
+            if set(prediction.payload.keys()) <= {TensorKey.embedding, TensorKey.inferred}:
                 continue
 
             address: Address = prediction.address
@@ -177,6 +182,10 @@ class ModelRuntime:
                 written: dict[TensorKey, Any] | None = write_fn(module=module, prediction=prediction)
                 if written is not None:
                     scribed.update(written)
+
+            has_decoded_output = TensorKey.state.name in scribed or TensorKey.content.name in scribed
+            if has_decoded_output and TensorKey.inferred in prediction.payload.keys():
+                scribed[TensorKey.inferred.name] = prediction.payload[TensorKey.inferred].detach().cpu()
 
             if TensorKey.embedding in prediction.payload.keys():
                 values = prediction.payload[TensorKey.embedding].detach().float()

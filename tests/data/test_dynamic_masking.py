@@ -111,7 +111,40 @@ def test_mask_literal_is_predict_only_and_does_not_enter_vocabulary():
     assert not field.trainable.any()
     assert list(field.targets.keys()) == []
     assert model.nodes["record/code"].embedder.vocab.snapshot() == ["A"]
-    assert "record/code" in model.predict([{"code": "<MASK>"}])
+    prediction = model.predict([{"code": "<MASK>"}])["record/code"]
+    assert prediction[TensorKey.inferred.name] == [True]
+
+
+def test_inferred_marks_only_masked_predict_slots():
+    model = j2v.Model.from_schema(
+        j2v.Array(
+            j2v.Category("letter", max_vocab_size=8, p_unavailable=0.0),
+            name="letters",
+            max_length=5,
+        ),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+    model.encode(
+        [{"letters": [{"letter": "A"}, {"letter": "B"}, {"letter": "C"}]}],
+        strata=Strata.train,
+        mask=False,
+    )
+
+    prediction = model.predict(
+        [
+            {
+                "letters": [
+                    {"letter": "A"},
+                    {"letter": "<MASK>"},
+                    {"letter": "C"},
+                ]
+            }
+        ]
+    )["record/letters/letter"]
+
+    assert prediction[TensorKey.inferred.name] == [[False, True, False, False, False]]
 
 
 def test_mask_literal_can_mask_whole_structured_leaf_but_not_leaf_items():

@@ -56,6 +56,12 @@ Same raw value can need different types:
 Any node configured with `embed=True` can also emit an `embedding` payload from
 `Model.predict(...)`. See [Learning Modes & Embeddings](embeddings.md).
 
+Decoded leaf outputs also include `inferred`. A `true` value means the
+corresponding slot was hidden from the input, either because it was a supervised
+target or because the request used the `<MASK>` literal during prediction.
+Visible and padded slots can still appear in full-shaped decoded payloads, but
+their decoded values are not intended to be consumed when `inferred` is `false`.
+
 No public content payload does not mean the field is ignored. `DateParts`,
 `Entity`, and `Text` can still be visible inputs, train reconstruction losses,
 and emit embeddings when configured with `embed=True`.

@@ -116,6 +116,7 @@ the candidate list requested by `topk`:
             "probability": ...,
             "topk": ...,
         },
+        "inferred": ...,
     }
 }
 ```
