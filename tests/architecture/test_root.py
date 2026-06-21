@@ -11,8 +11,8 @@ import pytest
 import torch
 from lightning.pytorch.strategies import DDPStrategy, FSDPStrategy
 
-import json2vec as jv
 import json2vec as j2v
+import json2vec as jv
 from json2vec import distributed as j2v_distributed
 from json2vec.architecture.root import (
     Model,
@@ -971,14 +971,14 @@ def test_inference_helpers_accept_preprocess() -> None:
     assert Address("root", "label") in supervised
 
 
-def _multi_loss_hyperparameters() -> Hyperparameters:
-    return Hyperparameters(
+def _multi_loss_schema() -> Schema:
+    return Schema(
         d_model=8,
         fields={
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "embed": True,
-            "max_length": 1,
+            "length": 1,
             "attention": "none",
             "fields": [
                 {
@@ -992,7 +992,7 @@ def _multi_loss_hyperparameters() -> Hyperparameters:
                     "query": "[*].color",
                     "embed": False,
                     "p_prune": 1.0,
-                    "max_vocab_size": 16,
+                    "size": 16,
                 },
                 {
                     "name": "label",
@@ -1000,7 +1000,7 @@ def _multi_loss_hyperparameters() -> Hyperparameters:
                     "query": "[*].label",
                     "embed": False,
                     "p_prune": 1.0,
-                    "max_vocab_size": 16,
+                    "size": 16,
                     "topk": [2],
                 },
             ],
@@ -1014,7 +1014,7 @@ def _multi_loss_batch(model: Model) -> dict:
             [{"amount": 1.5, "color": "red", "label": "warm"}],
             [{"amount": 2.0, "color": "blue", "label": "cool"}],
         ],
-        hyperparameters=model.hyperparameters,
+        schema=model.schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -1053,7 +1053,7 @@ def test_training_step_handles_batch_without_trainable_fields(monkeypatch) -> No
             pass
 
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = j2v.Model.from_schema(
+    model = j2v.Model.from_tree(
         j2v.Number("amount"),
         d_model=8,
         n_layers=1,
@@ -1081,7 +1081,7 @@ def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkey
             pass
 
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
+    model = Model(schema=_multi_loss_schema(), batch_size=2, distributed_jd="manual_allreduce")
 
     captured_jacobians: list[torch.Tensor] = []
     captured_weights: list[torch.Tensor] = []
@@ -1136,7 +1136,7 @@ def test_training_step_steps_optimizer_then_zeros_grads(monkeypatch) -> None:
 
     optimizer = RecordingOptimizer()
     _patch_manual_optimization(monkeypatch, optimizer=optimizer)
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model = Model(schema=_multi_loss_schema(), batch_size=2)
 
     model.training_step(_multi_loss_batch(model), 0)
 
@@ -1165,7 +1165,7 @@ def test_training_step_steps_scheduler_after_optimizer(monkeypatch) -> None:
     optimizer = RecordingOptimizer()
     scheduler = RecordingScheduler(optimizer)
     _patch_manual_optimization(monkeypatch, optimizer=optimizer, scheduler=scheduler)
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model = Model(schema=_multi_loss_schema(), batch_size=2)
 
     model.training_step(_multi_loss_batch(model), 0)
 
@@ -1192,7 +1192,7 @@ def test_training_step_accumulates_grads_across_micro_batches(monkeypatch) -> No
 
     monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
     _patch_manual_optimization(monkeypatch, optimizer=optimizer)
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
+    model = Model(schema=_multi_loss_schema(), batch_size=2, distributed_jd="manual_allreduce")
     model._trainer = type("TrainerStub", (), {"accumulate_grad_batches": 3})()  # noqa: SLF001
 
     model.training_step(_multi_loss_batch(model), 0)
@@ -1229,7 +1229,7 @@ def test_training_step_accumulates_grads_across_micro_batches_without_distribute
     monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
     _patch_manual_optimization(monkeypatch, optimizer=optimizer)
     model = Model(
-        hyperparameters=_multi_loss_hyperparameters(),
+        schema=_multi_loss_schema(),
         batch_size=2,
         distributed_jd="off",
     )
@@ -1254,21 +1254,21 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
             pass
 
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2)
+    model = Model(schema=_multi_loss_schema(), batch_size=2)
     model.on_fit_start()
     baseline = model.training_step(_multi_loss_batch(model), 0)
     assert baseline["loss"].shape[0] == 2
 
     model.extend(
         j2v.where("name") == "root",
-        j2v.Category("vehicle", p_prune=1.0, max_vocab_size=8),
+        j2v.Category("vehicle", p_prune=1.0, size=8),
     )
     inputs = encode(
         batch=[
             [{"amount": 1.5, "color": "red", "label": "warm", "vehicle": "car"}],
             [{"amount": 2.0, "color": "blue", "label": "cool", "vehicle": "boat"}],
         ],
-        hyperparameters=model.hyperparameters,
+        schema=model.schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -1288,10 +1288,10 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
 
 
 def test_trainer_fit_advances_parameters_under_jd_manual_optimization() -> None:
-    model = j2v.Model.from_schema(
+    model = j2v.Model.from_tree(
         j2v.Number("amount"),
-        j2v.Category("color", target=True, max_vocab_size=16),
-        j2v.Category("label", target=True, max_vocab_size=16),
+        j2v.Category("color", target=True, size=16),
+        j2v.Category("label", target=True, size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -1338,7 +1338,7 @@ def test_trainer_fit_advances_parameters_under_jd_manual_optimization() -> None:
 
 
 def test_configure_callbacks_attaches_bypass_callback_when_jd_enabled() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
+    model = Model(schema=_schema(), batch_size=2, distributed_jd="manual_allreduce")
 
     callbacks = model.configure_callbacks()
 
@@ -1346,7 +1346,7 @@ def test_configure_callbacks_attaches_bypass_callback_when_jd_enabled() -> None:
 
 
 def test_configure_callbacks_omits_bypass_callback_when_distributed_jd_off() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2, distributed_jd="off")
+    model = Model(schema=_schema(), batch_size=2, distributed_jd="off")
 
     callbacks = model.configure_callbacks()
 
@@ -1354,7 +1354,7 @@ def test_configure_callbacks_omits_bypass_callback_when_distributed_jd_off() -> 
 
 
 def test_configure_callbacks_skips_bypass_callback_already_attached_to_trainer() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     model._trainer = type(  # noqa: SLF001
         "TrainerStub",
         (),
@@ -1514,7 +1514,7 @@ def test_training_step_calls_mean_all_reduce_grads(monkeypatch) -> None:
 
     monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
-    model = Model(hyperparameters=_multi_loss_hyperparameters(), batch_size=2, distributed_jd="manual_allreduce")
+    model = Model(schema=_multi_loss_schema(), batch_size=2, distributed_jd="manual_allreduce")
 
     model.training_step(_multi_loss_batch(model), 0)
 
@@ -1537,7 +1537,7 @@ def test_training_step_skips_all_reduce_when_distributed_jd_off(monkeypatch) -> 
     monkeypatch.setattr("json2vec.architecture.root.mean_all_reduce_grads", fake_all_reduce)
     _patch_manual_optimization(monkeypatch, optimizer=OptimizerStub())
     model = Model(
-        hyperparameters=_multi_loss_hyperparameters(),
+        schema=_multi_loss_schema(),
         batch_size=2,
         distributed_jd="off",
     )

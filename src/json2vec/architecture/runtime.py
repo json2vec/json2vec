@@ -124,7 +124,7 @@ class ModelRuntime:
 
     @staticmethod
     def _root_encoding(module: "Model", outgoing: dict[Address, Parcel]) -> torch.Tensor | None:
-        depthwise = module.hyperparameters.depthwise
+        depthwise = module.schema.depthwise
         if not depthwise or not depthwise[0]:
             return None
         root_address = depthwise[0][0]
