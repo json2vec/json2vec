@@ -219,6 +219,7 @@ class Model(lit.LightningModule, Renderable):
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
         distributed_jd: DistributedJDMode = "off",
+        jacobian_epsilon: Rate = 0.0,
         **field_kwargs: TreeFieldInput,
     ) -> Self:
         """Compatibility wrapper for constructing a model from tree fields.
@@ -267,6 +268,7 @@ class Model(lit.LightningModule, Renderable):
             optimizer=optimizer,
             scheduler=scheduler,
             distributed_jd=distributed_jd,
+            jacobian_epsilon=jacobian_epsilon,
             **field_kwargs,
         )
 
@@ -289,6 +291,7 @@ class Model(lit.LightningModule, Renderable):
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
         distributed_jd: DistributedJDMode = "auto",
+        jacobian_epsilon: Rate = 0.0,
         **field_kwargs: Any,
     ):
         """Build a model from tree fields, or from an existing ``schema``.
@@ -347,6 +350,7 @@ class Model(lit.LightningModule, Renderable):
         self._contract_scheduler: ContractScheduler = ContractScheduler()
         self._jd_aggregation = None
         self.incidence_matrix = None
+        self.jacobian_epsilon = jacobian_epsilon
 
         self._build()
         self._build_jd_components()
@@ -730,7 +734,7 @@ class Model(lit.LightningModule, Renderable):
                 losses,
                 params=incident_parameters,
                 incidence=self.incidence_matrix,
-                epsilon=0.01,
+                epsilon=self.jacobian_epsilon,
                 parallel_chunk_size=None,
             )
             has_jd_hooks = any(getattr(module, "_forward_hooks", None) for module in self._jd_aggregation.modules())
