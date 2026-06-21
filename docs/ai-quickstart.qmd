@@ -231,21 +231,20 @@ model
 ```
 
 Use a preprocessor when the source needs Python logic before querying. The
-decorator registers the callable for dataset and deployment configuration, and
-the same callable can be passed directly to `model.encode(...)` or
-`model.predict(...)`.
+decorator returns a `Preprocessor` object that can be passed to data modules,
+deployment configuration, `model.encode(...)`, or `model.predict(...)`.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
 @jv.preprocess
-def normalize_request(record: dict) -> dict:
-    return {
+def normalize_request(record: dict) -> jv.Observation:
+    return jv.Observation({
         "amount": float(record["amount_usd"]),
         "merchant": record["merchant"].strip().lower(),
         "label": record["label"],
-    }
+    })
 ```
 
 Then pass it to data modules, `model.encode(...)`, `model.predict(...)`, or
@@ -261,7 +260,8 @@ Use a [postprocessor](guides/postprocessors.qmd) to turn address-keyed predictio
 #| echo: true
 #| output: true
 
-def risk_response(context, predictions):
+@jv.postprocess
+def risk_response(predictions):
     label = {}
     for address, values in predictions.items():
         if str(address) == "record/label":

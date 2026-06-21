@@ -12,7 +12,7 @@ import torch
 from lightning.pytorch import Callback, Trainer
 from loguru import logger
 
-from json2vec.data.processing import MASK_LITERAL
+from json2vec.data.nested import MASK_LITERAL
 from json2vec.distributed import all_gather_object, broadcast_object, is_distributed, is_rank_zero
 from json2vec.structs.tree import Address
 

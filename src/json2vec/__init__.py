@@ -17,9 +17,22 @@ from json2vec.architecture.root import (
     SchedulerConfig,
 )
 from json2vec.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule
-from json2vec.data.processing import MASK_LITERAL, MaskLiteral
-from json2vec.inference.callback import Postprocessor, Writer
-from json2vec.preprocessors import PREPROCESSORS, Preprocessor, PreprocessorMode, preprocess
+from json2vec.data.nested import MASK_LITERAL, MaskLiteral
+from json2vec.data.processors import (
+    Metadata,
+    Observation,
+    Postprocessor,
+    PostprocessorProvider,
+    PostprocessorResult,
+    Predictions,
+    Preprocessor,
+    PreprocessorProvider,
+    RawBatch,
+    RawObservation,
+    postprocess,
+    preprocess,
+)
+from json2vec.inference.callback import Writer
 from json2vec.structs.enums import (
     AttentionMode,
     Component,
@@ -115,20 +128,26 @@ __all__ = [
     "MASK_LITERAL",
     "Mask",
     "MaskLiteral",
+    "Metadata",
     "Model",
     "ModelSource",
     "MutationLockCallback",
     "NodeAttribute",
     "NodePredicate",
     "Number",
+    "Observation",
     "OptimizerConfig",
     "Overflow",
-    "PREPROCESSORS",
     "Plugin",
     "PolarsDataModule",
     "Postprocessor",
+    "PostprocessorProvider",
+    "PostprocessorResult",
+    "Predictions",
     "Preprocessor",
-    "PreprocessorMode",
+    "PreprocessorProvider",
+    "RawBatch",
+    "RawObservation",
     "RequestBase",
     "RollbackCheckpoint",
     "RuntimePlacementCallback",
@@ -149,6 +168,7 @@ __all__ = [
     "VocabularySyncCallback",
     "Writer",
     "predicate",
+    "postprocess",
     "preprocess",
     "where",
 ]

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 from collections.abc import Callable, Mapping
+from functools import partial
 from typing import Annotated, Any, TypeAlias, TypeVar
 
 from beartype import beartype
@@ -11,9 +13,9 @@ from beartype.vale import Is
 from tensordict import TensorDict
 from torch.utils.data import get_worker_info
 
+from json2vec.data.processors import Preprocessor
 from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
-from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor
 from json2vec.structs.enums import Strata
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TensorFieldBase
@@ -34,29 +36,42 @@ InterprocessEncodingContext: TypeAlias = dict[Address, Any]
 # list; the encoder prepends the outer batch selector before JMESPath search.
 
 
+@beartype
+class Pipeline:
+    def __init__(self, **arguments: Any):
+        self.arguments: dict[str, Any] = arguments
+        self.steps: list[Callable[..., Any]] = []
+
+    def __or__(self, function: Callable[..., Any]) -> "Pipeline":
+        required = [name for name in inspect.signature(function).parameters.keys()]
+        available = set(required) & set(self.arguments.keys())
+        self.steps.append(partial(function, **{arg: self.arguments[arg] for arg in available}))
+        return self
+
+    def __repr__(self) -> str:
+        return f"Pipeline(steps={len(self.steps)}, arguments={self.arguments!r})"
+
+    def __iter__(self):
+        stream = self.steps[0]()
+
+        for step in self.steps[1:]:
+            stream = step(stream)
+
+        return iter(stream)
+
+
 class PreprocessorConfig:
-    Value: TypeAlias = str | Callable[..., Any] | Preprocessor | None
+    Value: TypeAlias = Preprocessor | None
 
     @classmethod
     def normalize(cls, preprocessor: Value) -> Value:
         if preprocessor is None:
             return None
 
-        if isinstance(preprocessor, str):
-            if preprocessor not in PREPROCESSORS:
-                raise ValueError(f"you haven't registered preprocessor {preprocessor}")
-            return preprocessor
-
         if isinstance(preprocessor, Preprocessor):
             return preprocessor
 
-        if callable(preprocessor):
-            name = getattr(preprocessor, "__name__", None)
-            if isinstance(name, str) and name in PREPROCESSORS:
-                return name
-            return preprocessor
-
-        return preprocessor
+        raise TypeError(f"preprocessor must be a Preprocessor object or None, got {type(preprocessor).__name__}")
 
 
 @beartype

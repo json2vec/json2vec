@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import torch
 from tensordict import TensorDict
 
+import json2vec as jv
 from json2vec.inference.callback import Writer
 
 
@@ -16,8 +17,23 @@ class _DummyModule:
 def test_writer_postprocess_receives_batch_context(tmp_path):
     seen = {}
 
-    def processor(context, predictions):
-        seen["context"] = context
+    @jv.postprocess
+    def processor(
+        predictions,
+        *,
+        input,
+        batch,
+        metadata,
+        batch_indices,
+        batch_idx,
+        dataloader_idx,
+    ):
+        seen["input"] = input
+        seen["batch"] = batch
+        seen["metadata"] = metadata
+        seen["batch_indices"] = batch_indices
+        seen["batch_idx"] = batch_idx
+        seen["dataloader_idx"] = dataloader_idx
         seen["predictions"] = predictions
 
     batch = TensorDict(
@@ -40,10 +56,10 @@ def test_writer_postprocess_receives_batch_context(tmp_path):
     )
     writer.on_predict_end(SimpleNamespace(), SimpleNamespace())
 
-    assert seen["context"]["input"] is batch
-    assert seen["context"]["batch"] is batch
-    assert list(seen["context"]["metadata"]) == [{"color": "r"}]
-    assert seen["context"]["batch_indices"] == [12]
-    assert seen["context"]["batch_idx"] == 3
-    assert seen["context"]["dataloader_idx"] == 4
+    assert seen["input"] is batch
+    assert seen["batch"] is batch
+    assert list(seen["metadata"]) == [{"color": "r"}]
+    assert seen["batch_indices"] == [12]
+    assert seen["batch_idx"] == 3
+    assert seen["dataloader_idx"] == 4
     assert seen["predictions"]["root/label"]["value"] == ["ok"]

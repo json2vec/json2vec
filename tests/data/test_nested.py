@@ -1,25 +1,9 @@
-from collections.abc import Iterable, Iterator
-
 import numpy as np
 import pytest
 
-from json2vec.data.processing import Pipeline, apply, contains_mask_literal, extract_mask_literals, pad
+from json2vec.data.nested import apply, contains_mask_literal, extract_mask_literals, pad
 from json2vec.structs.enums import Overflow, Strata, Tokens
 from json2vec.structs.tree import Address
-
-
-def test_pipeline():
-    def source() -> Iterator[int]:
-        yield from range(5)
-
-    def step1(pipe: Iterable[int]) -> Iterator[int]:
-        yield from (x + 1 for x in pipe)
-
-    def step2(pipe: Iterable[int], multiplier: int) -> Iterator[int]:
-        yield from (x * multiplier for x in pipe)
-
-    pipe = Pipeline(multiplier=2) | source | step1 | step2
-    assert list(pipe) == [2, 4, 6, 8, 10]
 
 
 def test_pad_tracks_null_and_padding():

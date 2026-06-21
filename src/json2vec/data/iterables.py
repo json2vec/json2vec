@@ -23,8 +23,8 @@ from json2vec.data.datasets.base import (
     ProcessedObservation,
     RawObservation,
 )
-from json2vec.data.processing import MASK_LITERAL, contains_mask_literal
-from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor, PreprocessorMode
+from json2vec.data.nested import MASK_LITERAL, contains_mask_literal
+from json2vec.data.processors import Preprocessor
 from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.experiment import Schema
 from json2vec.structs.tree import Address
@@ -38,35 +38,23 @@ MISSING = object()
 def process(
     pipe: Iterable[RawObservation],
     preprocessor: PreprocessorConfig.Value,
-    preprocessor_kwargs: dict[str, Any] | None,
     strata: Strata,
+    schema: Schema,
     interprocess_encoding_context: InterprocessEncodingContext,
 ) -> Iterator[ProcessedObservation]:
-    preprocessor = PreprocessorConfig.normalize(preprocessor)
-    kwargs = {} if preprocessor_kwargs is None else preprocessor_kwargs
+    resolved = Preprocessor.normalize(PreprocessorConfig.normalize(preprocessor))
 
-    if preprocessor is None:
+    if resolved is None:
         for item in pipe:
             yield [item]
         return
 
-    if isinstance(preprocessor, str):
-        resolved = PREPROCESSORS[preprocessor]
-    elif isinstance(preprocessor, Preprocessor):
-        resolved = preprocessor
-    else:
-        resolved = Preprocessor(
-            name=getattr(preprocessor, "__name__", type(preprocessor).__name__),
-            func=preprocessor,
-            mode=PreprocessorMode.transformation,
-        )
-
     for item in pipe:
         yield from resolved.outputs(
             item,
-            **kwargs,
             strata=strata,
-            interprocess_encoding_context=interprocess_encoding_context,
+            schema=schema,
+            encoding_context=interprocess_encoding_context,
         )
 
 

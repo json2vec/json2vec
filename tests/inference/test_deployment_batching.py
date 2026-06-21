@@ -7,6 +7,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+import json2vec as jv
 import json2vec.inference.deployment as deployment_module
 from json2vec import Model, Number, where
 from json2vec.inference.deployment import Deployment, ErrorItem, RequestItem
@@ -132,10 +133,11 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
 
 
 def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_once(monkeypatch):
+    @jv.preprocess
     def __deployment_preprocess(observation: dict):
         if observation["hue"] == "bad":
             raise ValueError("bad hue")
-        return {"color": observation["hue"]}
+        return jv.Observation({"color": observation["hue"]})
 
     captured = {"calls": 0}
 
@@ -176,8 +178,11 @@ def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
-    def processor(context, predictions):
-        seen["context"] = context
+    @jv.postprocess
+    def processor(predictions, *, request, observations, input):
+        seen["request"] = request
+        seen["observations"] = observations
+        seen["input"] = input
         seen["predictions"] = predictions
         return {
             "root/label": {"value": ["rewritten"]},
@@ -189,9 +194,9 @@ def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     runtime = _runtime(postprocessor=processor)
     output = runtime.predict_payloads([{"color": "r"}])[0]
 
-    assert seen["context"]["request"] == {"color": "r"}
-    assert seen["context"]["observations"] == [[{"color": "r"}]]
-    assert "input" in seen["context"]
+    assert seen["request"] == {"color": "r"}
+    assert seen["observations"] == [[{"color": "r"}]]
+    assert seen["input"] is not None
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
     assert output["predictions"]["root/label"]["value"] == "rewritten"
     assert output["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
@@ -208,8 +213,9 @@ def test_fastapi_runtime_postprocess_receives_device_moved_input(monkeypatch):
     def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
-    def processor(context, predictions):
-        seen["input_device"] = context["input"]["dummy"].device
+    @jv.postprocess
+    def processor(predictions, *, input):
+        seen["input_device"] = input["dummy"].device
         return predictions
 
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
@@ -247,9 +253,11 @@ def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch)
     assert output == {"predictions": {}}
 
 
-def test_fastapi_runtime_decode_rejects_preprocessor_generator():
+def test_fastapi_runtime_decode_rejects_multiple_preprocessor_outputs():
+    @jv.preprocess
     def __deployment_generator(observation: dict):
-        yield {"color": observation["hue"]}
+        yield jv.Observation({"color": observation["hue"]})
+        yield jv.Observation({"color": observation["hue"] + "2"})
 
     runtime = _runtime(preprocessor=__deployment_generator)
     context = {}
@@ -258,15 +266,16 @@ def test_fastapi_runtime_decode_rejects_preprocessor_generator():
 
     assert isinstance(error, ErrorItem)
     assert error.status_code == 422
-    assert "preprocessor must return a dict object" in error.message
+    assert "deployment requests must encode exactly one observation" in error.message
 
 
 def test_fastapi_runtime_decode_validates_pydantic_request_model():
     class Request(pydantic.BaseModel):
         hue: str
 
+    @jv.preprocess
     def __deployment_preprocess(observation: dict):
-        return {"color": observation["hue"]}
+        return jv.Observation({"color": observation["hue"]})
 
     runtime = _runtime(
         request_signature=Request,
@@ -490,11 +499,12 @@ def test_fastapi_runtime_setup_uses_model_instance(monkeypatch):
     assert runtime.model is model
 
 
-def test_deployment_binds_preprocessor_kwargs():
-    def __deployment_preprocess(observation: dict, suffix: str):
-        return {"color": observation["hue"] + suffix}
+def test_deployment_uses_bound_preprocessor_object():
+    @jv.preprocess
+    def __deployment_preprocess(observation: dict, *, suffix: str):
+        return jv.Observation({"color": observation["hue"] + suffix})
 
-    deployment = Deployment(checkpoint="unused").preprocess(__deployment_preprocess, suffix="!")
+    deployment = Deployment(checkpoint="unused").preprocess(__deployment_preprocess.partial(suffix="!"))
     runtime = deployment_module.FastAPIRuntime(
         checkpoint="unused",
         accelerator=deployment_module.Accelerator.cpu,

@@ -2,7 +2,8 @@
 
 from typing import TYPE_CHECKING, Any
 
-from json2vec.inference.callback import Postprocessor, Writer
+from json2vec.data.processors import Postprocessor
+from json2vec.inference.callback import Writer
 
 if TYPE_CHECKING:
     from json2vec.inference.deployment import (

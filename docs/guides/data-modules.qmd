@@ -32,8 +32,7 @@ Data modules use the same core ideas:
 | Option | Meaning |
 | --- | --- |
 | `model` | Supplies schema schema, `batch_size`, and tensorfield encoding state. |
-| `preprocessor` | Callable, registered preprocessor name, or `Preprocessor` object. |
-| `**kwargs` | Passed to the preprocessor. |
+| `preprocessor` | `Preprocessor` object returned by `@jv.preprocess`. |
 | `num_workers` | PyTorch dataloader worker count. |
 | `persistent_workers` | Keeps worker processes alive between epochs when workers are enabled. |
 | `pin_memory` | Enables dataloader pinning when useful for accelerator transfer. |
@@ -299,7 +298,7 @@ Use a preprocessor when records need Python logic before schema queries run:
 type coercion, renaming, source-specific cleanup, sorting, windowing, session
 splitting, or derived fields.
 
-A transformation preprocessor returns one normalized observation for each input
+A transformation preprocessor returns one wrapped observation for each input
 observation:
 
 ```{python .marimo}
@@ -307,12 +306,12 @@ observation:
 #| output: true
 
 @jv.preprocess
-def normalize_transaction(record: dict) -> dict:
-    return {
+def normalize_transaction(record: dict) -> jv.Observation:
+    return jv.Observation({
         "amount": float(record["transaction"]["amount_usd"]),
         "merchant": record["transaction"]["merchant_name"].strip().lower(),
         "label": record["outcome"],
-    }
+    })
 ```
 
 After preprocessing, default queries are inferred against the returned record,
@@ -328,12 +327,12 @@ datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     preprocessor=my_preprocessor,
-    request_time="2026-05-31",
 )
 ```
 
-The keyword arguments after data module options are passed to the preprocessor.
-Use this for request-time-dependent shaping such as trailing windows:
+Bind user-supplied preprocessor parameters before passing the preprocessor into
+the data module. Pipeline-provided parameters such as `strata`, `schema`, and
+`encoding_context` are matched by name:
 
 ```{python .marimo}
 #| echo: true
@@ -342,9 +341,10 @@ Use this for request-time-dependent shaping such as trailing windows:
 datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
-    preprocessor=build_windows,
-    as_of="2026-05-31T00:00:00Z",
-    trailing_days=30,
+    preprocessor=build_windows.partial(
+        as_of="2026-05-31T00:00:00Z",
+        trailing_days=30,
+    ),
 )
 ```
 
@@ -357,14 +357,14 @@ contains many model records:
 #| echo: true
 #| output: true
 
-@jv.preprocess(yields=True)
+@jv.preprocess
 def session_windows(account: dict):
     for session in account["sessions"]:
-        yield {
+        yield jv.Observation({
             "account_id": account["account_id"],
             "events": session["events"],
             "label": session.get("label"),
-        }
+        })
 ```
 
 The same callable can be passed directly to `model.encode(...)` or

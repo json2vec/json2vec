@@ -6,10 +6,10 @@ import os
 import random
 import re
 import weakref
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from functools import partial, partialmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
 import lightning.pytorch as lit
@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from json2vec.data.datasets.base import (
     InterprocessEncodingContext,
     NonNegativeInt,
+    Pipeline,
     PositiveInt,
     PreprocessorConfig,
     RawObservation,
@@ -42,10 +43,9 @@ from json2vec.data.iterables import (
     shuffle,
     transform,
 )
-from json2vec.data.processing import Pipeline
+from json2vec.data.processors import Preprocessor
 from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
-from json2vec.preprocessors.base import Preprocessor
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Schema
 
@@ -257,7 +257,6 @@ class BatchDataset(IterableDataset):
         suffix: Suffix,
         pattern: PatternInput,
         preprocessor: PreprocessorConfig.Value,
-        preprocessor_kwargs: dict[str, Any],
         interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
@@ -277,7 +276,6 @@ class BatchDataset(IterableDataset):
         self.suffix = suffix
         self.pattern = pattern
         self.preprocessor = preprocessor
-        self.preprocessor_kwargs = preprocessor_kwargs
         self.interprocess_encoding_context = interprocess_encoding_context
         self.global_rank = distributed_rank() if global_rank is None else global_rank
         self.world_size = distributed_world_size() if world_size is None else world_size
@@ -302,7 +300,6 @@ class BatchDataset(IterableDataset):
                 suffix=self.suffix,
                 pattern=self.pattern,
                 preprocessor=self.preprocessor,
-                preprocessor_kwargs=self.preprocessor_kwargs,
                 strata=self.strata,
                 interprocess_encoding_context=self.interprocess_encoding_context,
                 jmespath_resolution_monitor=JMESPathResolutionMonitor(),
@@ -331,7 +328,6 @@ def dataloader(
     suffix: Suffix,
     pattern: PatternInput,
     preprocessor: PreprocessorConfig.Value,
-    preprocessor_kwargs: dict[str, Any],
     interprocess_encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
@@ -360,7 +356,6 @@ def dataloader(
             suffix=suffix,
             pattern=pattern,
             preprocessor=preprocessor,
-            preprocessor_kwargs=preprocessor_kwargs,
             interprocess_encoding_context=interprocess_encoding_context,
             batch_size=batch_size,
             strata=strata,
@@ -399,7 +394,7 @@ class StreamingDataModule(lit.LightningDataModule):
         validate: PatternInput | None = None,
         test: PatternInput | None = None,
         predict: PatternInput | None = None,
-        preprocessor: str | Callable[..., Any] | Preprocessor | None = None,
+        preprocessor: Preprocessor | None = None,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
         pin_memory: bool | StrataMap[bool] = True,
@@ -409,7 +404,6 @@ class StreamingDataModule(lit.LightningDataModule):
         observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
         replacement: bool | StrataMap[bool] | None = None,
-        **kwargs: Any,
     ):
         super().__init__()
 
@@ -420,7 +414,6 @@ class StreamingDataModule(lit.LightningDataModule):
         self.test = _compile_pattern(test) if test is not None else None
         self.predict = _compile_pattern(predict) if predict is not None else None
         self.preprocessor = PreprocessorConfig.normalize(preprocessor)
-        self.preprocessor_kwargs = dict(kwargs)
         try:
             self._model_ref = weakref.ref(model)
         except TypeError:
@@ -513,7 +506,6 @@ class StreamingDataModule(lit.LightningDataModule):
             suffix=self.suffix,
             pattern=pattern,
             preprocessor=self.preprocessor,
-            preprocessor_kwargs=self.preprocessor_kwargs,
             interprocess_encoding_context=interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,

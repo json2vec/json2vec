@@ -101,9 +101,9 @@ addresses, filtered payloads, or fewer fields.
 import json2vec as jv
 
 
-def compact_rows(context, predictions):
+@jv.postprocess
+def compact_rows(predictions, *, metadata):
     label = predictions.get(jv.Address("record", "label"), {}).get("content", {})
-    metadata = context[jv.TensorKey.metadata]
 
     return {
         jv.Address("record", "warehouse_row"): {
@@ -123,16 +123,16 @@ writer = jv.Writer(
 Keep returned lists row-aligned with the prediction batch. That lets the writer
 build a valid Parquet table.
 
-Writer postprocessors receive context keys such as:
+Writer postprocessors can request named runtime values such as:
 
-| Key | Meaning |
+| Parameter | Meaning |
 | --- | --- |
-| `"input"` | Encoded Lightning batch. |
-| `"batch"` | Alias for the encoded batch. |
-| `jv.TensorKey.metadata` | Raw input metadata for each row. |
-| `"batch_indices"` | Lightning batch indices when provided. |
-| `"batch_idx"` | Prediction batch index. |
-| `"dataloader_idx"` | Prediction dataloader index. |
+| `input` | Encoded Lightning batch. |
+| `batch` | Alias for the encoded batch. |
+| `metadata` | Raw input metadata for each row. |
+| `batch_indices` | Lightning batch indices when provided. |
+| `batch_idx` | Prediction batch index. |
+| `dataloader_idx` | Prediction dataloader index. |
 
 For more output-shaping patterns, see [Postprocessors](postprocessors.qmd).
 
