@@ -1,31 +1,31 @@
 import pytest
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.structs.enums import TensorKey
 
 
-def test_model_from_schema_builds_record_array_and_infers_queries():
-    model = j2v.Model.from_schema(
-        j2v.Category(
+def test_model_from_tree_builds_record_branch_and_infers_queries():
+    model = jv.Model.from_tree(
+        jv.Category(
             "job_code",
             query='[*]."job code"',
             description="job code",
-            max_vocab_size=128,
+            size=128,
             source="openml",
         ),
-        j2v.Number("amount"),
-        j2v.Category("label", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
+        jv.Number("amount"),
+        jv.Category("label", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
         d_model=32,
         n_layers=2,
         n_heads=4,
         batch_size=8,
     )
-    params = model.hyperparameters
+    params = model.schema
 
     assert model.batch_size == 8
     assert params.d_model == 32
     assert params.fields.name == "record"
-    assert params.fields.max_length == 1
+    assert params.fields.length == 1
     assert params.fields.n_layers == 2
     assert params.fields.n_heads == 4
 
@@ -33,7 +33,7 @@ def test_model_from_schema_builds_record_array_and_infers_queries():
     assert job.name == "job_code"
     assert job.description == "job code"
     assert job.query == '[*]."job code"'
-    assert job.max_vocab_size == 128
+    assert job.size == 128
     assert job.source == "openml"
 
     amount = params.requests["record/amount"]
@@ -52,37 +52,37 @@ def test_model_from_schema_builds_record_array_and_infers_queries():
     assert params.target == ["record/label"]
 
 
-def test_model_from_schema_rejects_duplicate_sources():
+def test_model_from_tree_rejects_duplicate_sources():
     with pytest.raises(ValueError, match="duplicate schema source field"):
-        j2v.Model.from_schema(
-            j2v.Number("amount"),
-            j2v.Number("amount"),
+        jv.Model.from_tree(
+            jv.Number("amount"),
+            jv.Number("amount"),
             d_model=16,
             n_layers=1,
             n_heads=4,
         )
 
 
-def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
-            j2v.Category(
+def test_model_from_tree_accepts_branch_nodes_and_infers_nested_queries():
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
+            jv.Category(
                 "merchant_code",
                 query='[*].transactions[*]."merchant code"',
                 description="merchant code",
-                max_vocab_size=32,
+                size=32,
             ),
             name="transactions",
-            max_length=4,
+            length=4,
         ),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    params = model.hyperparameters
+    params = model.schema
 
-    assert "record/transactions" in params.arrays
+    assert "record/transactions" in params.branches
 
     amount = params.requests["record/transactions/amount"]
     # Nested defaults follow the same convention: one leading selector here,
@@ -94,47 +94,47 @@ def test_model_from_schema_accepts_array_nodes_and_infers_nested_queries():
     assert merchant.name == "merchant_code"
     assert merchant.description == "merchant code"
     assert merchant.query == '[*].transactions[*]."merchant code"'
-    assert merchant.max_vocab_size == 32
+    assert merchant.size == 32
 
 
-def test_array_mask_shorthand_normalizes_and_exports_public_api():
-    policy = j2v.Mask(name="recent", count=1, window=2)
-    array = j2v.Array(
-        j2v.Number("amount"),
+def test_branch_mask_shorthand_normalizes_and_exports_public_api():
+    policy = jv.Mask(name="recent", count=1, window=2)
+    branch = jv.Branch(
+        jv.Number("amount"),
         name="transactions",
-        max_length=4,
+        length=4,
         mask=policy,
     )
-    model = j2v.Model.from_schema(array, d_model=16, n_layers=1, n_heads=4)
+    model = jv.Model.from_tree(branch, d_model=16, n_layers=1, n_heads=4)
 
-    bound = model.hyperparameters.arrays["record/transactions"]
+    bound = model.schema.branches["record/transactions"]
     assert bound.masks == [policy]
-    assert j2v.MASK_LITERAL == "<MASK>"
-    assert j2v.MaskLiteral is not None
+    assert jv.MASK_LITERAL == "<MASK>"
+    assert jv.MaskLiteral is not None
 
 
-def test_array_mask_validation_rejects_invalid_bound_configs():
-    with pytest.raises(ValueError, match="root array"):
-        j2v.Hyperparameters.model_validate(
+def test_branch_mask_validation_rejects_invalid_bound_configs():
+    with pytest.raises(ValueError, match="root branch"):
+        jv.Schema.model_validate(
             {
                 "d_model": 16,
                 "fields": {
                     "name": "record",
-                    "type": "array",
-                    "max_length": 1,
+                    "type": "branch",
+                    "length": 1,
                     "masks": [{"count": 1}],
                     "fields": [{"name": "amount", "type": "number", "query": "[*].amount"}],
                 },
             }
         )
 
-    with pytest.raises(ValueError, match="offset must be less than max_length=2"):
-        j2v.Model.from_schema(
-            j2v.Array(
-                j2v.Number("amount"),
+    with pytest.raises(ValueError, match="offset must be less than length=2"):
+        jv.Model.from_tree(
+            jv.Branch(
+                jv.Number("amount"),
                 name="transactions",
-                max_length=2,
-                masks=[j2v.Mask(count=1, offset=2)],
+                length=2,
+                masks=[jv.Mask(count=1, offset=2)],
             ),
             d_model=16,
             n_layers=1,
@@ -142,12 +142,12 @@ def test_array_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="duplicate mask name"):
-        j2v.Model.from_schema(
-            j2v.Array(
-                j2v.Number("amount"),
+        jv.Model.from_tree(
+            jv.Branch(
+                jv.Number("amount"),
                 name="transactions",
-                max_length=2,
-                masks=[j2v.Mask(name="same", count=1), j2v.Mask(name="same", rate=0.5)],
+                length=2,
+                masks=[jv.Mask(name="same", count=1), jv.Mask(name="same", rate=0.5)],
             ),
             d_model=16,
             n_layers=1,
@@ -155,12 +155,12 @@ def test_array_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="excludes every active descendant leaf"):
-        j2v.Model.from_schema(
-            j2v.Array(
-                j2v.Number("amount"),
+        jv.Model.from_tree(
+            jv.Branch(
+                jv.Number("amount"),
                 name="transactions",
-                max_length=2,
-                masks=[j2v.Mask(count=1, exclude=j2v.where("type") == "number")],
+                length=2,
+                masks=[jv.Mask(count=1, exclude=jv.where("type") == "number")],
             ),
             d_model=16,
             n_layers=1,
@@ -168,9 +168,9 @@ def test_array_mask_validation_rejects_invalid_bound_configs():
         )
 
 
-def test_model_from_schema_accepts_root_array_options():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+def test_model_from_tree_accepts_root_branch_options():
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=2,
         n_heads=4,
@@ -181,13 +181,13 @@ def test_model_from_schema_accepts_root_array_options():
         n_linear=2,
         dropout=0.2,
     )
-    params = model.hyperparameters
+    params = model.schema
 
     assert params.fields.name == "events"
     assert params.fields.description == "event records"
     assert params.fields.embed is True
     assert params.fields.attention == "none"
-    assert params.fields.max_length == 1
+    assert params.fields.length == 1
     assert params.fields.n_linear == 2
     assert params.fields.dropout == 0.2
     assert not hasattr(params.fields, "p_mask")
@@ -195,21 +195,21 @@ def test_model_from_schema_accepts_root_array_options():
     assert params.shapes["events/amount"] == (1,)
 
 
-def test_model_from_schema_rejects_root_max_length_argument():
-    with pytest.raises(TypeError, match="unexpected keyword argument 'max_length'"):
-        j2v.Model.from_schema(
-            j2v.Number("amount"),
+def test_model_from_tree_rejects_root_length_argument():
+    with pytest.raises(TypeError, match="tree field 'length'"):
+        jv.Model.from_tree(
+            jv.Number("amount"),
             d_model=16,
             n_layers=2,
             n_heads=4,
-            max_length=3,
+            length=3,
         )
 
 
-def test_model_from_schema_rejects_root_array_mask_options():
-    with pytest.raises(TypeError, match="unexpected keyword argument 'p_mask'"):
-        j2v.Model.from_schema(
-            j2v.Number("amount"),
+def test_model_from_tree_rejects_root_branch_mask_options():
+    with pytest.raises(TypeError, match="tree field 'p_mask'"):
+        jv.Model.from_tree(
+            jv.Number("amount"),
             d_model=16,
             n_layers=2,
             n_heads=4,
@@ -218,86 +218,86 @@ def test_model_from_schema_rejects_root_array_mask_options():
 
 
 def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Category("label", target=True, embed=False),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Category("label", target=True, embed=False),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    params = model.hyperparameters
+    params = model.schema
 
-    numeric = j2v.where("type") == "number"
-    assert model.select(numeric) == model.select(j2v.where("type") == "number")
+    numeric = jv.where("type") == "number"
+    assert model.select(numeric) == model.select(jv.where("type") == "number")
 
     model.update(numeric, weight=2.0)
     assert params.requests["record/amount"].weight == 2.0
 
-    model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-    assert model.select(j2v.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
+    model.update(jv.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+    assert model.select(jv.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
 
-    target = j2v.where("target")
+    target = jv.where("target")
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
-    model.update(j2v.where("name") == "amount", target=True)
+    model.update(jv.where("name") == "amount", target=True)
     assert params.requests["record/amount"].p_prune == 1.0
     assert model.select(target, include_root=False) == [
         params.requests["record/amount"],
         params.requests["record/label"],
     ]
 
-    model.update(j2v.where("name") == "amount", target=False)
+    model.update(jv.where("name") == "amount", target=False)
     assert params.requests["record/amount"].p_prune == 0.0
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
-    model.update(j2v.where("name") == "amount", p_prune=0.25)
+    model.update(jv.where("name") == "amount", p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
 
 def test_schema_helper_classmethods_back_public_dsl():
-    predicate = j2v.NodePredicate.from_callable("amount-name", lambda node: node.name == "amount")
-    attribute = j2v.NodeAttribute.named("name")
+    predicate = jv.NodePredicate.from_callable("amount-name", lambda node: node.name == "amount")
+    attribute = jv.NodeAttribute.named("name")
 
-    assert j2v.predicate("amount-name", lambda node: node.name == "amount").key == predicate.key
-    assert j2v.where("name") == attribute
-    assert j2v.Hyperparameters.update_values({"target": True}) == {"target": True}
+    assert jv.predicate("amount-name", lambda node: node.name == "amount").key == predicate.key
+    assert jv.where("name") == attribute
+    assert jv.Schema.update_values({"target": True}) == {"target": True}
 
 
-def test_hyperparameters_select_returns_nodes_and_accepts_boolean_predicates():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Number("memo", active=False),
+def test_schema_select_returns_nodes_and_accepts_boolean_predicates():
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Number("memo", active=False),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    params = model.hyperparameters
+    params = model.schema
 
-    active = params.select(j2v.where("active"), include_root=False)
-    inactive = params.select(~j2v.where("active"), include_root=False)
+    active = params.select(jv.where("active"), include_root=False)
+    inactive = params.select(~jv.where("active"), include_root=False)
 
     assert isinstance(active, list)
     assert active == [params.requests["record/amount"]]
     assert inactive == [params.requests["record/memo"]]
 
-    model.update(j2v.where("name") == "memo", target=True)
+    model.update(jv.where("name") == "memo", target=True)
     assert params.requests["record/memo"].p_prune == 1.0
-    assert params.select(j2v.where("target"), include_root=False) == []
+    assert params.select(jv.where("target"), include_root=False) == []
 
     with pytest.raises(TypeError, match="Python 'not where"):
-        not j2v.where("active")
+        not jv.where("active")
 
 
 def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Number("memo", active=False, p_mask=0.5, embed=True),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Number("memo", active=False, p_mask=0.5, embed=True),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    params = model.hyperparameters
+    params = model.schema
 
     assert "record/memo" in params.requests
     assert "record/memo" not in params.active_requests
@@ -306,7 +306,7 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
     inactive = model.select(lambda node: getattr(node, "active", True) is False)
     assert inactive[0].address == "record/memo"
 
-    model.update(j2v.where("name") == "memo", active=True)
+    model.update(jv.where("name") == "memo", active=True)
 
     assert "record/memo" in params.requests
     assert "record/memo" in params.active_requests
@@ -315,8 +315,8 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
 
 
 def test_model_update_applies_validated_values_before_rebuilding_modules():
-    model = j2v.Model.from_schema(
-        j2v.Category("label", max_vocab_size=8, topk=[2]),
+    model = jv.Model.from_tree(
+        jv.Category("label", size=8, topk=[2]),
         d_model=16,
         n_layers=1,
         n_heads=4,
@@ -324,53 +324,53 @@ def test_model_update_applies_validated_values_before_rebuilding_modules():
     address = "record/label"
     before = model.nodes[address]
 
-    model.update(j2v.where("name") == "label", max_vocab_size=16, topk=[3, 2])
+    model.update(jv.where("name") == "label", size=16, topk=[3, 2])
 
-    request = model.hyperparameters.requests[address]
-    assert request.max_vocab_size == 16
+    request = model.schema.requests[address]
+    assert request.size == 16
     assert request.topk == [2, 3]
     assert model.nodes[address] is not before
-    assert model.nodes[address].embedder.max_vocab_size == 16
+    assert model.nodes[address].embedder.size == 16
     assert model.nodes[address].embedder.embeddings[TensorKey.content.name].num_embeddings == 16
 
 
 def test_model_update_uses_current_schema_when_selection_cache_is_stale():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    predicate = j2v.where("name") == "amount"
+    predicate = jv.where("name") == "amount"
 
-    assert model.select(predicate) == [model.hyperparameters.requests["record/amount"]]
+    assert model.select(predicate) == [model.schema.requests["record/amount"]]
 
-    request = model.hyperparameters.requests["record/amount"]
+    request = model.schema.requests["record/amount"]
     request.name = "renamed"
 
     model.update(predicate, weight=2.0)
 
     assert request.weight == 1.0
-    assert "record/amount" not in model.hyperparameters.requests
-    assert "record/renamed" in model.hyperparameters.requests
+    assert "record/amount" not in model.schema.requests
+    assert "record/renamed" in model.schema.requests
     assert "record/amount" not in model.nodes
     assert "record/renamed" in model.nodes
 
 
 def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modules():
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
             name="transactions",
-            max_length=4,
+            length=4,
         ),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    params = model.hyperparameters
+    params = model.schema
 
-    model.extend(j2v.where("address") == "record/transactions", j2v.Number("risk_score"))
+    model.extend(jv.where("address") == "record/transactions", jv.Number("risk_score"))
 
     assert "record/transactions/risk_score" in params.requests
     assert "record/transactions/risk_score" in model.nodes
@@ -378,8 +378,8 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
 
 
 def test_model_extend_appends_category_field_and_preserves_existing_vocabulary():
-    model = j2v.Model.from_schema(
-        j2v.Category("label", max_vocab_size=10),
+    model = jv.Model.from_tree(
+        jv.Category("label", size=10),
         d_model=16,
         n_layers=1,
         n_heads=4,
@@ -388,98 +388,98 @@ def test_model_extend_appends_category_field_and_preserves_existing_vocabulary()
     label_vocab = model.nodes["record/label"].embedder.vocab
     label_vocab.extend(["alpha", "beta"])
 
-    model.extend(j2v.where("name") == "record", j2v.Category("caretaker", max_vocab_size=10))
+    model.extend(jv.where("name") == "record", jv.Category("caretaker", size=10))
 
-    assert "record/caretaker" in model.hyperparameters.requests
+    assert "record/caretaker" in model.schema.requests
     assert "record/caretaker" in model.nodes
-    assert model.hyperparameters.requests["record/caretaker"].query == "[*].caretaker"
+    assert model.schema.requests["record/caretaker"].query == "[*].caretaker"
     assert model.nodes["record/label"].embedder.vocab.snapshot() == ["alpha", "beta"]
     assert model.nodes["record/caretaker"].embedder.vocab.snapshot() == []
 
 
 def test_model_extend_defaults_to_root_when_only_one_array_matches():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
 
-    model.extend(j2v.Number("risk_score"))
+    model.extend(jv.Number("risk_score"))
 
-    assert "record/risk_score" in model.hyperparameters.requests
+    assert "record/risk_score" in model.schema.requests
     assert "record/risk_score" in model.nodes
 
 
 def test_model_delete_removes_nodes_permanently_and_rebuilds_modules():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Number("risk_score"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Number("risk_score"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    params = model.hyperparameters
+    params = model.schema
 
-    model.delete(j2v.where("name") == "risk_score")
+    model.delete(jv.where("name") == "risk_score")
 
     assert "record/risk_score" not in params.requests
     assert "record/risk_score" not in model.nodes
 
 
 def test_model_delete_rejects_removing_the_final_request():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
 
     with pytest.raises(ValueError, match="every request"):
-        model.delete(j2v.where("name") == "amount")
+        model.delete(jv.where("name") == "amount")
 
 
 def test_model_reset_reinitializes_runtime_node_without_changing_schema():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     before = model.nodes["record/amount"]
 
-    model.reset(j2v.where("name") == "amount")
+    model.reset(jv.where("name") == "amount")
 
     assert model.nodes["record/amount"] is not before
-    assert "record/amount" in model.hyperparameters.requests
+    assert "record/amount" in model.schema.requests
 
 
 def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     before = model.nodes["record/amount"]
 
-    with model.override(j2v.where("name") == "amount", active=False):
-        assert "record/amount" not in model.hyperparameters.active_requests
+    with model.override(jv.where("name") == "amount", active=False):
+        assert "record/amount" not in model.schema.active_requests
         assert model.nodes["record/amount"] is not before
 
-    assert "record/amount" in model.hyperparameters.active_requests
+    assert "record/amount" in model.schema.active_requests
 
 
 def test_model_override_target_restores_original_prune_rate():
-    model = j2v.Model.from_schema(
-        j2v.Number(name="amount", p_prune=0.25),
+    model = jv.Model.from_tree(
+        jv.Number(name="amount", p_prune=0.25),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    request = model.hyperparameters.requests["record/amount"]
+    request = model.schema.requests["record/amount"]
 
-    with model.override(j2v.where("name") == "amount", target=True):
+    with model.override(jv.where("name") == "amount", target=True):
         assert request.p_prune == 1.0
         assert request.target is True
 
@@ -488,20 +488,20 @@ def test_model_override_target_restores_original_prune_rate():
 
 
 def test_model_mutations_are_blocked_inside_training_loop_lock():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    lock = j2v.MutationLockCallback()
+    lock = jv.MutationLockCallback()
 
     lock.on_train_start(trainer=None, pl_module=model)
     try:
         with pytest.raises(RuntimeError, match="active loop: train"):
-            model.update(j2v.where("name") == "amount", weight=2.0)
+            model.update(jv.where("name") == "amount", weight=2.0)
     finally:
         lock.on_train_end(trainer=None, pl_module=model)
 
-    model.update(j2v.where("name") == "amount", weight=2.0)
-    assert model.hyperparameters.requests["record/amount"].weight == 2.0
+    model.update(jv.where("name") == "amount", weight=2.0)
+    assert model.schema.requests["record/amount"].weight == 2.0

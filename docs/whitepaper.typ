@@ -149,12 +149,12 @@ n_heads: 4
 fields:
   - name: x2
     type: category
-    max_vocab_size: 1000
+    size: 1000
     query: "[*].x2"
 
   - name: x1
     type: category
-    max_vocab_size: 1000
+    size: 1000
     query: "[*].x1"
 ```
 
@@ -200,7 +200,7 @@ fields:
       - name: tokens
         description: each unique wordpiece token
         type: category
-        max_vocab_size: 20000
+        size: 20000
         query: "[*].tokens[*]"
 ```
 
@@ -236,19 +236,19 @@ fields:
       - name: tokens
         description: each unique wordpiece token
         type: category
-        max_vocab_size: 20000
+        size: 20000
         query: "[*].tokens[*]"
 
       - name: part_of_speech
         description: part of speech for each word (verb, noun, adjective, etc.)
         type: category
-        max_vocab_size: 100
+        size: 100
         query: "[*].part_of_speech[*]"
 
   - name: sentiment
     description: sentiment of message (positive, neutral, negative)
     type: category
-    max_vocab_size: 3
+    size: 3
     query: "[*].sentiment"
 ```
 
@@ -311,7 +311,7 @@ fields:
           each unique piece type (pawn, bishop, knight, rook, queen, king)
           empty squares are marked by `None`
         type: category
-        max_vocab_size: 6
+        size: 6
         query: "[*].board[*].piece_type"
 
       - name: piece_color
@@ -319,14 +319,14 @@ fields:
           player colors (black & white)
           empty squares are marked by `None`
         type: category
-        max_vocab_size: 2
+        size: 2
         query: "[*].board[*].piece_color"
 
         # consider adding castling rights as additional context
 
   - name: player_to_move
     type: category
-    max_vocab_size: 2
+    size: 2
     query: "[*].player_to_move"
 
   - name: centipawn_score
@@ -387,7 +387,7 @@ fields:
 
   - name: fare_basis_code
     type: category
-    max_vocab_size: 30000
+    size: 30000
     query: "[*].fare_basis_code"
 ```
 
@@ -415,7 +415,7 @@ fields:
 
     - name: characters
       type: category
-      max_vocab_size: 100
+      size: 100
       query: "[*].fare_basis_code_chars[*]"
 ```
 
@@ -448,12 +448,12 @@ fields:
 
   - name: origin
     type: category
-    max_vocab_size: ...
+    size: ...
     query: "[*].origin"
 
   - name: destination
     type: category
-    max_vocab_size: ...
+    size: ...
     query: "[*].destination"
 ```
 
@@ -484,7 +484,7 @@ fields:
 
       - name: location
         type: category
-        max_vocab_size: ...
+        size: ...
         query: "[*].[origin, destination]"
 ```
 
@@ -525,7 +525,7 @@ fields:
       - name: type
         description: transaction type (card swipe, ACH, wire, etc.)
         type: category
-        max_vocab_size: 20
+        size: 20
         query: "[*].transactions[*].type"
 
       - name: amount
@@ -573,7 +573,7 @@ fields:
       - name: region
         type: category
         description: region / state of device used for login session
-        max_vocab_size: 20
+        size: 20
         query: "[*].login_sessions[*].region"
 
       - name: clickstream_events
@@ -585,7 +585,7 @@ fields:
           - name: type
             description: clickstream event type
             type: category
-            max_vocab_size: 20
+            size: 20
             query: "[*].login_sessions[*].clickstream_events[*].type"
 
           - name: timestamp
@@ -703,7 +703,7 @@ foo: Plugin = Plugin(name="foo")
 @foo.register
 class Request(RequestBase):
     type: Literal["foo"]
-    # datatype-specific schema hyperparameters
+    # datatype-specific schema schema
 
 @foo.register
 class TensorField(TensorFieldBase):
@@ -741,7 +741,7 @@ Developers may, in the future, implement `image`, `video`, or `audio` datatypes,
 
 Categorical data creates a practical problem: most business datasets have string labels whose vocabulary is either unknown ahead of time or too inconvenient to fully materialize before training.
 
-The `category` datatype handles this with an online vocabulary tokenizer. During training, observed labels are assigned integer ids until `max_vocab_size` is reached. The learned vocabulary becomes part of the model state, so validation, testing, finetuning, and inference can reuse the same mapping.
+The `category` datatype handles this with an online vocabulary tokenizer. During training, observed labels are assigned integer ids until `size` is reached. The learned vocabulary becomes part of the model state, so validation, testing, finetuning, and inference can reuse the same mapping.
 
 The model will never learn vocabulary observed outside of training, which could lead to unexpected behavior.
 
@@ -754,7 +754,7 @@ For example:
 ```yaml
 - name: merchant_category
   type: category
-  max_vocab_size: 5000
+  size: 5000
   p_unavailable: 0.01
   topk: [5, 20]
   query: "[*].merchant_category"
@@ -811,7 +811,7 @@ For example:
 
     - name: region
       type: category
-      max_vocab_size: 100
+      size: 100
       query: "[*].login_sessions[*].region"
 ```
 
@@ -956,7 +956,7 @@ For nested contexts, queries can reshape values without rewriting the source obj
 ```yaml
 - name: location
   type: category
-  max_vocab_size: 50000
+  size: 50000
   query: "[*].[origin, destination]"
 ```
 
@@ -986,10 +986,10 @@ For this, `json2vec` supports optional dataset preprocessors. A preprocessor run
 When no preprocessor is configured, observations pass through unchanged. A custom preprocessor can sit between a messy source system and a clean modeling schema:
 
 ```python
-import json2vec as j2v
+import json2vec as jv
 
 
-@j2v.preprocess(yields=True)
+@jv.preprocess(yields=True)
 def customer_windows(customer, window_days: int):
     for window in sample_windows(customer, days=window_days):
         yield {
@@ -1030,36 +1030,36 @@ The idea is simple: the same datatype-specific losses are used for self-supervis
 
 During pretraining, all masked values are imputed regardless of their dimensionality. During supervised learning, all targeted values are predicted regardless of their dimensionality.
 The difference is that masking happens value-by-value according to the masking rate. Targeting removes a field from the input and trains the model to reconstruct it.
-`dropout` can be configured on arrays or fields. `p_mask` and `p_prune` are configured explicitly on leaf fields. These rates do not inherit down the schema tree; broad updates are made deliberately with schema selections.
+`dropout` can be configured on branches or fields. `p_mask` and `p_prune` are configured explicitly on leaf fields. These rates do not inherit down the schema tree; broad updates are made deliberately with schema selections.
 
 This means that the control flow is the same for pretraining and finetuning. The difference between pretraining and finetuning is configuration, not a separate model architecture.
 
 ```python
-import json2vec as j2v
+import json2vec as jv
 
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
-    j2v.Category("merchant", max_vocab_size=4096),
-    j2v.Category("is_fraud", max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=128,
     n_layers=4,
     n_heads=4,
     batch_size=256,
+    amount=jv.Number,
+    merchant=jv.Category(size=4096),
+    is_fraud=jv.Category(size=2),
 )
-model.update(j2v.where("type") == "number", p_mask=0.15)
-model.update(j2v.where("type") == "category", p_mask=0.05)
+model.update(jv.where("type") == "number", p_mask=0.15)
+model.update(jv.where("type") == "category", p_mask=0.05)
 ```
 
 ```python
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
-    j2v.Category("merchant", max_vocab_size=4096),
-    j2v.Category("is_fraud", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=128,
     n_layers=4,
     n_heads=4,
     batch_size=256,
+    amount=jv.Number,
+    merchant=jv.Category(size=4096),
+    is_fraud=jv.Category(target=True, size=2),
 )
 ```
 

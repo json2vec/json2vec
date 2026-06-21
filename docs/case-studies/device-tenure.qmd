@@ -86,33 +86,30 @@ This is a documentation sketch, not a full training script.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Category("customer_id", active=False, max_vocab_size=100_000),
-    j2v.Array(
-        j2v.Entity("device_id", embed=True),
-        j2v.Category("event_type", max_vocab_size=128),
-        j2v.Number("days_since_event"),
-        j2v.Category("ip_country", max_vocab_size=256),
-        name="login_sessions",
-        max_length=32,
-        embed=True,
-    ),
-    j2v.Array(
-        j2v.Entity("device_id"),
-        j2v.Number("amount"),
-        j2v.Category("merchant_category", max_vocab_size=1024),
-        j2v.Number("days_since_event"),
-        name="transactions",
-        max_length=128,
-    ),
-    j2v.Category("account_takeover", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     name="customer",
     d_model=128,
     n_layers=2,
     n_heads=4,
     embed=True,
+    login_sessions=jv.Branch(
+        length=32,
+        embed=True,
+        device_id=jv.Entity(embed=True),
+        event_type=jv.Category(size=128),
+        days_since_event=jv.Number,
+        ip_country=jv.Category(size=256),
+    ),
+    transactions=jv.Branch(
+        length=128,
+        device_id=jv.Entity,
+        amount=jv.Number,
+        merchant_category=jv.Category(size=1024),
+        days_since_event=jv.Number,
+    ),
+    account_takeover=jv.Category(target=True, size=2),
 )
 
 model
@@ -120,13 +117,14 @@ model
 
 The `Entity("device_id")` fields let the model learn repeated local identity
 relationships within the customer observation. `days_since_event` gives it
-recency. The login-session array and root node request embeddings so offline
+recency. The login-session branch and root node request embeddings so offline
 analysis can inspect both customer-level and login-history representations.
 
-`customer_id` is marked `active=False` so the schema can retain the field as
-metadata without feeding a high-cardinality identifier into the model. Use an
-active `Category` only when a persistent global identity vocabulary is intended
-and appropriate for the decision.
+`customer_id` stays in the raw and processed records for joins, audit trails,
+or request metadata, but it is deliberately not modeled as a `Category`.
+Treating customer identifiers as a large categorical vocabulary is usually a
+memory-heavy anti-pattern unless the global identity itself is intentionally
+part of the model.
 
 `Entity` encodes local sameness within the tensorfield values it reads. If a
 use case requires matching the same identifier across sibling branches, such as
@@ -179,7 +177,7 @@ Use the same data path as other supervised `json2vec` models:
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
@@ -204,9 +202,9 @@ embeddings:
 
 predictions = model.predict(customer_records)
 
-risk = predictions[j2v.Address("customer", "account_takeover")]
-customer_embedding = predictions[j2v.Address("customer")]["embedding"]
-login_embedding = predictions[j2v.Address("customer", "login_sessions")]["embedding"]
+risk = predictions[jv.Address("customer", "account_takeover")]
+customer_embedding = predictions[jv.Address("customer")]["embedding"]
+login_embedding = predictions[jv.Address("customer", "login_sessions")]["embedding"]
 ```
 
 Use a [postprocessor](../guides/postprocessors.qmd) to return only the public

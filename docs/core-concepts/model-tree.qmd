@@ -10,53 +10,52 @@ pyproject: |
 
 # Model Tree
 
-The schema you pass to `Model.from_schema(...)` becomes a tree. The generated
-root array encodes one processed observation, nested `Array(...)` nodes encode
-repeated child contexts, and leaf tensorfields read values from input records.
+The schema you pass to `Model.from_tree(...)` becomes a tree. The generated
+root branch encodes one processed observation, nested `Branch(...)` nodes define
+shared child contexts, and leaf tensorfields read values from input records.
 
 Internally, the tree is backed by `anytree` and `pydantic`, but the public model
 is easiest to read as root, branch, and leaf nodes.
 
-Each node has a stable slash-delimited address (`j2v.Address`):
+Each node has a stable slash-delimited address (`jv.Address`):
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Category("customer_id", active=False, max_vocab_size=100_000),
-    j2v.Array(
-        j2v.Category("sku", max_vocab_size=2048),
-        j2v.Number("quantity"),
-        j2v.Number("price", p_mask=0.15),
-        name="line_items",
-        max_length=32,
-        embed=True,
-    ),
-    j2v.Category("returned", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     name="order",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
+    source_channel=jv.Category(active=False, size=16),
+    line_items=jv.Branch(
+        length=32,
+        embed=True,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+        price=jv.Number(p_mask=0.15),
+    ),
+    returned=jv.Category(target=True, size=2),
 )
 
 model
 ```
 
 ```text
-order                         array, root context encoder, embed
-|-- customer_id               category leaf, inactive
-|-- line_items                array, branch context encoder, embed
+order                         root branch context encoder, embed
+|-- source_channel            category leaf, inactive
+|-- line_items                branch context encoder, embed
 |   |-- sku                   category leaf
 |   |-- quantity              number leaf
 |   `-- price                 number leaf, masked reconstruction
 `-- returned                  category leaf, supervised target
 ```
 
-`order` is the root context. `j2v.Address("order", "line_items")` is the
+`order` is the root context. `jv.Address("order", "line_items")` is the
 branch address rendered as `order/line_items`. The leaves are the typed
 requests that read values from input records.
 
@@ -67,8 +66,8 @@ whether or not the customer returned any of the items.
 
 | Node kind | Created by | Runtime role |
 | --- | --- | --- |
-| Root array | `Model.from_schema(..., name=...)` | Encodes the whole processed observation. |
-| Branch array | `Array(..., name=..., max_length=...)` | Encodes a repeated nested context and passes one pooled representation to its parent. |
+| Root branch | `Model.from_tree(..., name=...)` | Encodes the whole processed observation. |
+| Branch | `Branch(..., name=..., length=...)` | Defines a child context, optionally applies local attention, and pools the representation to its parent. |
 | Leaf tensorfield | `Number`, `Category`, `Set`, `Vector`, and other tensorfields | Reads source values, stores typed tensors, embeds visible input, and decodes predictions when trained or requested. |
 
 ::: {.callout-note}
@@ -76,31 +75,33 @@ Tensorfields represent an extensible typing system. There are many built-in
 data types, with more in development.
 :::
 
-Array nodes are context encoders with cross-attention pooling.
+A branch names the coordinate space shared by its child leaves. Its encoder can
+apply transformer attention within that context, then cross-attention pooling
+rolls the context up to the parent.
 Leaf nodes are the only nodes that bind directly to values with a request-level `query`. See
 [Query Paths](querypaths.qmd) for how leaf queries are inferred.
 
 ::: {.callout-note}
-Under the hood, the root array uses the same machinery as other arrays, but
-it is always a singleton context with `max_length=1`. Use nested
-`Array(max_length=...)` for repeated data.
+Under the hood, the root branch uses the same machinery as other branches, but
+it is always a singleton context with `length=1`. Use nested
+`Branch(length=...)` for repeated data.
 :::
 
 ## Nodes As N-Dimensional Arrays
 
-Every schema node corresponds to an N-dimensional tensor shape. Array nodes add
+Every schema node corresponds to an N-dimensional tensor shape. Branch nodes add
 dimensions. Leaf tensorfields store typed arrays at the shape defined by their
-array ancestors.
+branch ancestors.
 
 For the `order/line_items/price` leaf above, the inherited shape is:
 
 ```text
-order.max_length       -> 1
-line_items.max_length  -> 32
+order.length       -> 1
+line_items.length  -> 32
 leaf shape             -> (1, 32)
 ```
 
-For user-declared arrays, `max_length` defines the retained dimension and
+For user-declared branches, `length` defines the retained dimension and
 `overflow` controls whether overlong query results keep the head, keep the
 tail, or raise an error.
 
@@ -128,7 +129,7 @@ leaf embedding payload  (batch, ..., d_model)
 array embedding payload (batch, ..., d_model)
 ```
 
-The repeated dimensions before `d_model` come from the schema path. Array
+The repeated dimensions before `d_model` come from the schema path. Branch
 encoders pool a child context before handing a representation to the parent.
 
 This extends to all model trees. Users may define multiple branches, and each branch can have child branches of their own:
@@ -160,11 +161,11 @@ leaves from their available context.
    original values in `targets`, and set `trainable=True` where reconstruction
    loss should be computed.
 3. Active, non-target leaves run their tensorfield embedders and send `Parcel`
-   objects to their parent arrays.
-4. Array encoders run from deepest branches back to the root. Each array
+   objects to their parent branches.
+4. Branch encoders run from deepest branches back to the root. Each branch
    concatenates child parcels, applies its configured attention layers, pools the
    child context, and sends one parcel to its parent.
-5. Arrays configured with `embed=True` emit embedding predictions from their
+5. Branches configured with `embed=True` emit embedding predictions from their
    pooled payloads.
 6. Leaves that are trainable, targets, or configured with `embed=True` run their
    decoders.
@@ -175,9 +176,9 @@ leaves from their available context.
 
 Pooling happens in two places.
 
-Array pooling compresses a branch context before passing it upward to its parent context. After an
-array concatenates its child payloads and runs attention layers, learned-query
-cross-attention produces the vector payload for that array node.
+Branch pooling compresses a branch context before passing it upward to its parent context. After a
+branch concatenates its child payloads and runs attention layers, learned-query
+cross-attention produces the vector payload for that branch node.
 
 Decoder pooling builds a prediction context for a leaf. Each leaf has a
 `heritage`: the addresses along its path from the root through the leaf itself.
@@ -208,7 +209,7 @@ Schema roles change how nodes participate in training and prediction:
 | `p_mask=0.15` | Randomly hides individual leaf values for reconstruction. |
 | `p_prune=0.15` | Randomly hides whole leaf instances for reconstruction. |
 | `target=True` | Always hides a leaf from input and decodes it as a supervised target; shorthand for `p_prune=1.0`. |
-| `mask=j2v.Mask(...)` | Hides selected coordinates inside an `Array` and projects that selection onto descendant leaves. |
+| `mask=jv.Mask(...)` | Hides selected coordinates inside a `Branch` and projects that selection onto descendant leaves. |
 | `embed=True` | Emits an embedding for root, branch, or leaf nodes during prediction. |
 | `active=False` | Keeps a leaf in the schema but removes it from encoding, forward passes, losses, and prediction until it is reactivated. |
 
@@ -217,7 +218,7 @@ Model mutations edit the same tree:
 | Method | Use |
 | --- | --- |
 | `model.update(predicate, **values)` | Change selected node attributes such as `weight`, `target`, `p_mask`, `embed`, or `active`. |
-| `model.extend(predicate, new_field, ...)` | Add new children under one selected array node. |
+| `model.extend(predicate, new_field, ...)` | Add new children under one selected branch node. |
 | `model.delete(predicate)` | Permanently remove selected nodes and their descendants. |
 | `model.reset(predicate)` | Reinitialize selected runtime modules while keeping schema values. |
 | `model.override(predicate, **values)` | Temporarily change nodes inside a context manager, then restore them. |
@@ -226,14 +227,14 @@ Mutations rebuild the runtime graph and reload compatible state where shapes
 still match. They are blocked while Lightning owns an active training,
 validation, test, or prediction loop.
 
-Use predicates such as `j2v.where("name") == "price"` or
-`j2v.where("type") == "number"` to select nodes. The same predicate style is
+Use predicates such as `jv.where("name") == "price"` or
+`jv.where("type") == "number"` to select nodes. The same predicate style is
 used across schema mutation workflows.
 
 ## Where Next
 
 - Use [Built-In Data Types](data-types.qmd) to choose leaf tensorfields.
-- Use [Array](../data-types/array.qmd) for repeated branch contexts.
+- Use [Branch](../data-types/branch.qmd) for repeated branch contexts.
 - Use [Learning Modes & Embeddings](embeddings.qmd) for `p_mask`,
   `p_prune`, and `embed=True` patterns.
 - Use [Dynamic Masking](dynamic-masking.qmd) for windowed reconstruction inside

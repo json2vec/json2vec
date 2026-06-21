@@ -26,7 +26,7 @@ def _build_plugin() -> Plugin:
 
     class TensorField(TensorFieldBase):
         @classmethod
-        def new(cls, values, address, hyperparameters, strata):
+        def new(cls, values, address, schema, strata):
             return object()
 
         def mask(self, p_mask: float):
@@ -36,12 +36,12 @@ def _build_plugin() -> Plugin:
             return None
 
     class Embedder(EmbedderBase):
-        def __init__(self, hyperparameters: object, address: object):
-            super().__init__(hyperparameters=hyperparameters, address=address)
+        def __init__(self, schema: object, address: object):
+            super().__init__(schema=schema, address=address)
 
     class Decoder(DecoderBase):
-        def __init__(self, hyperparameters: object, address: object):
-            super().__init__(hyperparameters=hyperparameters, address=address)
+        def __init__(self, schema: object, address: object):
+            super().__init__(schema=schema, address=address)
 
     plugin.register(Request)
     plugin.register(TensorField)
@@ -159,12 +159,12 @@ def test_plugin_rejects_invalid_callback_factory_without_registering():
 
 def test_plugin_rejects_embedder_with_missing_address_param():
     class Embedder(EmbedderBase):
-        def __init__(self, hyperparameters: object):
-            super().__init__(hyperparameters=hyperparameters, address=None)
+        def __init__(self, schema: object):
+            super().__init__(schema=schema, address=None)
 
     plugin = Plugin(name=_plugin_name("badembedder"))
     try:
-        with pytest.raises(TypeError, match="must accept 'hyperparameters' and 'address'"):
+        with pytest.raises(TypeError, match="must accept 'schema' and 'address'"):
             plugin.register(Embedder)
     finally:
         TENSORFIELDS.pop(plugin.name, None)

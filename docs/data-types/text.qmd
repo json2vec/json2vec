@@ -24,9 +24,9 @@ dimension.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-body = j2v.Text(
+body = jv.Text(
     "body",
     model_name="bert-base-uncased",
     max_length=128,
@@ -58,7 +58,7 @@ must run from cached files only.
 ## Input Values
 
 `Text` expects string values. `None` is encoded as a null state, and missing
-array positions are encoded as padded state.
+branch positions are encoded as padded state.
 
 Text is tokenized with the configured Hugging Face tokenizer using max-length
 padding and truncation. Token IDs and attention masks are stored as tensorfield
@@ -79,11 +79,11 @@ Text can be nested like any other leaf:
 #| echo: true
 #| output: true
 
-ticket_events = j2v.Array(
-    j2v.Text("message", model_name="bert-base-uncased", max_length=128),
-    j2v.Category("event_type", max_vocab_size=64),
+ticket_events = jv.Branch(
     name="ticket_events",
-    max_length=32,
+    length=32,
+    message=jv.Text(model_name="bert-base-uncased", max_length=128),
+    event_type=jv.Category(size=64),
 )
 
 ticket_events
@@ -125,4 +125,4 @@ embedding-reconstruction target, not as a generated-text output. Configure
 
 The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
 by `json2vec`. Use `encoder_batch_size` to manage memory when many text values are
-flattened from nested arrays.
+flattened from nested branches.

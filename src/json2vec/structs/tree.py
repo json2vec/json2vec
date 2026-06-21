@@ -113,11 +113,11 @@ class Address(str):
 
 
 class Node(NodeMixin, Renderable, pydantic.BaseModel):
-    """Base schema tree node shared by arrays and tensorfield requests."""
+    """Base schema tree node shared by branches and tensorfield requests."""
 
     model_config = pydantic.ConfigDict(extra="forbid")
 
-    name: str
+    name: str | None = None
     type: str
     description: str | None = None
     embed: bool = False
@@ -139,6 +139,9 @@ class Node(NodeMixin, Renderable, pydantic.BaseModel):
 
     @pydantic.model_validator(mode="after")
     def check_node_name(self):
+        if self.name is None:
+            return self
+
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("name must be a non-empty string")
 
@@ -184,7 +187,7 @@ class Leaf(Node):
 
     active: bool = True
     embed: bool = False
-    name: str
+    name: str | None = None
     type: str
     query: str | None = None
     pooling: Literal["query", "mean"] = "query"
@@ -339,7 +342,7 @@ class Leaf(Node):
         excluded = {"name", "type", "description", "active", "embed", "query", *common_names}
         specific = Text()
         first = True
-        for name in type(self).model_fields:
+        for name, field in type(self).model_fields.items():
             if name in excluded:
                 continue
             value = getattr(self, name, None)
@@ -351,7 +354,8 @@ class Leaf(Node):
                 value = value.value
             if not first:
                 specific.append(" ")
-            specific.append(f"{name}=", style="dim")
+            label = str(field.serialization_alias or field.alias or name)
+            specific.append(f"{label}=", style="dim")
             specific.append(str(value), style="cyan")
             first = False
         if specific.plain:
@@ -364,8 +368,8 @@ class Leaf(Node):
         out: list[int] = []
 
         for node in self.path:
-            if node.type == "array":
-                out.append(node.max_length)
+            if node.type == "branch":
+                out.append(node.length)
 
         return tuple(out)
 
@@ -374,7 +378,7 @@ class Leaf(Node):
         out: list[Overflow] = []
 
         for node in self.path:
-            if node.type == "array":
+            if node.type == "branch":
                 out.append(node.overflow)
 
         return tuple(out)

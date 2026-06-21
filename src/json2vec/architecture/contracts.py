@@ -88,7 +88,7 @@ def sanitize(
 
     require_forward_addresses(module, inputs, strata=normalized)
 
-    for address in module.hyperparameters.active_requests:
+    for address in module.schema.active_requests:
         tensorfield = inputs[address]
         require_registered_tensorfield(module, address, tensorfield)
         require_core_tensors(module, address, tensorfield)
@@ -113,7 +113,7 @@ def batch_signature(module: "Model", inputs: Any) -> ContractSignature:
 
     input_keys = tuple(sorted(str(key) for key in inputs.keys()))
     fields: list[tuple[Any, ...]] = []
-    for address in sorted(module.hyperparameters.active_requests, key=str):
+    for address in sorted(module.schema.active_requests, key=str):
         if address not in inputs.keys():
             fields.append((str(address), "missing"))
             continue
@@ -175,7 +175,7 @@ def require_forward_addresses(
     keys = set(inputs.keys())
     metadata_keys = {key for key in keys if key == TensorKey.metadata}
     addresses = {Address(str(key)) for key in keys if key != TensorKey.metadata}
-    expected = set(module.hyperparameters.active_requests)
+    expected = set(module.schema.active_requests)
 
     if metadata_keys and strata != Strata.predict:
         raise ForwardContractError(f"forward input contains {TensorKey.metadata} outside predict strata")
@@ -188,14 +188,14 @@ def require_forward_addresses(
     if not extra:
         return
 
-    arrays = extra & set(module.hyperparameters.arrays)
-    if arrays:
+    branches = extra & set(module.schema.branches)
+    if branches:
         raise ForwardContractError(
-            f"forward input contains array address(es); only active leaf request addresses are allowed: "
-            f"{format_addresses(arrays)}"
+            f"forward input contains branch address(es); only active leaf request addresses are allowed: "
+            f"{format_addresses(branches)}"
         )
 
-    inactive = {address for address in extra if address in module.hyperparameters.requests}
+    inactive = {address for address in extra if address in module.schema.requests}
     if inactive:
         raise ForwardContractError(
             "forward input contains inactive request address(es): "
@@ -209,7 +209,7 @@ def require_registered_tensorfield(module: "Model", address: Address, value: Any
     if not isinstance(value, TensorFieldBase):
         raise TypeError(f"forward input '{address}' must be a TensorFieldBase, got {type(value).__name__}")
 
-    request = module.hyperparameters.requests[address]
+    request = module.schema.requests[address]
     expected = TENSORFIELDS[request.type].TensorField
     if not isinstance(value, expected):
         raise TypeError(
@@ -228,7 +228,7 @@ def require_core_tensors(module: "Model", address: Address, tensorfield: TensorF
     )
     targets = require_targets(address, tensorfield)
 
-    field_shape = module.hyperparameters.shapes[address]
+    field_shape = module.schema.shapes[address]
     if state.ndim != len(field_shape) + 1:
         raise ForwardContractError(
             f"forward input '{address}' state must have rank {len(field_shape) + 1}, got {state.ndim}"
@@ -314,7 +314,7 @@ def require_mask_contract(module: "Model", address: Address, tensorfield: Tensor
     state = tensorfield.state
     trainable = tensorfield.trainable
     is_masked = state.eq(Tokens.masked.value)
-    is_target = address in module.hyperparameters.target
+    is_target = address in module.schema.target
 
     if trainable.any() and not state.masked_select(trainable).eq(Tokens.masked.value).all():
         raise ForwardContractError(f"forward input '{address}' trainable positions must have masked state")
@@ -342,7 +342,7 @@ def require_target_contract(
     *,
     strata: Strata | None,
 ) -> None:
-    if address not in module.hyperparameters.target:
+    if address not in module.schema.target:
         return
 
     if not tensorfield.state.eq(Tokens.masked.value).all():

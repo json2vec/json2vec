@@ -7,7 +7,7 @@ eval: false
 
 This page is the first practical pass through `json2vec`: define the record
 shape, train a tiny model, inspect predictions, then extend the same idea to
-nested arrays. The goal is not model quality. It is to make the package's core
+nested branches. The goal is not model quality. It is to make the package's core
 loop concrete.
 
 ## Prerequisites
@@ -52,36 +52,36 @@ writes the prediction.
 
 ## Build The Model
 
-Use the package root import. `Model.from_schema(...)` turns the field
+Use the package root import. `Model.from_tree(...)` turns the field
 declarations into a model tree. The root node is named `record` by default.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 import lightning.pytorch as lit
 import polars as pl
 import torch
 
 records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
-model = j2v.Model.from_schema(
-    j2v.Number("sepal_length"),
-    j2v.Number("petal_length"),
-    j2v.Category("species", target=True, max_vocab_size=4, topk=[2]),
+model = jv.Model.from_tree(
     d_model=16,
     n_layers=1,
     n_heads=4,
     batch_size=8,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
+    sepal_length=jv.Number,
+    petal_length=jv.Number,
+    species=jv.Category(target=True, size=4, topk=[2]),
 )
 
 model
 ```
 
-The Rich display is the fastest way to verify the tree that was built: root array,
+The Rich display is the fastest way to verify the tree that was built: root branch,
 numeric input leaves, target leaf, inferred queries, and root embedding.
 
 Schema roles control what the model sees and what prediction can emit:
@@ -92,7 +92,7 @@ Schema roles control what the model sees and what prediction can emit:
 | `target=True` | value is hidden | decoded supervised output |
 | `p_mask` | some observed values are hidden during training | decoded reconstruction for trainable values |
 | `p_prune` | whole field instances are hidden during training | decoded reconstruction for trainable values |
-| array `mask=` | repeated coordinates are hidden across descendant leaves | decoded reconstruction for affected trainable leaves |
+| branch `mask=` | repeated coordinates are hidden across descendant leaves | decoded reconstruction for affected trainable leaves |
 | `embed=True` | does not hide the value | embedding at that address |
 
 `target=True` is the always-pruned supervised case and is shorthand for
@@ -112,7 +112,7 @@ to sample observations from a Polars dataframe.
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -137,7 +137,7 @@ trainer = lit.Trainer(
 trainer.fit(model=model, datamodule=datamodule)
 ```
 
-`j2v.Model` is a LightningModule, and `j2v.PolarsDataModule` is a
+`jv.Model` is a LightningModule, and `jv.PolarsDataModule` is a
 LightningDataModule. This example uses the normal Lightning `Trainer.fit(...)`
 loop. Use [Training With Lightning](guides/lightning.qmd) for callbacks,
 devices, checkpointing, and distributed training, and use
@@ -156,8 +156,8 @@ part of the schema that produced them.
 
 predictions = model.predict(records.to_dicts()[:3])
 
-species = predictions[j2v.Address("record", "species")]
-record = predictions[j2v.Address("record")]
+species = predictions[jv.Address("record", "species")]
+record = predictions[jv.Address("record")]
 
 print(species["content"]["value"])
 print(species["content"]["probability"])
@@ -175,7 +175,7 @@ when a query or preprocessor is not producing the shape you expect.
 
 `model.encode(...)` accepts raw dictionaries and returns nested tensorfield
 inputs. Each tensorfield keeps `content` separate from value `state`, so nulls,
-padded array slots, and training masks are distinct.
+padded branch slots, and training masks are distinct.
 
 ```{python .marimo}
 #| echo: true
@@ -193,11 +193,11 @@ prediction path; see [Data Modules](guides/data-modules.qmd#preprocessors).
 Use [custom queries](core-concepts/querypaths.qmd) when the source shape is
 stable and selection is enough.
 
-## Add Nested Arrays
+## Add Nested Branches
 
 Flat examples are useful for mechanics, but `json2vec` is designed for
 predictive modeling with hierarchical data where nested structures carry
-signal. Use `Array` when a record contains a list of child objects:
+signal. Use `Branch` when a record contains a list of child objects:
 
 ```{python .marimo}
 #| echo: true
@@ -218,21 +218,20 @@ The matching schema gives `measurements` its own repeated context encoder:
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category("name", max_vocab_size=16),
-        j2v.Number("value"),
-        name="measurements",
-        max_length=8,
-        embed=True,
-    ),
-    j2v.Category("diagnosis", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=24,
     n_layers=1,
     n_heads=4,
     batch_size=8,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
+    measurements=jv.Branch(
+        jv.Category("name", size=16),
+        length=8,
+        embed=True,
+        value=jv.Number,
+    ),
+    diagnosis=jv.Category(target=True, size=2),
 )
 
 model
@@ -251,7 +250,7 @@ Run the complete nested example with:
 
 nested_records = pl.read_ndjson("docs/data/breast-cancer.jsonl").head(32)
 
-nested_datamodule = j2v.PolarsDataModule(
+nested_datamodule = jv.PolarsDataModule(
     model=model,
     train=nested_records,
     validate=nested_records,
@@ -276,8 +275,8 @@ nested_trainer = lit.Trainer(
 nested_trainer.fit(model=model, datamodule=nested_datamodule)
 nested_predictions = model.predict(nested_records.to_dicts()[:2])
 
-diagnosis = nested_predictions[j2v.Address("record", "diagnosis")]
-measurements = nested_predictions[j2v.Address("record", "measurements")]
+diagnosis = nested_predictions[jv.Address("record", "diagnosis")]
+measurements = nested_predictions[jv.Address("record", "measurements")]
 
 print(diagnosis["content"]["value"])
 print(measurements["embedding"])

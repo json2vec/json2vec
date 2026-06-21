@@ -125,9 +125,9 @@ def preprocess(
 
     Example:
         ```python
-        import json2vec as j2v
+        import json2vec as jv
 
-        @j2v.preprocess
+        @jv.preprocess
         def normalize(record: dict) -> dict:
             return {**record, "amount": float(record["amount"])}
         ```

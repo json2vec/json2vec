@@ -1,4 +1,4 @@
-"""Schema hyperparameters, node predicates, and mutation helpers."""
+"""Serializable schema, node predicates, and mutation helpers."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Annotated, Any, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 
 import pydantic
 from anytree import LevelOrderGroupIter, PreOrderIter
@@ -26,35 +26,64 @@ from json2vec.structs.selectors import (
     predicate,
     where,
 )
-from json2vec.structs.structure import Array, Mask, RequestTypes
+from json2vec.structs.structure import Branch, Mask, RequestTypes
 from json2vec.structs.tree import Address, Leaf, Node, Rate, Selection
 
 __all__ = [
     "ExtendArg",
-    "Hyperparameters",
+    "Schema",
     "NodeAttribute",
     "NodePredicate",
     "NodeSelector",
     "SchemaField",
     "SelectionCacheEntry",
     "SelectionKey",
+    "TreeFieldInput",
     "predicate",
     "where",
 ]
 
+TreeFieldInput: TypeAlias = SchemaField | type[Leaf]
+
 _MISSING = object()
 
 
-class Hyperparameters(Node):
+def bind_tree_field(source: str | None, value: TreeFieldInput) -> SchemaField:
+    """Materialize and bind a tree field from a keyword source name."""
+    if isinstance(value, type) and issubclass(value, Leaf):
+        value = value()
+
+    if not isinstance(value, (Branch, Leaf)):
+        label = f" '{source}'" if source is not None else ""
+        raise TypeError(f"tree field{label} must be a Branch, Leaf, or Leaf class")
+
+    if source is None:
+        if value.name is None:
+            raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
+        return value
+
+    if value.name is None:
+        value.name = source
+        value.model_fields_set.add("name")
+        value.check_node_name()
+        return value
+
+    if value.name != source:
+        raise ValueError(f"tree keyword '{source}' cannot bind field named '{value.name}'")
+
+    return value
+
+
+class Schema(Node):
     """Serializable schema and training metadata used to build a `Model`."""
 
     model_config = pydantic.ConfigDict(extra="forbid")
 
-    name: Literal["hyperparameters"] = pydantic.Field(default="hyperparameters", exclude=True)
-    type: Literal["hyperparameters"] = pydantic.Field(default="hyperparameters", exclude=True)
+    name: Literal["schema"] = pydantic.Field(default="schema", exclude=True)
+    type: Literal["schema"] = pydantic.Field(default="schema", exclude=True)
     description: Literal[None] = pydantic.Field(default=None, exclude=True)
     d_model: Annotated[int, pydantic.Field(gt=0, default=128)]
-    fields: Array
+    fields: Branch
 
     embed: ClassVar[None] = None
     dropout: ClassVar[None] = None  # ty:ignore[invalid-attribute-override]
@@ -88,14 +117,14 @@ class Hyperparameters(Node):
         return json.dumps(value)
 
     @classmethod
-    def query_for_source(cls, array_path: tuple[str, ...], source: str) -> str:
+    def query_for_source(cls, branch_path: tuple[str, ...], source: str) -> str:
         """Infer a request-level query for a leaf source field.
 
         The encoder prepends the outer batch selector during search. Inferred
         queries therefore start at the processed-observation level: `[*].amount`,
         not `[*][*].amount`.
         """
-        selectors = "".join(f".{cls.jmespath_member(array)}[*]" for array in array_path)
+        selectors = "".join(f".{cls.jmespath_member(branch)}[*]" for branch in branch_path)
         return f"[*]{selectors}.{cls.jmespath_member(source)}"
 
     @classmethod
@@ -106,8 +135,10 @@ class Hyperparameters(Node):
         return request_cls.model_validate(leaf.model_dump(mode="python", round_trip=True))
 
     @classmethod
-    def from_schema_node(cls, node: SchemaField, *, array_path: tuple[str, ...] = ()) -> Array | RequestTypes:
+    def from_tree_node(cls, node: SchemaField, *, branch_path: tuple[str, ...] = ()) -> Branch | RequestTypes:
         if isinstance(node, Leaf):
+            if node.name is None:
+                raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
             source = node.name
             node_name = Node.sanitize_name(source)
             updates: dict[str, Any] = {}
@@ -118,53 +149,62 @@ class Hyperparameters(Node):
                     updates["description"] = source
 
             if node.query is None:
-                updates["query"] = cls.query_for_source(array_path, source)
+                updates["query"] = cls.query_for_source(branch_path, source)
 
             return cls.request_from_leaf(node.model_copy(update=updates))
 
-        if isinstance(node, Array):
-            child_path = (*array_path, node.name)
-            fields = [cls.from_schema_node(field, array_path=child_path) for field in node.fields]
+        if isinstance(node, Branch):
+            if node.name is None:
+                raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
+            child_path = (*branch_path, node.name)
+            fields = [cls.from_tree_node(field, branch_path=child_path) for field in node.fields]
             payload = node.model_dump(mode="python", round_trip=True, exclude={"fields", "masks"})
-            return Array(*fields, masks=list(node.masks), **payload)
+            return Branch(*fields, masks=list(node.masks), **payload)
 
-        raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
+        raise TypeError("tree fields must be Branch, Leaf, or concrete request instances")
 
     @classmethod
-    def from_schema(
+    def from_tree(
         cls,
-        *field_args: SchemaField,
+        *field_args: TreeFieldInput,
         d_model: int,
         n_layers: int,
         n_heads: int,
-        fields: Sequence[SchemaField] | None = None,
+        fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
         n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
         dropout: Rate | None = None,
+        **field_kwargs: TreeFieldInput,
     ) -> Self:
-        """Build hyperparameters from schema fields."""
-        normalized = [*(fields or ()), *field_args]
+        """Build schema from tree fields."""
+        normalized = [
+            *(bind_tree_field(None, field) for field in (fields or ())),
+            *(bind_tree_field(None, field) for field in field_args),
+            *(bind_tree_field(source, field) for source, field in field_kwargs.items()),
+        ]
         if not normalized:
-            raise ValueError("from_schema requires at least one field")
+            raise ValueError("from_tree requires at least one field")
 
         seen_sources: set[str] = set()
-        root_fields: list[Array | RequestTypes] = []
+        root_fields: list[Branch | RequestTypes] = []
 
         for field in normalized:
-            if not isinstance(field, (Array, Leaf)):
-                raise TypeError("schema fields must be Array, Leaf, or concrete request instances")
+            if not isinstance(field, (Branch, Leaf)):
+                raise TypeError("tree fields must be Branch, Leaf, or concrete request instances")
+            if field.name is None:
+                raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
 
             source = field.name
             if source in seen_sources:
                 raise ValueError(f"duplicate schema source field: {source}")
             seen_sources.add(source)
 
-            root_fields.append(cls.from_schema_node(field))
+            root_fields.append(cls.from_tree_node(field))
 
-        array = Array(
+        branch = Branch(
             name=name,
             description=description,
             embed=embed,
@@ -172,34 +212,34 @@ class Hyperparameters(Node):
             n_layers=n_layers,
             n_heads=n_heads,
             n_linear=n_linear,
-            max_length=1,
+            length=1,
             overflow=Overflow.error,
             dropout=dropout,
             fields=root_fields,
         )
-        return cls(d_model=d_model, fields=array)
+        return cls(d_model=d_model, fields=branch)
 
     def model_post_init(self, __context):
-        def materialize(array: Array) -> Array:
-            fields: list[Array | RequestTypes] = []
-            for field in list(array.fields):
+        def materialize(branch: Branch) -> Branch:
+            fields: list[Branch | RequestTypes] = []
+            for field in list(branch.fields):
                 field.parent = None
 
-                if isinstance(field, Array):
+                if isinstance(field, Branch):
                     fields.append(materialize(field))
                 elif type(field) is Leaf:
                     fields.append(self.request_from_leaf(field))
                 else:
                     fields.append(field)
 
-            array.fields = fields
-            for field in array.fields:
-                field.parent = array
+            branch.fields = fields
+            for field in branch.fields:
+                field.parent = branch
 
-            return array
+            return branch
 
         self.fields = materialize(self.fields)
-        self.fields.max_length = 1
+        self.fields.length = 1
         self.fields.overflow = Overflow.error
         self.fields.parent: Self = self
         self._post_bind_validate()
@@ -221,8 +261,8 @@ class Hyperparameters(Node):
         return [Address(str(node.address)) for node in self.select(role)]
 
     @functools.cached_property
-    def arrays(self) -> dict[Address, Array]:
-        return {node.address: node for node in self.descendants if isinstance(node, Array)}
+    def branches(self) -> dict[Address, Branch]:
+        return {node.address: node for node in self.descendants if isinstance(node, Branch)}
 
     @functools.cached_property
     def requests(self) -> dict[Address, RequestTypes]:
@@ -239,15 +279,15 @@ class Hyperparameters(Node):
     def overflows(self, address: Address) -> tuple[Overflow, ...]:
         return (Overflow.error, *self.requests[Address(str(address))].overflows)
 
-    def array_masks_for(self, address: Address) -> tuple[tuple[Address, Mask], ...]:
+    def branch_masks_for(self, address: Address) -> tuple[tuple[Address, Mask], ...]:
         request = self.requests[Address(str(address))]
         applications: list[tuple[Address, Mask]] = []
-        for array in [node for node in request.path if isinstance(node, Array)]:
-            for mask in array.masks:
-                if any(leaf is request for leaf in array.excluded_leaves(mask)):
+        for branch in [node for node in request.path if isinstance(node, Branch)]:
+            for mask in branch.masks:
+                if any(leaf is request for leaf in branch.excluded_leaves(mask)):
                     continue
 
-                applications.append((array.address, mask))
+                applications.append((branch.address, mask))
 
         return tuple(applications)
 
@@ -255,14 +295,14 @@ class Hyperparameters(Node):
     def depthwise(self) -> list[list[Address]]:
         out: list[list[Address]] = []
         for depth in LevelOrderGroupIter(self.fields):
-            arrays = [node.address for node in depth if isinstance(node, Array)]
-            if arrays:
-                out.append(arrays)
+            branches = [node.address for node in depth if isinstance(node, Branch)]
+            if branches:
+                out.append(branches)
 
         return out
 
     def _clear_tree_caches(self) -> None:
-        for name in ("arrays", "requests", "active_requests", "shapes", "depthwise"):
+        for name in ("branches", "requests", "active_requests", "shapes", "depthwise"):
             self.__dict__.pop(name, None)
 
         for node in PreOrderIter(self.fields):
@@ -288,8 +328,8 @@ class Hyperparameters(Node):
         }
 
     def _post_bind_validate(self) -> None:
-        for array in self.arrays.values():
-            array.post_bind_validate()
+        for branch in self.branches.values():
+            branch.post_bind_validate()
 
         for request in self.requests.values():
             request.post_bind_validate()
@@ -362,7 +402,7 @@ class Hyperparameters(Node):
 
             if validate and applicable_values:
                 payload = node.model_dump(mode="python", round_trip=True)
-                if isinstance(node, Array) and "masks" not in applicable_values:
+                if isinstance(node, Branch) and "masks" not in applicable_values:
                     payload["masks"] = list(node.masks)
                 if "target" in applicable_values and "p_prune" not in applicable_values:
                     payload.pop("p_prune", None)
@@ -385,19 +425,19 @@ class Hyperparameters(Node):
         include_root: bool = True,
         use_cache: bool = True,
     ) -> None:
-        """Append new schema fields under the single array selected by predicates."""
+        """Append new schema fields under the single branch selected by predicates."""
         predicates: list[NodeSelector] = []
         fields: list[SchemaField] = []
         reading_fields = False
 
         for item in args:
-            if isinstance(item, (Array, Leaf)):
+            if isinstance(item, (Branch, Leaf)):
                 reading_fields = True
                 fields.append(item)
                 continue
 
             if reading_fields:
-                raise TypeError("extend predicates must come before new schema fields")
+                raise TypeError("extend predicates must come before new tree fields")
 
             predicates.append(item)
 
@@ -407,15 +447,15 @@ class Hyperparameters(Node):
         candidates = [
             node
             for node in self.select(*predicates, include_root=include_root, use_cache=use_cache)
-            if isinstance(node, Array)
+            if isinstance(node, Branch)
         ]
 
         if len(candidates) != 1:
-            raise ValueError(f"extend requires exactly one matching array node, found {len(candidates)}")
+            raise ValueError(f"extend requires exactly one matching branch node, found {len(candidates)}")
 
         parent = candidates[0]
-        array_path = tuple(node.name for node in parent.path[2:] if isinstance(node, Array))
-        new_fields = [self.from_schema_node(field, array_path=array_path) for field in fields]
+        branch_path = tuple(node.name for node in parent.path[2:] if isinstance(node, Branch) and node.name is not None)
+        new_fields = [self.from_tree_node(field, branch_path=branch_path) for field in fields]
         existing_names = {field.name for field in parent.fields}
         duplicate_names = sorted({field.name for field in new_fields if field.name in existing_names})
         duplicate_names.extend(
@@ -463,7 +503,7 @@ class Hyperparameters(Node):
         if not selected:
             raise ValueError("delete matched no nodes")
         if self.fields in selected:
-            raise ValueError("delete cannot remove the root array")
+            raise ValueError("delete cannot remove the root branch")
 
         selected_ids = {id(node) for node in selected}
         roots = [
@@ -482,16 +522,16 @@ class Hyperparameters(Node):
         if not remaining_request_addresses:
             raise ValueError("delete would remove every request")
 
-        remaining_array_addresses = {address for address in self.arrays if address not in removed_addresses}
-        for address in remaining_array_addresses:
+        remaining_branch_addresses = {address for address in self.branches if address not in removed_addresses}
+        for address in remaining_branch_addresses:
             prefix = f"{address}/"
             if not any(str(request_address).startswith(prefix) for request_address in remaining_request_addresses):
-                raise ValueError(f"delete would leave array '{address}' without request descendants")
+                raise ValueError(f"delete would leave branch '{address}' without request descendants")
 
         for node in roots:
             parent = node.parent
-            if not isinstance(parent, Array):
-                raise ValueError(f"delete cannot remove '{node.address}' because it has no array parent")
+            if not isinstance(parent, Branch):
+                raise ValueError(f"delete cannot remove '{node.address}' because it has no branch parent")
             parent.fields = [field for field in parent.fields if field is not node]
             node.parent = None
 
@@ -562,7 +602,7 @@ class Hyperparameters(Node):
         heading.append(f"[{self.type}]", style=self.RICH_TYPE_STYLE)
         for name, value in (
             ("d_model", self.d_model),
-            ("arrays", len(self.arrays)),
+            ("branches", len(self.branches)),
             ("fields", len(self.active_requests)),
             ("targets", len(self.target)),
             ("embeds", len(self.embed)),

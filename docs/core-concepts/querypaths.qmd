@@ -9,11 +9,11 @@ This guide is limited to how `json2vec` binds schema fields to values in
 JSON-like input records.
 
 Each leaf field has a request-level `query`. When `query` is omitted,
-`json2vec` infers one from the field name and its parent `Array` nodes. When the
+`json2vec` infers one from the field name and its parent `Branch` nodes. When the
 source payload does not match the schema names, pass an explicit
 [JMESPath](https://jmespath.org/) expression with `query=...`.
 
-Queries are the bridge between your raw record shape and the model tree. Arrays
+Queries are the bridge between your raw record shape and the model tree. Branches
 define repeated contexts, but only leaf tensorfields such as `Number`,
 `Category`, and `Entity` bind directly to source values with `query`.
 Those leaf queries can be set when the field is constructed, updated later with
@@ -134,15 +134,15 @@ record = {
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
-    j2v.Category("merchant", max_vocab_size=4096),
-    j2v.Category("is_fraud", max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=32,
     n_layers=1,
     n_heads=4,
+    amount=jv.Number,
+    merchant=jv.Category(size=4096),
+    is_fraud=jv.Category(size=2),
 )
 
 model
@@ -156,18 +156,18 @@ The inferred request queries are:
 | `record/merchant` | `[*].merchant` |
 | `record/is_fraud` | `[*].is_fraud` |
 
-Changing the root array name changes addresses, not source queries:
+Changing the root branch name changes addresses, not source queries:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
+model = jv.Model.from_tree(
     name="transaction",
     d_model=32,
     n_layers=1,
     n_heads=4,
+    amount=jv.Number,
 )
 
 model
@@ -179,14 +179,14 @@ model
 
 ## Nested Defaults
 
-Use `Array` when the source contains repeated child objects:
+Use `Branch` when the source contains fields that share a repeated context:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
 record = {
-    "order_id": "O-1001",
+    "order_source": "web",
     "line_items": [
         {"sku": "A12", "quantity": 2, "price": 19.99},
         {"sku": "B07", "quantity": 1, "price": 45.50},
@@ -198,18 +198,17 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Category("order_id", max_vocab_size=100_000),
-    j2v.Array(
-        j2v.Category("sku", max_vocab_size=2048),
-        j2v.Number("quantity"),
-        j2v.Number("price"),
-        name="line_items",
-        max_length=32,
-    ),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
+    order_source=jv.Category(size=32),
+    line_items=jv.Branch(
+        length=32,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+        price=jv.Number,
+    ),
 )
 
 model
@@ -219,7 +218,7 @@ The inferred child queries include the parent array selector:
 
 | Address | Query |
 | --- | --- |
-| `record/order_id` | `[*].order_id` |
+| `record/order_source` | `[*].order_source` |
 | `record/line_items/sku` | `[*].line_items[*].sku` |
 | `record/line_items/quantity` | `[*].line_items[*].quantity` |
 | `record/line_items/price` | `[*].line_items[*].price` |
@@ -235,14 +234,14 @@ Query shape follows the schema shape. Against one processed observation,
 ```
 
 That nested result is intentional. It preserves the root record dimension and
-the `line_items` dimension. Array overflow is resolved after query selection,
-using the order returned by the query. Use `overflow="tail"` on an `Array` when
+the `line_items` dimension. Branch overflow is resolved after query selection,
+using the order returned by the query. Use `overflow="tail"` on a `Branch` when
 the newest records are at the end of that result, or `overflow="error"` when
 truncation should fail fast.
 
-## Multiple Nested Arrays
+## Multiple Nested Branches
 
-Default inference extends through every parent `Array`:
+Default inference extends through every parent `Branch`:
 
 ```{python .marimo}
 #| echo: true
@@ -251,7 +250,7 @@ Default inference extends through every parent `Array`:
 record = {
     "accounts": [
         {
-            "account_id": "A-1",
+            "account_type": "checking",
             "transactions": [
                 {"merchant": "bookshop", "amount": 12.50},
                 {"merchant": "bakery", "amount": 8.25},
@@ -265,21 +264,19 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category("account_id", max_vocab_size=100_000),
-        j2v.Array(
-            j2v.Category("merchant", max_vocab_size=4096),
-            j2v.Number("amount"),
-            name="transactions",
-            max_length=128,
-        ),
-        name="accounts",
-        max_length=8,
-    ),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
+    accounts=jv.Branch(
+        length=8,
+        account_type=jv.Category(size=16),
+        transactions=jv.Branch(
+            length=128,
+            merchant=jv.Category(size=4096),
+            amount=jv.Number,
+        ),
+    ),
 )
 
 model
@@ -289,7 +286,7 @@ The nested defaults are:
 
 | Address | Query |
 | --- | --- |
-| `record/accounts/account_id` | `[*].accounts[*].account_id` |
+| `record/accounts/account_type` | `[*].accounts[*].account_type` |
 | `record/accounts/transactions/merchant` | `[*].accounts[*].transactions[*].merchant` |
 | `record/accounts/transactions/amount` | `[*].accounts[*].transactions[*].amount` |
 
@@ -304,9 +301,9 @@ Important rules:
   `[*].`.
 - Do not include the extra outer batch selector.
 - Explicit queries are full request-level paths. They are not relative to the
-  parent `Array`.
+  parent `Branch`.
 - The result shape should match the field's schema location. A leaf under one
-  `Array` should usually return nested lists with one array dimension.
+  `Branch` should usually return nested lists with one array dimension.
 - Use JMESPath syntax, not JSONPath syntax. For example, use `[*].amount`, not
   `$.amount`.
 
@@ -334,7 +331,7 @@ of rebuilding the schema:
 #| output: true
 
 model.update(
-    j2v.where("address") == "record/amount",
+    jv.where("address") == "record/amount",
     query="[*].transaction.amount_usd",
 )
 ```
@@ -347,13 +344,13 @@ context manager. The original query is restored when the context exits:
 #| output: true
 
 with model.override(
-    j2v.where("address") == "record/amount",
+    jv.where("address") == "record/amount",
     query="[*].fallback.amount",
 ):
     predictions = model.predict(records)
 ```
 
-Select leaf tensorfields when changing `query`. `Array` nodes define model
+Select leaf tensorfields when changing `query`. `Branch` nodes define model
 structure and addresses, but they do not bind directly to source values.
 
 ## Renamed Source Keys
@@ -377,13 +374,13 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount", query="[*].transaction.amount_usd"),
-    j2v.Category("merchant", query="[*].transaction.merchant_name", max_vocab_size=4096),
-    j2v.Category("label", query="[*].outcome", max_vocab_size=8),
+model = jv.Model.from_tree(
     d_model=32,
     n_layers=1,
     n_heads=4,
+    amount=jv.Number(query="[*].transaction.amount_usd"),
+    merchant=jv.Category(query="[*].transaction.merchant_name", size=4096),
+    label=jv.Category(query="[*].outcome", size=8),
 )
 
 model
@@ -416,12 +413,12 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Category("job_code", query='[*]."job code"', max_vocab_size=128),
-    j2v.Number("amount", query='[*].transaction."amount-usd"'),
+model = jv.Model.from_tree(
     d_model=32,
     n_layers=1,
     n_heads=4,
+    job_code=jv.Category(query='[*]."job code"', size=128),
+    amount=jv.Number(query='[*].transaction."amount-usd"'),
 )
 
 model
@@ -430,9 +427,9 @@ model
 In Python, it is usually easiest to wrap the query string in single quotes when
 the JMESPath expression contains quoted object keys.
 
-## Custom Queries Under Arrays
+## Custom Queries Under Branches
 
-When a schema array name differs from the source array path, set full explicit
+When a schema branch name differs from the source array path, set full explicit
 queries on the child leaves:
 
 ```{python .marimo}
@@ -453,16 +450,15 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category("sku", query="[*].payload.items[*].product.sku", max_vocab_size=2048),
-        j2v.Number("quantity", query="[*].payload.items[*].qty"),
-        name="line_items",
-        max_length=32,
-    ),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
+    line_items=jv.Branch(
+        length=32,
+        sku=jv.Category(query="[*].payload.items[*].product.sku", size=2048),
+        quantity=jv.Number(query="[*].payload.items[*].qty"),
+    ),
 )
 
 model
@@ -475,10 +471,10 @@ The output addresses use the schema names:
 | `record/line_items/sku` | `[*].payload.items[*].product.sku` |
 | `record/line_items/quantity` | `[*].payload.items[*].qty` |
 
-## Filtered Arrays
+## Filtered Branches
 
 JMESPath filters are useful when only some child objects should populate a
-schema array:
+schema branch:
 
 ```{python .marimo}
 #| echo: true
@@ -497,16 +493,15 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Entity("device_id", query="[*].events[?event_type == 'login'].device_id"),
-        j2v.Number("risk_score", query="[*].events[?event_type == 'login'].risk_score"),
-        name="login_events",
-        max_length=16,
-    ),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
+    login_events=jv.Branch(
+        length=16,
+        device_id=jv.Entity(query="[*].events[?event_type == 'login'].device_id"),
+        risk_score=jv.Number(query="[*].events[?event_type == 'login'].risk_score"),
+    ),
 )
 
 model
@@ -519,7 +514,7 @@ within `login_events`.
 You can filter nested arrays with a query path, but use a
 [preprocessor](../guides/data-modules.qmd#preprocessors) when filtering depends
 on sorting, windowing, request time, or other business rules.
-Sibling fields under the same `Array` should use the same filter so their values
+Sibling fields under the same `Branch` should use the same filter so their values
 remain aligned.
 :::
 
@@ -549,16 +544,15 @@ record = {
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Category("first_origin", query="[*].legs[0].origin_airport", max_vocab_size=512),
-    j2v.Array(
-        j2v.Number("amount", query="[*].events[:10].amount"),
-        name="recent_events",
-        max_length=10,
-    ),
+model = jv.Model.from_tree(
     d_model=32,
     n_layers=1,
     n_heads=4,
+    first_origin=jv.Category(query="[*].legs[0].origin_airport", size=512),
+    recent_events=jv.Branch(
+        length=10,
+        amount=jv.Number(query="[*].events[:10].amount"),
+    ),
 )
 
 model
@@ -593,7 +587,7 @@ first, choose a time window, or make the slicing rule testable outside JMESPath.
 | `{"accounts": [{"txns": [{"amount": 1}]}]}` | `[*].accounts[*].txns[*].amount` | `[[[1]]]` |
 
 Avoid flattening operators such as `[]` unless you intentionally want to remove
-an array dimension. Most fields under `Array` should use `[*]` at each array
+an array dimension. Most fields under `Branch` should use `[*]` at each array
 level so values remain aligned with the schema tree.
 
 For example:
@@ -646,6 +640,6 @@ print(tensors)
 | --- | --- | --- |
 | Query syntax is rejected while building the model | The expression is not valid JMESPath | Compile it with `jmespath.compile(...)` or test it in the JMESPath playground. |
 | Query repeatedly returns empty results | The source path does not exist for the input records | Test against one processed observation and check key names exactly. |
-| Array child values are misaligned | Different child queries filter or flatten differently | Use the same array path and filters for sibling fields. |
-| Shape is flatter than expected | The query used `[]` flattening or skipped a `[*]` level | Use `[*]` at every schema array level. |
+| Branch child values are misaligned | Different child queries filter or flatten differently | Use the same array path and filters for sibling fields. |
+| Shape is flatter than expected | The query used `[]` flattening or skipped a `[*]` level | Use `[*]` at every schema branch level. |
 | Query starts with `[*][*]` | You wrote the internal batch query | Remove the extra leading selector. |

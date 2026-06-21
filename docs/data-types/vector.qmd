@@ -23,9 +23,9 @@ precomputed embeddings, dense descriptors, sensor windows, or model features.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-embedding = j2v.Vector(
+embedding = jv.Vector(
     "embedding",
     n_dim=4,
     objective="l2",
@@ -36,7 +36,7 @@ embedding
 
 Use `Vector` when embeddings or dense features are already present in the input
 record. Use `Text` when `json2vec` should compute embeddings from strings. Use an
-`Array` when repeated measurements have item structure.
+`Branch` when repeated measurements have item structure.
 
 ## Input Values
 
@@ -47,7 +47,7 @@ record. Use `Text` when `json2vec` should compute embeddings from strings. Use a
 - 1D PyTorch tensors.
 
 Every valued input must have exactly `n_dim` numeric elements. `None` is encoded
-as a null state, and missing array positions are encoded as padded state.
+as a null state, and missing branch positions are encoded as padded state.
 Prepare vector scale and normalization upstream unless a custom tensorfield owns
 that behavior.
 

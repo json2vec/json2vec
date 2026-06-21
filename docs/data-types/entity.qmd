@@ -29,25 +29,25 @@ vocabulary for that identifier.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-transactions = j2v.Array(
-    j2v.Entity("account_id", topk=[5]),
+transactions = jv.Branch(
     name="transactions",
-    max_length=16,
+    length=16,
+    account_id=jv.Entity(topk=[5]),
 )
 
 transactions
 ```
 
-Use `Category` when identifiers should be stable labels learned across training
-and prediction. Use `Entity` only when equality inside the current repeated
-context is the useful signal.
+Use `Category` when a value is a bounded stable label learned across training
+and prediction. Use `Entity` when equality inside the current repeated context
+is the useful signal.
 
 ## Input Values
 
 `Entity` expects hashable scalar values such as strings or integers. `None` is
-encoded as a null state, and missing array positions are encoded as padded
+encoded as a null state, and missing branch positions are encoded as padded
 state.
 
 Entity IDs are local to the tensorized batch. The same raw value receives the
@@ -70,11 +70,11 @@ Common entity fields include:
 | `topk` | `[]` | Optional top-k identity accuracy metrics. Values must be positive and not `1`. |
 
 An `Entity` field must have at least two slots per observation. In practice,
-place it under an `Array(max_length=...)` greater than `1`.
+place it under a `Branch(length=...)` greater than `1`.
 
 ::: {.callout-note}
 Advanced root shapes can also provide repeated values, but the normal and
-clearest pattern is `Entity` under an `Array`.
+clearest pattern is `Entity` under a `Branch`.
 :::
 
 ## Target Behavior
@@ -96,11 +96,12 @@ internal representation for learning identity relationships. Configure
 
 ## Notes
 
-Use `j2v.Category` when identifiers should map to a persistent global vocabulary and
-be emitted as labels. Use `j2v.Entity` when only equality relationships within the
-current repeated context matter, or there are simply too many unique global values to track.
+Use `jv.Category` when values should map to a bounded persistent vocabulary and
+be emitted as labels. Use `jv.Entity` when only equality relationships within
+the current repeated context matter, or there are too many unique global values
+to track efficiently.
 
-Users may also consider defining a "superbloom" style custom extension to maintain a larger set of unique categorical values without the linear memory costs associated with `j2v.Category`.
+Users may also consider defining a "superbloom" style custom extension to maintain a larger set of unique categorical values without the linear memory costs associated with `jv.Category`.
 
 See the [Device Tenure](../case-studies/device-tenure.qmd) case study for an
 applied repeated-device pattern.

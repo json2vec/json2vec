@@ -1,0 +1,227 @@
+---
+marimo-static-output: true
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "marimo>=0.23.8",
+    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+  ]
+---
+
+# Branch
+
+Use `Branch` to name a shared context for child fields. In raw data this is
+often a repeated collection such as transactions, line items, sessions, or
+measurements: the child leaves are the attributes of each item in that
+collection.
+
+A branch gives those leaves one coordinate system. `length`, `overflow`, and
+branch masks apply to the collection as a whole; child queries stay aligned
+under the branch address; and branch embeddings represent the grouped context.
+At runtime, child leaf embeddings are gathered into the branch. If
+`attention!="none"`, a transformer encoder lets items in the context interact;
+then pooling rolls the branch representation up to its parent.
+
+```json
+{
+  "measurements": [
+    {"name": "mean_radius", "value": 17.99},
+    {"name": "mean_texture", "value": 10.38}
+  ]
+}
+```
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import json2vec as jv
+
+measurements = jv.Branch(
+    jv.Category("name", size=32),
+    name="measurements",
+    length=8,
+    overflow="tail",
+    n_layers=2,
+    value=jv.Number,
+)
+
+measurements
+```
+
+Use a different type for scalar vectors (`Vector`) or unordered labels (`Set`).
+If repeated rows do not define a real shared context and are only a melted
+representation of a flat table, preprocessing or flattening is usually more
+efficient.
+
+## Input Values
+
+For the common repeated-collection case, `Branch` expects a list of child
+objects at the source path named by `name`, unless the child fields use
+explicit `query` expressions. Each child tensorfield is padded to the configured
+`length`, and overlong inputs are handled by the branch's `overflow` policy.
+
+::: {.callout-note}
+Set `length` deliberately for real repeated data. The default is `1`,
+which is useful for singleton contexts but usually too small for meaningful
+histories.
+:::
+
+With `length=2` and the default `overflow="head"`, the first two items are
+retained, extra items are truncated, and missing slots are padded:
+
+```json
+[
+  {"measurements": [{"name": "a", "value": 1.0}, {"name": "b", "value": 2.0}, {"name": "c", "value": 3.0}]},
+  {"measurements": [{"name": "a", "value": 4.0}]}
+]
+```
+
+The first record keeps `a` and `b`; `c` is truncated. The second record keeps
+`a` and adds one padded slot. Branch order is the order returned by the query.
+Sort, window, or filter in a preprocessor when
+order matters.
+
+Use `overflow="tail"` when the query result is ordered oldest-to-newest and the
+most recent records should be retained:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+events = jv.Branch(
+    name="events",
+    length=128,
+    overflow="tail",
+    event_type=jv.Category(size=128),
+    amount=jv.Number,
+)
+
+events
+```
+
+Use `overflow="error"` when any truncated input would indicate a bad schema,
+bad query, or upstream data contract failure.
+
+For a top-level schema like:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model = jv.Model.from_tree(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    measurements=jv.Branch(
+        jv.Category("name", size=32),
+        length=8,
+        value=jv.Number,
+    ),
+)
+
+model
+```
+
+`json2vec` infers child queries like `[*].measurements[*].name` and
+`[*].measurements[*].value`.
+
+::: {.callout-note}
+Field `name` controls the public schema name. `query` controls where values
+are read. When omitted, `json2vec` infers the request query from the field and
+parent branch names. `Branch` itself does not read a value with `query`; its
+child leaves do.
+:::
+
+Use explicit queries when the source keys do not match the public schema names:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+items = jv.Branch(
+    name="items",
+    length=32,
+    sku=jv.Category(query="[*].line_items[*].product_sku", size=2048),
+    quantity=jv.Number(query="[*].line_items[*].qty"),
+)
+
+items
+```
+
+Explicit queries can also stack repeated semantic roles, such as origin and
+destination, into one shared field. See [Field Stacking](../guides/field-stacking.qmd).
+
+## Examples
+
+Common branch contexts include:
+
+- Transaction line items, order items, cart contents, or invoice rows.
+- Time-ordered events in a session, visit, trip, or workflow.
+- Repeated measurements, sensor readings, observations, or lab results.
+- Related parties or counterparties attached to one record.
+- Singleton subcontexts that deserve their own address, encoder, or embedding.
+
+## Configuration
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `name` | required | Public schema name and inferred source key. |
+| `fields` | `[]` | Child branches or tensorfields. Positional constructor arguments become `fields`. |
+| `length` | `1` | Number of repeated slots retained per observation. Must be positive. |
+| `overflow` | `"head"` | How to handle more than `length` child records: `"head"` keeps the first records, `"tail"` keeps the last records, and `"error"` raises. |
+| `attention` | `"mha"` | Attention implementation for the branch encoder. Use `"none"` to skip transformer attention and only pool the child context. |
+| `n_layers` | `1` | Number of encoder layers for this branch. |
+| `n_heads` | `4` | Attention heads for this branch. Must be even. |
+| `n_linear` | `1` | Number of feed-forward linear layers in this branch. |
+| `dropout` | `None` | Optional dropout rate. |
+| `mask` | `None` | One `jv.Mask(...)` policy for selecting repeated coordinates during training. |
+| `masks` | `[]` | Multiple named or unnamed `jv.Mask(...)` policies for the same branch. |
+| `embed` | `False` | Includes this branch node in `Model.predict(...)` outputs under `embedding`. See [Learning Modes & Embeddings](../core-concepts/embeddings.qmd). |
+| `description` | `None` | Optional schema metadata. |
+
+## Nesting
+
+Branches can contain tensorfields or other branches. Each nested branch names
+another shared context and contributes another dimension to the child fields'
+shape.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+session = jv.Branch(
+    name="sessions",
+    length=4,
+    transactions=jv.Branch(
+        length=32,
+        amount=jv.Number,
+    ),
+)
+
+session
+```
+
+Deep nesting is useful when the source shape marks real context boundaries. If
+repeated records are only an artifact of upstream storage, flattening or
+preprocessing the data can be more efficient.
+
+## Target And Prediction Behavior
+
+`Branch` itself is not a supervised target. Its child tensorfields can be
+targets, and the branch context is used to encode those children and route
+information through the model.
+
+`p_mask`, `p_prune`, and `target=True` are configured on leaf tensorfields, not
+on `Branch`. To apply the same masking or pruning rate to every child field, use
+`model.update(...)` with a selector that matches those leaves.
+
+Configure `mask=` or `masks=` on a branch when the selection is about repeated
+coordinates rather than independent leaf values. Branch masks are resolved after
+query extraction, overflow handling, and padding, then projected to active
+descendant leaves. See [Dynamic Masking](../core-concepts/dynamic-masking.qmd).
+
+Configure `embed=True` on a branch when you want `Model.predict(...)` to return
+a representation for the grouped context under that branch address. See
+[Learning Modes & Embeddings](../core-concepts/embeddings.qmd) for root,
+branch, and leaf embedding patterns.

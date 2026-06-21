@@ -4,7 +4,7 @@ import string
 
 from rich import print
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.structs.enums import Strata
 
 ALPHABET = string.ascii_uppercase
@@ -17,20 +17,18 @@ def letter_record(values: str) -> dict[str, list[dict[str, str]]]:
 
 
 if __name__ == "__main__":
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Category(
-                "letter",
-                max_vocab_size=len(ALPHABET),
-                p_unavailable=0.0,
-                topk=[3],
-            ),
-            name="letters",
-            max_length=8,
-        ),
+    model = jv.Model.from_tree(
         d_model=16,
         n_layers=1,
         n_heads=4,
+        letters=jv.Branch(
+            length=8,
+            letter=jv.Category(
+                size=len(ALPHABET),
+                p_unavailable=0.0,
+                topk=[3],
+            ),
+        ),
     )
 
     # Prime the vocabulary from normal training inputs. The reserved MASK

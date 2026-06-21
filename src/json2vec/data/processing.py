@@ -162,10 +162,10 @@ def _iter_leaf_nodes(
             continue
 
         length = len(node)
-        max_length = shape[depth]
+        capacity = shape[depth]
         policy = overflows[depth]
 
-        if policy == Overflow.error and length > max_length:
+        if policy == Overflow.error and length > capacity:
             provided_shape = (*shape[:depth], length, *shape[depth + 1 :])
             if depth == 0:
                 context = "batch dimension 0"
@@ -175,9 +175,9 @@ def _iter_leaf_nodes(
                 context = f"dimension {depth}"
             if address is not None:
                 context = f"{context} for {Address(str(address))}"
-            raise ValueError(f"array overflow at {context}: expected shape {shape}, provided shape {provided_shape}")
+            raise ValueError(f"branch overflow at {context}: expected shape {shape}, provided shape {provided_shape}")
 
-        limit = min(length, max_length)
+        limit = min(length, capacity)
         if policy == Overflow.tail:
             source_start = length - limit
             indices = [(source_start + destination, destination) for destination in range(limit)]

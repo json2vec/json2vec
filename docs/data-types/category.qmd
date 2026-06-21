@@ -24,11 +24,11 @@ country codes, product families, merchant IDs, and similar discrete values.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-merchant = j2v.Category(
+merchant = jv.Category(
     "merchant",
-    max_vocab_size=4096,
+    size=4096,
     topk=[3, 10],
     p_unavailable=0.02,
 )
@@ -43,9 +43,9 @@ matching inside repeated records rather than a persistent vocabulary.
 ## Input Values
 
 `Category` expects scalar labels. Strings are the normal input. Use a
-preprocessor if upstream identifiers need to be converted into stable label
+preprocessor if upstream labels or codes need to be converted into stable
 strings or otherwise cleaned. `None` is encoded as a null state, and missing
-array positions are encoded as padded state.
+branch positions are encoded as padded state.
 
 ## Examples
 
@@ -54,13 +54,17 @@ Common category fields include:
 - A supervised class label such as `fraud`, `churn`, `species`, or `diagnosis`.
 - A bounded business label such as customer tier, region, product family, or channel.
 - A stable categorical code such as country, currency, device type, or merchant category.
-- A high-value identifier only when it should be learned as a persistent global label.
+
+Avoid using `Category` for massive identifiers such as customer IDs, account
+IDs, session IDs, or device IDs. A large global vocabulary is memory-heavy and
+usually generalizes poorly. Keep unique IDs as metadata, or use `Entity` when
+the model only needs local equality within a repeated context.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-target = j2v.Category("fraud", target=True, max_vocab_size=3, topk=[2])
+target = jv.Category("fraud", target=True, size=3, topk=[2])
 
 target
 ```
@@ -69,18 +73,18 @@ target
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `max_vocab_size` | `10000` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
+| `size` | `1024` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
 | `p_unavailable` | `0.01` | During training, randomly routes known labels to the unavailable bucket so the decoder learns that case. |
-| `topk` | `[]` | Optional top-k accuracy metrics and prediction candidates. Values must be positive, not `1`, and less than `max_vocab_size`. |
+| `topk` | `[]` | Optional top-k accuracy metrics and prediction candidates. Values must be positive, not `1`, and less than `size`. |
 
 ## Shared Preprocessing State
 
 `Category` maintains an online vocabulary shared by encoding workers and saved
-with the model. Training data can add new labels until `max_vocab_size` is full.
+with the model. Training data can add new labels until `size` is full.
 Validation, test, and prediction data do not expand the vocabulary.
 
 Labels that are not in the learned vocabulary keep state `valued`, but their
-content is routed to a reserved unavailable bucket at index `max_vocab_size`.
+content is routed to a reserved unavailable bucket at index `size`.
 This preserves the fact that the field existed while avoiding unstable
 vocabulary growth after training.
 
@@ -113,7 +117,7 @@ Top-k metrics are tracked for each configured value in `topk`.
 
 `topk=1` is disallowed because top-1 is already represented by the primary
 `content.value` and `content.probability` fields. Values must be less than
-`max_vocab_size` so the requested candidates stay inside the learned label
+`size` so the requested candidates stay inside the learned label
 space. Duplicate values are normalized away.
 
 The reserved unavailable bucket can affect training loss and metrics, but it is
@@ -122,7 +126,7 @@ not emitted as a prediction candidate.
 ## Prediction Output
 
 Rendered examples use string paths for readability. The Python dictionary
-returned by `Model.predict(...)` is keyed by `j2v.Address` objects.
+returned by `Model.predict(...)` is keyed by `jv.Address` objects.
 
 `Model.predict(...)` returns the most likely known label, its probability, and
 the candidate list requested by `topk`:

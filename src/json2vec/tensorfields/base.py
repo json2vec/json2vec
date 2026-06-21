@@ -21,7 +21,7 @@ from json2vec.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-    from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.experiment import Schema
     from json2vec.structs.structure import Mask
 
 pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
@@ -32,7 +32,7 @@ RequestBase: TypeAlias = Leaf
 CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
 RegisterT = TypeVar("RegisterT", bound=ComponentValue)
-ArrayMaskApplication: TypeAlias = tuple[Address, "Mask"]
+BranchMaskApplication: TypeAlias = tuple[Address, "Mask"]
 
 
 def default_write(module: "Model", prediction: Prediction) -> None:
@@ -42,28 +42,28 @@ def default_write(module: "Model", prediction: Prediction) -> None:
 class EmbedderBase(torch.nn.Module):
     """Base class for tensorfield embedders."""
 
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+    def __init__(self, schema: Schema, address: Address):
         super().__init__()
 
 
 class DecoderBase(torch.nn.Module):
     """Base class for tensorfield decoders."""
 
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+    def __init__(self, schema: Schema, address: Address):
         super().__init__()
 
         self.address: Address = address
         self.sigma: torch.Tensor = torch.nn.Parameter(torch.zeros(1))
 
-        request = hyperparameters.requests[address]
+        request = schema.requests[address]
         n_context = 1
-        for dimension in hyperparameters.shapes[address]:
+        for dimension in schema.shapes[address]:
             n_context *= dimension
         match request.pooling:
             case "query":
                 self.pool = LearnedQueryCrossAttention(
                     n_context=n_context,
-                    d_model=hyperparameters.d_model,
+                    d_model=schema.d_model,
                     nhead=request.n_heads,
                     dropout=float(request.dropout or 0.0),
                     n_linear=request.n_linear,
@@ -125,7 +125,7 @@ class TensorFieldBase(Renderable):
         cls,
         values: list,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         strata: Strata,
     ) -> "TensorFieldBase":
         raise NotImplementedError
@@ -136,7 +136,7 @@ class TensorFieldBase(Renderable):
         cls,
         batch_size: int,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
     ) -> "TensorFieldBase":
         raise NotImplementedError
 
@@ -247,34 +247,36 @@ def _broadcast_to_state(selected: torch.Tensor, state: torch.Tensor) -> torch.Te
     return selected.expand_as(state)
 
 
-def _array_mask_candidates(
+def _branch_mask_candidates(
     state: torch.Tensor,
     *,
     address: Address,
-    array_address: Address,
+    branch_address: Address,
     mask: Mask,
-    hyperparameters: Hyperparameters,
+    schema: Schema,
 ) -> torch.Tensor:
     occupied = state.ne(torch.as_tensor(Tokens.padded.value, device=state.device, dtype=state.dtype))
-    request = hyperparameters.requests[address]
-    array_nodes = [node for node in request.path if getattr(node, "type", None) == "array"]
-    array_index = next(
-        index for index, array in enumerate(array_nodes) if Address(str(array.address)) == Address(str(array_address))
+    request = schema.requests[address]
+    branch_nodes = [node for node in request.path if getattr(node, "type", None) == "branch"]
+    branch_index = next(
+        index
+        for index, branch in enumerate(branch_nodes)
+        if Address(str(branch.address)) == Address(str(branch_address))
     )
-    array_dim = array_index + 1
+    branch_dim = branch_index + 1
 
-    occupied_at_array = occupied
-    while occupied_at_array.ndim > array_dim + 1:
-        occupied_at_array = occupied_at_array.any(dim=-1)
+    occupied_at_branch = occupied
+    while occupied_at_branch.ndim > branch_dim + 1:
+        occupied_at_branch = occupied_at_branch.any(dim=-1)
 
-    slot_count = occupied_at_array.shape[-1]
+    slot_count = occupied_at_branch.shape[-1]
     positions = torch.arange(slot_count, device=state.device).reshape(
-        *((1,) * (occupied_at_array.ndim - 1)),
+        *((1,) * (occupied_at_branch.ndim - 1)),
         slot_count,
     )
-    lengths = occupied_at_array.sum(dim=-1, keepdim=True)
+    lengths = occupied_at_branch.sum(dim=-1, keepdim=True)
 
-    if mask.array:
+    if mask.branch:
         extent = torch.full_like(lengths, slot_count)
     else:
         extent = lengths
@@ -296,17 +298,17 @@ def _array_mask_candidates(
 
     lower = lower.clamp(min=0, max=slot_count)
     upper = upper.clamp(min=0, max=slot_count)
-    candidates = (positions >= lower) & (positions < upper) & occupied_at_array
+    candidates = (positions >= lower) & (positions < upper) & occupied_at_branch
 
     if mask.rate is not None:
-        selected_at_array = torch.rand(candidates.shape, device=state.device, dtype=torch.float).lt(mask.rate)
-        selected_at_array &= candidates
+        selected_at_branch = torch.rand(candidates.shape, device=state.device, dtype=torch.float).lt(mask.rate)
+        selected_at_branch &= candidates
     else:
-        selected_at_array = torch.zeros_like(candidates, dtype=torch.bool)
+        selected_at_branch = torch.zeros_like(candidates, dtype=torch.bool)
         count = int(mask.count or 0)
         if count > 0 and candidates.any():
             flattened = candidates.reshape(-1, slot_count)
-            selected_flat = selected_at_array.reshape(-1, slot_count)
+            selected_flat = selected_at_branch.reshape(-1, slot_count)
             for row_index, row in enumerate(flattened):
                 candidate_indexes = torch.nonzero(row, as_tuple=False).reshape(-1)
                 if candidate_indexes.numel() == 0:
@@ -316,7 +318,7 @@ def _array_mask_candidates(
                 permutation = torch.randperm(candidate_indexes.numel(), device=state.device)[:chosen_count]
                 selected_flat[row_index, candidate_indexes[permutation]] = True
 
-    selected = _broadcast_to_state(selected_at_array, state)
+    selected = _broadcast_to_state(selected_at_branch, state)
     return selected & state.ne(torch.as_tensor(Tokens.padded.value, device=state.device, dtype=state.dtype))
 
 
@@ -329,23 +331,23 @@ def apply_mask_policies(
     p_mask: float = 0.0,
     *,
     p_prune: float = 0.0,
-    array_masks: tuple[ArrayMaskApplication, ...] = (),
+    branch_masks: tuple[BranchMaskApplication, ...] = (),
     address: Address | None = None,
-    hyperparameters: Hyperparameters | None = None,
+    schema: Schema | None = None,
 ) -> None:
-    """Apply array masks, random masks, and prune masks from one snapshot."""
+    """Apply branch masks, random masks, and prune masks from one snapshot."""
     state = tensorfield.state.clone()
 
-    if array_masks and (address is None or hyperparameters is None):
-        raise ValueError("array masks require address and hyperparameters")
+    if branch_masks and (address is None or schema is None):
+        raise ValueError("branch masks require address and schema")
 
-    for array_address, mask in array_masks:
-        selected = _array_mask_candidates(
+    for branch_address, mask in branch_masks:
+        selected = _branch_mask_candidates(
             state,
             address=cast(Address, address),
-            array_address=array_address,
+            branch_address=branch_address,
             mask=mask,
-            hyperparameters=hyperparameters,
+            schema=schema,
         )
         if selected.any():
             tensorfield.hide(selected, cache_targets=True, trainable=True)
@@ -451,10 +453,10 @@ class Plugin:
                 if not issubclass(obj, EmbedderBase):
                     raise TypeError("Embedder must be a subclass of EmbedderBase")
 
-                # confirm the init method is expecting hyperparameters and address
+                # confirm the init method is expecting schema and address
                 init_params = list(obj.__init__.__annotations__.keys())
-                if "hyperparameters" not in init_params or "address" not in init_params:
-                    raise TypeError("Embedder __init__ method must accept 'hyperparameters' and 'address' parameters")
+                if "schema" not in init_params or "address" not in init_params:
+                    raise TypeError("Embedder __init__ method must accept 'schema' and 'address' parameters")
 
             case Component.Decoder:
                 if not isinstance(obj, type):
@@ -464,8 +466,8 @@ class Plugin:
                     raise TypeError("Decoder must be a subclass of DecoderBase")
 
                 init_params = list(obj.__init__.__annotations__.keys())
-                if "hyperparameters" not in init_params or "address" not in init_params:
-                    raise TypeError("Decoder __init__ method must accept 'hyperparameters' and 'address' parameters")
+                if "schema" not in init_params or "address" not in init_params:
+                    raise TypeError("Decoder __init__ method must accept 'schema' and 'address' parameters")
 
             case Component.loss:
                 if not callable(obj):

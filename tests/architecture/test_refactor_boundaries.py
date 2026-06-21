@@ -4,17 +4,17 @@ import torch
 from lightning.pytorch.utilities.model_summary.model_summary import summarize
 from loguru import logger
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.architecture.checkpoint import CheckpointState
 from json2vec.architecture.graph import ModelGraph
 from json2vec.architecture.mutations import SchemaEditor
 from json2vec.structs import experiment, selectors
 
 
-def _model() -> j2v.Model:
-    return j2v.Model.from_schema(
-        j2v.Number(name="amount"),
-        j2v.Category(name="label", target=True, max_vocab_size=4),
+def _model() -> jv.Model:
+    return jv.Model.from_tree(
+        jv.Number(name="amount"),
+        jv.Category(name="label", target=True, size=4),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -24,8 +24,9 @@ def _model() -> j2v.Model:
 def test_model_uses_mutation_facade() -> None:
     model = _model()
 
-    assert isinstance(model.schema, SchemaEditor)
-    assert model.schema.select(j2v.where("name") == "amount") == model.select(j2v.where("name") == "amount")
+    assert isinstance(model.schema, jv.Schema)
+    assert isinstance(model._schema_editor, SchemaEditor)
+    assert model.schema.select(jv.where("name") == "amount") == model.select(jv.where("name") == "amount")
 
 
 def test_model_mutations_emit_structured_logs() -> None:
@@ -40,14 +41,14 @@ def test_model_mutations_emit_structured_logs() -> None:
     )
 
     try:
-        model.update(j2v.where("name") == "amount", weight=2.0)
-        model.update(j2v.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-        model.update(j2v.where("name") == "amount", target=True)
-        model.extend(j2v.where("name") == "record", j2v.Category(name="extra", max_vocab_size=4))
-        model.reset(j2v.where("name") == "amount")
-        with model.override(j2v.where("name") == "amount", weight=3.0):
+        model.update(jv.where("name") == "amount", weight=2.0)
+        model.update(jv.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+        model.update(jv.where("name") == "amount", target=True)
+        model.extend(jv.where("name") == "record", jv.Category(name="extra", size=4))
+        model.reset(jv.where("name") == "amount")
+        with model.override(jv.where("name") == "amount", weight=3.0):
             pass
-        model.delete(j2v.where("name") == "extra")
+        model.delete(jv.where("name") == "extra")
     finally:
         logger.remove(sink_id)
 
@@ -90,7 +91,7 @@ def test_model_mutation_logs_include_previous_and_current_address_for_renames() 
     )
 
     try:
-        model.update(j2v.where("name") == "amount", name="total")
+        model.update(jv.where("name") == "amount", name="total")
     finally:
         logger.remove(sink_id)
 
@@ -131,9 +132,9 @@ def test_checkpoint_state_round_trip(tmp_path) -> None:
     path = tmp_path / "model.ckpt"
 
     CheckpointState.save(model, path)
-    restored = CheckpointState.load(j2v.Model, path)
+    restored = CheckpointState.load(jv.Model, path)
 
-    assert restored.hyperparameters.model_dump(mode="python") == model.hyperparameters.model_dump(mode="python")
+    assert restored.schema.model_dump(mode="python") == model.schema.model_dump(mode="python")
     assert restored.batch_size == model.batch_size
 
 

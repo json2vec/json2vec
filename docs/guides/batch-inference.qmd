@@ -7,7 +7,7 @@ eval: false
 
 `model.predict([...])` is the interactive path for a list of raw dictionaries.
 For large prediction jobs, use a data module with Lightning
-`trainer.predict(...)`. Attach `j2v.Writer(...)` to write each prediction batch
+`trainer.predict(...)`. Attach `jv.Writer(...)` to write each prediction batch
 to Parquet as it finishes.
 
 ## Minimal Batch Prediction
@@ -19,7 +19,7 @@ to Parquet as it finishes.
 import lightning.pytorch as lit
 import polars as pl
 
-import json2vec as j2v
+import json2vec as jv
 
 predict_frame = pl.DataFrame(
     {
@@ -28,7 +28,7 @@ predict_frame = pl.DataFrame(
     }
 )
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     predict=predict_frame,
     num_workers=0,
@@ -36,7 +36,7 @@ datamodule = j2v.PolarsDataModule(
     pin_memory=False,
 )
 
-writer = j2v.Writer("predictions")
+writer = jv.Writer("predictions")
 
 trainer = lit.Trainer(
     accelerator="cpu",
@@ -83,7 +83,7 @@ for nodes configured with `embed=True`.
 #| echo: true
 #| output: true
 
-writer = j2v.Writer(
+writer = jv.Writer(
     "predictions",
     flush_every_n_batches=100,
 )
@@ -98,15 +98,15 @@ addresses, filtered payloads, or fewer fields.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
 
 def compact_rows(context, predictions):
-    label = predictions.get(j2v.Address("record", "label"), {}).get("content", {})
-    metadata = context[j2v.TensorKey.metadata]
+    label = predictions.get(jv.Address("record", "label"), {}).get("content", {})
+    metadata = context[jv.TensorKey.metadata]
 
     return {
-        j2v.Address("record", "warehouse_row"): {
+        jv.Address("record", "warehouse_row"): {
             "request_id": [item.get("request_id") for item in metadata],
             "label": label.get("value"),
             "label_probability": label.get("probability"),
@@ -114,7 +114,7 @@ def compact_rows(context, predictions):
     }
 
 
-writer = j2v.Writer(
+writer = jv.Writer(
     "warehouse-predictions",
     postprocessor=compact_rows,
 )
@@ -129,7 +129,7 @@ Writer postprocessors receive context keys such as:
 | --- | --- |
 | `"input"` | Encoded Lightning batch. |
 | `"batch"` | Alias for the encoded batch. |
-| `j2v.TensorKey.metadata` | Raw input metadata for each row. |
+| `jv.TensorKey.metadata` | Raw input metadata for each row. |
 | `"batch_indices"` | Lightning batch indices when provided. |
 | `"batch_idx"` | Prediction batch index. |
 | `"dataloader_idx"` | Prediction dataloader index. |
@@ -147,9 +147,9 @@ split:
 
 import lightning.pytorch as lit
 
-import json2vec as j2v
+import json2vec as jv
 
-datamodule = j2v.StreamingDataModule(
+datamodule = jv.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
@@ -160,7 +160,7 @@ datamodule = j2v.StreamingDataModule(
 trainer = lit.Trainer(
     accelerator="gpu",
     devices=1,
-    callbacks=[j2v.Writer("predictions")],
+    callbacks=[jv.Writer("predictions")],
 )
 
 trainer.predict(model=model, datamodule=datamodule)
@@ -178,7 +178,7 @@ destination is object storage.
 | Notebook demo | `model.predict([...])` |
 | Batch DataFrame prediction | `PolarsDataModule(..., predict=...)` plus `Writer` |
 | Batch file or S3 prediction | `StreamingDataModule(..., predict=...)` plus `Writer` |
-| Online service | `j2v.Deployment` |
+| Online service | `jv.Deployment` |
 
 ## Common Mistakes
 

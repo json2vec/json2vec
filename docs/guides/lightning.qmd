@@ -5,7 +5,7 @@ eval: false
 
 # Training With Lightning
 
-`json2vec` builds on top of PyTorch Lightning. A `j2v.Model` is a Lightning
+`json2vec` builds on top of PyTorch Lightning. A `jv.Model` is a Lightning
 `LightningModule`, and the data modules in `json2vec` are Lightning
 `LightningDataModule` implementations. The schema defines the model tree,
 typed inputs, losses, targets, and embeddings; Lightning runs the training,
@@ -25,10 +25,10 @@ aligned really well with the abstractions provided by Lightning.
 | --- | --- |
 | Schema, addresses, query paths, targets, embeddings | `json2vec` |
 | Tensorization, typed value state, datatype-specific losses | `json2vec` |
-| Optimizer and scheduler hooks | `j2v.Model` through Lightning |
+| Optimizer and scheduler hooks | `jv.Model` through Lightning |
 | Epochs, devices, precision, callbacks, logging, checkpoints | Lightning `Trainer` |
-| Data loading and tensorization batches | `j2v.PolarsDataModule` or `j2v.StreamingDataModule` |
-| Batch prediction writing | Lightning `Trainer.predict(...)` plus `j2v.Writer` |
+| Data loading and tensorization batches | `jv.PolarsDataModule` or `jv.StreamingDataModule` |
+| Batch prediction writing | Lightning `Trainer.predict(...)` plus `jv.Writer` |
 
 ## Minimal Training Loop
 
@@ -39,7 +39,7 @@ aligned really well with the abstractions provided by Lightning.
 import lightning.pytorch as lit
 import polars as pl
 
-import json2vec as j2v
+import json2vec as jv
 
 records = pl.DataFrame(
     {
@@ -49,17 +49,17 @@ records = pl.DataFrame(
     }
 )
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
-    j2v.Category("merchant", max_vocab_size=128),
-    j2v.Category("fraud", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=32,
     n_layers=1,
     n_heads=4,
     batch_size=2,
+    amount=jv.Number,
+    merchant=jv.Category(size=128),
+    fraud=jv.Category(target=True, size=2),
 )
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -136,7 +136,7 @@ predictions = model.predict(
 ```
 
 Use this for debugging, notebooks, and small request batches. For high-volume
-prediction, use `trainer.predict(...)` with a data module and `j2v.Writer`.
+prediction, use `trainer.predict(...)` with a data module and `jv.Writer`.
 
 ## Production Notes
 
@@ -151,6 +151,6 @@ through Lightning and the data module options.
 - Use [Data Modules](data-modules.qmd) to choose `PolarsDataModule` or
   `StreamingDataModule`.
 - Use [Batch Inference](batch-inference.qmd) to write predictions with
-  `j2v.Writer`.
+  `jv.Writer`.
 - Use [preprocessors](data-modules.qmd#preprocessors) for input-side Python
   logic.

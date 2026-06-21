@@ -107,7 +107,7 @@ These requirements map to the rest of the docs:
 | Capability | Start here |
 | --- | --- |
 | Dynamic schema architecture | [Model Tree](core-concepts/model-tree.qmd) |
-| Hierarchical context encoding | [Model Tree](core-concepts/model-tree.qmd), [Array](data-types/array.qmd) |
+| Hierarchical context encoding | [Model Tree](core-concepts/model-tree.qmd), [Branch](data-types/branch.qmd) |
 | Schema evolution | [Model Tree](core-concepts/model-tree.qmd#roles-and-mutations) |
 | Datatype plugins | [Built-In Data Types](core-concepts/data-types.qmd) |
 | Reconstruction and embeddings | [Learning Modes & Embeddings](core-concepts/embeddings.qmd), [Dynamic Masking](core-concepts/dynamic-masking.qmd) |
@@ -119,9 +119,10 @@ These requirements map to the rest of the docs:
 In `json2vec`, the schema is not metadata around the model. It is the model
 blueprint.
 
-Leaf fields become typed tensorfield requests. Array nodes become context
-encoders. Targets describe values the model should learn to reconstruct or
-predict. Embedding settings describe which nodes should expose intermediate
+Leaf fields become typed tensorfield requests. Branch nodes define shared
+contexts, optionally apply local attention, and pool those contexts upward.
+Targets describe values the model should learn to reconstruct or predict.
+Embedding settings describe which nodes should expose intermediate
 representations.
 
 That lets the model be created directly from the API:
@@ -130,19 +131,19 @@ That lets the model be created directly from the API:
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Number("alcohol"),
-    j2v.Number("malic_acid"),
-    j2v.Number("color_intensity"),
-    j2v.Number("proline"),
-    j2v.Category("cultivar", target=True, max_vocab_size=4),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
     batch_size=16,
     embed=True,
+    alcohol=jv.Number,
+    malic_acid=jv.Number,
+    color_intensity=jv.Number,
+    proline=jv.Number,
+    cultivar=jv.Category(target=True, size=4),
 )
 
 model
@@ -154,9 +155,9 @@ The same object can then be mutated explicitly:
 #| echo: true
 #| output: true
 
-model.update(j2v.where("type") == "number", p_mask=0.10)
-model.update(j2v.where("name") == "cultivar", target=True)
-model.update(j2v.where("name") == "proline", active=False)
+model.update(jv.where("type") == "number", p_mask=0.10)
+model.update(jv.where("name") == "cultivar", target=True)
+model.update(jv.where("name") == "proline", active=False)
 ```
 
 This matters because a schema can evolve with the use case. A pretraining model,

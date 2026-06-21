@@ -8,11 +8,11 @@ from typing import Any, TypeAlias
 
 import pydantic
 
-from json2vec.structs.structure import Array
+from json2vec.structs.structure import Branch
 from json2vec.structs.tree import Leaf, Node
 
 SelectionKey: TypeAlias = tuple[Any, ...]
-SchemaField: TypeAlias = Array | Leaf
+SchemaField: TypeAlias = Branch | Leaf
 
 
 class SelectionCacheEntry(pydantic.BaseModel):

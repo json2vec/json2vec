@@ -51,11 +51,11 @@ class VocabularyState:
     def __init__(
         self,
         storage: _VocabularyStorage,
-        max_vocab_size: int,
+        size: int,
         share: Callable[[], _VocabularyStorage] | None = None,
     ):
         self.storage = storage
-        self.max_vocab_size: int = max_vocab_size
+        self.size: int = size
         self._share = share
         self.vocab: list[Any] = []
         self.index: dict[Any, int] = {}
@@ -121,7 +121,7 @@ class VocabularyState:
 
     @property
     def unavailable_index(self) -> int:
-        return self.max_vocab_size
+        return self.size
 
     def reserve(self, values: Any, *, learn: bool) -> None:
         """Reserve every scalar token found in a JSON-like nested value."""
@@ -164,7 +164,7 @@ class VocabularyState:
                 if word in self.index:
                     continue
 
-                if len(self.vocab) >= self.max_vocab_size:
+                if len(self.vocab) >= self.size:
                     break
 
                 self.index[word] = len(self.vocab)
@@ -219,10 +219,10 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         return resources
 
-    def __init__(self, max_vocab_size: int):
+    def __init__(self, size: int):
         super().__init__()
 
-        self.max_vocab_size: int = max_vocab_size
+        self.size: int = size
         self.manager: SyncManager | None = None
         self.master: list[Any] | ListProxy[Any] = []
         self.lock: Any = _LocalLock()
@@ -315,7 +315,7 @@ class OnlineVocabularyModel(torch.nn.Module):
     def state(self) -> VocabularyState:
         return VocabularyState(
             storage=self.storage,
-            max_vocab_size=self.max_vocab_size,
+            size=self.size,
             share=self._shared_state,
         )
 
@@ -345,7 +345,7 @@ class OnlineVocabularyModel(torch.nn.Module):
                 if word in index:
                     continue
 
-                if len(vocab) >= self.max_vocab_size:
+                if len(vocab) >= self.size:
                     rejected += 1
                     continue
 
@@ -362,7 +362,7 @@ class OnlineVocabularyModel(torch.nn.Module):
 
     def load_snapshot(self, vocabulary: list[Any]) -> None:
         with self.lock:
-            self.master[:] = vocabulary[: self.max_vocab_size]
+            self.master[:] = vocabulary[: self.size]
 
         with self.proposal_lock:
             self.proposals[:] = []
@@ -399,7 +399,7 @@ def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -
                 "accepted": accepted,
                 "rejected_full": rejected,
                 "size": len(snapshot),
-                "max": vocab.max_vocab_size,
+                "max": vocab.size,
             }
 
         payload = {"snapshots": snapshots, "stats": stats}

@@ -67,8 +67,8 @@ website:
             text: Dynamic Masking
       - section: Data Types
         contents:
-          - href: data-types/array.qmd
-            text: Array
+          - href: data-types/branch.qmd
+            text: Branch
           - href: data-types/number.qmd
             text: Number
           - href: data-types/category.qmd

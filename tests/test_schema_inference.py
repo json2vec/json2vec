@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.helpers import InferenceConfig, infer_schema
 
 
@@ -18,13 +18,13 @@ def _by_name(fields):
 
 
 def test_inference_helpers_exported_from_helpers_namespace():
-    assert j2v.helpers.infer_schema is infer_schema
-    assert j2v.helpers.InferenceConfig is InferenceConfig
-    assert not hasattr(j2v, "infer_schema")
-    assert not hasattr(j2v, "create_model_from_records")
-    assert not hasattr(j2v, "InferenceConfig")
-    assert not hasattr(j2v.Model, "from_records")
-    assert not hasattr(j2v.helpers, "create_model_from_records")
+    assert jv.helpers.infer_schema is infer_schema
+    assert jv.helpers.InferenceConfig is InferenceConfig
+    assert not hasattr(jv, "infer_schema")
+    assert not hasattr(jv, "create_model_from_records")
+    assert not hasattr(jv, "InferenceConfig")
+    assert not hasattr(jv.Model, "from_records")
+    assert not hasattr(jv.helpers, "create_model_from_records")
 
 
 def test_empty_input_raises():
@@ -71,7 +71,7 @@ def test_id_named_int_becomes_category():
 def test_boolean_column_becomes_binary_category():
     fields = _by_name(infer_schema([{"flag": True}, {"flag": False}, {"flag": True}]))
     assert fields["flag"].type == "category"
-    assert fields["flag"].max_vocab_size == 2
+    assert fields["flag"].size == 2
 
 
 def test_iso_date_column_becomes_dateparts():
@@ -108,7 +108,7 @@ def test_numpy_scalar_types_are_recognized():
     fields = _by_name(infer_schema(records))
     assert fields["i"].type == "category"  # low-cardinality integer
     assert fields["f"].type == "number"
-    assert fields["b"].type == "category" and fields["b"].max_vocab_size == 2
+    assert fields["b"].type == "category" and fields["b"].size == 2
 
 
 def test_iso_datetime_with_time_adds_hour_part():
@@ -122,7 +122,7 @@ def test_vocab_size_scales_with_cardinality():
     records = [{"cat": f"c{i % 7}"} for i in range(100)]
     fields = _by_name(infer_schema(records))
     assert fields["cat"].type == "category"
-    assert fields["cat"].max_vocab_size >= 7
+    assert fields["cat"].size >= 7
 
 
 # --------------------------------------------------------------------------- #
@@ -152,30 +152,30 @@ def test_variable_width_numeric_list_is_skipped_with_warning():
     assert any(field.name == "ok" for field in fields)
 
 
-def test_fixed_length_array_is_not_padded_to_a_power_of_two():
-    # Every record has exactly 5 items; max_length should be 5, not rounded to 8.
+def test_fixed_length_branch_is_not_padded_to_a_power_of_two():
+    # Every record has exactly 5 items; length should be 5, not rounded to 8.
     records = [{"m": [{"v": float(j)} for j in range(5)]} for _ in range(20)]
     fields = _by_name(infer_schema(records))
-    assert fields["m"].max_length == 5
+    assert fields["m"].length == 5
 
 
-def test_array_length_uses_the_configured_quantile():
+def test_branch_length_uses_the_configured_quantile():
     # Lengths 1..10 uniformly; the p50 length is 5-6, well under the max of 10.
     records = [{"m": [{"v": 1.0}] * n} for n in range(1, 11)]
     fields = _by_name(infer_schema(records, array_length_quantile=0.5))
-    assert fields["m"].max_length <= 6
+    assert fields["m"].length <= 6
 
 
-def test_list_of_objects_becomes_array_with_inferred_queries():
+def test_list_of_objects_becomes_branch_with_inferred_queries():
     records = [
         {"items": [{"sku": "A", "price": 1.0}, {"sku": "B", "price": 2.0}]},
         {"items": [{"sku": "C", "price": 3.0}]},
     ]
     fields = _by_name(infer_schema(records))
-    array = fields["items"]
-    assert array.type == "array"
-    assert array.max_length >= 2
-    children = _by_name(array.fields)
+    branch = fields["items"]
+    assert branch.type == "branch"
+    assert branch.length >= 2
+    children = _by_name(branch.fields)
     assert children["sku"].query == "[*].items[*].sku"
     assert children["price"].query == "[*].items[*].price"
     assert children["price"].type == "number"
@@ -197,7 +197,7 @@ def test_nested_dict_is_flattened_with_dotted_queries():
     assert fields["profile_score"].query == "[*].profile.score"
 
 
-def test_object_inside_array_keeps_one_array_selector():
+def test_object_inside_branch_keeps_one_array_selector():
     records = [
         {"orders": [{"meta": {"id": 1}, "total": 9.99}]},
         {"orders": [{"meta": {"id": 2}, "total": 4.50}]},
@@ -205,7 +205,7 @@ def test_object_inside_array_keeps_one_array_selector():
     fields = _by_name(infer_schema(records))
     children = _by_name(fields["orders"].fields)
     assert children["meta_id"].query == "[*].orders[*].meta.id"
-    # Exactly one array selector for one Array ancestor.
+    # Exactly one array selector for one Branch ancestor.
     assert children["meta_id"].query.count("[*]") == 2  # outer observation + orders
 
 
@@ -302,26 +302,26 @@ def test_inferred_schema_builds_a_working_model():
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        fields = j2v.helpers.infer_schema(records, target="returned")
-        model = j2v.Model.from_schema(
+        fields = jv.helpers.infer_schema(records, target="returned")
+        model = jv.Model.from_tree(
             *fields,
             d_model=16,
             n_layers=1,
             n_heads=4,
         )
 
-    requests = model.hyperparameters.requests
+    requests = model.schema.requests
 
     # The `returned` field is a supervised target.
-    returned = requests[j2v.Address("record", "returned")]
+    returned = requests[jv.Address("record", "returned")]
     assert returned.target is True
 
-    # Invariant: a leaf's [*] selectors equal its Array-ancestor count + 1 (root).
+    # Invariant: a leaf's [*] selectors equal its Branch-ancestor count + 1 (root).
     for address, request in requests.items():
-        ancestors = len(model.hyperparameters.shapes[address])
+        ancestors = len(model.schema.shapes[address])
         assert request.query.count("[*]") == ancestors
 
     # The model predicts the withheld target end to end.
     predictions = model.predict([{k: v for k, v in records[0].items() if k != "returned"}])
-    decoded = predictions[j2v.Address("record", "returned")]
+    decoded = predictions[jv.Address("record", "returned")]
     assert decoded["content"]["value"] is not None

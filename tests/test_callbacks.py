@@ -4,7 +4,7 @@ from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocab
 
 
 def test_vocabulary_sync_callback_gathers_rank_proposals(monkeypatch):
-    vocab = OnlineVocabularyModel(max_vocab_size=8)
+    vocab = OnlineVocabularyModel(size=8)
     vocab.load_snapshot(["ALPHA"])
     vocab.proposals.append("BETA")
     trainer = SimpleNamespace(strategy=SimpleNamespace(barriers=[]))

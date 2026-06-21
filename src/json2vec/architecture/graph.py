@@ -10,7 +10,7 @@ import torch
 from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedInput
 from json2vec.structs.enums import Strata
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.tree import Address, Node
 
 if TYPE_CHECKING:
@@ -18,43 +18,43 @@ if TYPE_CHECKING:
 
 
 class ModelGraph:
-    """Build and rebuild runtime modules from schema hyperparameters."""
+    """Build and rebuild runtime modules from a schema tree."""
 
     @staticmethod
-    def example_forward_kwargs(hyperparameters: Hyperparameters, batch_size: int) -> dict[str, EncodedInput | Strata]:
+    def example_forward_kwargs(schema: Schema, batch_size: int) -> dict[str, EncodedInput | Strata]:
         from json2vec.data.iterables import mock
 
         return {
-            "inputs": mock(hyperparameters=hyperparameters, batch_size=batch_size),
+            "inputs": mock(schema=schema, batch_size=batch_size),
             "strata": Strata.predict,
         }
 
     @staticmethod
     def build(
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         batch_size: int,
     ) -> tuple[torch.nn.ModuleDict, dict[str, EncodedInput | Strata]]:
         nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
-        for address in hyperparameters.requests | hyperparameters.arrays:
+        for address in schema.requests | schema.branches:
             nodes[address] = NodeModule(
-                hyperparameters=hyperparameters,
+                schema=schema,
                 address=address,
                 batch_size=batch_size,
             )
 
-        return nodes, ModelGraph.example_forward_kwargs(hyperparameters=hyperparameters, batch_size=batch_size)
+        return nodes, ModelGraph.example_forward_kwargs(schema=schema, batch_size=batch_size)
 
     @staticmethod
     def install(module: "Model") -> None:
         module.nodes, module.example_input_array = ModelGraph.build(
-            hyperparameters=module.hyperparameters,
+            schema=module.schema,
             batch_size=module.batch_size,
         )
 
     @staticmethod
     def rebuild(module: "Model") -> None:
-        module.hyperparameters._clear_tree_caches()
+        module.schema._clear_tree_caches()
         was_training = module.training
         device = module.device
         previous = {
@@ -99,13 +99,13 @@ class ModelGraph:
 
         for address in selected_by_address:
             module.nodes[address] = NodeModule(
-                hyperparameters=module.hyperparameters,
+                schema=module.schema,
                 address=address,
                 batch_size=module.batch_size,
             )
 
         module.example_input_array = ModelGraph.example_forward_kwargs(
-            hyperparameters=module.hyperparameters,
+            schema=module.schema,
             batch_size=module.batch_size,
         )
         device = module.device

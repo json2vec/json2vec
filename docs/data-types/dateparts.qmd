@@ -23,9 +23,9 @@ hour of day, day of week, month of year, and related cyclical buckets.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-created_at = j2v.DateParts(
+created_at = jv.DateParts(
     "created_at",
     dateparts=["day of week", "HourOfDay"],
     pattern="%Y-%m-%dT%H:%M:%S",
@@ -54,7 +54,7 @@ train/test split artifacts instead of general patterns.
 
 `DateParts` accepts datetime-like values that NumPy can coerce to
 `datetime64[m]`. If `pattern` is provided, source values are parsed with
-`datetime.strptime` first. `None` is encoded as a null state, and missing array
+`datetime.strptime` first. `None` is encoded as a null state, and missing branch
 positions are encoded as padded state.
 
 Internal precision is minutes. Seconds can be parsed, but no built-in date part

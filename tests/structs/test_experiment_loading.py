@@ -1,5 +1,5 @@
 import json2vec.structs.experiment as experiment_module
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 
 def _structure_payload() -> dict:
@@ -7,14 +7,14 @@ def _structure_payload() -> dict:
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
-            "max_length": 1,
+            "length": 1,
             "fields": [
                 {
                     "name": "identifier",
                     "type": "category",
-                    "max_vocab_size": 1024,
+                    "size": 1024,
                     "query": "[*].id",
                 }
             ],
@@ -22,11 +22,11 @@ def _structure_payload() -> dict:
     }
 
 
-def test_hyperparameters_supports_programmatic_instantiation():
-    hyperparameters = Hyperparameters.model_validate(_structure_payload())
+def test_schema_supports_programmatic_instantiation():
+    schema = Schema.model_validate(_structure_payload())
 
-    assert hyperparameters.d_model == 16
-    assert "root/identifier" in hyperparameters.requests
+    assert schema.d_model == 16
+    assert "root/identifier" in schema.requests
 
 
 def test_experiment_model_is_removed():
