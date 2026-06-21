@@ -78,6 +78,7 @@ groups children instead of reading one source value.
 | `query` | inferred | JMESPath expression for the source value. See [Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields stay in the schema but are ignored by encoding, losses, and prediction. |
+| `nullable` | `True` | Allows explicit `None` input values. Set `False` to raise during encoding whenever this leaf contains `state == Tokens.null`. |
 
 ### Training Roles
 
@@ -130,6 +131,8 @@ Tensorfields track value state separately from value content:
 
 For `Set("tags")`, `["vip"]` and `[]` are both valued content. `null` is a
 null field state. A missing repeated slot inside a `Branch` is padded.
+If a leaf is configured with `nullable=False`, encoding raises when the extracted
+input contains an explicit null for that leaf.
 
 This separation matters most for numeric content. A sentinel such as `0`, `-1`,
 or `999999` can collide with real values and distort normalization. `NaN` can

@@ -31,6 +31,7 @@ from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TENSORFIELDS, TensorFieldBase
 
 T = TypeVar("T")
+MISSING = object()
 
 
 @beartype
@@ -172,16 +173,16 @@ def compile_query_extractor(expression: str) -> Callable[[Any], Any] | None:
             operation, key = operations[operation_index]
             if operation == "field":
                 if not isinstance(item, dict) or key not in item:
-                    return None
+                    return MISSING
                 return apply(item[key], operation_index + 1)
 
             if not isinstance(item, list):
-                return None
+                return MISSING
 
             out = []
             for child in item:
                 result = apply(child, operation_index + 1)
-                if result is not None:
+                if result is not MISSING:
                     out.append(result)
             return out
 
@@ -266,6 +267,7 @@ def encode(
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
 
         out[address] = TensorField.new(**kwargs)
+        out[address].check_nullable(address=address, schema=schema)
 
         if not defer_target_masking and strata != Strata.predict and address in target_addresses:
             out[address].mask(p_prune=1.0)

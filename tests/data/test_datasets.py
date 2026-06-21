@@ -122,6 +122,13 @@ def test_simple_query_extractor_matches_jmespath_for_supported_expressions():
         assert extractor(batch) == iterables.query(expression).search(batch)
 
 
+def test_simple_query_extractor_preserves_explicit_null_leaf_values():
+    extractor = iterables.compile_query_extractor("[*].amount")
+
+    assert extractor is not None
+    assert extractor([[{"amount": None}], [{"missing": 2.0}], [{"amount": 1.0}]]) == [[None], [], [1.0]]
+
+
 def test_simple_query_extractor_falls_back_for_unsupported_expressions():
     assert iterables.compile_query_extractor("[*].items[?amount > `1`].amount") is None
     assert iterables.compile_query_extractor("[*].items[0].amount") is None

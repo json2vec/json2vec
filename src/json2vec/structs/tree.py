@@ -190,6 +190,7 @@ class Leaf(Node):
     name: str | None = None
     type: str
     query: str | None = None
+    nullable: bool = True
     pooling: Literal["query", "mean"] = "query"
     weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
     p_mask: Rate = 0.0
@@ -339,7 +340,7 @@ class Leaf(Node):
             line.append_text(common)
             yield line
 
-        excluded = {"name", "type", "description", "active", "embed", "query", *common_names}
+        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", *common_names}
         specific = Text()
         first = True
         for name, field in type(self).model_fields.items():

@@ -722,6 +722,33 @@ def test_encode_branch_error_overflow_raises() -> None:
         )
 
 
+def test_encode_allows_null_inputs_by_default() -> None:
+    model = jv.Model.from_tree(
+        amount=jv.Number,
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    inputs = model.encode(batch=[{"amount": None}])
+    amount = inputs[Address("record", "amount")]
+
+    assert model.schema.requests[Address("record", "amount")].nullable is True
+    assert torch.equal(amount.state, torch.tensor([[Tokens.null.value]], dtype=torch.int64))
+
+
+def test_encode_nullable_false_rejects_null_inputs() -> None:
+    model = jv.Model.from_tree(
+        amount=jv.Number(nullable=False),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    with pytest.raises(ValueError, match="record/amount.*nullable=False.*1 null"):
+        model.encode(batch=[{"amount": None}])
+
+
 def test_encode_accepts_preprocess() -> None:
     def __root_helper_preprocess(observation: dict):
         return {"color": observation["hue"]}

@@ -151,6 +151,18 @@ class TensorFieldBase(Renderable):
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True) -> None:
         raise NotImplementedError
 
+    def check_nullable(self, *, address: Address, schema: Schema) -> None:
+        request = schema.requests[address]
+        if request.nullable:
+            return
+
+        nulls = self.state.eq(torch.as_tensor(Tokens.null.value, device=self.state.device, dtype=self.state.dtype))
+        if not nulls.any():
+            return
+
+        count = int(nulls.sum().item())
+        raise ValueError(f"request '{address}' has nullable=False but input contains {count} null value(s)")
+
     def __rich_console__(self, console, options):
         state = getattr(self, TensorKey.state, None)
         trainable = getattr(self, TensorKey.trainable, None)
