@@ -12,7 +12,7 @@ import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from torch.utils.data import IterableDataset
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.data import iterables
 from json2vec.data.datasets import base, custom, polars, streaming
 from json2vec.data.datasets.base import _is_assigned_to_worker, _worker_identity, sha256
@@ -21,18 +21,18 @@ from json2vec.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
 from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
 from json2vec.preprocessors.base import Preprocessor, PreprocessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.tree import Address
 
 
-def _datamodule_hyperparameters():
-    return Hyperparameters.model_validate(
+def _datamodule_schema():
+    return Schema.model_validate(
         {
             "d_model": 8,
             "fields": {
                 "name": "record",
-                "type": "array",
-                "max_length": 1,
+                "type": "branch",
+                "length": 1,
                 "fields": [],
             },
         }
@@ -40,8 +40,8 @@ def _datamodule_hyperparameters():
 
 
 def _datamodule_model(batch_size: int = 2):
-    return j2v.Model.from_schema(
-        j2v.Category("id", max_vocab_size=16),
+    return jv.Model.from_tree(
+        jv.Category("id", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -49,10 +49,10 @@ def _datamodule_model(batch_size: int = 2):
     )
 
 
-def _checkpoint_payload(model: j2v.Model) -> dict:
+def _checkpoint_payload(model: jv.Model) -> dict:
     return {
         "state_dict": model.state_dict(),
-        "hyperparameters": model.hyperparameters.model_dump(mode="python"),
+        "schema": model.schema.model_dump(mode="python"),
         "batch_size": model.batch_size,
     }
 
@@ -120,6 +120,13 @@ def test_simple_query_extractor_matches_jmespath_for_supported_expressions():
 
         assert extractor is not None
         assert extractor(batch) == iterables.query(expression).search(batch)
+
+
+def test_simple_query_extractor_preserves_explicit_null_leaf_values():
+    extractor = iterables.compile_query_extractor("[*].amount")
+
+    assert extractor is not None
+    assert extractor([[{"amount": None}], [{"missing": 2.0}], [{"amount": 1.0}]]) == [[None], [], [1.0]]
 
 
 def test_simple_query_extractor_falls_back_for_unsupported_expressions():
@@ -475,7 +482,7 @@ def test_process_transformation_preprocessor_rejects_non_dict(monkeypatch: pytes
         )
 
 
-def test_process_without_preprocessor_still_wraps_root_array():
+def test_process_without_preprocessor_still_wraps_root_branch():
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
@@ -660,10 +667,10 @@ def test_streaming_datamodule_regex_patterns_keep_strata_disjoint(
             record = {"id": f"{split}-{index}"}
             (split_dir / f"part-{index}.ndjson").write_text(json.dumps(record), encoding="utf-8")
 
-    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+    def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
-    def mask(pipe, hyperparameters):
+    def mask(pipe, schema):
         yield from pipe
 
     monkeypatch.setattr(streaming, "transform", transform)
@@ -706,8 +713,8 @@ def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
 
 
 def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp_path: Path):
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -720,8 +727,8 @@ def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp
         train=re.compile(r".*\.ndjson$"),
         num_workers=0,
     )
-    restored = j2v.Model.from_schema(
-        j2v.Number("risk_score"),
+    restored = jv.Model.from_tree(
+        jv.Number("risk_score"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -732,12 +739,12 @@ def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp
 
     loader = module.train_dataloader()
     assert loader is not None
-    assert module.hyperparameters is model.hyperparameters
+    assert module.schema is model.schema
     assert module.batch_size == 5
-    assert loader.dataset.hyperparameters is model.hyperparameters
+    assert loader.dataset.schema is model.schema
     assert loader.dataset.batch_size == 5
-    assert "record/risk_score" in loader.dataset.hyperparameters.requests
-    assert "record/amount" not in loader.dataset.hyperparameters.requests
+    assert "record/risk_score" in loader.dataset.schema.requests
+    assert "record/amount" not in loader.dataset.schema.requests
 
 
 def test_custom_datamodule_accepts_named_datasets_and_loader_configuration_per_strata():
@@ -824,8 +831,8 @@ def test_custom_datamodule_accepts_partial_dataset_mapping_until_loader_requeste
 
 
 def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -836,8 +843,8 @@ def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
         train=RecordsDataset([{"amount": 1.0, "risk_score": 2.0}]),
         num_workers=0,
     )
-    restored = j2v.Model.from_schema(
-        j2v.Number("risk_score"),
+    restored = jv.Model.from_tree(
+        jv.Number("risk_score"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -848,26 +855,26 @@ def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
 
     loader = module.train_dataloader()
     assert loader is not None
-    assert module.hyperparameters is model.hyperparameters
+    assert module.schema is model.schema
     assert module.batch_size == 5
-    assert loader.dataset.hyperparameters is model.hyperparameters
+    assert loader.dataset.schema is model.schema
     assert loader.dataset.batch_size == 5
-    assert "record/risk_score" in loader.dataset.hyperparameters.requests
-    assert "record/amount" not in loader.dataset.hyperparameters.requests
+    assert "record/risk_score" in loader.dataset.schema.requests
+    assert "record/amount" not in loader.dataset.schema.requests
 
 
 def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest.MonkeyPatch):
-    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+    def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
-    def mask(pipe, hyperparameters):
+    def mask(pipe, schema):
         yield from pipe
 
     monkeypatch.setattr(custom, "transform", transform)
     monkeypatch.setattr(custom, "mask", mask)
 
     batch_dataset = CustomBatchDataset(
-        hyperparameters=SimpleNamespace(requests={}),
+        schema=SimpleNamespace(requests={}),
         dataset=RecordsDataset([{"id": 1}, {"id": 2}, {"id": 3}]),
         preprocessor=None,
         preprocessor_kwargs={},
@@ -933,8 +940,8 @@ def test_polars_datamodule_accepts_named_splits():
 
 
 def test_polars_datamodule_refreshes_context_after_model_reset():
-    model = j2v.Model.from_schema(
-        j2v.Category("code", max_vocab_size=16),
+    model = jv.Model.from_tree(
+        jv.Category("code", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -947,7 +954,7 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
     )
     before = module.interprocess_encoding_context["record/code"]
 
-    model.reset(j2v.where("name") == "code")
+    model.reset(jv.where("name") == "code")
 
     after = module.interprocess_encoding_context["record/code"]
     current = model.interprocess_encoding_context["record/code"]
@@ -957,8 +964,8 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
 
 
 def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
-    model = j2v.Model.from_schema(
-        j2v.Category("code", max_vocab_size=16),
+    model = jv.Model.from_tree(
+        jv.Category("code", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -991,8 +998,8 @@ def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
 
 
 def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -1003,8 +1010,8 @@ def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
         train=pl.DataFrame({"amount": [1.0], "risk_score": [2.0]}),
         num_workers=0,
     )
-    restored = j2v.Model.from_schema(
-        j2v.Number("risk_score"),
+    restored = jv.Model.from_tree(
+        jv.Number("risk_score"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -1015,12 +1022,12 @@ def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
 
     loader = module.train_dataloader()
     assert loader is not None
-    assert module.hyperparameters is model.hyperparameters
+    assert module.schema is model.schema
     assert module.batch_size == 5
-    assert loader.dataset.hyperparameters is model.hyperparameters
+    assert loader.dataset.schema is model.schema
     assert loader.dataset.batch_size == 5
-    assert "record/risk_score" in loader.dataset.hyperparameters.requests
-    assert "record/amount" not in loader.dataset.hyperparameters.requests
+    assert "record/risk_score" in loader.dataset.schema.requests
+    assert "record/amount" not in loader.dataset.schema.requests
 
 
 def test_polars_datamodule_requires_at_least_one_split():
@@ -1070,17 +1077,17 @@ def test_polars_datamodule_passes_replacement_to_dataset():
 
 
 def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch: pytest.MonkeyPatch):
-    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+    def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
-    def mask(pipe, hyperparameters):
+    def mask(pipe, schema):
         yield from pipe
 
     monkeypatch.setattr(polars, "transform", transform)
     monkeypatch.setattr(polars, "mask", mask)
 
     batch_dataset = PolarsBatchDataset(
-        hyperparameters=SimpleNamespace(requests={}),
+        schema=SimpleNamespace(requests={}),
         dataframe=pl.DataFrame({"id": [1, 2, 3]}),
         preprocessor=None,
         preprocessor_kwargs={},
@@ -1115,10 +1122,10 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     def batch(pipe, batch_size):
         yield list(pipe)
 
-    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+    def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
-    def mask(pipe, hyperparameters):
+    def mask(pipe, schema):
         yield from pipe
 
     monkeypatch.setattr(streaming, "observe", observe)
@@ -1129,7 +1136,7 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     monkeypatch.setattr(streaming, "mask", mask)
 
     batch_dataset = BatchDataset(
-        hyperparameters=SimpleNamespace(requests={}),
+        schema=SimpleNamespace(requests={}),
         root="/tmp/json2vec-test",
         suffix=Suffix.ndjson,
         pattern=re.compile(r".*\.ndjson$"),
@@ -1171,10 +1178,10 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     def batch(pipe, batch_size):
         yield list(pipe)
 
-    def transform(pipe, hyperparameters, strata, interprocess_encoding_context):
+    def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
-    def mask(pipe, hyperparameters):
+    def mask(pipe, schema):
         yield from pipe
 
     monkeypatch.setattr(streaming, "observe", observe)
@@ -1185,7 +1192,7 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(streaming, "mask", mask)
 
     batch_dataset = BatchDataset(
-        hyperparameters=SimpleNamespace(requests={}),
+        schema=SimpleNamespace(requests={}),
         root="/tmp/json2vec-test",
         suffix=Suffix.ndjson,
         pattern=re.compile(r".*\.ndjson$"),
@@ -1215,20 +1222,20 @@ def test_mask_uses_direct_field_rates():
         def mask(self, p_mask: float, **kwargs):
             self.calls.append((p_mask, kwargs))
 
-    class Hyperparameters(SimpleNamespace):
-        def array_masks_for(self, address):
+    class Schema(SimpleNamespace):
+        def branch_masks_for(self, address):
             return ()
 
     first = Field()
     second = Field()
-    hyperparameters = Hyperparameters(
+    schema = Schema(
         active_requests={
             "root/first": SimpleNamespace(p_mask=0.25, p_prune=0.0),
             "root/second": SimpleNamespace(p_mask=0.0, p_prune=0.0),
         },
     )
 
-    output = list(iterables.mask.__wrapped__([{"root/first": first, "root/second": second}], hyperparameters))
+    output = list(iterables.mask.__wrapped__([{"root/first": first, "root/second": second}], schema))
 
     assert output == [{"root/first": first, "root/second": second}]
     assert first.calls == [
@@ -1236,9 +1243,9 @@ def test_mask_uses_direct_field_rates():
             0.25,
             {
                 "p_prune": 0.0,
-                "array_masks": (),
+                "branch_masks": (),
                 "address": "root/first",
-                "hyperparameters": hyperparameters,
+                "schema": schema,
             },
         )
     ]
@@ -1255,14 +1262,14 @@ def test_target_uses_direct_field_rates():
 
     first = Field()
     second = Field()
-    hyperparameters = SimpleNamespace(
+    schema = SimpleNamespace(
         active_requests={
             "root/first": SimpleNamespace(p_prune=0.0),
             "root/second": SimpleNamespace(p_prune=0.75),
         },
     )
 
-    output = list(iterables.target.__wrapped__([{"root/first": first, "root/second": second}], hyperparameters))
+    output = list(iterables.target.__wrapped__([{"root/first": first, "root/second": second}], schema))
 
     assert output == [{"root/first": first, "root/second": second}]
     assert first.calls == []

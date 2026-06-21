@@ -5,7 +5,7 @@ import torch
 from tensordict import TensorDict
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.category import (
     Decoder,
@@ -24,7 +24,7 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
         "name": "category",
         "type": "category",
         "query": "[*].items[*].label",
-        "max_vocab_size": 8,
+        "size": 8,
     }
     if topk is not None:
         field["topk"] = topk
@@ -35,13 +35,13 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
             "fields": [
                 {
                     "name": "items",
-                    "type": "array",
-                    "max_length": 2,
+                    "type": "branch",
+                    "length": 2,
                     "fields": [field],
                 }
             ],
@@ -49,12 +49,12 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
     }
 
 
-def _state(max_vocab_size: int = 8):
-    return OnlineVocabularyModel(max_vocab_size=max_vocab_size).state
+def _state(size: int = 8):
+    return OnlineVocabularyModel(size=size).state
 
 
 def test_category_vocabulary_refreshes_stale_validation_snapshot():
-    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    vocabulary = OnlineVocabularyModel(size=8)
     validation_state = vocabulary.state
     training_state = vocabulary.state
 
@@ -67,7 +67,7 @@ def test_category_vocabulary_refreshes_stale_validation_snapshot():
 
 
 def test_category_vocabulary_nonzero_rank_proposes_unseen_tokens():
-    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    vocabulary = OnlineVocabularyModel(size=8)
     state = vocabulary.state
     state.configure_distributed(global_rank=1, world_size=2)
 
@@ -79,7 +79,7 @@ def test_category_vocabulary_nonzero_rank_proposes_unseen_tokens():
 
 
 def test_category_vocabulary_reserves_nested_tokens_in_batch():
-    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    vocabulary = OnlineVocabularyModel(size=8)
     state = vocabulary.state
 
     state.reserve([[["ALPHA", None, "BETA"], ["ALPHA"]]], learn=True)
@@ -90,7 +90,7 @@ def test_category_vocabulary_reserves_nested_tokens_in_batch():
 
 
 def test_category_vocabulary_batch_proposals_are_unique_per_call():
-    vocabulary = OnlineVocabularyModel(max_vocab_size=8)
+    vocabulary = OnlineVocabularyModel(size=8)
     state = vocabulary.state
     state.configure_distributed(global_rank=1, world_size=2)
 
@@ -102,14 +102,14 @@ def test_category_vocabulary_batch_proposals_are_unique_per_call():
 
 
 def test_category_tensorfield_separates_state_and_content():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    schema = structure
     state = _state()
 
     field = TensorField.new(
         values=[[["ALPHA", None]], [["BETA"]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
@@ -137,14 +137,14 @@ def test_category_tensorfield_separates_state_and_content():
 
 
 def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    hyperparameters = structure
-    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    schema = structure
+    state = _state(size=structure.requests[ADDRESS].size)
 
     TensorField.new(
         values=[[["ALPHA"]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
@@ -152,7 +152,7 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     field = TensorField.new(
         values=[[["OMEGA"]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.validate,
         interprocess_encoding_context=state,
     )
@@ -163,19 +163,19 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     )
     assert torch.equal(
         field.content,
-        torch.tensor([[[structure.requests[ADDRESS].max_vocab_size, 0]]], dtype=torch.int64),
+        torch.tensor([[[structure.requests[ADDRESS].size, 0]]], dtype=torch.int64),
     )
 
 
 def test_category_tensorfield_can_simulate_unavailable_during_training():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=1.0))
-    hyperparameters = structure
-    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    structure = Schema.model_validate(_structure_payload(p_unavailable=1.0))
+    schema = structure
+    state = _state(size=structure.requests[ADDRESS].size)
 
     field = TensorField.new(
         values=[[["ALPHA", None]], [["BETA"]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
@@ -184,8 +184,8 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
         field.content,
         torch.tensor(
             [
-                [[structure.requests[ADDRESS].max_vocab_size, 0]],
-                [[structure.requests[ADDRESS].max_vocab_size, 0]],
+                [[structure.requests[ADDRESS].size, 0]],
+                [[structure.requests[ADDRESS].size, 0]],
             ],
             dtype=torch.int64,
         ),
@@ -193,20 +193,20 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
 
 
 def test_category_embedder_and_decoder_use_real_vocab_width():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     request = structure.requests[ADDRESS]
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
-    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
 
-    assert embedder.embeddings[TensorKey.content.name].num_embeddings == request.max_vocab_size
-    assert embedder.counters[TensorKey.content.name].size == request.max_vocab_size
-    assert decoder.linears[TensorKey.content.name].out_features == request.max_vocab_size
+    assert embedder.embeddings[TensorKey.content.name].num_embeddings == request.size
+    assert embedder.counters[TensorKey.content.name].size == request.size
+    assert decoder.linears[TensorKey.content.name].out_features == request.size
 
 
 def test_category_embedder_treats_unavailable_as_zero_content_contribution():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
-    unavailable = structure.requests[ADDRESS].max_vocab_size
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    unavailable = structure.requests[ADDRESS].size
     field = TensorField(
         state=torch.tensor([[Tokens.valued.value]], dtype=torch.int64),
         content=torch.tensor([[unavailable]], dtype=torch.int64),
@@ -239,9 +239,7 @@ class _DummyNode:
 class _DummyModule:
     def __init__(self):
         self.nodes = {ADDRESS: _DummyNode()}
-        self.hyperparameters = SimpleNamespace(
-            requests={ADDRESS: SimpleNamespace(topk=[2, 3, 5, 10], max_vocab_size=8)}
-        )
+        self.schema = SimpleNamespace(requests={ADDRESS: SimpleNamespace(topk=[2, 3, 5, 10], size=8)})
 
 
 def test_category_write_emits_state_and_content_payloads():
@@ -313,8 +311,8 @@ def test_category_write_ignores_logits_beyond_vocabulary_snapshot():
 
 
 class _TrackingModule:
-    def __init__(self, hyperparameters: Hyperparameters, embedder: Embedder, decoder: Decoder):
-        self.hyperparameters = hyperparameters
+    def __init__(self, schema: Schema, embedder: Embedder, decoder: Decoder):
+        self.schema = schema
         self.nodes = {ADDRESS: SimpleNamespace(embedder=embedder, decoder=decoder)}
         self.tracked = {}
 
@@ -324,22 +322,22 @@ class _TrackingModule:
 
 
 def test_category_loss_does_not_mutate_counters():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    schema = structure
     state = _state()
 
     field = TensorField.new(
         values=[[["ALPHA", None]], [["BETA"]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
     field.mask(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
-    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
-    module = _TrackingModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
 
     prediction = Prediction(
         address=ADDRESS,
@@ -348,7 +346,7 @@ def test_category_loss_does_not_mutate_counters():
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
                 TensorKey.content: torch.zeros(
                     *field.content.shape,
-                    structure.requests[ADDRESS].max_vocab_size,
+                    structure.requests[ADDRESS].size,
                 ),
             },
             batch_size=field.batch_size,
@@ -361,41 +359,41 @@ def test_category_loss_does_not_mutate_counters():
     assert torch.equal(embedder.counters[TensorKey.state.name].counts, expected_state_counts)
 
     expected_content_counts = torch.ones(
-        structure.requests[ADDRESS].max_vocab_size,
+        structure.requests[ADDRESS].size,
         dtype=torch.int64,
     )
     assert torch.equal(embedder.counters[TensorKey.content.name].counts, expected_content_counts)
 
 
 def test_category_loss_uses_uniform_target_for_unavailable_content():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    state = _state(size=structure.requests[ADDRESS].size)
 
     TensorField.new(
         values=[[["ALPHA"]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
     field = TensorField.new(
         values=[[["OMEGA"]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.validate,
         interprocess_encoding_context=state,
     )
     field.target(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
-    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
-    module = _TrackingModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
     prediction = Prediction(
         address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
-                TensorKey.content: torch.zeros(*field.content.shape, structure.requests[ADDRESS].max_vocab_size),
+                TensorKey.content: torch.zeros(*field.content.shape, structure.requests[ADDRESS].size),
             },
             batch_size=field.batch_size,
         ),

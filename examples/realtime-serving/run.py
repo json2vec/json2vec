@@ -9,7 +9,7 @@ import polars as pl
 import pydantic
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 
 
 class TransactionRequest(pydantic.BaseModel):
@@ -50,20 +50,20 @@ def records() -> pl.DataFrame:
     )
 
 
-def build_model() -> j2v.Model:
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Category("merchant", max_vocab_size=16),
-        j2v.Category("risk", target=True, max_vocab_size=4, topk=[2]),
+def build_model() -> jv.Model:
+    model = jv.Model.from_tree(
         d_model=16,
         n_layers=1,
         n_heads=4,
         batch_size=4,
         embed=True,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
+        amount=jv.Number,
+        merchant=jv.Category(size=16),
+        risk=jv.Category(target=True, size=4, topk=[2]),
     )
 
-    datamodule = j2v.PolarsDataModule(
+    datamodule = jv.PolarsDataModule(
         model=model,
         train=records(),
         validate=records(),
@@ -116,7 +116,7 @@ def main() -> None:
     parser.add_argument("--log-level", default=os.environ.get("JSON2VEC_LOG_LEVEL", "info"))
     args = parser.parse_args()
 
-    deployment = j2v.Deployment(
+    deployment = jv.Deployment(
         model=build_model(),
         accelerator="cpu",
         max_batch_size=8,

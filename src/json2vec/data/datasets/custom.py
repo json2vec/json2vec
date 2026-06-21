@@ -38,7 +38,7 @@ from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
 from json2vec.preprocessors.base import Preprocessor
 from json2vec.structs.enums import Strata
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
@@ -79,7 +79,7 @@ def observe_dataset(dataset: IterableDataset) -> Iterator[RawObservation]:
 class CustomBatchDataset(IterableDataset):
     def __init__(
         self,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         dataset: IterableDataset,
         preprocessor: PreprocessorConfig.Value,
         preprocessor_kwargs: dict[str, Any],
@@ -93,7 +93,7 @@ class CustomBatchDataset(IterableDataset):
     ):
         super().__init__()
 
-        self.hyperparameters = hyperparameters
+        self.schema = schema
         self.dataset = dataset
         self.preprocessor = preprocessor
         self.preprocessor_kwargs = preprocessor_kwargs
@@ -112,7 +112,7 @@ class CustomBatchDataset(IterableDataset):
 
         yield from (
             Pipeline(
-                hyperparameters=self.hyperparameters,
+                schema=self.schema,
                 dataset=self.dataset,
                 preprocessor=self.preprocessor,
                 preprocessor_kwargs=self.preprocessor_kwargs,
@@ -133,7 +133,7 @@ class CustomBatchDataset(IterableDataset):
 
 
 def custom_dataloader(
-    hyperparameters: Hyperparameters,
+    schema: Schema,
     dataset: IterableDataset,
     preprocessor: PreprocessorConfig.Value,
     preprocessor_kwargs: dict[str, Any],
@@ -156,7 +156,7 @@ def custom_dataloader(
 
     return DataLoader(
         dataset=CustomBatchDataset(
-            hyperparameters=hyperparameters,
+            schema=schema,
             dataset=dataset,
             preprocessor=preprocessor,
             preprocessor_kwargs=preprocessor_kwargs,
@@ -234,7 +234,7 @@ class CustomDataModule(lit.LightningDataModule):
             self._model_ref = weakref.ref(model)
         except TypeError:
             self._model_ref = None
-        self._hyperparameters = model.hyperparameters
+        self._schema = model.schema
         self._interprocess_encoding_context = model.interprocess_encoding_context
         self._batch_size = model.batch_size
         self.num_workers = Strata.expand(num_workers, default=None)
@@ -250,17 +250,17 @@ class CustomDataModule(lit.LightningDataModule):
         return self._model_ref()
 
     @property
-    def hyperparameters(self) -> Hyperparameters:
+    def schema(self) -> Schema:
         model = self._model()
         if model is not None:
-            return model.hyperparameters
+            return model.schema
 
-        return self._hyperparameters
+        return self._schema
 
-    @hyperparameters.setter
-    def hyperparameters(self, hyperparameters: Hyperparameters) -> None:
+    @schema.setter
+    def schema(self, schema: Schema) -> None:
         self._model_ref = None
-        self._hyperparameters = hyperparameters
+        self._schema = schema
 
     @property
     def batch_size(self) -> int:
@@ -307,7 +307,7 @@ class CustomDataModule(lit.LightningDataModule):
             share_interprocess_encoding_context(interprocess_encoding_context)
 
         return custom_dataloader(
-            hyperparameters=self.hyperparameters,
+            schema=self.schema,
             dataset=self.datasets[strata],
             preprocessor=self.preprocessor,
             preprocessor_kwargs=self.preprocessor_kwargs,

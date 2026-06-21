@@ -20,7 +20,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/core-concepts/data-types.qmd",
         "docs/core-concepts/embeddings.qmd",
         "docs/core-concepts/dynamic-masking.qmd",
-        "docs/data-types/array.qmd",
+        "docs/data-types/branch.qmd",
         "docs/data-types/category.qmd",
         "docs/data-types/dateparts.qmd",
         "docs/data-types/entity.qmd",
@@ -45,10 +45,10 @@ def test_quarto_docs_use_current_public_api_style() -> None:
     root = _repo_root()
     sources = "\n".join(path.read_text() for path in sorted((root / "docs").rglob("*.qmd")))
 
-    assert "j2v.Model.from_schema(" in sources
-    assert "j2v.Array(" in sources
+    assert "jv.Model.from_tree(" in sources
+    assert "jv.Branch(" in sources
     assert "Struct(" not in sources
-    assert not re.search(r"Model\.from_schema\([^)]*\broot\s*=", sources, re.DOTALL)
+    assert not re.search(r"Model\.from_tree\([^)]*\broot\s*=", sources, re.DOTALL)
 
 
 def test_only_allowed_standalone_examples_are_present() -> None:

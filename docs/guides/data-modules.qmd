@@ -19,7 +19,7 @@ The batch path is:
 2. An optional preprocessor emits processed observations.
 3. Observations are sampled and shuffled.
 4. Observations are grouped into model batches.
-5. Query paths tensorize values from the model schema and resolve array
+5. Query paths tensorize values from the model schema and resolve branch
    `overflow` policies.
 6. `p_mask` hides selected leaf values for reconstruction.
 7. `p_prune` and `target=True` hide selected leaf instances for decoding.
@@ -31,7 +31,7 @@ Data modules use the same core ideas:
 
 | Option | Meaning |
 | --- | --- |
-| `model` | Supplies schema hyperparameters, `batch_size`, and tensorfield encoding state. |
+| `model` | Supplies schema schema, `batch_size`, and tensorfield encoding state. |
 | `preprocessor` | Callable, registered preprocessor name, or `Preprocessor` object. |
 | `**kwargs` | Passed to the preprocessor. |
 | `num_workers` | PyTorch dataloader worker count. |
@@ -48,7 +48,7 @@ Most execution options accept either one value or a mapping keyed by
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=valid_frame,
@@ -83,7 +83,7 @@ pruning.
 
 from torch.utils.data import IterableDataset
 
-import json2vec as j2v
+import json2vec as jv
 
 
 class Records(IterableDataset):
@@ -94,7 +94,7 @@ class Records(IterableDataset):
         yield from self.records
 
 
-datamodule = j2v.CustomDataModule(
+datamodule = jv.CustomDataModule(
     model=model,
     train=Records([
         {"amount": 10.5, "merchant": "bookstore", "label": "ok"},
@@ -115,7 +115,7 @@ You may pass named splits or one split mapping:
 #| echo: true
 #| output: true
 
-datamodule = j2v.CustomDataModule(
+datamodule = jv.CustomDataModule(
     model=model,
     datasets={
         "train": train_dataset,
@@ -141,12 +141,12 @@ for examples, notebooks, tests, and small-to-medium local workflows.
 
 import polars as pl
 
-import json2vec as j2v
+import json2vec as jv
 
 train = pl.read_ndjson("docs/data/iris.jsonl")
 valid = train.head(16)
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=train,
     validate=valid,
@@ -162,7 +162,7 @@ You may pass named splits:
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=valid_frame,
@@ -177,7 +177,7 @@ Or pass one split mapping:
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     dataframe={
         "train": train_frame,
@@ -198,7 +198,7 @@ Configure a `predict` split before using the Lightning prediction loop:
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     predict=predict_frame,
 )
@@ -206,7 +206,7 @@ datamodule = j2v.PolarsDataModule(
 trainer.predict(model=model, datamodule=datamodule)
 ```
 
-For writing outputs to disk, add `j2v.Writer`; see
+For writing outputs to disk, add `jv.Writer`; see
 [Batch Inference](batch-inference.qmd).
 
 ## StreamingDataModule
@@ -232,9 +232,9 @@ objects.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-datamodule = j2v.StreamingDataModule(
+datamodule = jv.StreamingDataModule(
     model=model,
     root="data/events",
     suffix="ndjson",
@@ -251,7 +251,7 @@ For S3:
 #| echo: true
 #| output: true
 
-datamodule = j2v.StreamingDataModule(
+datamodule = jv.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
@@ -306,7 +306,7 @@ observation:
 #| echo: true
 #| output: true
 
-@j2v.preprocess
+@jv.preprocess
 def normalize_transaction(record: dict) -> dict:
     return {
         "amount": float(record["transaction"]["amount_usd"]),
@@ -324,7 +324,7 @@ All data modules accept the same preprocessor forms:
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     preprocessor=my_preprocessor,
@@ -339,7 +339,7 @@ Use this for request-time-dependent shaping such as trailing windows:
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     preprocessor=build_windows,
@@ -357,7 +357,7 @@ contains many model records:
 #| echo: true
 #| output: true
 
-@j2v.preprocess(yields=True)
+@jv.preprocess(yields=True)
 def session_windows(account: dict):
     for session in account["sessions"]:
         yield {
@@ -382,14 +382,14 @@ predictions = model.predict(raw_records[:2], preprocess=normalize_transaction)
 
 Data modules keep a reference to the model when possible. If you mutate the
 model schema between Lightning runs, the data module reads the current
-hyperparameters from the model. If you detach or replace the model, rebuild the
+schema from the model. If you detach or replace the model, rebuild the
 data module so it uses the intended schema and tensorfield encoding context.
 
 ## Where Next
 
 - Use [Training With Lightning](lightning.qmd) for the execution model.
 - Use [Batch Inference](batch-inference.qmd) for `trainer.predict(...)` and
-  `j2v.Writer`.
+  `jv.Writer`.
 - Use this page's [preprocessor section](#preprocessors) for input-side
   transformations.
 - Use [Query Paths](../core-concepts/querypaths.qmd) to map processed records to

@@ -11,7 +11,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from loguru import logger
 
 from json2vec.architecture.graph import ModelGraph
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
@@ -60,11 +60,11 @@ class RollbackCheckpoint(ModelCheckpoint):
 class CheckpointState:
     """Save, load, and restore model state without owning the public facade."""
 
-    required_fields = {"state_dict", "hyperparameters", "batch_size"}
+    required_fields = {"state_dict", "schema", "batch_size"}
 
     @staticmethod
     def dump(module: "Model", checkpoint: dict[str, Any]) -> None:
-        checkpoint["hyperparameters"] = module.hyperparameters.model_dump(mode="python")
+        checkpoint["schema"] = module.schema.model_dump(mode="python")
         checkpoint["batch_size"] = module.batch_size
 
     @staticmethod
@@ -85,7 +85,7 @@ class CheckpointState:
 
         device = module.device
         was_training = module.training
-        module.hyperparameters = Hyperparameters.model_validate(checkpoint["hyperparameters"])
+        module.schema = Schema.model_validate(checkpoint["schema"])
         module.batch_size = checkpoint["batch_size"]
         ModelGraph.install(module)
         if isinstance(device, torch.device):
@@ -98,11 +98,11 @@ class CheckpointState:
         path = Path(checkpoint)
         logger.bind(component="model_factory", checkpoint=str(path)).info("loading Model from checkpoint")
         state = torch.load(path, weights_only=False, map_location="cpu")
-        if "hyperparameters" not in state:
-            raise ValueError("missing hyperparameters in checkpoint")
+        if "schema" not in state:
+            raise ValueError("missing schema in checkpoint")
 
         model = model_cls(
-            hyperparameters=Hyperparameters.model_validate(state["hyperparameters"]),
+            schema=Schema.model_validate(state["schema"]),
             batch_size=state["batch_size"],
         )
         model.restore_checkpoint_state(state)

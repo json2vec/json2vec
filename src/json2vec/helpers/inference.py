@@ -1,6 +1,6 @@
 """Infer a `json2vec` schema directly from sample records.
 
-`Model.from_schema(...)` expects hand-written field constructors. This module
+`Model.from_tree(...)` expects hand-written field constructors. This module
 derives those constructors from raw data instead, so a dataset can be turned
 into a model without first describing its shape by hand.
 
@@ -8,14 +8,14 @@ Inference has two layers:
 
 1. **Structure** — walk the record tree to discover nested objects and repeated
    child arrays. Nested ``dict`` values are flattened into leaves with dotted
-   JMESPath queries; ``list`` of objects become :class:`~json2vec.Array` nodes.
+   JMESPath queries; ``list`` of objects become :class:`~json2vec.Branch` nodes.
 2. **Typing** — profile each leaf column across the sample and pick a
    tensorfield (``Number``, ``Category``, ``Set``, ``Vector``, ``DateParts``,
    or optionally ``Text``) plus reasonable parameters from simple statistics
    (cardinality, dtype, null rate, list lengths).
 
 The result is a list of field constructors ready to splat into
-``Model.from_schema(*fields, ...)``. Inference is a best-effort starting point:
+``Model.from_tree(*fields, ...)``. Inference is a best-effort starting point:
 every threshold is tunable, and guesses can be corrected afterwards with
 ``model.update(...)`` / ``model.extend(...)``.
 """
@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from json2vec.structs.enums import Overflow
-from json2vec.structs.structure import Array
+from json2vec.structs.structure import Branch
 from json2vec.structs.tree import Leaf
 from json2vec.tensorfields.extensions.category import Request as Category
 from json2vec.tensorfields.extensions.dateparts import Request as DateParts
@@ -102,13 +102,13 @@ class InferenceConfig:
     """HuggingFace model used when a column is inferred as ``Text``."""
 
     vocab_cap: int = 50_000
-    """Upper bound on inferred ``max_vocab_size`` for ``Category`` / ``Set``."""
+    """Upper bound on inferred ``size`` for ``Category`` / ``Set``."""
 
     array_length_quantile: float = 0.95
-    """Quantile of observed list lengths used to size an ``Array.max_length``."""
+    """Quantile of observed list lengths used to size an ``Branch.length``."""
 
     max_array_length: int = 1024
-    """Hard cap on inferred ``Array.max_length``."""
+    """Hard cap on inferred ``Branch.length``."""
 
     overflow: Overflow = Overflow.head
     """Default overflow policy for inferred arrays."""
@@ -152,7 +152,7 @@ def _next_power_of_two(n: int) -> int:
 
 
 def _vocab_size(distinct: int, config: InferenceConfig) -> int:
-    """Pick a ``max_vocab_size`` cap with headroom for unseen labels."""
+    """Pick a ``size`` cap with headroom for unseen labels."""
     headroom = _next_power_of_two(distinct * 2 + 16)
     return max(2, min(config.vocab_cap, headroom))
 
@@ -243,7 +243,7 @@ def _profile_level(records: Sequence[Mapping]) -> dict[str, _Column]:
 
 @dataclass
 class _Decision:
-    node: Array | Leaf | None
+    node: Branch | Leaf | None
     reason: str
     query: str | None = None
 
@@ -321,7 +321,7 @@ def _decide_scalar(
     # Booleans are categorical with a tiny vocabulary.
     if n_bool and n_bool == observed:
         return _Decision(
-            Category(name=name, query=query, max_vocab_size=2, p_prune=p_prune),
+            Category(name=name, query=query, size=2, p_prune=p_prune),
             reason=f"boolean column ({observed} values)",
         )
 
@@ -344,7 +344,7 @@ def _decide_scalar(
             categorical, why = _int_is_categorical(name, distinct, config)
             if categorical:
                 return _Decision(
-                    Category(name=name, query=query, max_vocab_size=_vocab_size(distinct, config), p_prune=p_prune),
+                    Category(name=name, query=query, size=_vocab_size(distinct, config), p_prune=p_prune),
                     reason=f"integer treated as category: {why}",
                 )
         return _Decision(
@@ -379,7 +379,7 @@ def _decide_scalar(
             )
 
         return _Decision(
-            Category(name=name, query=query, max_vocab_size=_vocab_size(distinct, config), p_prune=p_prune),
+            Category(name=name, query=query, size=_vocab_size(distinct, config), p_prune=p_prune),
             reason=f"string category ({distinct} distinct)",
         )
 
@@ -405,7 +405,7 @@ def _decide_scalar_list(
     if n_str == len(items):
         distinct = len(set(items))
         return _Decision(
-            Set(name=name, query=query, max_vocab_size=_vocab_size(distinct, config), p_prune=p_prune),
+            Set(name=name, query=query, size=_vocab_size(distinct, config), p_prune=p_prune),
             reason=f"list of labels → Set ({distinct} distinct)",
         )
 
@@ -448,17 +448,17 @@ def _decide_column(
     if column.saw_dict:
         return _Decision(None, reason="object", query=f"{query_prefix}.{member}")
 
-    # Repeated child objects: a new Array context.
+    # Repeated child objects: a new Branch context.
     if column.saw_list and column.list_object_items:
         child_prefix = f"{query_prefix}.{member}[*]"
         child_columns = _profile_level(column.list_object_items)
         fields = _build_fields(child_columns, query_prefix=child_prefix, name_prefix="", config=config)
         if not fields:
             return _Decision(None, reason="array of objects with no typable fields")
-        max_length = _infer_array_length(column.list_lengths, config)
+        length = _infer_array_length(column.list_lengths, config)
         return _Decision(
-            Array(*fields, name=name, max_length=max_length, overflow=config.overflow),
-            reason=f"array of objects → Array(max_length={max_length})",
+            Branch(*fields, name=name, length=length, overflow=config.overflow),
+            reason=f"array of objects → Branch(length={length})",
         )
 
     # Repeated scalars: Set or Vector.
@@ -477,7 +477,7 @@ def _infer_array_length(lengths: list[int], config: InferenceConfig) -> int:
     # Use the observed quantile length directly. Sequence length does not need to
     # be a power of two (that only matters for d_model / heads), so rounding up
     # would only pad fixed-length arrays — e.g. a constant length of 5 should be
-    # max_length=5, not 8.
+    # length=5, not 8.
     chosen = max(1, ordered[index])
     return max(1, min(config.max_array_length, chosen))
 
@@ -499,9 +499,9 @@ def _build_fields(
     name_prefix: str,
     config: InferenceConfig,
     explain: list[tuple[str, str, str]] | None = None,
-) -> list[Array | Leaf]:
+) -> list[Branch | Leaf]:
     """Build schema nodes for one container level, flattening nested objects."""
-    fields: list[Array | Leaf] = []
+    fields: list[Branch | Leaf] = []
     seen: set[str] = set()
 
     for column in columns.values():
@@ -567,7 +567,7 @@ def infer_schema(
     config: InferenceConfig | None = None,
     explain: bool = False,
     **overrides: Any,
-) -> list[Array | Leaf]:
+) -> list[Branch | Leaf]:
     """Infer `json2vec` field constructors from sample records.
 
     Args:
@@ -581,8 +581,8 @@ def infer_schema(
             :class:`InferenceConfig` fields when ``config`` is not given.
 
     Returns:
-        A list of :class:`~json2vec.Array` and leaf request constructors ready
-        to pass to ``Model.from_schema(*fields, ...)``.
+        A list of :class:`~json2vec.Branch` and leaf request constructors ready
+        to pass to ``Model.from_tree(*fields, ...)``.
 
     Raises:
         ValueError: If no records are provided or no typable fields are found.

@@ -4,7 +4,7 @@ import torch
 from rich.console import Console
 from rich.pretty import Pretty
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.structs.tree import Renderable
 
 
@@ -20,7 +20,7 @@ def test_renderable_owns_shared_rich_styles() -> None:
 
 
 def test_leaf_rich_display_uses_schema_summary() -> None:
-    rendered = render_text(j2v.Number("amount"))
+    rendered = render_text(jv.Number("amount"))
 
     assert "amount [number] active" in rendered
     assert "query=" not in rendered
@@ -35,9 +35,9 @@ def test_leaf_rich_display_uses_schema_summary() -> None:
 
 
 def test_leaf_display_flags() -> None:
-    target = render_text(j2v.Category("returned", target=True, max_vocab_size=2)).splitlines()[0].split()
-    embedded = render_text(j2v.Number("amount", embed=True)).splitlines()[0].split()
-    inactive = render_text(j2v.Category("customer_id", active=False)).splitlines()[0].split()
+    target = render_text(jv.Category("returned", target=True, size=2)).splitlines()[0].split()
+    embedded = render_text(jv.Number("amount", embed=True)).splitlines()[0].split()
+    inactive = render_text(jv.Category("customer_id", active=False)).splitlines()[0].split()
 
     assert "target" in target
     assert "embed" in embedded
@@ -46,35 +46,35 @@ def test_leaf_display_flags() -> None:
 
 
 def test_names_and_type_labels_have_background_styles() -> None:
-    number_html = j2v.Number("amount")._repr_html_()
-    category_html = j2v.Category("sku")._repr_html_()
-    array_html = j2v.Array(j2v.Number("amount"), name="items")._repr_html_()
-    hyperparameters_html = j2v.Hyperparameters.from_schema(
-        j2v.Number("amount"),
-        j2v.Number("label", target=True),
+    number_html = jv.Number("amount")._repr_html_()
+    category_html = jv.Category("sku")._repr_html_()
+    branch_html = jv.Branch(jv.Number("amount"), name="items")._repr_html_()
+    schema_html = jv.Schema.from_tree(
+        jv.Number("amount"),
+        jv.Number("label", target=True),
         name="record",
         d_model=8,
         n_layers=1,
         n_heads=4,
     )._repr_html_()
-    model_html = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Number("label", target=True),
+    model_html = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Number("label", target=True),
         name="record",
         d_model=8,
         n_layers=1,
         n_heads=4,
     )._repr_html_()
 
-    for html in (number_html, category_html, array_html, hyperparameters_html, model_html):
+    for html in (number_html, category_html, branch_html, schema_html, model_html):
         assert "color: #808000" in html
         assert "background-color: #3f3f46" in html
         assert "background-color: #1f2937" in html
 
 
 def test_leaf_display_separates_common_and_specific_attributes() -> None:
-    number_lines = render_text(j2v.Number("amount", p_mask=0.15, objective="huber")).splitlines()
-    category_lines = render_text(j2v.Category("sku", max_vocab_size=2048)).splitlines()
+    number_lines = render_text(jv.Number("amount", p_mask=0.15, objective="huber")).splitlines()
+    category_lines = render_text(jv.Category("sku", size=2048)).splitlines()
 
     assert "p_mask=0.15" in number_lines[1]
     assert number_lines[1].startswith(" ")
@@ -84,22 +84,22 @@ def test_leaf_display_separates_common_and_specific_attributes() -> None:
 
     assert "pooling=query" in category_lines[1]
     assert category_lines[1].startswith(" ")
-    assert "max_vocab_size=2048" not in category_lines[1]
-    assert "max_vocab_size=2048" in category_lines[2]
+    assert "size=2048" not in category_lines[1]
+    assert "size=2048" in category_lines[2]
     assert category_lines[2].startswith(" ")
 
 
-def test_array_rich_display_renders_child_subtree() -> None:
+def test_branch_rich_display_renders_child_subtree() -> None:
     rendered = render_text(
-        j2v.Array(
-            j2v.Category("sku", max_vocab_size=2048),
-            j2v.Number("quantity"),
+        jv.Branch(
+            jv.Category("sku", size=2048),
+            jv.Number("quantity"),
             name="line_items",
-            max_length=32,
+            length=32,
         )
     )
 
-    assert "line_items [array] max_length=32 overflow=head attention=mha n_layers=1 n_heads=4 n_linear=1" in rendered
+    assert "line_items [branch] length=32 overflow=head attention=mha n_layers=1 n_heads=4 n_linear=1" in rendered
     assert "embed=False" not in rendered
     assert "|-- sku [category] active" in rendered
     assert "`-- quantity [number] active" in rendered
@@ -107,9 +107,9 @@ def test_array_rich_display_renders_child_subtree() -> None:
 
 
 def test_tree_prefixes_have_bold_html_style() -> None:
-    html = j2v.Array(
-        j2v.Number("amount"),
-        j2v.Number("quantity"),
+    html = jv.Branch(
+        jv.Number("amount"),
+        jv.Number("quantity"),
         name="line_items",
     )._repr_html_()
 
@@ -117,24 +117,24 @@ def test_tree_prefixes_have_bold_html_style() -> None:
     assert 'font-weight: bold">`-- </span>' in html
 
 
-def test_array_embed_renders_as_flag() -> None:
+def test_branch_embed_renders_as_flag() -> None:
     rendered = render_text(
-        j2v.Array(
-            j2v.Number("amount"),
+        jv.Branch(
+            jv.Number("amount"),
             name="line_items",
-            max_length=32,
+            length=32,
             embed=True,
         )
     )
 
-    assert "line_items [array] embed max_length=32 overflow=head" in rendered
+    assert "line_items [branch] embed length=32 overflow=head" in rendered
     assert "embed=True" not in rendered
 
 
-def test_root_array_embed_renders_as_flag() -> None:
+def test_root_branch_embed_renders_as_flag() -> None:
     rendered = render_text(
-        j2v.Hyperparameters.from_schema(
-            j2v.Number("amount"),
+        jv.Schema.from_tree(
+            jv.Number("amount"),
             name="record",
             d_model=8,
             n_layers=1,
@@ -147,22 +147,22 @@ def test_root_array_embed_renders_as_flag() -> None:
     assert "embed=True" not in rendered
 
 
-def test_nested_array_rich_display_renders_nested_tree_prefixes() -> None:
+def test_nested_branch_rich_display_renders_nested_tree_prefixes() -> None:
     rendered = render_text(
-        j2v.Array(
-            j2v.Array(
-                j2v.Number("amount"),
-                j2v.Category("merchant", max_vocab_size=4096),
+        jv.Branch(
+            jv.Branch(
+                jv.Number("amount"),
+                jv.Category("merchant", size=4096),
                 name="transactions",
-                max_length=360,
+                length=360,
                 overflow="tail",
             ),
-            j2v.Category("churned", target=True, max_vocab_size=2),
+            jv.Category("churned", target=True, size=2),
             name="customer",
         )
     )
 
-    assert "|-- transactions [array] max_length=360 overflow=tail" in rendered
+    assert "|-- transactions [branch] length=360 overflow=tail" in rendered
     assert "|   |-- amount [number] active" in rendered
     assert "|   `-- merchant [category] active" in rendered
     assert "`-- churned [category] active target" in rendered
@@ -170,7 +170,7 @@ def test_nested_array_rich_display_renders_nested_tree_prefixes() -> None:
 
 
 def test_common_display_surfaces_are_backed_by_rich() -> None:
-    node = j2v.Number("amount")
+    node = jv.Number("amount")
 
     assert str(node) == render_text(node)
 
@@ -190,23 +190,23 @@ def test_common_display_surfaces_are_backed_by_rich() -> None:
     assert data == node._repr_html_()
 
 
-def test_hyperparameters_rich_display_uses_root_schema_tree() -> None:
-    hyperparameters = j2v.Hyperparameters.from_schema(
-        j2v.Number("amount"),
-        j2v.Category("label", target=True, max_vocab_size=2),
+def test_schema_rich_display_uses_root_schema_tree() -> None:
+    schema = jv.Schema.from_tree(
+        jv.Number("amount"),
+        jv.Category("label", target=True, size=2),
         name="record",
         d_model=8,
         n_layers=1,
         n_heads=4,
     )
 
-    assert isinstance(hyperparameters, Renderable)
-    rendered = render_text(hyperparameters)
+    assert isinstance(schema, Renderable)
+    rendered = render_text(schema)
 
-    assert rendered == str(hyperparameters)
-    assert "hyperparameters [hyperparameters] d_model=8 arrays=1 fields=2 targets=1 embeds=0" in rendered
+    assert rendered == str(schema)
+    assert "schema [schema] d_model=8 branches=1 fields=2 targets=1 embeds=0" in rendered
     root_line = next(line for line in rendered.splitlines() if "`-- record [root]" in line)
-    assert "max_length=" not in root_line
+    assert "length=" not in root_line
     assert "overflow=" not in root_line
     assert "embed=False" not in root_line
     assert "    |-- amount [number] active query=[*].amount" in rendered
@@ -214,9 +214,9 @@ def test_hyperparameters_rich_display_uses_root_schema_tree() -> None:
 
 
 def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Category("label", target=True, max_vocab_size=2),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Category("label", target=True, size=2),
         name="record",
         d_model=8,
         n_layers=1,
@@ -229,9 +229,9 @@ def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
 
     assert rendered == str(model)
     assert "Model [model] batch_size=3 d_model=8 parameters=" in rendered
-    assert "arrays=1 fields=2 targets=1 embeds=0" in rendered
+    assert "branches=1 fields=2 targets=1 embeds=0" in rendered
     root_line = next(line for line in rendered.splitlines() if "`-- record [root]" in line)
-    assert "max_length=" not in root_line
+    assert "length=" not in root_line
     assert "overflow=" not in root_line
     assert "embed=False" not in root_line
     assert "    |-- amount [number] active query=[*].amount" in rendered
@@ -239,16 +239,16 @@ def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
 
 
 def test_model_select_pprint_uses_rich_node_display() -> None:
-    model = j2v.Model.from_schema(
-        j2v.Number("amount"),
-        j2v.Category("species", target=True, max_vocab_size=4),
+    model = jv.Model.from_tree(
+        jv.Number("amount"),
+        jv.Category("species", target=True, size=4),
         name="record",
         d_model=8,
         n_layers=1,
         n_heads=4,
     )
 
-    selection = model.select(j2v.where("address") == "record/species")
+    selection = model.select(jv.where("address") == "record/species")
     rendered = pformat(selection)
     console = Console(record=True, width=120)
     console.print(Pretty(selection))
@@ -258,17 +258,17 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
     for output in (rendered, rich_rendered):
         assert "species [category] active target query=[*].species" in output
         assert " pooling=query weight=1 p_mask=0 p_prune=1 n_heads=4 n_linear=1" in output
-        assert " max_vocab_size=4 p_unavailable=0.01 topk=[]" in output
+        assert " size=4 p_unavailable=0.01 topk=[]" in output
         assert "Request(name=" not in output
         assert "Selection(" not in output
 
 
 def test_tensorfield_rich_display_previews_state_tokens() -> None:
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Category("letter", max_vocab_size=4, p_unavailable=0.0),
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Category("letter", size=4, p_unavailable=0.0),
             name="letters",
-            max_length=4,
+            length=4,
         ),
         d_model=8,
         n_layers=1,
@@ -276,7 +276,7 @@ def test_tensorfield_rich_display_previews_state_tokens() -> None:
     )
     field = model.encode(
         [{"letters": [{"letter": "A"}, {"letter": "B"}]}],
-        strata=j2v.Strata.train,
+        strata=jv.Strata.train,
     )["record/letters/letter"]
 
     field.hide(torch.tensor([[[False, True, False, False]]]))
@@ -290,15 +290,15 @@ def test_tensorfield_rich_display_previews_state_tokens() -> None:
 
 
 def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Array(
-                j2v.Category("letter", max_vocab_size=8, p_unavailable=0.0),
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Branch(
+                jv.Category("letter", size=8, p_unavailable=0.0),
                 name="letters",
-                max_length=3,
+                length=3,
             ),
             name="words",
-            max_length=2,
+            length=2,
         ),
         d_model=8,
         n_layers=1,
@@ -313,7 +313,7 @@ def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
                 ]
             }
         ],
-        strata=j2v.Strata.train,
+        strata=jv.Strata.train,
         mask=False,
     )["record/words/letters/letter"]
 
@@ -324,7 +324,7 @@ def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
 
 
 def test_rich_display_does_not_replace_repr_or_mutate_serialization() -> None:
-    node = j2v.Number("amount", p_mask=0.15)
+    node = jv.Number("amount", p_mask=0.15)
     dumped = node.model_dump(mode="python")
 
     assert "query=<inferred>" not in repr(node)

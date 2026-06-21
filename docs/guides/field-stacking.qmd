@@ -21,15 +21,15 @@ Without stacking, two locations become two separate categorical fields:
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Category("origin", max_vocab_size=4096),
-    j2v.Category("destination", max_vocab_size=4096),
+model = jv.Model.from_tree(
     name="itinerary",
     d_model=64,
     n_layers=2,
     n_heads=4,
+    origin=jv.Category(size=4096),
+    destination=jv.Category(size=4096),
 )
 
 model
@@ -44,20 +44,15 @@ With stacking, the source fields become repeated values under one schema field:
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category(
-            "location",
-            query="[*].[origin, destination]",
-            max_vocab_size=4096,
-        ),
-        name="locations",
-        max_length=2,
-    ),
+model = jv.Model.from_tree(
     name="itinerary",
     d_model=64,
     n_layers=2,
     n_heads=4,
+    locations=jv.Branch(
+        length=2,
+        location=jv.Category(query="[*].[origin, destination]", size=4096),
+    ),
 )
 
 model
@@ -73,7 +68,7 @@ For a raw record like:
 ```
 
 the query `[*].[origin, destination]` produces two location values for the
-`locations` array. The modeled field is `itinerary/locations/location`, so both
+`locations` branch. The modeled field is `itinerary/locations/location`, so both
 positions share one categorical vocabulary.
 
 ```{python .marimo}
@@ -94,20 +89,16 @@ Stacking also works for repeated identity roles.
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Entity(
-            "account_id",
-            query="[*].[buyer_account_id, seller_account_id]",
-        ),
-        name="parties",
-        max_length=2,
-    ),
-    j2v.Number("amount"),
+model = jv.Model.from_tree(
     name="payment",
     d_model=64,
     n_layers=2,
     n_heads=4,
+    parties=jv.Branch(
+        length=2,
+        account_id=jv.Entity(query="[*].[buyer_account_id, seller_account_id]"),
+    ),
+    amount=jv.Number,
 )
 
 model
@@ -115,7 +106,8 @@ model
 
 Use `Entity` when the useful signal is local equality inside the observation,
 for example whether the same account appears in multiple roles or events. Use
-`Category` when the identifier should be learned as a persistent global label.
+`Category` for bounded labels or codes that should be learned as a persistent
+global vocabulary.
 
 ## Preserve Roles When They Matter
 
@@ -127,7 +119,7 @@ dense query.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
 
 def stack_parties(record: dict) -> dict:
@@ -140,18 +132,17 @@ def stack_parties(record: dict) -> dict:
     }
 
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Entity("party_id"),
-        j2v.Category("role", max_vocab_size=8),
-        name="parties",
-        max_length=2,
-    ),
-    j2v.Number("amount"),
+model = jv.Model.from_tree(
     name="payment",
     d_model=64,
     n_layers=2,
     n_heads=4,
+    parties=jv.Branch(
+        length=2,
+        party_id=jv.Entity,
+        role=jv.Category(size=8),
+    ),
+    amount=jv.Number,
 )
 
 model
@@ -173,20 +164,15 @@ Stacking can represent state changes:
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category(
-            "status",
-            query="[*].[previous_status, new_status]",
-            max_vocab_size=64,
-        ),
-        name="status_values",
-        max_length=2,
-    ),
+model = jv.Model.from_tree(
     name="profile_change",
     d_model=32,
     n_layers=1,
     n_heads=4,
+    status_values=jv.Branch(
+        length=2,
+        status=jv.Category(query="[*].[previous_status, new_status]", size=64),
+    ),
 )
 
 model
@@ -215,7 +201,7 @@ For values inside an array, include the parent path:
 query = "[*].segments[*].[origin, destination]"
 ```
 
-The resulting values should line up with the `Array(max_length=...)` that owns
+The resulting values should line up with the `Branch(length=...)` that owns
 the stacked field.
 
 ## When To Use It
@@ -239,7 +225,7 @@ would be easier to test and maintain.
 ## Where Next
 
 - Use [Query Paths](../core-concepts/querypaths.qmd) for request query conventions.
-- Use [Array](../data-types/array.qmd) for repeated context behavior.
+- Use [Branch](../data-types/branch.qmd) for repeated context behavior.
 - Use [preprocessors](data-modules.qmd#preprocessors) when role-aware stacking
   needs Python logic.
 - See the [Device Tenure case study](../case-studies/device-tenure.qmd) for a

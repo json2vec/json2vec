@@ -16,7 +16,7 @@ from loguru import logger
 from json2vec.architecture.graph import ModelGraph
 from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import NodeAttribute, NodePredicate, SchemaField
-from json2vec.structs.structure import Array
+from json2vec.structs.structure import Branch
 from json2vec.structs.tree import Leaf, Node
 
 if TYPE_CHECKING:
@@ -124,7 +124,7 @@ class SchemaEditor:
         include_root: bool = True,
         use_cache: bool = True,
     ) -> list[Node]:
-        return self.module.hyperparameters.select(
+        return self.module.schema.select(
             *predicates,
             include_root=include_root,
             use_cache=use_cache,
@@ -141,7 +141,7 @@ class SchemaEditor:
         **values: Any,
     ) -> None:
         self._assert_mutation_allowed("update")
-        values = self.module.hyperparameters.update_values(values)
+        values = self.module.schema.update_values(values)
         changes = self._attribute_changes(
             values=values,
             predicates=predicates,
@@ -149,7 +149,7 @@ class SchemaEditor:
             include_root=include_root,
             use_cache=use_cache,
         )
-        self.module.hyperparameters.update(
+        self.module.schema.update(
             *predicates,
             strict=strict,
             allow_extra=allow_extra,
@@ -170,7 +170,7 @@ class SchemaEditor:
     ) -> None:
         self._assert_mutation_allowed("extend")
         parent, field_count = self._extend_target(*args, include_root=include_root, use_cache=use_cache)
-        self.module.hyperparameters.extend(*args, include_root=include_root, use_cache=use_cache)
+        self.module.schema.extend(*args, include_root=include_root, use_cache=use_cache)
         ModelGraph.rebuild(self.module)
         self.module._reset_contracts()
         for field in parent.fields[-field_count:]:
@@ -189,7 +189,7 @@ class SchemaEditor:
     ) -> None:
         self._assert_mutation_allowed("delete")
         roots = self._delete_roots(*predicates, include_root=include_root, use_cache=use_cache)
-        self.module.hyperparameters.delete(*predicates, include_root=include_root, use_cache=use_cache)
+        self.module.schema.delete(*predicates, include_root=include_root, use_cache=use_cache)
         ModelGraph.rebuild(self.module)
         self.module._reset_contracts()
         for node in roots:
@@ -208,7 +208,7 @@ class SchemaEditor:
         descendants: bool = False,
     ) -> None:
         self._assert_mutation_allowed("reset")
-        selected = self.module.hyperparameters.select(
+        selected = self.module.schema.select(
             *predicates,
             include_root=include_root,
             use_cache=use_cache,
@@ -239,7 +239,7 @@ class SchemaEditor:
         **values: Any,
     ) -> Iterator[None]:
         self._assert_mutation_allowed("override")
-        values = self.module.hyperparameters.update_values(values)
+        values = self.module.schema.update_values(values)
         changes = self._attribute_changes(
             values=values,
             predicates=predicates,
@@ -249,7 +249,7 @@ class SchemaEditor:
         )
         entered = False
         try:
-            with self.module.hyperparameters.override(
+            with self.module.schema.override(
                 *predicates,
                 strict=strict,
                 allow_extra=allow_extra,
@@ -278,7 +278,7 @@ class SchemaEditor:
         include_root: bool,
         use_cache: bool,
     ) -> list[AttributeChange]:
-        nodes = self.module.hyperparameters.select(*predicates, include_root=include_root, use_cache=use_cache)
+        nodes = self.module.schema.select(*predicates, include_root=include_root, use_cache=use_cache)
         changes: list[AttributeChange] = []
         for node in nodes:
             can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
@@ -305,32 +305,32 @@ class SchemaEditor:
         *args: NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField,
         include_root: bool,
         use_cache: bool,
-    ) -> tuple[Array, int]:
+    ) -> tuple[Branch, int]:
         predicates: list[NodePredicate | NodeAttribute | Callable[[Node], bool]] = []
         field_count = 0
         reading_fields = False
 
         for item in args:
-            if isinstance(item, (Array, Leaf)):
+            if isinstance(item, (Branch, Leaf)):
                 reading_fields = True
                 field_count += 1
                 continue
 
             if reading_fields:
-                raise TypeError("extend predicates must come before new schema fields")
+                raise TypeError("extend predicates must come before new tree fields")
 
             predicates.append(item)
 
         if field_count == 0:
-            raise ValueError("extend requires at least one schema field")
+            raise ValueError("extend requires at least one tree field")
 
         candidates = [
             node
-            for node in self.module.hyperparameters.select(*predicates, include_root=include_root, use_cache=use_cache)
-            if isinstance(node, Array)
+            for node in self.module.schema.select(*predicates, include_root=include_root, use_cache=use_cache)
+            if isinstance(node, Branch)
         ]
         if len(candidates) != 1:
-            raise ValueError(f"extend requires exactly one matching array node, found {len(candidates)}")
+            raise ValueError(f"extend requires exactly one matching branch node, found {len(candidates)}")
 
         return candidates[0], field_count
 
@@ -340,7 +340,7 @@ class SchemaEditor:
         include_root: bool,
         use_cache: bool,
     ) -> list[Node]:
-        selected = self.module.hyperparameters.select(*predicates, include_root=include_root, use_cache=use_cache)
+        selected = self.module.schema.select(*predicates, include_root=include_root, use_cache=use_cache)
         selected_ids = {id(node) for node in selected}
         return [
             node
@@ -348,7 +348,7 @@ class SchemaEditor:
             if not any(
                 id(ancestor) in selected_ids
                 for ancestor in getattr(node, "ancestors", ())
-                if ancestor is not self.module.hyperparameters
+                if ancestor is not self.module.schema
             )
         ]
 

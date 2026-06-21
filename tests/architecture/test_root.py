@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from json2vec.data.iterables import encode
 from json2vec.logging.throughput import ThroughputLogger
 from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.shared.counter import CounterUpdateCallback
 from json2vec.tensorfields.shared.vocabulary import (
@@ -20,21 +20,21 @@ from json2vec.tensorfields.shared.vocabulary import (
 )
 
 
-def _hyperparameters() -> Hyperparameters:
-    return Hyperparameters.model_validate(
+def _schema() -> Schema:
+    return Schema.model_validate(
         {
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "array",
+                "type": "branch",
                 "dropout": 0.1,
-                "max_length": 1,
+                "length": 1,
                 "fields": [
                     {
                         "name": "label",
                         "type": "category",
                         "query": "[*].label",
-                        "max_vocab_size": 32,
+                        "size": 32,
                     }
                 ],
             },
@@ -42,21 +42,21 @@ def _hyperparameters() -> Hyperparameters:
     )
 
 
-def test_on_save_checkpoint_serializes_hyperparameters() -> None:
-    hyperparameters = _hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+def test_on_save_checkpoint_serializes_schema() -> None:
+    schema = _schema()
+    model = Model(schema=schema, batch_size=2)
     checkpoint = {}
 
     model.on_save_checkpoint(checkpoint)
 
-    restored = Hyperparameters.model_validate(checkpoint["hyperparameters"])
-    assert restored.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+    restored = Schema.model_validate(checkpoint["schema"])
+    assert restored.model_dump(mode="python") == schema.model_dump(mode="python")
     assert checkpoint["batch_size"] == 2
 
 
 def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
-    hyperparameters = _hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    schema = _schema()
+    model = Model(schema=schema, batch_size=2)
     pathname = tmp_path / "nested" / "model.ckpt"
 
     model.save(pathname=pathname)
@@ -65,7 +65,7 @@ def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
 
     assert pathname.exists()
     assert restored.batch_size == 2
-    assert restored.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+    assert restored.schema.model_dump(mode="python") == schema.model_dump(mode="python")
 
     restored_state = restored.state_dict()
     for key, value in model.state_dict().items():
@@ -75,14 +75,14 @@ def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
             assert restored_state[key] == value
 
 
-def _prediction_hyperparameters() -> Hyperparameters:
-    return Hyperparameters(
+def _prediction_schema() -> Schema:
+    return Schema(
         d_model=8,
         fields={
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "embed": True,
-            "max_length": 1,
+            "length": 1,
             "attention": "none",
             "fields": [
                 {
@@ -90,7 +90,7 @@ def _prediction_hyperparameters() -> Hyperparameters:
                     "type": "category",
                     "query": "[*].color",
                     "embed": False,
-                    "max_vocab_size": 16,
+                    "size": 16,
                 },
                 {
                     "name": "label",
@@ -98,7 +98,7 @@ def _prediction_hyperparameters() -> Hyperparameters:
                     "query": "[*].label",
                     "embed": False,
                     "p_prune": 1.0,
-                    "max_vocab_size": 16,
+                    "size": 16,
                     "topk": [2],
                 },
             ],
@@ -107,14 +107,14 @@ def _prediction_hyperparameters() -> Hyperparameters:
 
 
 def _primed_prediction_model() -> Model:
-    hyperparameters = _prediction_hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    schema = _prediction_schema()
+    model = Model(schema=schema, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
             [{"color": "blue", "label": "cool"}],
         ],
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -123,33 +123,33 @@ def _primed_prediction_model() -> Model:
     return model
 
 
-def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
-    hyperparameters = _hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+def _build_checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
+    schema = _schema()
+    model = Model(schema=schema, batch_size=2)
     checkpoint_path = tmp_path / "model.ckpt"
     model.save(checkpoint_path)
 
-    return checkpoint_path, hyperparameters
+    return checkpoint_path, schema
 
 
 def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
+    checkpoint_path, schema = _build_checkpoint(tmp_path)
 
     model = Model.load(checkpoint_path)
 
     assert model.batch_size == 2
-    assert model.hyperparameters.model_dump(mode="python") == hyperparameters.model_dump(mode="python")
+    assert model.schema.model_dump(mode="python") == schema.model_dump(mode="python")
 
 
 def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     best_path = tmp_path / "best.ckpt"
     model.save(best_path)
     best_state = {
         key: value.detach().clone() if isinstance(value, torch.Tensor) else deepcopy(value)
         for key, value in model.state_dict().items()
     }
-    best_hyperparameters = model.hyperparameters.model_dump(mode="python")
+    best_schema = model.schema.model_dump(mode="python")
     address = Address("root", "label")
 
     model.update(lambda node: node.address == address, weight=3.0)
@@ -184,7 +184,7 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
     assert strategy.barriers == ["rollback_checkpoint_load"]
     assert strategy.checkpoint_io.loaded == [(str(best_path), torch.device("cpu"), False)]
     assert model.batch_size == 2
-    assert model.hyperparameters.model_dump(mode="python") == best_hyperparameters
+    assert model.schema.model_dump(mode="python") == best_schema
     assert model.nodes[address] is not mutated_node
     for key, value in best_state.items():
         restored = model.state_dict()[key]
@@ -195,11 +195,11 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
 
 
 def test_rollback_checkpoint_loads_schema_metadata_with_weights_only_disabled(tmp_path: Path) -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     best_path = tmp_path / "best.ckpt"
     model.save(best_path)
     checkpoint = torch.load(best_path, weights_only=False, map_location="cpu")
-    assert checkpoint["hyperparameters"]["fields"]["attention"] == AttentionMode.mha
+    assert checkpoint["schema"]["fields"]["attention"] == AttentionMode.mha
 
     with torch.no_grad():
         next(model.parameters()).add_(1.0)
@@ -240,9 +240,9 @@ def test_rollback_checkpoint_requires_a_saved_checkpoint() -> None:
 
 
 def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> None:
-    _, hyperparameters = _build_checkpoint(tmp_path)
+    _, schema = _build_checkpoint(tmp_path)
     model = Model(
-        hyperparameters=hyperparameters,
+        schema=schema,
         batch_size=2,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
     )
@@ -252,9 +252,9 @@ def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> No
 
 
 def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> None:
-    _, hyperparameters = _build_checkpoint(tmp_path)
+    _, schema = _build_checkpoint(tmp_path)
     model = Model(
-        hyperparameters=hyperparameters,
+        schema=schema,
         batch_size=2,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
         scheduler=lambda _module, optimizer: torch.optim.lr_scheduler.StepLR(optimizer, step_size=1),
@@ -267,7 +267,7 @@ def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> No
 
 
 def test_configure_callbacks_collects_active_extension_callbacks() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
 
     callbacks = model.configure_callbacks()
     callback_types = [type(callback) for callback in callbacks]
@@ -287,31 +287,31 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
 
 
 def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
-    hyperparameters = Hyperparameters.model_validate(
+    schema = Schema.model_validate(
         {
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "array",
-                "max_length": 1,
+                "type": "branch",
+                "length": 1,
                 "fields": [
                     {
                         "name": "label",
                         "type": "category",
                         "query": "[*].label",
-                        "max_vocab_size": 16,
+                        "size": 16,
                     },
                     {
                         "name": "tags",
                         "type": "set",
                         "query": "[*].tags",
-                        "max_vocab_size": 16,
+                        "size": 16,
                     },
                 ],
             },
         }
     )
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(schema=schema, batch_size=2)
 
     vocabulary_callbacks = [
         callback for callback in model.configure_callbacks() if isinstance(callback, VocabularySyncCallback)
@@ -341,7 +341,7 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
 
 
 def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     model._trainer = type(  # noqa: SLF001
         "TrainerStub",
         (),
@@ -360,7 +360,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
 
 
 def test_builtin_resources_are_attached_to_extension_modules() -> None:
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     address = Address("root", "label")
 
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
@@ -369,7 +369,7 @@ def test_builtin_resources_are_attached_to_extension_modules() -> None:
 
 
 def test_online_vocabulary_model_uses_local_storage_until_shared():
-    vocab = OnlineVocabularyModel(max_vocab_size=8)
+    vocab = OnlineVocabularyModel(size=8)
 
     assert vocab.manager is None
     assert vocab.is_shared is False
@@ -400,7 +400,7 @@ def test_online_vocabulary_model_uses_local_storage_until_shared():
 
 
 def test_vocabulary_callback_freezes_model_vocabularies_on_fit_end():
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     address = Address("root", "label")
     vocab = model.nodes[address].embedder.vocab
 
@@ -433,14 +433,14 @@ def test_runtime_placement_callback_moves_module_to_root_device() -> None:
 
 
 def test_training_counters_observe_all_encoded_fields() -> None:
-    hyperparameters = _prediction_hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    schema = _prediction_schema()
+    model = Model(schema=schema, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
             [{"color": "blue", "label": "cool"}],
         ],
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -457,12 +457,12 @@ def test_training_counters_observe_all_encoded_fields() -> None:
 
     valued = field.state.eq(Tokens.valued.value)
     expected_content_counts = torch.ones(
-        hyperparameters.requests[address].max_vocab_size,
+        schema.requests[address].size,
         dtype=torch.int64,
     )
     expected_content_counts += torch.bincount(
         field.content.masked_select(valued).reshape(-1),
-        minlength=hyperparameters.requests[address].max_vocab_size,
+        minlength=schema.requests[address].size,
     )
     assert torch.equal(embedder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
 
@@ -479,12 +479,12 @@ def test_training_counters_observe_all_encoded_fields() -> None:
 
     target_valued = target_field.targets[TensorKey.state].eq(Tokens.valued.value)
     expected_target_content_counts = torch.ones(
-        hyperparameters.requests[target_address].max_vocab_size,
+        schema.requests[target_address].size,
         dtype=torch.int64,
     )
     expected_target_content_counts += torch.bincount(
         target_field.targets[TensorKey.content].masked_select(target_valued).reshape(-1),
-        minlength=hyperparameters.requests[target_address].max_vocab_size,
+        minlength=schema.requests[target_address].size,
     )
     assert torch.equal(
         target_embedder.counters[TensorKey.content.name].counts.cpu(),
@@ -502,14 +502,14 @@ def test_training_counters_call_content_counter_for_empty_updates() -> None:
             self.calls.append(values.detach().cpu())
             return values
 
-    hyperparameters = _prediction_hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    schema = _prediction_schema()
+    model = Model(schema=schema, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
             [{"color": "blue", "label": "cool"}],
         ],
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -533,7 +533,7 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
         calls.append(kwargs)
 
     monkeypatch.setattr(Model, "log", log)
-    model = Model(hyperparameters=_hyperparameters(), batch_size=2)
+    model = Model(schema=_schema(), batch_size=2)
     value = torch.tensor(1.0, requires_grad=True)
 
     assert model.track(("loss", "train"), value=value) is value
@@ -547,14 +547,14 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
 
 def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(monkeypatch) -> None:
     monkeypatch.setattr(Model, "log", lambda self, **kwargs: None)
-    hyperparameters = _prediction_hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    schema = _prediction_schema()
+    model = Model(schema=schema, batch_size=2)
     inputs = encode(
         batch=[
             [{"color": "red", "label": "warm"}],
             [{"color": "blue", "label": "cool"}],
         ],
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -567,20 +567,20 @@ def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(mo
 
 def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
     model = Model(
-        hyperparameters=Hyperparameters(
+        schema=Schema(
             d_model=8,
             fields={
                 "name": "root",
-                "type": "array",
+                "type": "branch",
                 "embed": True,
-                "max_length": 1,
+                "length": 1,
                 "attention": "none",
                 "fields": [
                     {
                         "name": "color",
                         "type": "category",
                         "query": "[*].color",
-                        "max_vocab_size": 16,
+                        "size": 16,
                     },
                     {
                         "name": "ignored",
@@ -589,7 +589,7 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
                         "active": False,
                         "embed": True,
                         "p_prune": 1.0,
-                        "max_vocab_size": 16,
+                        "size": 16,
                     },
                 ],
             },
@@ -602,7 +602,7 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
             [{"color": "red"}],
             [{"color": "blue"}],
         ],
-        hyperparameters=model.hyperparameters,
+        schema=model.schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -610,9 +610,9 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
 
     assert Address("root", "ignored") not in inputs.keys()
     assert Address("root", "ignored") in model.nodes
-    assert Address("root", "ignored") not in model.hyperparameters.active_requests
-    assert Address("root", "ignored") not in model.hyperparameters.target
-    assert Address("root", "ignored") not in model.hyperparameters.embed
+    assert Address("root", "ignored") not in model.schema.active_requests
+    assert Address("root", "ignored") not in model.schema.target
+    assert Address("root", "ignored") not in model.schema.embed
     assert all(prediction.address != Address("root", "ignored") for prediction in predictions)
 
 
@@ -666,12 +666,12 @@ def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
     assert torch.equal(label.state, torch.full((2, 1), Tokens.masked.value))
 
 
-def test_encode_array_tail_overflow_keeps_last_values() -> None:
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
+def test_encode_branch_tail_overflow_keeps_last_values() -> None:
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
             name="events",
-            max_length=2,
+            length=2,
             overflow="tail",
         ),
         d_model=8,
@@ -695,12 +695,12 @@ def test_encode_array_tail_overflow_keeps_last_values() -> None:
     assert torch.equal(amount.content, torch.tensor([[[2.0, 3.0]]]))
 
 
-def test_encode_array_error_overflow_raises() -> None:
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
+def test_encode_branch_error_overflow_raises() -> None:
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
             name="events",
-            max_length=2,
+            length=2,
             overflow="error",
         ),
         d_model=8,
@@ -708,7 +708,7 @@ def test_encode_array_error_overflow_raises() -> None:
         n_heads=4,
     )
 
-    with pytest.raises(ValueError, match="array overflow at dimension 2 for record/events/amount"):
+    with pytest.raises(ValueError, match="branch overflow at dimension 2 for record/events/amount"):
         model.encode(
             batch=[
                 {
@@ -720,6 +720,33 @@ def test_encode_array_error_overflow_raises() -> None:
                 }
             ]
         )
+
+
+def test_encode_allows_null_inputs_by_default() -> None:
+    model = jv.Model.from_tree(
+        amount=jv.Number,
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    inputs = model.encode(batch=[{"amount": None}])
+    amount = inputs[Address("record", "amount")]
+
+    assert model.schema.requests[Address("record", "amount")].nullable is True
+    assert torch.equal(amount.state, torch.tensor([[Tokens.null.value]], dtype=torch.int64))
+
+
+def test_encode_nullable_false_rejects_null_inputs() -> None:
+    model = jv.Model.from_tree(
+        amount=jv.Number(nullable=False),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+
+    with pytest.raises(ValueError, match="record/amount.*nullable=False.*1 null"):
+        model.encode(batch=[{"amount": None}])
 
 
 def test_encode_accepts_preprocess() -> None:
@@ -808,26 +835,26 @@ def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
         def forward(self, memory: torch.Tensor) -> torch.Tensor:
             return torch.ones(memory.shape[0], 1, memory.shape[-1], device=memory.device)
 
-    hyperparameters = Hyperparameters.model_validate(
+    schema = Schema.model_validate(
         {
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "array",
-                "max_length": 1,
+                "type": "branch",
+                "length": 1,
                 "fields": [
                     {
                         "name": "color",
                         "type": "category",
                         "query": "[*].color",
                         "embed": True,
-                        "max_vocab_size": 16,
+                        "size": 16,
                     }
                 ],
             },
         }
     )
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    model = Model(schema=schema, batch_size=2)
     model.nodes[Address("root", "color")].decoder.pool = ConstantPool()
 
     inputs = model.encode(

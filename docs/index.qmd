@@ -32,7 +32,8 @@ A `json2vec` schema is both a data contract and an architecture blueprint.
 
 - Leaf fields such as `Number`, `Category`, `Set`, `Entity`, `Text`, and
   `Vector` become datatype-specific tensorfields.
-- `Array` nodes become local context encoders for repeated child objects.
+- `Branch` nodes define shared contexts for child fields, with optional local
+  attention and pooling before the representation flows upward.
 - Targets, masks, pruning, and embeddings are configured on the same schema
   tree.
 - Prediction output is keyed by schema address, so decoded values and
@@ -59,24 +60,22 @@ change the source keys read from each input record.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Category("customer_tier", max_vocab_size=16),
-    j2v.Array(
-        j2v.Category("sku", max_vocab_size=2048),
-        j2v.Number("quantity"),
-        j2v.Number("price"),
-        name="line_items",
-        max_length=32,
-        embed=True,
-    ),
-    j2v.Category("returned", target=True, max_vocab_size=2),
-    name="order",
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
+    customer_tier=jv.Category(size=16),
+    returned=jv.Category(target=True, size=2),
+    line_items=jv.Branch(
+        embed=True,
+        length=32,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+        price=jv.Number,
+    ),
 )
 
 model
@@ -114,7 +113,7 @@ addresses.
 - **Unified training roles:** `target=True`, `p_prune`, and `p_mask` all use the
   same reconstruction path, so supervised and self-supervised objectives share
   the model tree.
-- **Embedding trees:** embeddings can come from the root, arrays, or selected
+- **Embedding trees:** embeddings can come from the root, branches, or selected
   leaves, making branch-level retrieval and diagnostics possible.
 - **Schema evolution:** models are completely mutable and can be updated, extended, deleted, reset, or
   temporarily overridden after construction.
@@ -145,7 +144,7 @@ without making a feature table the only representation the model can see.
 - Modeling rationale: [Why `json2vec`](motivation.qmd)
 - Built-in fields: [Data Types](core-concepts/data-types.qmd)
 - Learning modes and embeddings: [Learning Modes & Embeddings](core-concepts/embeddings.qmd)
-- Windowed reconstruction in arrays: [Dynamic Masking](core-concepts/dynamic-masking.qmd)
+- Windowed reconstruction in branches: [Dynamic Masking](core-concepts/dynamic-masking.qmd)
 - Training execution: [Training With Lightning](guides/lightning.qmd)
 - In-memory and streaming inputs: [Data Modules](guides/data-modules.qmd)
 - Offline prediction jobs: [Batch Inference](guides/batch-inference.qmd)

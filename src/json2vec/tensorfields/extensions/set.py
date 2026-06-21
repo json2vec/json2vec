@@ -1,7 +1,7 @@
 # ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
@@ -27,7 +27,7 @@ from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocab
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-    from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.experiment import Schema
 
 sets: Plugin = Plugin(name="set")
 sets.callback(VocabularySyncCallback, CounterUpdateCallback)
@@ -37,10 +37,32 @@ sets.callback(VocabularySyncCallback, CounterUpdateCallback)
 class Request(RequestBase):
     """Multi-label set tensorfield request backed by an online vocabulary."""
 
+    model_config = pydantic.ConfigDict(extra="allow", populate_by_name=True, serialize_by_alias=True)
+
     type: Literal["set"] = "set"
-    max_vocab_size: Annotated[int, pydantic.Field(gt=0, default=10_000)] = 10_000
+    capacity: Annotated[
+        int,
+        pydantic.Field(alias="size", serialization_alias="size", gt=0, default=10_000),
+    ] = 10_000
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
     threshold: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
+
+    @property
+    def size(self) -> int:
+        return self.capacity
+
+    @size.setter
+    def size(self, value: int) -> None:
+        self.capacity = value
+        self.model_fields_set.add("capacity")
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def reject_removed_options(cls, data: Any) -> Any:
+        if isinstance(data, Mapping) and "max_vocab_size" in data:
+            raise ValueError("max_vocab_size was removed; use size")
+
+        return data
 
 
 def _encode_set_content(value: Any, state: VocabularyState, n_tokens: int) -> np.ndarray:
@@ -80,13 +102,13 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         strata: Strata,
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
-        request: Request = hyperparameters.requests[address]
-        shape: tuple[int, ...] = (len(values), *hyperparameters.shapes[address])
-        n_tokens: int = request.max_vocab_size
+        request: Request = schema.requests[address]
+        shape: tuple[int, ...] = (len(values), *schema.shapes[address])
+        n_tokens: int = request.size
         values, literal_masks = extract_mask_literals(
             values,
             strata=strata,
@@ -102,7 +124,7 @@ class TensorField(TensorFieldBase):
             shape=shape,
             dtype=np.float32,
             pad_value=0.0,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
             value_shape=(n_tokens,),
             encode=lambda value: _encode_set_content(
@@ -116,7 +138,7 @@ class TensorField(TensorFieldBase):
             shape=shape,
             dtype=bool,
             pad_value=False,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
 
@@ -169,13 +191,13 @@ class TensorField(TensorFieldBase):
         cls,
         batch_size: int,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
     ):
-        request: Request = hyperparameters.requests[address]
-        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
+        request: Request = schema.requests[address]
+        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
 
         state = torch.full(shape, Tokens.masked)
-        content = torch.zeros((*shape, request.max_vocab_size), dtype=torch.float32)
+        content = torch.zeros((*shape, request.size), dtype=torch.float32)
 
         return cls(
             state=state,
@@ -188,25 +210,25 @@ class TensorField(TensorFieldBase):
 
 @sets.register
 class Embedder(EmbedderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        request: Request = hyperparameters.requests[address]
+        request: Request = schema.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
-        self.max_vocab_size: int = request.max_vocab_size
+        self.size: int = request.size
 
-        self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(max_vocab_size=request.max_vocab_size)
+        self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=request.size)
 
         self.embeddings = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: torch.nn.Embedding(
                     num_embeddings=len(Tokens),
-                    embedding_dim=hyperparameters.d_model,
+                    embedding_dim=schema.d_model,
                 ),
                 TensorKey.content.name: torch.nn.Embedding(
-                    num_embeddings=self.max_vocab_size,
-                    embedding_dim=hyperparameters.d_model,
+                    num_embeddings=self.size,
+                    embedding_dim=schema.d_model,
                 ),
             }
         )
@@ -222,7 +244,7 @@ class Embedder(EmbedderBase):
         dims: list[int]
 
         N, *dims, n_tokens = inputs.content.shape
-        if n_tokens != self.max_vocab_size:
+        if n_tokens != self.size:
             raise ValueError(f"Set in address {self.origin} has invalid vocabulary width")
 
         state = inputs.state.reshape(-1)
@@ -251,20 +273,20 @@ class Embedder(EmbedderBase):
 
 @sets.register
 class Decoder(DecoderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        request: Request = hyperparameters.requests[address]
+        request: Request = schema.requests[address]
 
         self.linears = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: torch.nn.Linear(
-                    in_features=hyperparameters.d_model,
+                    in_features=schema.d_model,
                     out_features=len(Tokens),
                 ),
                 TensorKey.content.name: torch.nn.Linear(
-                    in_features=hyperparameters.d_model,
-                    out_features=request.max_vocab_size,
+                    in_features=schema.d_model,
+                    out_features=request.size,
                 ),
             }
         )
@@ -345,7 +367,7 @@ def loss(
 @sets.register
 def write(module: Model, prediction: Prediction):
     node = module.nodes[prediction.address]
-    request: Request = module.hyperparameters.requests[prediction.address]
+    request: Request = module.schema.requests[prediction.address]
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     content_logits: torch.Tensor = prediction.payload[TensorKey.content]
 

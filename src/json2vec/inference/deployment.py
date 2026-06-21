@@ -251,7 +251,7 @@ class FastAPIRuntime:
         if observations:
             encoded = encode(
                 batch=observations,
-                hyperparameters=self.model.hyperparameters,
+                schema=self.model.schema,
                 strata=Strata.predict,
                 interprocess_encoding_context=self.interprocess_encoding_context,
                 jmespath_resolution_monitor=getattr(self, "jmespath_resolution_monitor", None),

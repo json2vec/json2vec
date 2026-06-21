@@ -47,7 +47,7 @@ from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
 from json2vec.preprocessors.base import Preprocessor
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
@@ -252,7 +252,7 @@ def read(
 class BatchDataset(IterableDataset):
     def __init__(
         self,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         root: str | Path,
         suffix: Suffix,
         pattern: PatternInput,
@@ -272,7 +272,7 @@ class BatchDataset(IterableDataset):
     ):
         super().__init__()
 
-        self.hyperparameters = hyperparameters
+        self.schema = schema
         self.root = root
         self.suffix = suffix
         self.pattern = pattern
@@ -297,7 +297,7 @@ class BatchDataset(IterableDataset):
 
         yield from (
             Pipeline(
-                hyperparameters=self.hyperparameters,
+                schema=self.schema,
                 root=self.root,
                 suffix=self.suffix,
                 pattern=self.pattern,
@@ -326,7 +326,7 @@ class BatchDataset(IterableDataset):
 
 
 def dataloader(
-    hyperparameters: Hyperparameters,
+    schema: Schema,
     root: str | Path,
     suffix: Suffix,
     pattern: PatternInput,
@@ -355,7 +355,7 @@ def dataloader(
 
     return DataLoader(
         dataset=BatchDataset(
-            hyperparameters=hyperparameters,
+            schema=schema,
             root=root,
             suffix=suffix,
             pattern=pattern,
@@ -386,7 +386,7 @@ class StreamingDataModule(lit.LightningDataModule):
     """Lightning data module for streaming records from files.
 
     Reads file-backed records, applies an optional preprocessor, batches
-    observations, and encodes them with model hyperparameters.
+    observations, and encodes them with model schema.
     """
 
     @beartype
@@ -425,7 +425,7 @@ class StreamingDataModule(lit.LightningDataModule):
             self._model_ref = weakref.ref(model)
         except TypeError:
             self._model_ref = None
-        self._hyperparameters = model.hyperparameters
+        self._schema = model.schema
         self._interprocess_encoding_context = model.interprocess_encoding_context
         self._batch_size = model.batch_size
         self.num_workers = Strata.expand(num_workers, default=None)
@@ -449,17 +449,17 @@ class StreamingDataModule(lit.LightningDataModule):
         return self._model_ref()
 
     @property
-    def hyperparameters(self) -> Hyperparameters:
+    def schema(self) -> Schema:
         model = self._model()
         if model is not None:
-            return model.hyperparameters
+            return model.schema
 
-        return self._hyperparameters
+        return self._schema
 
-    @hyperparameters.setter
-    def hyperparameters(self, hyperparameters: Hyperparameters) -> None:
+    @schema.setter
+    def schema(self, schema: Schema) -> None:
         self._model_ref = None
-        self._hyperparameters = hyperparameters
+        self._schema = schema
 
     @property
     def batch_size(self) -> int:
@@ -508,7 +508,7 @@ class StreamingDataModule(lit.LightningDataModule):
             share_interprocess_encoding_context(interprocess_encoding_context)
 
         return dataloader(
-            hyperparameters=self.hyperparameters,
+            schema=self.schema,
             root=self.root,
             suffix=self.suffix,
             pattern=pattern,

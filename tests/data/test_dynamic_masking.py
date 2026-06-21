@@ -1,18 +1,18 @@
 import pytest
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.data.iterables import encode, mask
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 
 
-def test_array_mask_count_targets_recent_real_slots_and_excludes_padding():
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
+def test_branch_mask_count_targets_recent_real_slots_and_excludes_padding():
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
             name="items",
-            max_length=5,
-            mask=j2v.Mask(count=1, window=2),
+            length=5,
+            mask=jv.Mask(count=1, window=2),
         ),
         d_model=8,
         n_layers=1,
@@ -20,12 +20,12 @@ def test_array_mask_count_targets_recent_real_slots_and_excludes_padding():
     )
     inputs = encode(
         batch=[[{"items": [{"amount": 1.0}, {"amount": 2.0}, {"amount": 3.0}]}]],
-        hyperparameters=model.hyperparameters,
+        schema=model.schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
-    field = next(mask([inputs], model.hyperparameters, Strata.train))["record/items/amount"]
+    field = next(mask([inputs], model.schema, Strata.train))["record/items/amount"]
 
     assert int(field.trainable.sum()) == 1
     assert field.trainable[0, 0, :3].any()
@@ -34,13 +34,13 @@ def test_array_mask_count_targets_recent_real_slots_and_excludes_padding():
     assert torch.equal(field.targets[TensorKey.state], torch.tensor([[[0, 0, 0, 2, 2]]]))
 
 
-def test_model_encode_mask_flag_applies_and_skips_array_masks():
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
+def test_model_encode_mask_flag_applies_and_skips_branch_masks():
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
             name="items",
-            max_length=5,
-            mask=j2v.Mask(count=1, window=2),
+            length=5,
+            mask=jv.Mask(count=1, window=2),
         ),
         d_model=8,
         n_layers=1,
@@ -66,14 +66,14 @@ def test_model_encode_mask_flag_applies_and_skips_array_masks():
     assert set(masked.targets.keys()) == {TensorKey.content, TensorKey.state}
 
 
-def test_array_mask_exclude_predicate_skips_matching_leaf():
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Number("amount"),
-            j2v.Category("code", max_vocab_size=8),
+def test_branch_mask_exclude_predicate_skips_matching_leaf():
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Number("amount"),
+            jv.Category("code", size=8),
             name="items",
-            max_length=2,
-            mask=j2v.Mask(count=1, exclude=j2v.where("type") == "category"),
+            length=2,
+            mask=jv.Mask(count=1, exclude=jv.where("type") == "category"),
         ),
         d_model=8,
         n_layers=1,
@@ -81,20 +81,20 @@ def test_array_mask_exclude_predicate_skips_matching_leaf():
     )
     inputs = encode(
         batch=[[{"items": [{"amount": 1.0, "code": "A"}, {"amount": 2.0, "code": "B"}]}]],
-        hyperparameters=model.hyperparameters,
+        schema=model.schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
-    masked = next(mask([inputs], model.hyperparameters, Strata.train))
+    masked = next(mask([inputs], model.schema, Strata.train))
 
     assert int(masked["record/items/amount"].trainable.sum()) == 1
     assert not masked["record/items/code"].trainable.any()
 
 
 def test_mask_literal_is_predict_only_and_does_not_enter_vocabulary():
-    model = j2v.Model.from_schema(
-        j2v.Category("code", max_vocab_size=8),
+    model = jv.Model.from_tree(
+        jv.Category("code", size=8),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -116,11 +116,11 @@ def test_mask_literal_is_predict_only_and_does_not_enter_vocabulary():
 
 
 def test_inferred_marks_only_masked_predict_slots():
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Category("letter", max_vocab_size=8, p_unavailable=0.0),
+    model = jv.Model.from_tree(
+        jv.Branch(
+            jv.Category("letter", size=8, p_unavailable=0.0),
             name="letters",
-            max_length=5,
+            length=5,
         ),
         d_model=8,
         n_layers=1,
@@ -148,8 +148,8 @@ def test_inferred_marks_only_masked_predict_slots():
 
 
 def test_mask_literal_can_mask_whole_structured_leaf_but_not_leaf_items():
-    model = j2v.Model.from_schema(
-        j2v.Vector("embedding", n_dim=2),
+    model = jv.Model.from_tree(
+        jv.Vector("embedding", n_dim=2),
         d_model=8,
         n_layers=1,
         n_heads=4,

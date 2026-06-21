@@ -4,8 +4,9 @@ marimo-static-output: true
 
 # Built-In Data Types
 
-Data types are the structural and typed nodes in a `json2vec` schema. `Array`
-groups repeated nested objects. Tensorfields are typed leaves that read values,
+Data types are the structural and typed nodes in a `json2vec` schema. `Branch`
+names shared contexts for child fields, usually repeated collections such as
+transactions or sessions. Tensorfields are typed leaves that read values,
 encode them into tensors, hide values during training, and decode targets when
 requested.
 
@@ -26,22 +27,22 @@ query -> validate raw values -> tensorize content/state -> embed visible values
 | Source value | Recommended type | Use a different type when |
 | --- | --- | --- |
 | Continuous scalar | [`Number`](../data-types/number.qmd) | Numeric value is an ID, code, or class label. |
-| One label | [`Category`](../data-types/category.qmd) | The label only needs equality matching within a repeated context; use `Entity`. |
-| Zero or more labels | [`Set`](../data-types/set.qmd) | Labels have attributes or order; use `Array`. |
-| Repeated objects | [`Array`](../data-types/array.qmd) | Repetition is only an upstream storage artifact; preprocess or flatten. |
+| One bounded label | [`Category`](../data-types/category.qmd) | The value is a massive or unstable identifier; keep it as metadata or use `Entity` for local repeated equality. |
+| Zero or more labels | [`Set`](../data-types/set.qmd) | Labels have attributes or order; use `Branch`. |
+| Repeated objects | [`Branch`](../data-types/branch.qmd) | Repetition is only an upstream storage artifact; preprocess or flatten. |
 | Timestamp/calendar value | [`DateParts`](../data-types/dateparts.qmd) | Elapsed time or recency matters; derive a `Number`. |
-| Local repeated identity | [`Entity`](../data-types/entity.qmd) | The ID must be stable across training and prediction; use `Category`. |
+| Local repeated identity | [`Entity`](../data-types/entity.qmd) | The ID is intentionally a small, stable, globally learned label; use `Category`. |
 | Precomputed dense vector | [`Vector`](../data-types/vector.qmd) | `json2vec` should compute embeddings from strings; use `Text`. |
 | Free-form text | [`Text`](../data-types/text.qmd) | The string is a bounded label; use `Category` or `Set`. |
 
 Same raw value can need different types:
 
 - `"12345"` is a `Number` only if distance and magnitude matter.
-- `"12345"` is a `Category` if it is a stable global ID or code.
+- `"12345"` is a `Category` if it is a bounded code or label.
 - `"12345"` is an `Entity` if only repeated equality inside the current
   repeated context matters.
 - `["red", "sale"]` is a `Set` if the labels are unordered.
-- `[{"name": "red"}, {"name": "sale"}]` is an `Array` if each item has fields.
+- `[{"name": "red"}, {"name": "sale"}]` is a `Branch` if each item has fields.
 
 ## Prediction Support
 
@@ -54,7 +55,7 @@ Same raw value can need different types:
 | `DateParts` | No | No public payload | Trains losses and accuracies only. |
 | `Entity` | No | No public payload | Observation-local identity representation. |
 | `Text` | No | No public payload | Reconstructs frozen encoder embeddings, not text. |
-| `Array` | No direct payload | No | Child fields may emit predictions. |
+| `Branch` | No direct payload | No | Child fields may emit predictions. |
 
 Any node configured with `embed=True` can also emit an `embedding` payload from
 `Model.predict(...)`. See [Learning Modes & Embeddings](embeddings.qmd).
@@ -66,7 +67,7 @@ and emit embeddings when configured with `embed=True`.
 ## Shared Leaf Options
 
 Every tensorfield inherits shared leaf options. Type-specific pages document
-options unique to that tensorfield. `Array` has structural options because it
+options unique to that tensorfield. `Branch` has structural options because it
 groups children instead of reading one source value.
 
 ### Schema Identity
@@ -77,6 +78,7 @@ groups children instead of reading one source value.
 | `query` | inferred | JMESPath expression for the source value. See [Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields stay in the schema but are ignored by encoding, losses, and prediction. |
+| `nullable` | `True` | Allows explicit `None` input values. Set `False` to raise during encoding whenever this leaf contains `state == Tokens.null`. |
 
 ### Training Roles
 
@@ -94,9 +96,9 @@ the model to always reconstruct a hidden value, but it is not the same API as
 `p_mask=1.0`. Masking is value-level and stochastic, and `p_mask` rates are
 validated to be lower than `1.0`.
 
-`p_mask`, `p_prune`, and `target` are leaf tensorfield options. `Array` nodes
+`p_mask`, `p_prune`, and `target` are leaf tensorfield options. `Branch` nodes
 define repeated structure and can emit embeddings. They can also own
-`j2v.Mask(...)` policies that select repeated coordinates and apply that
+`jv.Mask(...)` policies that select repeated coordinates and apply that
 selection to descendant leaves; see [Dynamic Masking](dynamic-masking.qmd).
 
 ### Outputs And Decoder Options
@@ -115,7 +117,7 @@ Tensorfields track value state separately from value content:
 
 - `valued`: the source value exists and was encoded.
 - `null`: the source value exists as `None`.
-- `padded`: the configured array shape has a slot with no source value.
+- `padded`: the configured branch shape has a slot with no source value.
 - `masked`: training or prediction intentionally hid the value.
 
 ```json
@@ -128,10 +130,12 @@ Tensorfields track value state separately from value content:
 ```
 
 For `Set("tags")`, `["vip"]` and `[]` are both valued content. `null` is a
-null field state. A missing repeated slot inside an `Array` is padded.
+null field state. A missing repeated slot inside a `Branch` is padded.
+If a leaf is configured with `nullable=False`, encoding raises when the extracted
+input contains an explicit null for that leaf.
 
 This separation matters most for numeric content. A sentinel such as `0`, `-1`,
 or `999999` can collide with real values and distort normalization. `NaN` can
-say "not a number", but it cannot distinguish null source data, padded array
+say "not a number", but it cannot distinguish null source data, padded branch
 slots, and training-time masks. The model predicts state separately, then
 content is meaningful when the field is valued.

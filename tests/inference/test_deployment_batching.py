@@ -18,7 +18,7 @@ class _DummyModel:
     def __init__(self):
         self.calls = 0
         self.write_calls = 0
-        self.hyperparameters = object()
+        self.schema = object()
         self.interprocess_encoding_context = {}
 
     def to(self, device):
@@ -92,7 +92,7 @@ def test_fastapi_batcher_submit_many_splits_large_payload_by_max_batch_size():
 
 
 def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
-    model = Model.from_schema(
+    model = Model.from_tree(
         Number(name="amount"),
         d_model=8,
         n_layers=1,
@@ -110,12 +110,12 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     captured_monitors = []
     real_encode = deployment_module.encode
 
-    def spy_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def spy_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         captured_batches.append(batch)
         captured_monitors.append(jmespath_resolution_monitor)
         return real_encode(
             batch=batch,
-            hyperparameters=hyperparameters,
+            schema=schema,
             strata=strata,
             interprocess_encoding_context=interprocess_encoding_context,
             jmespath_resolution_monitor=jmespath_resolution_monitor,
@@ -139,7 +139,7 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
 
     captured = {"calls": 0}
 
-    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         captured["calls"] += 1
         captured["batch"] = batch
         captured["strata"] = strata
@@ -173,7 +173,7 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
 def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     seen = {}
 
-    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     def processor(context, predictions):
@@ -205,7 +205,7 @@ def test_fastapi_runtime_postprocess_receives_device_moved_input(monkeypatch):
             assert data["dummy"].device == torch.device("meta")
             return super().__call__(data, strata=strata)
 
-    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     def processor(context, predictions):
@@ -234,7 +234,7 @@ def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch)
             assert predictions == []
             return {}
 
-    def fake_encode(batch, hyperparameters, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
@@ -283,7 +283,7 @@ def test_fastapi_runtime_decode_validates_pydantic_request_model():
 
 def test_fastapi_runtime_setup_can_enable_query_monitor():
     runtime = deployment_module.FastAPIRuntime(
-        checkpoint=Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
+        checkpoint=Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
         accelerator=deployment_module.Accelerator.cpu,
         monitor_queries=True,
         query_monitor_every=7,
@@ -392,14 +392,14 @@ def test_deployment_launcher_configures_worker_import_string(monkeypatch):
 
 
 def test_deployment_launcher_rejects_workers_with_model_instance():
-    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
 
     with pytest.raises(ValueError, match="workers > 1"):
         Deployment(model=model, workers=2).serve()
 
 
 def test_deployment_launcher_accepts_model_instance(monkeypatch):
-    model = Model.from_schema(
+    model = Model.from_tree(
         Number(name="amount"),
         d_model=8,
         n_layers=1,
@@ -423,7 +423,7 @@ def test_deployment_launcher_accepts_model_instance(monkeypatch):
 
 
 def test_deployment_rejects_explicit_checkpoint_and_model():
-    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
 
     with pytest.raises(ValueError, match="pass either checkpoint or model"):
         Deployment(checkpoint="model.ckpt", model=model)
@@ -473,7 +473,7 @@ def test_fastapi_runtime_setup_applies_queued_update_operations(monkeypatch):
 
 
 def test_fastapi_runtime_setup_uses_model_instance(monkeypatch):
-    model = Model.from_schema(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
     monkeypatch.setattr(
         deployment_module.Model,
         "load",

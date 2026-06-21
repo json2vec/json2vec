@@ -8,15 +8,15 @@ eval: false
 Dynamic masking hides values during training so the model learns to reconstruct
 them from surrounding context. Leaf fields already support local stochastic
 masking with `p_mask`, pruning with `p_prune`, and supervised targets with
-`target=True`. Array masks add one more control: they select slices of a
+`target=True`. Branch masks add one more control: they select slices of a
 repeated context and apply that selection to descendant tensorfields.
 
-Use array masks when the hiding rule is about a repeated coordinate rather than
+Use branch masks when the hiding rule is about a repeated coordinate rather than
 one leaf value. Common examples are "mask half of the last 10 retained events,"
 "mask three early line items," or "mask the amount and merchant for selected
 transactions while leaving country visible."
 
-## Leaf Masking Versus Array Masking
+## Leaf Masking Versus Branch Masking
 
 Use the narrowest mechanism that matches the modeling intent.
 
@@ -25,36 +25,35 @@ Use the narrowest mechanism that matches the modeling intent.
 | `target=True` | leaf tensorfield | Every instance of that leaf, for supervised prediction. |
 | `p_prune=...` | leaf tensorfield | Whole leaf instances sampled independently. |
 | `p_mask=...` | leaf tensorfield | Observed leaf values sampled independently. |
-| `j2v.Mask(...)` | `Array` | Repeated array coordinates, projected onto descendant leaves. |
+| `jv.Mask(...)` | `Branch` | Repeated branch coordinates, projected onto descendant leaves. |
 
-Leaf masking is enough when every value can be sampled independently. Array
+Leaf masking is enough when every value can be sampled independently. Branch
 masking is better when one repeated row should be hidden consistently across
-several fields, or when the sampling window is defined by recency inside an
-array.
+several fields, or when the sampling window is defined by recency inside a
+branch.
 
-## Array Masks
+## Branch Masks
 
-Attach `j2v.Mask(...)` to an `Array(...)` with `mask=` or `masks=`:
+Attach `jv.Mask(...)` to a `Branch(...)` with `mask=` or `masks=`:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category("event_type", max_vocab_size=128),
-        j2v.Number("amount"),
-        name="events",
-        max_length=64,
-        overflow="tail",
-        mask=j2v.Mask(rate=0.50, window=10),
-    ),
+model = jv.Model.from_tree(
     name="customer",
     d_model=64,
     n_layers=2,
     n_heads=4,
+    events=jv.Branch(
+        length=64,
+        overflow="tail",
+        mask=jv.Mask(rate=0.50, window=10),
+        event_type=jv.Category(size=128),
+        amount=jv.Number,
+    ),
 )
 
 model
@@ -65,22 +64,22 @@ observation and masks about half of those slots. The same selected event rows
 are projected onto each active descendant leaf unless the mask excludes that
 leaf.
 
-`mask=` is shorthand for a one-item list. Use `masks=` when one array needs
+`mask=` is shorthand for a one-item list. Use `masks=` when one branch needs
 more than one masking policy:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-j2v.Array(
-    j2v.Category("sku", max_vocab_size=4096),
-    j2v.Number("quantity"),
+jv.Branch(
     name="line_items",
-    max_length=128,
+    length=128,
     masks=[
-        j2v.Mask(name="recent", rate=0.25, window=32),
-        j2v.Mask(name="early", count=3, window=20, start=True),
+        jv.Mask(name="recent", rate=0.25, window=32),
+        jv.Mask(name="early", count=3, window=20, start=True),
     ],
+    sku=jv.Category(size=4096),
+    quantity=jv.Number,
 )
 ```
 
@@ -93,14 +92,14 @@ Each `Mask` chooses a candidate window, then samples from that window.
 | `rate` | `None` | Bernoulli probability for each candidate slot. Mutually exclusive with `count`. |
 | `count` | `None` | Exact number of candidate slots to sample per parent coordinate, capped by available candidates. Mutually exclusive with `rate`. |
 | `window` | `None` | Candidate span length. `None` means all slots in the selected coordinate space. |
-| `array` | `False` | Use fixed padded array coordinates instead of observed non-padded coordinates. |
+| `branch` | `False` | Use fixed padded branch coordinates instead of observed non-padded coordinates. |
 | `start` | `False` | Take the window from the start instead of the end. |
 | `offset` | `0` | Skip slots away from the selected edge before taking the window. |
 | `exclude` | `None` | One predicate, or a list of predicates, for descendant leaves that should not receive this mask. |
 
 Exactly one of `rate` or `count` is required.
 
-The default coordinate mode is `array=False, start=False`, which means "the end
+The default coordinate mode is `branch=False, start=False`, which means "the end
 of the retained real values." This is usually the right choice for recency
 histories, especially with `overflow="tail"`.
 
@@ -109,7 +108,7 @@ histories, especially with `overflow="tail"`.
 Mask windows are resolved after preprocessing, query extraction, overflow
 handling, and padding. Padding is never selected.
 
-For an array with `max_length=8`, `window=3`, and retained values shaped like
+For a branch with `length=8`, `window=3`, and retained values shaped like
 this:
 
 ```text
@@ -121,21 +120,21 @@ The candidate windows are:
 
 | Configuration | Candidate slots |
 | --- | --- |
-| `j2v.Mask(rate=0.2, window=3, start=True)` | `0, 1, 2` |
-| `j2v.Mask(rate=0.2, window=3)` | `2, 3, 4` |
-| `j2v.Mask(rate=0.2, window=3, array=True, start=True)` | `0, 1, 2` |
-| `j2v.Mask(rate=0.2, window=3, array=True)` | none, because fixed slots `5, 6, 7` are padded |
+| `jv.Mask(rate=0.2, window=3, start=True)` | `0, 1, 2` |
+| `jv.Mask(rate=0.2, window=3)` | `2, 3, 4` |
+| `jv.Mask(rate=0.2, window=3, branch=True, start=True)` | `0, 1, 2` |
+| `jv.Mask(rate=0.2, window=3, branch=True)` | none, because fixed slots `5, 6, 7` are padded |
 
 `offset` skips away from the chosen edge. With the same values and `offset=2`:
 
 | Configuration | Candidate slots |
 | --- | --- |
-| `j2v.Mask(rate=0.2, window=3, start=True, offset=2)` | `2, 3, 4` |
-| `j2v.Mask(rate=0.2, window=3, offset=2)` | `0, 1, 2` |
+| `jv.Mask(rate=0.2, window=3, start=True, offset=2)` | `2, 3, 4` |
+| `jv.Mask(rate=0.2, window=3, offset=2)` | `0, 1, 2` |
 
-## Nested Arrays
+## Nested Branches
 
-An array mask is resolved at the array that owns it. If that array is nested,
+A branch mask is resolved at the branch that owns it. If that branch is nested,
 the mask is computed independently for each parent coordinate.
 
 This example masks two letters from the last two retained letters in each word:
@@ -151,7 +150,7 @@ import string
 
 from rich import print
 
-import json2vec as j2v
+import json2vec as jv
 
 ALPHABET = string.ascii_uppercase
 ADDRESS = "record/words/letters/letter"
@@ -170,31 +169,29 @@ def words(rng: random.Random) -> list[dict[str, list[dict[str, str]]]]:
 rng = random.Random(7)
 data = [{"words": words(rng)} for _ in range(5)]
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Array(
-            j2v.Category("letter", max_vocab_size=len(ALPHABET), p_unavailable=0.0),
-            name="letters",
-            max_length=8,
-            mask=j2v.Mask(count=2, window=2),
-        ),
-        name="words",
-        max_length=3,
-    ),
+model = jv.Model.from_tree(
     d_model=16,
     n_layers=1,
     n_heads=4,
+    words=jv.Branch(
+        length=3,
+        letters=jv.Branch(
+            length=8,
+            mask=jv.Mask(count=2, window=2),
+            letter=jv.Category(size=len(ALPHABET), p_unavailable=0.0),
+        ),
+    ),
 )
 
-inputs = model.encode(data, strata=j2v.Strata.train, mask=False)
-masked = model.encode(data, strata=j2v.Strata.train, mask=True)
+inputs = model.encode(data, strata=jv.Strata.train, mask=False)
+masked = model.encode(data, strata=jv.Strata.train, mask=True)
 
 print(inputs[ADDRESS])
 print(masked[ADDRESS])
 ```
 
 The tensorfield display shows the first batch item and the generated root
-singleton dimension. Nested arrays are printed with one row per inner array:
+singleton dimension. Nested branches are printed with one row per inner branch:
 
 ```text
 TensorField [tensorfield] state=(5, 1, 3, 8) device=cpu trainable=0
@@ -228,11 +225,11 @@ to inspect the raw tensorized state before any dynamic masks, `p_mask`, or
 #| echo: true
 #| output: true
 
-unmasked = model.encode(records, strata=j2v.Strata.train, mask=False)
-masked = model.encode(records, strata=j2v.Strata.train, mask=True)
+unmasked = model.encode(records, strata=jv.Strata.train, mask=False)
+masked = model.encode(records, strata=jv.Strata.train, mask=True)
 ```
 
-This is most useful when validating mask windows for ragged arrays. In the
+This is most useful when validating mask windows for ragged branches. In the
 rendered tensorfield state:
 
 | Symbol | Token |
@@ -255,34 +252,34 @@ others:
 #| echo: true
 #| output: true
 
-j2v.Array(
-    j2v.Category("merchant", max_vocab_size=4096),
-    j2v.Number("amount"),
-    j2v.Category("country", max_vocab_size=256),
+jv.Branch(
     name="transactions",
-    max_length=128,
-    mask=j2v.Mask(
+    length=128,
+    mask=jv.Mask(
         rate=0.25,
         window=32,
-        exclude=j2v.where("name") == "country",
+        exclude=jv.where("name") == "country",
     ),
+    merchant=jv.Category(size=4096),
+    amount=jv.Number,
+    country=jv.Category(size=256),
 )
 ```
 
 `exclude` accepts one predicate or a list of predicates. Predicates are resolved
-after the schema is bound, relative to the active descendant leaves of the array
+after the schema is bound, relative to the active descendant leaves of the branch
 that owns the mask:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-j2v.Mask(
+jv.Mask(
     rate=0.25,
     window=32,
     exclude=[
-        j2v.where("type") == "entity",
-        j2v.where("name") == "country",
+        jv.where("type") == "entity",
+        jv.where("name") == "country",
     ],
 )
 ```
@@ -322,12 +319,12 @@ Mask configuration is validated when the schema is bound:
 - `rate` must be between `0` and `1`.
 - `count` must be non-negative.
 - `window` must be positive when provided.
-- `offset` must be non-negative and smaller than the owning array's `max_length`.
-- Passing both `mask=` and `masks=` to one array is invalid.
-- Masks on the generated root array are not supported.
-- A masked array must have at least one active descendant leaf.
+- `offset` must be non-negative and smaller than the owning branch's `length`.
+- Passing both `mask=` and `masks=` to one branch is invalid.
+- Masks on the generated root branch are not supported.
+- A masked branch must have at least one active descendant leaf.
 - `exclude` cannot remove every active descendant leaf.
-- Duplicate non-null mask names on the same array are invalid.
+- Duplicate non-null mask names on the same branch are invalid.
 
 ## Performance Notes
 
@@ -337,14 +334,14 @@ of slots per parent coordinate and are more expensive, especially for large
 nested batches or many descendant leaves.
 
 For very large schemas, prefer `rate` when exact counts are not required. If
-multiple leaves share the same array mask, expect cost to scale with the number
+multiple leaves share the same branch mask, expect cost to scale with the number
 of affected leaves.
 
 ## Where Next
 
 - Use [Learning Modes & Embeddings](embeddings.qmd) for `target=True`,
   `p_mask`, `p_prune`, and embedding export patterns.
-- Use [Array](../data-types/array.qmd) for repeated-context configuration,
-  `max_length`, and `overflow`.
+- Use [Branch](../data-types/branch.qmd) for repeated-context configuration,
+  `length`, and `overflow`.
 - Use [Data Modules](../guides/data-modules.qmd) to see where preprocessing,
   queries, overflow, and masking run in the batch path.

@@ -23,7 +23,7 @@ Dropout: TypeAlias = Rate
 
 
 class Mask(pydantic.BaseModel):
-    """Structured masking policy attached to an `Array`."""
+    """Structured masking policy attached to a `Branch`."""
 
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
@@ -31,7 +31,7 @@ class Mask(pydantic.BaseModel):
     rate: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] | None = None
     count: Annotated[int, pydantic.Field(ge=0)] | None = None
     window: Annotated[int, pydantic.Field(gt=0)] | None = None
-    array: bool = False
+    branch: bool = False
     start: bool = False
     offset: Annotated[int, pydantic.Field(ge=0)] = 0
     exclude: Any = None
@@ -71,16 +71,16 @@ class Mask(pydantic.BaseModel):
         return value
 
 
-class Array(Node):
+class Branch(Node):
     """Repeated nested object group in a `json2vec` schema.
 
-    Positional children are treated as fields inside the array.
+    Positional children are treated as fields inside the branch.
     """
 
-    name: str
-    type: Annotated[Literal["array"], pydantic.Field(default="array")] = "array"
+    name: str | None = None
+    type: Annotated[Literal["branch"], pydantic.Field(default="branch")] = "branch"
     attention: AttentionMode = AttentionMode.mha
-    max_length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     overflow: Overflow = Overflow.head
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
@@ -88,10 +88,26 @@ class Array(Node):
     fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)
 
     def __init__(self, *children: Self | RequestTypes | Leaf, **data):
+        if "max_length" in data:
+            raise ValueError("max_length was removed; use length")
+
+        if data.get("type") not in (None, "branch"):
+            super().__init__(**data)
+            return
+
+        config_names = set(type(self).model_fields) | {"mask"}
+        keyword_children = {key: data.pop(key) for key in tuple(data) if key not in config_names}
+
         if children:
             if "fields" in data:
-                raise TypeError("array children were provided both positionally and by keyword")
+                raise TypeError("branch children were provided both positionally and by keyword")
             data["fields"] = list(children)
+
+        if keyword_children:
+            from json2vec.structs.experiment import bind_tree_field
+
+            data.setdefault("fields", [])
+            data["fields"].extend(bind_tree_field(key, value) for key, value in keyword_children.items())
 
         super().__init__(**data)
 
@@ -102,6 +118,9 @@ class Array(Node):
             return data
 
         values = dict(data)
+        if "max_length" in values:
+            raise ValueError("max_length was removed; use length")
+
         mask = values.pop("mask", None)
         if mask is None:
             return values
@@ -130,9 +149,9 @@ class Array(Node):
         if len(self.masks) == 0:
             return None
 
-        is_root = getattr(getattr(self, "parent", None), "type", None) == "hyperparameters"
+        is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
         if is_root:
-            raise ValueError("Mask on the generated root array is not supported")
+            raise ValueError("Mask on the generated root branch is not supported")
 
         active_leaves = [
             descendant
@@ -140,21 +159,21 @@ class Array(Node):
             if isinstance(descendant, Leaf) and getattr(descendant, "active", True)
         ]
         if not active_leaves:
-            raise ValueError(f"array '{self.address}' has masks but no active descendant leaves")
+            raise ValueError(f"branch '{self.address}' has masks but no active descendant leaves")
 
         names = [mask.name for mask in self.masks if mask.name is not None]
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
-            raise ValueError(f"array '{self.address}' has duplicate mask name(s): {duplicates}")
+            raise ValueError(f"branch '{self.address}' has duplicate mask name(s): {duplicates}")
 
         for mask in self.masks:
-            if mask.offset >= self.max_length:
-                raise ValueError(f"array '{self.address}' mask offset must be less than max_length={self.max_length}")
+            if mask.offset >= self.length:
+                raise ValueError(f"branch '{self.address}' mask offset must be less than length={self.length}")
 
             excluded = self.excluded_leaves(mask)
             if len(excluded) == len(active_leaves):
                 label = f" '{mask.name}'" if mask.name is not None else ""
-                raise ValueError(f"array '{self.address}' mask{label} excludes every active descendant leaf")
+                raise ValueError(f"branch '{self.address}' mask{label} excludes every active descendant leaf")
 
         return None
 
@@ -174,11 +193,11 @@ class Array(Node):
         )
 
     def __rich_console__(self, console, options):
-        is_root = getattr(getattr(self, "parent", None), "type", None) == "hyperparameters"
+        is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
         display_type = "root" if is_root else self.type
         attributes = ("attention", "n_layers", "n_heads", "n_linear", "dropout")
         if not is_root:
-            attributes = ("max_length", "overflow", *attributes)
+            attributes = ("length", "overflow", *attributes)
 
         heading = Text()
         heading.append(self.name, style=self.RICH_NAME_STYLE)

@@ -2,7 +2,7 @@ import torch
 from tensordict import TensorDict
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
 from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel
@@ -19,7 +19,7 @@ def _structure_payload(
         "name": "tags",
         "type": "set",
         "query": "[*].items[*].tags",
-        "max_vocab_size": 8,
+        "size": 8,
     }
     if p_unavailable is not None:
         field["p_unavailable"] = p_unavailable
@@ -30,13 +30,13 @@ def _structure_payload(
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
             "fields": [
                 {
                     "name": "items",
-                    "type": "array",
-                    "max_length": 2,
+                    "type": "branch",
+                    "length": 2,
                     "fields": [field],
                 }
             ],
@@ -44,32 +44,32 @@ def _structure_payload(
     }
 
 
-def _state(max_vocab_size: int = 8):
-    return OnlineVocabularyModel(max_vocab_size=max_vocab_size).state
+def _state(size: int = 8):
+    return OnlineVocabularyModel(size=size).state
 
 
-def test_set_request_is_available_in_hyperparameters():
-    structure = Hyperparameters.model_validate(_structure_payload())
+def test_set_request_is_available_in_schema():
+    structure = Schema.model_validate(_structure_payload())
     request = structure.requests[ADDRESS]
 
     assert request.type == "set"
-    assert request.max_vocab_size == 8
+    assert request.size == 8
     assert request.threshold is None
 
 
 def test_set_request_accepts_threshold():
-    structure = Hyperparameters.model_validate(_structure_payload(threshold=0.8))
+    structure = Schema.model_validate(_structure_payload(threshold=0.8))
     assert structure.requests[ADDRESS].threshold == 0.8
 
 
 def test_set_tensorfield_encodes_multi_hot_content():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state()
 
     field = TensorField.new(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
@@ -84,7 +84,7 @@ def test_set_tensorfield_encodes_multi_hot_content():
             dtype=torch.int64,
         ),
     )
-    assert field.content.shape == (2, 1, 2, structure.requests[ADDRESS].max_vocab_size)
+    assert field.content.shape == (2, 1, 2, structure.requests[ADDRESS].size)
     assert field.content[0, 0, 0, 0] == 1.0
     assert field.content[0, 0, 0, 1] == 1.0
     assert field.content[0, 0, 1].sum() == 0.0
@@ -92,13 +92,13 @@ def test_set_tensorfield_encodes_multi_hot_content():
 
 
 def test_set_tensorfield_reserves_real_vocabulary_in_batch():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    vocabulary = OnlineVocabularyModel(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    vocabulary = OnlineVocabularyModel(size=structure.requests[ADDRESS].size)
 
     TensorField.new(
         values=[[[["ALPHA", "BETA"], ["ALPHA"]]], [[["BETA"]]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=vocabulary.state,
     )
@@ -107,13 +107,13 @@ def test_set_tensorfield_reserves_real_vocabulary_in_batch():
 
 
 def test_set_tensorfield_zeros_oov_content_without_changing_state():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    state = _state(size=structure.requests[ADDRESS].size)
 
     TensorField.new(
         values=[[[["ALPHA"]]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
@@ -121,7 +121,7 @@ def test_set_tensorfield_zeros_oov_content_without_changing_state():
     field = TensorField.new(
         values=[[[["OMEGA"]]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.validate,
         interprocess_encoding_context=state,
     )
@@ -131,18 +131,18 @@ def test_set_tensorfield_zeros_oov_content_without_changing_state():
 
 
 def test_set_tensorfield_simulated_unavailable_zeros_content():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=1.0))
-    state = _state(max_vocab_size=structure.requests[ADDRESS].max_vocab_size)
+    structure = Schema.model_validate(_structure_payload(p_unavailable=1.0))
+    state = _state(size=structure.requests[ADDRESS].size)
 
     field = TensorField.new(
         values=[[[["ALPHA", "BETA"]]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
 
-    assert field.content.shape[-1] == structure.requests[ADDRESS].max_vocab_size
+    assert field.content.shape[-1] == structure.requests[ADDRESS].size
     assert field.content[0, 0, 0].sum() == 0.0
 
 
@@ -163,16 +163,16 @@ class _DummyNode:
 
 
 class _DummyModule:
-    def __init__(self, hyperparameters=None, embedder=None, decoder: Decoder | None = None):
+    def __init__(self, schema=None, embedder=None, decoder: Decoder | None = None):
         self.nodes = {ADDRESS: _DummyNode(embedder=embedder, decoder=decoder)}
-        self.hyperparameters = hyperparameters
+        self.schema = schema
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
         return value
 
 
 def test_set_write_emits_probability_for_each_known_vocab_item():
-    module = _DummyModule(hyperparameters=Hyperparameters.model_validate(_structure_payload()))
+    module = _DummyModule(schema=Schema.model_validate(_structure_payload()))
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
     state_logits[1, 0, Tokens.padded.value] = 10.0
@@ -204,7 +204,7 @@ def test_set_write_emits_probability_for_each_known_vocab_item():
 
 
 def test_set_write_filters_content_when_threshold_is_configured():
-    module = _DummyModule(hyperparameters=Hyperparameters.model_validate(_structure_payload(threshold=0.75)))
+    module = _DummyModule(schema=Schema.model_validate(_structure_payload(threshold=0.75)))
     state_logits = torch.zeros(2, 1, len(Tokens))
     content_logits = torch.tensor(
         [
@@ -233,20 +233,20 @@ def test_set_write_filters_content_when_threshold_is_configured():
 
 
 def test_set_loss_does_not_mutate_counter():
-    structure = Hyperparameters.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state()
     field = TensorField.new(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
     field.mask(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
-    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
-    module = _DummyModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _DummyModule(schema=structure, embedder=embedder, decoder=decoder)
     prediction = Prediction(
         address=ADDRESS,
         payload=TensorDict(

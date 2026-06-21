@@ -11,7 +11,7 @@ from loguru import logger
 from tensordict import TensorDict
 
 from json2vec.architecture.contracts import sanitize
-from json2vec.architecture.encoder import ArrayEncoder
+from json2vec.architecture.encoder import BranchEncoder
 from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.data.iterables import encode as encode_batch
@@ -61,9 +61,9 @@ class ModelRuntime:
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
 
-        for address in module.hyperparameters.active_requests.keys():
+        for address in module.schema.active_requests.keys():
             tensorfield: TensorFieldBase = inputs[address]
-            if address in module.hyperparameters.target:
+            if address in module.schema.target:
                 continue
 
             node_module = cast(NodeModule, module.nodes[address])
@@ -74,20 +74,20 @@ class ModelRuntime:
             processed[embedding.destination].append(embedding)
             outgoing[embedding.origin] = embedding
 
-        for depth in reversed(module.hyperparameters.depthwise):
+        for depth in reversed(module.schema.depthwise):
             for address in depth:
                 if len(processed[address]) == 0:
                     continue
 
                 node_module = cast(NodeModule, module.nodes[address])
-                encoder: ArrayEncoder = node_module.encoder
+                encoder: BranchEncoder = node_module.encoder
                 encoding: Parcel = encoder(processed[address])
                 if encoding.destination is None:
                     raise ValueError(f"parcel from '{encoding.origin}' has no destination")
                 processed[encoding.destination].append(encoding)
                 outgoing[encoding.origin] = encoding
 
-                if address in module.hyperparameters.embed:
+                if address in module.schema.embed:
                     predictions.append(
                         Prediction(
                             address=encoding.origin,
@@ -99,24 +99,24 @@ class ModelRuntime:
                         )
                     )
 
-        for address in module.hyperparameters.active_requests.keys():
+        for address in module.schema.active_requests.keys():
             has_masked_input = inputs[address].state.eq(Tokens.masked.value).any()
             if (
                 torch.any(inputs[address].trainable)
                 or (strata == Strata.predict and has_masked_input)
-                or (address in module.hyperparameters.target)
-                or (address in module.hyperparameters.embed)
+                or (address in module.schema.target)
+                or (address in module.schema.embed)
             ):
-                heritage: list[Address] = module.hyperparameters.requests[address].heritage
+                heritage: list[Address] = module.schema.requests[address].heritage
                 parcels: list[Parcel] = [
                     outgoing[address]
                     for address in heritage
-                    if address not in module.hyperparameters.target and address in outgoing.keys()
+                    if address not in module.schema.target and address in outgoing.keys()
                 ]
 
                 node_module = cast(NodeModule, module.nodes[address])
                 decoder: DecoderBase = node_module.decoder
-                prediction = decoder(parcels, embed=address in module.hyperparameters.embed)
+                prediction = decoder(parcels, embed=address in module.schema.embed)
                 if Strata.normalize(strata) == Strata.predict:
                     prediction.payload[TensorKey.inferred] = inputs[address].state.eq(Tokens.masked.value)
                 else:
@@ -142,14 +142,14 @@ class ModelRuntime:
         losses: list[torch.Tensor] = []
 
         for prediction in predictions:
-            if prediction.address not in module.hyperparameters.requests:
+            if prediction.address not in module.schema.requests:
                 continue
 
             if set(prediction.payload.keys()) <= {TensorKey.embedding, TensorKey.inferred}:
                 continue
 
             address: Address = prediction.address
-            request: RequestBase = module.hyperparameters.requests[address]
+            request: RequestBase = module.schema.requests[address]
             extension: Plugin = TENSORFIELDS[request.type]
             loss_fn = cast(Callable[..., torch.Tensor], getattr(extension, "loss"))
 
@@ -174,8 +174,8 @@ class ModelRuntime:
         for prediction in predictions:
             scribed: dict[Any, Any] = {}
 
-            if prediction.address in module.hyperparameters.requests:
-                request: RequestBase = module.hyperparameters.requests[prediction.address]
+            if prediction.address in module.schema.requests:
+                request: RequestBase = module.schema.requests[prediction.address]
                 extension: Plugin = TENSORFIELDS[request.type]
                 write_fn = cast(Callable[..., dict[TensorKey, Any] | None], getattr(extension, "write"))
 
@@ -224,13 +224,13 @@ class ModelRuntime:
 
         inputs = encode_batch(
             batch=cast(EncodedBatch, batch),
-            hyperparameters=module.hyperparameters,
+            schema=module.schema,
             strata=strata,
             interprocess_encoding_context=module.interprocess_encoding_context,
             defer_target_masking=True,
         )
         if mask:
-            return next(apply_mask([inputs], module.hyperparameters, strata=strata))
+            return next(apply_mask([inputs], module.schema, strata=strata))
 
         return inputs
 

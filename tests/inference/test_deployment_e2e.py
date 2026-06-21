@@ -15,7 +15,7 @@ from typing import Any
 from json2vec.architecture.root import Model
 from json2vec.data.iterables import encode
 from json2vec.structs.enums import Strata
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 SERVER_SCRIPT = """
 import sys
@@ -123,22 +123,22 @@ def _post_json(url: str, payload: Any, timeout: float = 30.0) -> tuple[int, Any]
         raise AssertionError(f"deployment returned HTTP {exc.code}: {body}") from exc
 
 
-def _hyperparameters() -> Hyperparameters:
-    return Hyperparameters.model_validate(
+def _schema() -> Schema:
+    return Schema.model_validate(
         {
             "d_model": 8,
             "fields": {
                 "name": "root",
-                "type": "array",
+                "type": "branch",
                 "dropout": 0.1,
-                "max_length": 1,
+                "length": 1,
                 "fields": [
                     {
                         "name": "label",
                         "type": "category",
                         "query": "[*].label",
                         "embed": True,
-                        "max_vocab_size": 32,
+                        "size": 32,
                     }
                 ],
             },
@@ -152,15 +152,15 @@ def _write_fake_records(path: Path) -> list[dict[str, str]]:
     return records
 
 
-def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
+def _build_checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
     dataset_path = tmp_path / "fake_records.ndjson"
     records = _write_fake_records(dataset_path)
-    hyperparameters = _hyperparameters()
-    model = Model(hyperparameters=hyperparameters, batch_size=2)
+    schema = _schema()
+    model = Model(schema=schema, batch_size=2)
 
     inputs = encode(
         batch=[[record] for record in records],
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
@@ -168,7 +168,7 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Hyperparameters]:
 
     checkpoint_path = tmp_path / "fake_model.ckpt"
     model.save(checkpoint_path)
-    return checkpoint_path, hyperparameters
+    return checkpoint_path, schema
 
 
 def _launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subprocess.Popen[str]:
@@ -186,7 +186,7 @@ def _launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subproces
 
 
 def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
+    checkpoint_path, schema = _build_checkpoint(tmp_path)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "deployment.log"
@@ -202,12 +202,12 @@ def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) 
     assert "root/label" in payload["predictions"]
 
     embedding = payload["predictions"]["root/label"]["embedding"]
-    assert len(embedding) == hyperparameters.d_model
+    assert len(embedding) == schema.d_model
     assert all(isinstance(value, float) for value in embedding)
 
 
 def test_deployment_accepts_multiple_inputs_in_one_request(tmp_path: Path) -> None:
-    checkpoint_path, hyperparameters = _build_checkpoint(tmp_path)
+    checkpoint_path, schema = _build_checkpoint(tmp_path)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "deployment.log"
@@ -225,7 +225,7 @@ def test_deployment_accepts_multiple_inputs_in_one_request(tmp_path: Path) -> No
     for item in payload:
         assert "root/label" in item["predictions"]
         embedding = item["predictions"]["root/label"]["embedding"]
-        assert len(embedding) == hyperparameters.d_model
+        assert len(embedding) == schema.d_model
 
 
 def test_deployment_accepts_unseen_category_values_at_runtime(tmp_path: Path) -> None:

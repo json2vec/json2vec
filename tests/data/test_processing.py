@@ -69,7 +69,7 @@ def test_pad_tail_overflow_keeps_last_items_and_compacts_slots():
 
 
 def test_pad_error_overflow_raises():
-    with pytest.raises(ValueError, match="array overflow at root node dimension 1"):
+    with pytest.raises(ValueError, match="branch overflow at root node dimension 1"):
         pad(
             nested=[[1, 2, 3]],
             shape=(1, 2),
@@ -78,7 +78,7 @@ def test_pad_error_overflow_raises():
 
 
 def test_pad_error_overflow_includes_address_when_provided():
-    with pytest.raises(ValueError, match="array overflow at root node dimension 1 for record/events/amount"):
+    with pytest.raises(ValueError, match="branch overflow at root node dimension 1 for record/events/amount"):
         pad(
             nested=[[1, 2, 3]],
             shape=(1, 2),
@@ -88,7 +88,7 @@ def test_pad_error_overflow_includes_address_when_provided():
 
 
 def test_pad_batch_overflow_raises():
-    with pytest.raises(ValueError, match="array overflow at batch"):
+    with pytest.raises(ValueError, match="branch overflow at batch"):
         pad(
             nested=[[1], [2]],
             shape=(1, 1),
@@ -97,7 +97,7 @@ def test_pad_batch_overflow_raises():
 
 
 def test_pad_root_overflow_raises():
-    with pytest.raises(ValueError, match="array overflow at root node dimension 1"):
+    with pytest.raises(ValueError, match="branch overflow at root node dimension 1"):
         pad(
             nested=[[[1], [2]]],
             shape=(1, 1, 1),

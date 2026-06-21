@@ -26,11 +26,12 @@ from json2vec.data.datasets.base import (
 from json2vec.data.processing import MASK_LITERAL, contains_mask_literal
 from json2vec.preprocessors.base import PREPROCESSORS, Preprocessor, PreprocessorMode
 from json2vec.structs.enums import Strata, TensorKey
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.tree import Address
 from json2vec.tensorfields.base import TENSORFIELDS, TensorFieldBase
 
 T = TypeVar("T")
+MISSING = object()
 
 
 @beartype
@@ -172,16 +173,16 @@ def compile_query_extractor(expression: str) -> Callable[[Any], Any] | None:
             operation, key = operations[operation_index]
             if operation == "field":
                 if not isinstance(item, dict) or key not in item:
-                    return None
+                    return MISSING
                 return apply(item[key], operation_index + 1)
 
             if not isinstance(item, list):
-                return None
+                return MISSING
 
             out = []
             for child in item:
                 result = apply(child, operation_index + 1)
-                if result is not None:
+                if result is not MISSING:
                     out.append(result)
             return out
 
@@ -221,26 +222,26 @@ class JMESPathResolutionMonitor(pydantic.BaseModel):
 
 def encode(
     batch: EncodedBatch,
-    hyperparameters: Hyperparameters,
+    schema: Schema,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
     jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
     defer_target_masking: bool = False,
 ) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
-    target_addresses = set(hyperparameters.target)
+    target_addresses = set(schema.target)
 
     if strata != Strata.predict and contains_mask_literal(batch):
         raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata")
 
-    for address, request in hyperparameters.active_requests.items():
+    for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
         if (strata == Strata.predict) & (address in target_addresses):
             out[address] = TensorField.empty(
                 batch_size=len(batch),
                 address=address,
-                hyperparameters=hyperparameters,
+                schema=schema,
             )
             continue
 
@@ -259,13 +260,14 @@ def encode(
         kwargs: dict[str, Any] = dict(
             values=result,
             address=address,
-            hyperparameters=hyperparameters,
+            schema=schema,
             strata=strata,
         )
         if "interprocess_encoding_context" in inspect.signature(TensorField.new).parameters:
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
 
         out[address] = TensorField.new(**kwargs)
+        out[address].check_nullable(address=address, schema=schema)
 
         if not defer_target_masking and strata != Strata.predict and address in target_addresses:
             out[address].mask(p_prune=1.0)
@@ -281,7 +283,7 @@ def encode(
 @beartype
 def transform(
     pipe: Iterable[EncodedBatch],
-    hyperparameters: Hyperparameters,
+    schema: Schema,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
     jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
@@ -289,7 +291,7 @@ def transform(
     for item in pipe:
         yield encode(
             batch=item,
-            hyperparameters=hyperparameters,
+            schema=schema,
             strata=strata,
             interprocess_encoding_context=interprocess_encoding_context,
             jmespath_resolution_monitor=jmespath_resolution_monitor,
@@ -302,26 +304,26 @@ def _apply_mask_policy(
     *,
     p_mask: float,
     p_prune: float,
-    array_masks: tuple[Any, ...],
+    branch_masks: tuple[Any, ...],
     address: Address,
-    hyperparameters: Hyperparameters,
+    schema: Schema,
 ) -> None:
     parameters = inspect.signature(field.mask).parameters
     supports_policy_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    supports_policy_kwargs |= any(name in parameters for name in ("p_prune", "array_masks", "hyperparameters"))
+    supports_policy_kwargs |= any(name in parameters for name in ("p_prune", "branch_masks", "schema"))
 
     if supports_policy_kwargs:
         field.mask(
             p_mask=p_mask,
             p_prune=p_prune,
-            array_masks=array_masks,
+            branch_masks=branch_masks,
             address=address,
-            hyperparameters=hyperparameters,
+            schema=schema,
         )
         return
 
-    if array_masks:
-        raise TypeError(f"tensorfield at '{address}' must accept mask(..., array_masks=...) to use Array masks")
+    if branch_masks:
+        raise TypeError(f"tensorfield at '{address}' must accept mask(..., branch_masks=...) to use Branch masks")
 
     if p_mask > 0.0:
         field.mask(p_mask=p_mask)
@@ -333,7 +335,7 @@ def _apply_mask_policy(
 @beartype
 def mask(
     pipe: Iterable[EncodedInput],
-    hyperparameters: Hyperparameters,
+    schema: Schema,
     strata: Strata = Strata.train,
 ) -> Iterator[EncodedInput]:
     for item in pipe:
@@ -341,20 +343,20 @@ def mask(
             yield item
             continue
 
-        for address, request in hyperparameters.active_requests.items():
+        for address, request in schema.active_requests.items():
             p_mask = float(request.p_mask or 0.0)
             p_prune = float(request.p_prune or 0.0)
-            array_masks = hyperparameters.array_masks_for(address)
-            if p_mask <= 0.0 and p_prune <= 0.0 and not array_masks:
+            branch_masks = schema.branch_masks_for(address)
+            if p_mask <= 0.0 and p_prune <= 0.0 and not branch_masks:
                 continue
 
             _apply_mask_policy(
                 item[address],
                 p_mask=p_mask,
                 p_prune=p_prune,
-                array_masks=array_masks,
+                branch_masks=branch_masks,
                 address=address,
-                hyperparameters=hyperparameters,
+                schema=schema,
             )
 
         yield item
@@ -363,10 +365,10 @@ def mask(
 @beartype
 def target(
     pipe: Iterable[EncodedInput],
-    hyperparameters: Hyperparameters,
+    schema: Schema,
 ) -> Iterator[EncodedInput]:
     for item in pipe:
-        for address, request in hyperparameters.active_requests.items():
+        for address, request in schema.active_requests.items():
             p_prune = float(request.p_prune or 0.0)
             if p_prune <= 0.0:
                 continue
@@ -376,15 +378,15 @@ def target(
         yield item
 
 
-def mock(hyperparameters: Hyperparameters, batch_size: int) -> EncodedInput:
+def mock(schema: Schema, batch_size: int) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
 
-    for address, request in hyperparameters.active_requests.items():
+    for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
         out[address] = TensorField.empty(
             batch_size=batch_size,
             address=address,
-            hyperparameters=hyperparameters,
+            schema=schema,
         )
 
     return cast(EncodedInput, TensorDict(source=cast(Any, out), batch_size=batch_size))

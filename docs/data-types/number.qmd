@@ -24,9 +24,9 @@ scores, datetime durations, and other numeric features.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-amount = j2v.Number(
+amount = jv.Number(
     "amount",
     jitter=0.02,
     objective="huber",
@@ -36,15 +36,17 @@ amount = j2v.Number(
 amount
 ```
 
-Use `Number` only when numeric distance is meaningful. Zip codes, merchant IDs,
-product codes, account IDs, and class labels should usually be `Category` or
-`Entity`, even when they look numeric.
+Use `Number` only when numeric distance is meaningful. Numeric-looking labels
+such as zip codes, bounded product codes, and class labels are usually
+`Category` or `Set`. Large identifiers such as customer IDs, account IDs, and
+device IDs should usually stay as metadata or use `Entity` when local repeated
+equality is the useful signal.
 
 ## Input Values
 
 `Number` expects scalar numeric values. `None` is encoded as a null state, and
-missing array positions are encoded as padded state. For repeated values, place
-the field inside an `Array`.
+missing branch positions are encoded as padded state. For repeated values, place
+the field inside a `Branch`.
 
 Numeric content is normalized online by the embedder before Fourier features are
 computed, so models do not require pre-normalized inputs.
@@ -106,7 +108,7 @@ The content loss is computed in normalized units, while tracked `mae` and
 ## Prediction Output
 
 Rendered examples use string paths for readability. The Python dictionary
-returned by `Model.predict(...)` is keyed by `j2v.Address` objects.
+returned by `Model.predict(...)` is keyed by `jv.Address` objects.
 
 `Model.predict(...)` returns a state probability map plus numeric content:
 
@@ -124,8 +126,10 @@ returned by `Model.predict(...)` is keyed by `j2v.Address` objects.
 
 ## Notes
 
-Use `Category` for numeric-looking identifiers or class labels. `Number` assumes
-the magnitude and distance between values are meaningful.
+Use `Category` for numeric-looking bounded labels or class labels. Keep massive
+identifiers out of the modeled schema unless you deliberately need a persistent
+global vocabulary. `Number` assumes the magnitude and distance between values
+are meaningful.
 
 When a continuous scalar is not the right representation, binned numerical data
 or CDF-style transforms can be implemented with a custom data type or a

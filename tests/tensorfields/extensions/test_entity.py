@@ -1,15 +1,15 @@
 import pytest
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.tensorfields.extensions.entity import TensorField
 
 ADDRESS = "root/items/identifier"
 
 
-def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) -> dict:
+def _structure_payload(*, length: int = 2, topk: list[int] | None = None) -> dict:
     field: dict = {
         "name": "identifier",
         "type": "entity",
@@ -22,13 +22,13 @@ def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) ->
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
             "fields": [
                 {
                     "name": "items",
-                    "type": "array",
-                    "max_length": max_length,
+                    "type": "branch",
+                    "length": length,
                     "fields": [field],
                 }
             ],
@@ -37,29 +37,29 @@ def _structure_payload(*, max_length: int = 2, topk: list[int] | None = None) ->
 
 
 def test_entity_shape_validation_happens_during_pydantic_loading():
-    Hyperparameters.model_validate(_structure_payload())
+    Schema.model_validate(_structure_payload())
 
     with pytest.raises(ValueError, match="requires at least 2 elements per observation"):
-        Hyperparameters.model_validate(_structure_payload(max_length=1))
+        Schema.model_validate(_structure_payload(length=1))
 
 
 def test_entity_topk_validation_rejects_one():
     with pytest.raises(ValueError, match="must not be 1"):
-        Hyperparameters.model_validate(_structure_payload(topk=[1]))
+        Schema.model_validate(_structure_payload(topk=[1]))
 
 
 def test_entity_topk_validation_rejects_values_at_or_above_slot_count():
     with pytest.raises(ValueError, match="less than the entity slot count"):
-        Hyperparameters.model_validate(_structure_payload(max_length=4, topk=[4]))
+        Schema.model_validate(_structure_payload(length=4, topk=[4]))
 
 
 def test_entity_topk_validation_allows_per_observation_values():
-    Hyperparameters.model_validate(_structure_payload(max_length=4, topk=[2, 3]))
+    Schema.model_validate(_structure_payload(length=4, topk=[2, 3]))
 
 
 def test_entity_tensorfield_uses_observation_local_unique_ids():
-    structure = Hyperparameters.model_validate(_structure_payload())
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload())
+    schema = structure
 
     values = [
         [["alice", "bob"]],
@@ -69,7 +69,7 @@ def test_entity_tensorfield_uses_observation_local_unique_ids():
     field = TensorField.new(
         values=values,
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
     )
 
@@ -90,13 +90,13 @@ def test_entity_tensorfield_uses_observation_local_unique_ids():
 
 
 def test_entity_tensorfield_separates_state_and_content():
-    structure = Hyperparameters.model_validate(_structure_payload())
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload())
+    schema = structure
 
     field = TensorField.new(
         values=[[["alice", None]], [["alice"]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
     )
 
@@ -123,8 +123,8 @@ def test_entity_tensorfield_separates_state_and_content():
 
 
 def test_entity_tensorfield_rejects_unhashable_values():
-    structure = Hyperparameters.model_validate(_structure_payload())
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload())
+    schema = structure
 
     values = [
         [[[1, 2], "ok"]],
@@ -135,14 +135,14 @@ def test_entity_tensorfield_rejects_unhashable_values():
         TensorField.new(
             values=values,
             address=ADDRESS,
-            hyperparameters=hyperparameters,
+            schema=schema,
             strata=Strata.train,
         )
 
 
 def test_entity_mask_preserves_targets_before_replacement():
-    structure = Hyperparameters.model_validate(_structure_payload())
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload())
+    schema = structure
     values = [
         [["a", "b"]],
         [["c", "d"]],
@@ -151,7 +151,7 @@ def test_entity_mask_preserves_targets_before_replacement():
     field = TensorField.new(
         values=values,
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
     )
     original_state = field.state.clone()
@@ -165,8 +165,8 @@ def test_entity_mask_preserves_targets_before_replacement():
 
 
 def test_entity_embedder_accepts_independent_observation_local_ids():
-    model = j2v.Model.from_schema(
-        j2v.Array(j2v.Entity("id"), name="items", max_length=2),
+    model = jv.Model.from_tree(
+        jv.Branch(jv.Entity("id"), name="items", length=2),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -196,8 +196,8 @@ def test_entity_embedder_accepts_independent_observation_local_ids():
 
 
 def test_entity_training_loss_consumes_decoder_slot_logits_directly():
-    model = j2v.Model.from_schema(
-        j2v.Array(j2v.Entity("id"), name="items", max_length=3),
+    model = jv.Model.from_tree(
+        jv.Branch(jv.Entity("id"), name="items", length=3),
         d_model=8,
         n_layers=1,
         n_heads=2,

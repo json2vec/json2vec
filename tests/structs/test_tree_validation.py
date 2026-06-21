@@ -47,7 +47,7 @@ def test_leaf_rejects_invalid_jmespath():
         Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "query": "["})
 
 
-def test_leaf_can_omit_query_until_bound_to_hyperparameters():
+def test_leaf_can_omit_query_until_bound_to_schema():
     leaf = Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4})
 
     assert leaf.query is None

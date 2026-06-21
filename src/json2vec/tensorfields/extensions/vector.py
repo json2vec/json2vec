@@ -26,7 +26,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-    from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.experiment import Schema
 
 
 vector: Plugin = Plugin(name="vector")
@@ -90,11 +90,11 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
-        request: Request = hyperparameters.requests[address]
+        array_shape: tuple[int, ...] = schema.shapes[address]
+        request: Request = schema.requests[address]
 
         leading_shape: tuple[int, ...] = (len(values), *array_shape)
         values, literal_masks = extract_mask_literals(
@@ -117,7 +117,7 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=object,
             pad_value=None,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
         literal_data, _ = pad(
@@ -125,7 +125,7 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=bool,
             pad_value=False,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
 
@@ -174,10 +174,10 @@ class TensorField(TensorFieldBase):
         cls,
         batch_size: int,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
     ):
-        request: Request = hyperparameters.requests[address]
-        leading_shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
+        request: Request = schema.requests[address]
+        leading_shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
         state = torch.full(leading_shape, Tokens.masked)
         content = torch.zeros((*leading_shape, request.n_dim), dtype=torch.float32)
 
@@ -192,19 +192,19 @@ class TensorField(TensorFieldBase):
 
 @vector.register
 class Embedder(EmbedderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        request: Request = hyperparameters.requests[address]
+        request: Request = schema.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
-            embedding_dim=hyperparameters.d_model,
+            embedding_dim=schema.d_model,
         )
         self.linear = torch.nn.Sequential(
-            torch.nn.Linear(in_features=request.n_dim, out_features=hyperparameters.d_model),
+            torch.nn.Linear(in_features=request.n_dim, out_features=schema.d_model),
             torch.nn.GELU(),
         )
 
@@ -229,17 +229,17 @@ class Embedder(EmbedderBase):
 
 @vector.register
 class Decoder(DecoderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        request: Request = hyperparameters.requests[address]
+        request: Request = schema.requests[address]
 
         self.classification = torch.nn.Linear(
-            in_features=hyperparameters.d_model,
+            in_features=schema.d_model,
             out_features=len(Tokens),
         )
         self.regression = torch.nn.Linear(
-            in_features=hyperparameters.d_model,
+            in_features=schema.d_model,
             out_features=request.n_dim,
         )
 
@@ -261,7 +261,7 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     address: Address = prediction.address
-    request: Request = module.hyperparameters.requests[address]
+    request: Request = module.schema.requests[address]
 
     trainable = batch.trainable.reshape(-1)
     state_targets = batch.targets[TensorKey.state].reshape(-1)

@@ -24,7 +24,8 @@ A `json2vec` schema is both a data contract and an architecture blueprint.
 
 - Leaf fields such as `Number`, `Category`, `Set`, `Entity`, `Text`, and
   `Vector` become datatype-specific tensorfields.
-- `Array` nodes become local context encoders for repeated child objects.
+- `Branch` nodes define shared contexts for child fields, with optional local
+  attention and pooling before the representation flows upward.
 - Targets, masks, pruning, and embeddings are configured on the same schema
   tree.
 - Prediction output is keyed by schema address, so decoded values and
@@ -37,24 +38,23 @@ inference, and serving.
 ## A Model From A Nested Record
 
 ```python
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Category("customer_tier", max_vocab_size=16),
-    j2v.Array(
-        j2v.Category("sku", max_vocab_size=2048),
-        j2v.Number("quantity"),
-        j2v.Number("price"),
-        name="line_items",
-        max_length=32,
-        embed=True,
-    ),
-    j2v.Category("returned", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     name="order",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
+    customer_tier=jv.Category(size=16),
+    line_items=jv.Branch(
+        length=32,
+        embed=True,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+        price=jv.Number,
+    ),
+    returned=jv.Category(target=True, size=2),
 )
 ```
 
@@ -77,8 +77,8 @@ to emit embeddings at configured addresses.
 
 ## Train With Lightning
 
-`j2v.Model` is a LightningModule. `j2v.PolarsDataModule` and
-`j2v.StreamingDataModule` are LightningDataModule implementations. The schema
+`jv.Model` is a LightningModule. `jv.PolarsDataModule` and
+`jv.StreamingDataModule` are LightningDataModule implementations. The schema
 defines the model tree, typed losses, prediction outputs, and embeddings;
 Lightning runs `fit`, `validate`, `test`, and `predict`.
 
@@ -87,23 +87,23 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 
 records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
-model = j2v.Model.from_schema(
-    j2v.Number("sepal_length"),
-    j2v.Number("petal_length"),
-    j2v.Category("species", target=True, max_vocab_size=4, topk=[2]),
+model = jv.Model.from_tree(
     d_model=16,
     n_layers=1,
     n_heads=4,
     batch_size=8,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
+    sepal_length=jv.Number,
+    petal_length=jv.Number,
+    species=jv.Category(target=True, size=4, topk=[2]),
 )
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -140,8 +140,8 @@ For small interactive batches, call `model.predict(...)` with raw dictionaries.
 ```python
 predictions = model.predict(records.to_dicts()[:3])
 
-species = predictions[j2v.Address("record", "species")]
-record = predictions[j2v.Address("record")]
+species = predictions[jv.Address("record", "species")]
+record = predictions[jv.Address("record")]
 
 print(species["content"]["value"])
 print(species["content"]["probability"])
@@ -149,10 +149,10 @@ print(record["embedding"])
 ```
 
 For larger offline jobs, configure a `predict` split on a data module and attach
-`j2v.Writer` to Lightning's prediction loop.
+`jv.Writer` to Lightning's prediction loop.
 
 ```python
-writer = j2v.Writer("predictions")
+writer = jv.Writer("predictions")
 
 trainer = lit.Trainer(
     accelerator="cpu",
@@ -160,7 +160,7 @@ trainer = lit.Trainer(
     logger=False,
 )
 
-predict_datamodule = j2v.PolarsDataModule(
+predict_datamodule = jv.PolarsDataModule(
     model=model,
     predict=records.drop("species"),
     num_workers=0,
@@ -226,7 +226,7 @@ for split configuration, sharding, sampling, buffers, and preprocessors.
   missing-state handling, masking, decoding, loss, metrics, and output writing.
 - **Unified training roles:** `target=True`, `p_prune`, and `p_mask` all use the
   same reconstruction path.
-- **Embedding trees:** embeddings can come from the root, arrays, or selected
+- **Embedding trees:** embeddings can come from the root, branches, or selected
   leaves.
 - **Schema evolution:** fields can be added, removed, updated, reset, or
   temporarily overridden after construction.
@@ -300,7 +300,7 @@ Tutorials and guides:
 - [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors.html)
 - [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance.html)
 - [Field Stacking](https://json2vec.github.io/json2vec/guides/field-stacking.html)
-- [Array](https://json2vec.github.io/json2vec/data-types/array.html)
+- [Branch](https://json2vec.github.io/json2vec/data-types/branch.html)
 - [Number](https://json2vec.github.io/json2vec/data-types/number.html)
 - [Category](https://json2vec.github.io/json2vec/data-types/category.html)
 - [Set](https://json2vec.github.io/json2vec/data-types/set.html)

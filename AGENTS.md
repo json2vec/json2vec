@@ -7,70 +7,69 @@ This file is the high-signal context for AI coding agents working in this repo. 
 JSON2Vec builds PyTorch/Lightning models from JSON-like schemas. Users normally import the package as:
 
 ```python
-import json2vec as j2v
+import json2vec as jv
 ```
 
-The public surface should stay usable from `json2vec` directly: `Model`, `Array`, built-in tensorfields, data modules, preprocessors, inference writers, deployment helpers, mutation predicates, and extension base classes.
+The public surface should stay usable from `json2vec` directly: `Model`, `Branch`, built-in tensorfields, data modules, preprocessors, inference writers, deployment helpers, mutation predicates, and extension base classes.
 
-The schema is the architecture. `Model.from_schema(...)` receives field constructors and array nodes, then builds the root array, tensorfield embedders, context encoders, decoders, losses, and prediction outputs.
+The schema is the architecture. `Model.from_tree(...)` receives field constructors and branch nodes, then builds the root branch, tensorfield embedders, context encoders, decoders, losses, and prediction outputs.
 
 ## Common API Patterns
 
 Minimal supervised model:
 
 ```python
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
-    j2v.Category("merchant", max_vocab_size=4096),
-    j2v.Category("label", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
+    amount=jv.Number,
+    merchant=jv.Category(size=4096),
+    label=jv.Category(target=True, size=2),
 )
 ```
 
 Nested repeated context:
 
 ```python
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category("sku", max_vocab_size=2048),
-        j2v.Number("quantity"),
-        name="line_items",
-        max_length=32,
-    ),
-    j2v.Category("returned", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     d_model=64,
     n_layers=2,
     n_heads=4,
+    line_items=jv.Branch(
+        length=32,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+    ),
+    returned=jv.Category(target=True, size=2),
 )
 ```
 
-Root array naming is passed to `Model.from_schema(...)` with `name=...`. The
-generated root array is always a singleton; use child `Array(max_length=...)`
+Root branch naming is passed to `Model.from_tree(...)` with `name=...`. The
+generated root branch is always a singleton; use child `Branch(length=...)`
 for repeated data.
 
 ```python
-model = j2v.Model.from_schema(
-    j2v.Number("amount"),
+model = jv.Model.from_tree(
     name="event",
     d_model=32,
     n_layers=1,
     n_heads=4,
     embed=True,
+    amount=jv.Number,
 )
 ```
 
 ## Gotchas
 
-- Do not use a public `Struct(...)` constructor. Public examples should use `Model.from_schema(...)` and `Array(...)`.
-- `Model.from_schema(..., name="customer")` names the generated root array. Older examples may say `root=...`; update them.
+- Do not use a public `Struct(...)` constructor. Public examples should use `Model.from_tree(...)` and `Branch(...)`.
+- `Model.from_tree(..., name="customer")` names the generated root branch. Older examples may say `root=...`; update them.
 - Inferred request queries are written from one processed observation: `[*].amount`, not `[*][*].amount`.
-- `Array(name="transactions")` makes child default queries like `[*].transactions[*].amount`.
-- `Array(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root array uses internal `Overflow.error`.
+- `Branch(name="transactions")` makes child default queries like `[*].transactions[*].amount`.
+- `Branch(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root branch uses internal `Overflow.error`.
 - `target=True` is shorthand for `p_prune=1.0`; the field is hidden from input and decoded as a supervised target.
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
-- `Entity` is for local repeated-identity matching and requires more than one value per observation, usually under an `Array(max_length>1)`.
+- `Entity` is for local repeated-identity matching and requires more than one value per observation, usually under a `Branch(length>1)`.
 - `DateParts` is for calendar parts. If elapsed time or recency matters, derive a `Number`.
 - Preprocessors run before tensorization. Use them for Python logic, windowing, normalization, or splitting one raw record into multiple observations.
 - Postprocessors run after prediction writing. Use them to reshape address-keyed outputs for APIs or warehouses.
@@ -80,7 +79,7 @@ model = j2v.Model.from_schema(
 Use `PolarsDataModule(...)` for in-memory examples and docs. Keep examples tiny:
 
 ```python
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -98,9 +97,9 @@ For quick examples, train with `max_epochs=1`, `limit_train_batches=1`, and `lim
 
 Top-level inference exports:
 
-- `j2v.Writer` writes batch prediction output.
-- `j2v.Postprocessor` is the postprocess callable type.
-- `j2v.Deployment`, `j2v.API`, `j2v.Accelerator`, and related serving types are lazy exports that require `json2vec[serving]`.
+- `jv.Writer` writes batch prediction output.
+- `jv.Postprocessor` is the postprocess callable type.
+- `jv.Deployment`, `jv.API`, `jv.Accelerator`, and related serving types are lazy exports that require `json2vec[serving]`.
 
 ## Useful Commands
 

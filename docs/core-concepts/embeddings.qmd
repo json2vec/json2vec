@@ -22,7 +22,7 @@ input 100% of the time and decoded from the remaining context:
   the model to reconstruct them.
 - `p_prune` randomly removes whole leaf field instances during training and
   asks the model to reconstruct them.
-- array `mask=` / `masks=` hide repeated coordinates and project that selection
+- branch `mask=` / `masks=` hide repeated coordinates and project that selection
   onto descendant leaves.
 - `embed=True` emits an embedding for that schema node during prediction. It
   does not make the field a target.
@@ -37,29 +37,29 @@ Unsupervised embedding workflows are built from the same machinery: train on
 masked or pruned reconstruction objectives without an external label, then emit
 representations with `embed=True`.
 
-For recency windows or row-level masking inside arrays, use
+For recency windows or row-level masking inside branches, use
 [Dynamic Masking](dynamic-masking.qmd). For independent leaf values, use
 `p_mask` or `p_prune`.
 
 ## Root Embeddings
 
-Set `embed=True` on `Model.from_schema(...)` to emit one representation for the
+Set `embed=True` on `Model.from_tree(...)` to emit one representation for the
 whole record.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount", p_mask=0.15),
-    j2v.Category("merchant", p_mask=0.15, max_vocab_size=4096),
+model = jv.Model.from_tree(
     name="transaction",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
+    amount=jv.Number(p_mask=0.15),
+    merchant=jv.Category(p_mask=0.15, size=4096),
 )
 
 model
@@ -72,35 +72,34 @@ After training, `model.predict(...)` includes the root embedding:
 #| output: true
 
 predictions = model.predict(records)
-transaction_embedding = predictions[j2v.Address("transaction")]["embedding"]
+transaction_embedding = predictions[jv.Address("transaction")]["embedding"]
 ```
 
 Use root embeddings for whole-record retrieval, clustering, anomaly detection,
 deduplication, or downstream models.
 
-## Array Embeddings
+## Branch Embeddings
 
-Set `embed=True` on an `Array` to emit a representation for a repeated context.
+Set `embed=True` on a `Branch` to emit a representation for a repeated context.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Category("customer_id", active=False, max_vocab_size=100_000),
-    j2v.Array(
-        j2v.Category("event_type", p_mask=0.15, max_vocab_size=128),
-        j2v.Category("merchant", p_mask=0.15, max_vocab_size=4096),
-        j2v.Number("amount", p_mask=0.15),
-        name="events",
-        max_length=64,
-        embed=True,
-    ),
+model = jv.Model.from_tree(
     name="customer",
     d_model=128,
     n_layers=2,
     n_heads=4,
     embed=True,
+    customer_tier=jv.Category(p_mask=0.15, size=16),
+    events=jv.Branch(
+        length=64,
+        embed=True,
+        event_type=jv.Category(p_mask=0.15, size=128),
+        merchant=jv.Category(p_mask=0.15, size=4096),
+        amount=jv.Number(p_mask=0.15),
+    ),
 )
 
 model
@@ -114,11 +113,11 @@ This produces an embedding tree with at least two useful addresses:
 
 predictions = model.predict(records)
 
-customer_embedding = predictions[j2v.Address("customer")]["embedding"]
-events_embedding = predictions[j2v.Address("customer", "events")]["embedding"]
+customer_embedding = predictions[jv.Address("customer")]["embedding"]
+events_embedding = predictions[jv.Address("customer", "events")]["embedding"]
 ```
 
-Use array embeddings when the repeated behavior matters independently from the
+Use branch embeddings when the repeated behavior matters independently from the
 whole record, such as event streams, transactions, line items, sessions, or
 measurements.
 
@@ -131,32 +130,32 @@ semantic meaning and you want a representation at that address.
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Entity("device_id", embed=True),
-        j2v.Category("event_type", p_mask=0.10, max_vocab_size=128),
-        name="login_sessions",
-        max_length=32,
-        embed=True,
-    ),
+model = jv.Model.from_tree(
     name="customer",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
+    login_sessions=jv.Branch(
+        length=32,
+        embed=True,
+        device_id=jv.Entity(embed=True),
+        event_type=jv.Category(p_mask=0.10, size=128),
+    ),
 )
 
 model
 ```
 
 Use `Entity` for local repeated-identity matching, such as whether the same
-device appears multiple times inside one observation. Use `Category` when the
-identifier should have a persistent vocabulary across training and prediction.
+device appears multiple times inside one observation. Use `Category` for
+bounded labels that should have a persistent vocabulary across training and
+prediction.
 
 ## An Unsupervised Schema
 
 This sketch has no label. The model learns by reconstructing masked values,
-which is often called self-supervised learning, and emits both root and array
+which is often called self-supervised learning, and emits both root and branch
 embeddings. The complete inline version below trains one tiny CPU batch from the
 bundled digit records.
 
@@ -168,19 +167,11 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 
 records = pl.read_ndjson("docs/data/digits.jsonl").head(24)
 
-model = j2v.Model.from_schema(
-    j2v.Array(
-        j2v.Category("row", max_vocab_size=8),
-        j2v.Category("column", max_vocab_size=8),
-        j2v.Number("intensity", p_mask=0.15),
-        name="pixels",
-        max_length=64,
-        embed=True,
-    ),
+model = jv.Model.from_tree(
     name="digit",
     d_model=24,
     n_layers=1,
@@ -188,9 +179,16 @@ model = j2v.Model.from_schema(
     batch_size=8,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
+    pixels=jv.Branch(
+        length=64,
+        embed=True,
+        row=jv.Category(size=8),
+        column=jv.Category(size=8),
+        intensity=jv.Number(p_mask=0.15),
+    ),
 )
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -216,12 +214,12 @@ trainer.fit(model=model, datamodule=datamodule)
 model
 predictions = model.predict(records.to_dicts()[:2])
 
-digit = predictions[j2v.Address("digit")]["embedding"]
-pixels = predictions[j2v.Address("digit", "pixels")]["embedding"]
+digit = predictions[jv.Address("digit")]["embedding"]
+pixels = predictions[jv.Address("digit", "pixels")]["embedding"]
 ```
 
-Root embeddings return one vector per input observation. Array embeddings return
-vectors shaped by the retained slots at that array address.
+Root embeddings return one vector per input observation. Branch embeddings return
+vectors shaped by the retained slots at that branch address.
 
 ## Combining Learning Signals
 
@@ -232,15 +230,15 @@ reconstruction tasks because both use the same typed decoder path.
 #| echo: true
 #| output: true
 
-model = j2v.Model.from_schema(
-    j2v.Number("amount", p_mask=0.10),
-    j2v.Category("merchant", p_mask=0.05, max_vocab_size=4096),
-    j2v.Category("fraud", target=True, max_vocab_size=2),
+model = jv.Model.from_tree(
     name="transaction",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
+    amount=jv.Number(p_mask=0.10),
+    merchant=jv.Category(p_mask=0.05, size=4096),
+    fraud=jv.Category(target=True, size=2),
 )
 
 model
@@ -259,12 +257,12 @@ For small interactive workflows, call `Model.predict(...)` directly.
 #| output: true
 
 predictions = model.predict(records)
-root = predictions[j2v.Address("customer")]["embedding"]
-events = predictions[j2v.Address("customer", "events")]["embedding"]
+root = predictions[jv.Address("customer")]["embedding"]
+events = predictions[jv.Address("customer", "events")]["embedding"]
 ```
 
 For larger offline jobs, use the [Batch Inference](../guides/batch-inference.qmd)
-guide. `j2v.Writer` writes target predictions, configured embeddings, and input
+guide. `jv.Writer` writes target predictions, configured embeddings, and input
 metadata from `trainer.predict(...)` to rank-partitioned Parquet files. Add a
 [postprocessor](../guides/postprocessors.qmd) when you need to strip, rename, or
 flatten the output for a downstream index.
@@ -272,9 +270,9 @@ flatten the output for a downstream index.
 ## Comparing Embeddings
 
 Embeddings from related schema addresses are the easiest to compare directly:
-root to root, event-array to event-array, or the same leaf address across
+root to root, event-branch to event-branch, or the same leaf address across
 records. Be careful comparing unrelated branches. A customer-level embedding and
-a transaction-array embedding may have the same width but are trained for
+a transaction-branch embedding may have the same width but are trained for
 different context roles.
 
 Cosine similarity is a reasonable starting point for retrieval and clustering,

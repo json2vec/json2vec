@@ -24,11 +24,11 @@ and similar multi-label fields.
 #| echo: true
 #| output: true
 
-import json2vec as j2v
+import json2vec as jv
 
-tags = j2v.Set(
+tags = jv.Set(
     "tags",
-    max_vocab_size=2048,
+    size=2048,
     p_unavailable=0.02,
     threshold=0.75,
 )
@@ -36,8 +36,8 @@ tags = j2v.Set(
 tags
 ```
 
-The input to a `Set` and an `Array` of `Category` values can look similar, but
-use `Set("tags")` for unordered labels. An `Array` of `Category` expects order
+The input to a `Set` and a `Branch` of `Category` values can look similar, but
+use `Set("tags")` for unordered labels. An `Branch` of `Category` expects order
 or item-level structure to matter.
 
 ## Input Values
@@ -62,25 +62,25 @@ Common set fields include:
 - Detected entities or concepts from an upstream parser.
 - Multi-label outcomes where more than one class can be true at once.
 
-Use `Array(Category("tag"))` instead when repeated labels need positions,
+Use `Branch(tag=Category())` instead when repeated labels need positions,
 attributes, or their own local context.
 
 ## Configuration
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `max_vocab_size` | `10000` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
+| `size` | `10000` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
 | `p_unavailable` | `0.01` | During training, randomly routes known labels to the unavailable bucket so the decoder learns that case. |
 | `threshold` | `None` | Optional prediction-time probability threshold. When set, prediction output only includes labels at or above the threshold. |
 
 ## Shared Preprocessing State
 
 `Set` maintains an online vocabulary shared by encoding workers and saved with
-the model. Training data can add new labels until `max_vocab_size` is full.
+the model. Training data can add new labels until `size` is full.
 Validation, test, and prediction data do not expand the vocabulary.
 
 Unknown labels after training are represented internally by a reserved
-unavailable slot at index `max_vocab_size`. Prediction output only includes
+unavailable slot at index `size`. Prediction output only includes
 probabilities for labels in the learned vocabulary.
 
 `p_unavailable` randomly removes some known training labels from their normal

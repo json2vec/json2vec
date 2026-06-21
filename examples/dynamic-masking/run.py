@@ -5,21 +5,21 @@ import string
 
 from rich import print
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.structs.enums import Strata
 
 ALPHABET = string.ascii_uppercase
 ADDRESS = "record/words/letters/letter"
 
 
-def consecutive_letters(rng: random.Random, *, min_length: int = 3, max_length: int = 8) -> list[dict[str, str]]:
-    length = rng.randint(min_length, max_length)
+def consecutive_letters(rng: random.Random, *, min_count: int = 3, max_count: int = 8) -> list[dict[str, str]]:
+    length = rng.randint(min_count, max_count)
     start = rng.randint(0, len(ALPHABET) - length)
     return [{"letter": value} for value in ALPHABET[start : start + length]]
 
 
-def words(rng: random.Random, *, min_length: int = 2, max_length: int = 4) -> list[dict[str, list[dict[str, str]]]]:
-    length = rng.randint(min_length, max_length)
+def words(rng: random.Random, *, min_count: int = 2, max_count: int = 4) -> list[dict[str, list[dict[str, str]]]]:
+    length = rng.randint(min_count, max_count)
     return [{"letters": consecutive_letters(rng)} for _ in range(length)]
 
 
@@ -29,20 +29,18 @@ def records(n: int, *, seed: int = 7) -> list[dict[str, list[dict[str, list[dict
 
 
 if __name__ == "__main__":
-    model = j2v.Model.from_schema(
-        j2v.Array(
-            j2v.Array(
-                j2v.Category(name="letter", max_vocab_size=len(ALPHABET), p_unavailable=0.0),
-                name="letters",
-                max_length=8,
-                mask=j2v.Mask(count=2, window=2),
-            ),
-            name="words",
-            max_length=3,
-        ),
+    model = jv.Model.from_tree(
         d_model=16,
         n_layers=1,
         n_heads=4,
+        words=jv.Branch(
+            length=3,
+            letters=jv.Branch(
+                length=8,
+                mask=jv.Mask(count=2, window=2),
+                letter=jv.Category(size=len(ALPHABET), p_unavailable=0.0),
+            ),
+        ),
     )
 
     data = records(5)

@@ -106,7 +106,7 @@ class CounterUpdateCallback(Callback):
         batch: TensorDict,
         batch_idx: int,
     ) -> None:  # ty:ignore[invalid-method-override]
-        for address in pl_module.hyperparameters.active_requests:
+        for address in pl_module.schema.active_requests:
             field = batch[address]
             embedder = pl_module.nodes[address].embedder
             observed: set[int] = set()

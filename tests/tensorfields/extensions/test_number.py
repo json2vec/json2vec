@@ -5,7 +5,7 @@ from loguru import logger
 from tensordict import TensorDict
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
 
@@ -22,13 +22,13 @@ def _structure_payload() -> dict:
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
             "fields": [
                 {
                     "name": "items",
-                    "type": "array",
-                    "max_length": 2,
+                    "type": "branch",
+                    "length": 2,
                     "fields": [field],
                 }
             ],
@@ -40,14 +40,14 @@ def test_number_request_allows_jitter_above_one():
     payload = _structure_payload()
     payload["fields"]["fields"][0]["fields"][0]["jitter"] = 1.5
 
-    structure = Hyperparameters.model_validate(payload)
+    structure = Schema.model_validate(payload)
 
     assert structure.requests[ADDRESS].jitter == 1.5
 
 
 class _TrackingModule:
-    def __init__(self, hyperparameters: Hyperparameters, embedder: Embedder, decoder: Decoder):
-        self.hyperparameters = hyperparameters
+    def __init__(self, schema: Schema, embedder: Embedder, decoder: Decoder):
+        self.schema = schema
         self.nodes = {ADDRESS: SimpleNamespace(embedder=embedder, decoder=decoder)}
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
@@ -55,20 +55,20 @@ class _TrackingModule:
 
 
 def test_number_loss_does_not_mutate_counter():
-    structure = Hyperparameters.model_validate(_structure_payload())
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload())
+    schema = structure
 
     field = TensorField.new(
         values=[[[1.0, None]], [[2.0]]],
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
     )
     field.mask(1.0)
 
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
-    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
-    module = _TrackingModule(hyperparameters=structure, embedder=embedder, decoder=decoder)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
 
     prediction = Prediction(
         address=ADDRESS,
@@ -105,8 +105,8 @@ def test_number_normalizer_ignores_nonfinite_values_when_updating():
 
 
 def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
-    structure = Hyperparameters.model_validate(_structure_payload())
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    structure = Schema.model_validate(_structure_payload())
+    embedder = Embedder(schema=structure, address=ADDRESS)
     bound = embedder.max_fourier_input.detach()
     content = torch.stack(
         [
@@ -159,16 +159,16 @@ def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
 
 
 def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
-    structure = Hyperparameters.model_validate(_structure_payload())
+    structure = Schema.model_validate(_structure_payload())
     field = TensorField.new(
         values=[[[1.0, 2.0]]],
         address=ADDRESS,
-        hyperparameters=structure,
+        schema=structure,
         strata=Strata.train,
     )
     field.content[0, 0, 0] = float("inf")
 
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    embedder = Embedder(schema=structure, address=ADDRESS)
     embedder.train()
     parcel = embedder(field)
 
@@ -178,7 +178,7 @@ def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
 
 
 def test_number_write_emits_state_probability_map():
-    structure = Hyperparameters.model_validate(_structure_payload())
+    structure = Schema.model_validate(_structure_payload())
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
     state_logits[1, 0, Tokens.null.value] = 10.0
@@ -193,7 +193,7 @@ def test_number_write_emits_state_probability_map():
         ),
     )
 
-    output = write(module=SimpleNamespace(hyperparameters=structure), prediction=prediction)
+    output = write(module=SimpleNamespace(schema=structure), prediction=prediction)
     state_payload = output[TensorKey.state.name]
 
     assert set(state_payload.keys()) == set(Tokens.__members__.keys())

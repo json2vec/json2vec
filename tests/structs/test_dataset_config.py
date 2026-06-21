@@ -1,11 +1,11 @@
 import pytest
 
-import json2vec as j2v
+import json2vec as jv
 from json2vec.data.datasets.base import PreprocessorConfig
 from json2vec.data.datasets.streaming import StreamingDataModule
 from json2vec.preprocessors.base import PREPROCESSORS, preprocess
 from json2vec.structs.enums import Suffix
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 
 def _preprocessor_name() -> str:
@@ -20,14 +20,14 @@ def _preprocessor_name() -> str:
     return _dataset_test_preprocessor.__name__
 
 
-def _hyperparameters():
-    return Hyperparameters.model_validate(
+def _schema():
+    return Schema.model_validate(
         {
             "d_model": 8,
             "fields": {
                 "name": "record",
-                "type": "array",
-                "max_length": 1,
+                "type": "branch",
+                "length": 1,
                 "fields": [],
             },
         }
@@ -35,8 +35,8 @@ def _hyperparameters():
 
 
 def _model():
-    return j2v.Model.from_schema(
-        j2v.Category("id", max_vocab_size=16),
+    return jv.Model.from_tree(
+        jv.Category("id", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,

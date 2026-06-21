@@ -1,6 +1,6 @@
 import pytest
 
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 
 
 def _structure_with_field(field: dict) -> dict:
@@ -8,9 +8,9 @@ def _structure_with_field(field: dict) -> dict:
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
-            "max_length": 2,
+            "length": 2,
             "fields": [field],
         },
     }
@@ -22,12 +22,12 @@ def test_category_topk_rejects_non_positive():
             "name": "cat",
             "type": "category",
             "query": "[*].code",
-            "max_vocab_size": 64,
+            "size": 64,
             "topk": [0],
         }
     )
     with pytest.raises(ValueError, match="topk values must be positive"):
-        Hyperparameters.model_validate(payload)
+        Schema.model_validate(payload)
 
 
 def test_category_topk_rejects_values_at_or_above_vocab():
@@ -36,26 +36,27 @@ def test_category_topk_rejects_values_at_or_above_vocab():
             "name": "cat",
             "type": "category",
             "query": "[*].code",
-            "max_vocab_size": 8,
+            "size": 8,
             "topk": [8],
         }
     )
-    with pytest.raises(ValueError, match="topk values must be less than max_vocab_size"):
-        Hyperparameters.model_validate(payload)
+    with pytest.raises(ValueError, match="topk values must be less than size"):
+        Schema.model_validate(payload)
 
 
-def test_category_rejects_removed_n_bands_option():
+def test_category_allows_extra_n_bands_option():
     payload = _structure_with_field(
         {
             "name": "cat",
             "type": "category",
             "query": "[*].code",
-            "max_vocab_size": 64,
+            "size": 64,
             "n_bands": 8,
         }
     )
-    with pytest.raises(ValueError, match="Category does not support n_bands"):
-        Hyperparameters.model_validate(payload)
+    schema = Schema.model_validate(payload)
+
+    assert schema.requests["root/cat"].n_bands == 8
 
 
 def test_set_threshold_rejects_values_above_one():
@@ -68,7 +69,7 @@ def test_set_threshold_rejects_values_above_one():
         }
     )
     with pytest.raises(ValueError, match="less than or equal to 1"):
-        Hyperparameters.model_validate(payload)
+        Schema.model_validate(payload)
 
 
 def test_dateparts_dateparts_reject_duplicates():
@@ -81,7 +82,7 @@ def test_dateparts_dateparts_reject_duplicates():
         }
     )
     with pytest.raises(ValueError, match="dateparts must be unique"):
-        Hyperparameters.model_validate(payload)
+        Schema.model_validate(payload)
 
 
 def test_dateparts_normalizes_friendly_datepart_names():
@@ -93,7 +94,7 @@ def test_dateparts_normalizes_friendly_datepart_names():
             "dateparts": ["Day Of Week", "month-of-year", "HourOfDay"],
         }
     )
-    structure = Hyperparameters.model_validate(payload)
+    structure = Schema.model_validate(payload)
     request = structure.requests["root/ts"]
 
     assert [datepart.value for datepart in request.dateparts] == [
@@ -113,7 +114,7 @@ def test_dateparts_unknown_name_suggests_canonical_value():
         }
     )
     with pytest.raises(ValueError, match="did you mean 'day_of_week'"):
-        Hyperparameters.model_validate(payload)
+        Schema.model_validate(payload)
 
 
 def test_dateparts_pattern_rejects_invalid_tokens():
@@ -127,7 +128,7 @@ def test_dateparts_pattern_rejects_invalid_tokens():
         }
     )
     with pytest.raises(ValueError, match="is not a valid format pattern"):
-        Hyperparameters.model_validate(payload)
+        Schema.model_validate(payload)
 
 
 def test_dateparts_pattern_accepts_valid_format():
@@ -140,5 +141,5 @@ def test_dateparts_pattern_accepts_valid_format():
             "pattern": "%Y-%m-%d",
         }
     )
-    structure = Hyperparameters.model_validate(payload)
+    structure = Schema.model_validate(payload)
     assert "root/ts" in structure.requests

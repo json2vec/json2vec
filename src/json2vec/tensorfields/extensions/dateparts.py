@@ -29,7 +29,7 @@ from json2vec.tensorfields.base import (
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-    from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.experiment import Schema
 
 
 class DatePart(enum.StrEnum):
@@ -218,10 +218,10 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        array_shape: tuple[int, ...] = schema.shapes[address]
         leading_shape: tuple[int, ...] = (len(values), *array_shape)
         values, literal_masks = extract_mask_literals(
             values,
@@ -230,7 +230,7 @@ class TensorField(TensorFieldBase):
             leaf_depth=len(leading_shape),
         )
 
-        request: RequestBase = hyperparameters.requests[address]
+        request: RequestBase = schema.requests[address]
 
         if request.pattern is not None:
             values = apply(values, datetime.strptime, request.pattern)
@@ -240,7 +240,7 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype="datetime64[m]",
             pad_value=np.nan,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
         literal_data, _ = pad(
@@ -248,7 +248,7 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=bool,
             pad_value=False,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
 
@@ -304,14 +304,14 @@ class TensorField(TensorFieldBase):
         cls,
         batch_size: int,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
     ):
-        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
+        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
 
         state: torch.Tensor = torch.full(shape, Tokens.masked)
 
         dateparts: dict[DatePart, torch.Tensor] = {}
-        for datepart in hyperparameters.requests[address].dateparts:
+        for datepart in schema.requests[address].dateparts:
             dateparts[datepart] = state.clone()
 
         return cls(
@@ -325,16 +325,16 @@ class TensorField(TensorFieldBase):
 
 @dateparts.register
 class Embedder(EmbedderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        request = hyperparameters.requests[address]
+        request = schema.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
-            embedding_dim=hyperparameters.d_model,
+            embedding_dim=schema.d_model,
         )
 
         self.dateparts = torch.nn.ModuleDict()
@@ -342,7 +342,7 @@ class Embedder(EmbedderBase):
         for datepart in request.dateparts:
             self.dateparts[datepart] = torch.nn.Embedding(
                 num_embeddings=len(Tokens) + DatePart.depth(datepart) + 1,
-                embedding_dim=hyperparameters.d_model,
+                embedding_dim=schema.d_model,
             )
 
     @beartype
@@ -366,19 +366,19 @@ class Embedder(EmbedderBase):
 
 @dateparts.register
 class Decoder(DecoderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
         self.linear = torch.nn.Linear(
-            in_features=hyperparameters.d_model,
+            in_features=schema.d_model,
             out_features=len(Tokens),
         )
 
         self.dateparts = torch.nn.ModuleDict()
 
-        for datepart in hyperparameters.requests[address].dateparts:
+        for datepart in schema.requests[address].dateparts:
             dim = len(Tokens) + DatePart.depth(datepart) + 1
-            self.dateparts[datepart] = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=dim)
+            self.dateparts[datepart] = torch.nn.Linear(in_features=schema.d_model, out_features=dim)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -423,7 +423,7 @@ def loss(
         value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(),
     )
 
-    request: RequestBase = module.hyperparameters.requests[prediction.address]
+    request: RequestBase = module.schema.requests[prediction.address]
 
     losses: list[torch.Tensor] = []
 

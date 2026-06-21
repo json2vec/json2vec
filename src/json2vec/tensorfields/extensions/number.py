@@ -28,7 +28,7 @@ from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-    from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.experiment import Schema
 
 
 number: Plugin = Plugin(name="number")
@@ -82,10 +82,10 @@ class TensorField(TensorFieldBase):
         cls,
         values: list,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = hyperparameters.shapes[address]
+        array_shape: tuple[int, ...] = schema.shapes[address]
         leading_shape: tuple[int, ...] = (len(values), *array_shape)
         values, literal_masks = extract_mask_literals(
             values,
@@ -99,7 +99,7 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=np.float64,
             pad_value=np.nan,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
         literal_data, _ = pad(
@@ -107,7 +107,7 @@ class TensorField(TensorFieldBase):
             shape=leading_shape,
             dtype=bool,
             pad_value=False,
-            overflows=hyperparameters.overflows(address),
+            overflows=schema.overflows(address),
             address=address,
         )
 
@@ -153,9 +153,9 @@ class TensorField(TensorFieldBase):
         cls,
         batch_size: int,
         address: Address,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
     ):
-        shape: tuple[int, ...] = (batch_size, *hyperparameters.shapes[address])
+        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
 
         state = torch.full(shape, Tokens.masked)
         content = torch.full(shape, 0.0)
@@ -233,21 +233,21 @@ class GlobalOnlineNormalizer(torch.nn.Module):
 
 @number.register
 class Embedder(EmbedderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        request: Request = hyperparameters.requests[address]
+        request: Request = schema.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
 
-        self.embeddings = torch.nn.Embedding(num_embeddings=len(Tokens), embedding_dim=hyperparameters.d_model)
+        self.embeddings = torch.nn.Embedding(num_embeddings=len(Tokens), embedding_dim=schema.d_model)
         self.counter = Counter(address=address, size=len(Tokens))
 
         n_bands = request.n_bands
         offset = request.offset
 
         weights = torch.logspace(start=-n_bands, end=offset, steps=n_bands + offset + 1, base=2)
-        self.linear = torch.nn.Linear(2 * len(weights), hyperparameters.d_model)
+        self.linear = torch.nn.Linear(2 * len(weights), schema.d_model)
         self.register_buffer("weights", weights.mul(math.pi).unsqueeze(dim=0))
         self.register_buffer("jitter", torch.tensor(request.jitter))
         self.register_buffer("max_fourier_input", torch.tensor(FOURIER_SAFE_MAX_ANGLE) / self.weights.abs().max())
@@ -326,11 +326,11 @@ class Embedder(EmbedderBase):
 
 @number.register
 class Decoder(DecoderBase):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
-        super().__init__(hyperparameters=hyperparameters, address=address)
+    def __init__(self, schema: Schema, address: Address):
+        super().__init__(schema=schema, address=address)
 
-        self.classification = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=len(Tokens))
-        self.regression = torch.nn.Linear(in_features=hyperparameters.d_model, out_features=1)
+        self.classification = torch.nn.Linear(in_features=schema.d_model, out_features=len(Tokens))
+        self.regression = torch.nn.Linear(in_features=schema.d_model, out_features=1)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -350,7 +350,7 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     address: Address = prediction.address
-    request: Request = module.hyperparameters.requests[prediction.address]
+    request: Request = module.schema.requests[prediction.address]
 
     embedder: Embedder = module.nodes[address].embedder
     normalizer: GlobalOnlineNormalizer = embedder.normalizer

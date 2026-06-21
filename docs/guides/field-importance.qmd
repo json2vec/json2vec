@@ -29,21 +29,21 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 
-import json2vec as j2v
+import json2vec as jv
 
 records = pl.read_ndjson("docs/data/iris.jsonl")
 
-model = j2v.Model.from_schema(
-    j2v.Number("sepal_length", p_prune=0.20),
-    j2v.Number("sepal_width", p_prune=0.20),
-    j2v.Number("petal_length", p_prune=0.20),
-    j2v.Number("petal_width", p_prune=0.20),
-    j2v.Category("species", target=True, max_vocab_size=4, topk=[2]),
+model = jv.Model.from_tree(
     d_model=32,
     n_layers=2,
     n_heads=4,
     batch_size=32,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
+    sepal_length=jv.Number(p_prune=0.20),
+    sepal_width=jv.Number(p_prune=0.20),
+    petal_length=jv.Number(p_prune=0.20),
+    petal_width=jv.Number(p_prune=0.20),
+    species=jv.Category(target=True, size=4, topk=[2]),
 )
 
 records.head(3)
@@ -57,7 +57,7 @@ visible to `trainer.test(...)`.
 #| echo: true
 #| output: true
 
-datamodule = j2v.PolarsDataModule(
+datamodule = jv.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -92,13 +92,13 @@ temporarily set `active=False` on one leaf for a single test run. The
 #| echo: true
 #| output: true
 
-model.update(j2v.where("type") == "number", p_prune=0.0)
+model.update(jv.where("type") == "number", p_prune=0.0)
 
 baseline = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
 print(f"baseline: {baseline['loss/test']:.4f}")
 
-for leaf in model.select(j2v.where("type") == "number"):
-    with model.override(j2v.where("address") == leaf.address, active=False):
+for leaf in model.select(jv.where("type") == "number"):
+    with model.override(jv.where("address") == leaf.address, active=False):
         result = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
         print(f"{leaf.name}: {result['loss/test']:.4f}")
 ```
@@ -113,8 +113,8 @@ view:
 rows = []
 baseline_loss = baseline["loss/test"]
 
-for leaf in model.select(j2v.where("type") == "number"):
-    with model.override(j2v.where("address") == leaf.address, active=False):
+for leaf in model.select(jv.where("type") == "number"):
+    with model.override(jv.where("address") == leaf.address, active=False):
         loss = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]["loss/test"]
     rows.append(
         {

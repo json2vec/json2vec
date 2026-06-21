@@ -3,7 +3,7 @@ import torch
 from tensordict import TensorDict
 
 from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Hyperparameters
+from json2vec.structs.experiment import Schema
 from json2vec.structs.packages import Prediction
 from json2vec.tensorfields.extensions.vector import Decoder, Embedder, TensorField, loss, write
 
@@ -22,13 +22,13 @@ def _structure_payload(*, n_dim: int = 3, objective: str = "l2") -> dict:
         "d_model": 16,
         "fields": {
             "name": "root",
-            "type": "array",
+            "type": "branch",
             "dropout": 0.1,
             "fields": [
                 {
                     "name": "items",
-                    "type": "array",
-                    "max_length": 2,
+                    "type": "branch",
+                    "length": 2,
                     "fields": [field],
                 }
             ],
@@ -44,7 +44,7 @@ def _values() -> list:
 
 
 def test_vector_request_is_available_in_structure():
-    structure = Hyperparameters.model_validate(_structure_payload())
+    structure = Schema.model_validate(_structure_payload())
     request = structure.requests[ADDRESS]
     assert request.type == "vector"
     assert request.n_dim == 3
@@ -52,12 +52,12 @@ def test_vector_request_is_available_in_structure():
 
 def test_vector_request_rejects_non_positive_n_dim():
     with pytest.raises(ValueError, match="greater than 0"):
-        Hyperparameters.model_validate(_structure_payload(n_dim=0))
+        Schema.model_validate(_structure_payload(n_dim=0))
 
 
 def test_vector_tensorfield_new_rejects_wrong_embedding_length():
-    structure = Hyperparameters.model_validate(_structure_payload(n_dim=3))
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload(n_dim=3))
+    schema = structure
     bad_values = [
         [[[0.1, 0.2], [0.3, 0.4, 0.5]]],
         [[[0.6, 0.7, 0.8], [0.9, 1.0, 1.1]]],
@@ -67,35 +67,35 @@ def test_vector_tensorfield_new_rejects_wrong_embedding_length():
         TensorField.new(
             values=bad_values,
             address=ADDRESS,
-            hyperparameters=hyperparameters,
+            schema=schema,
             strata=Strata.train,
         )
 
 
 def test_vector_embedder_and_decoder_shapes():
-    structure = Hyperparameters.model_validate(_structure_payload(n_dim=3))
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload(n_dim=3))
+    schema = structure
 
     field = TensorField.new(
         values=_values(),
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
     )
 
-    embedder = Embedder(hyperparameters=structure, address=ADDRESS)
+    embedder = Embedder(schema=structure, address=ADDRESS)
     parcel = embedder(field)
     assert parcel.payload.shape == (2, 1, 2, 16)
 
-    decoder = Decoder(hyperparameters=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
     prediction = decoder([parcel])
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 3)
 
 
 class _DummyModule:
-    def __init__(self, structure: Hyperparameters):
-        self.hyperparameters = structure
+    def __init__(self, structure: Schema):
+        self.schema = structure
         self.logged: list[tuple[tuple[str, ...], float]] = []
 
     def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
@@ -105,13 +105,13 @@ class _DummyModule:
 
 @pytest.mark.parametrize(("objective", "expected"), [("l1", 2.0), ("l2", 4.0)])
 def test_vector_loss_uses_selected_objective(objective: str, expected: float):
-    structure = Hyperparameters.model_validate(_structure_payload(objective=objective))
-    hyperparameters = structure
+    structure = Schema.model_validate(_structure_payload(objective=objective))
+    schema = structure
 
     field = TensorField.new(
         values=_values(),
         address=ADDRESS,
-        hyperparameters=hyperparameters,
+        schema=schema,
         strata=Strata.train,
     )
     field.mask(1.0)
@@ -136,7 +136,7 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
 
 
 def test_vector_write_returns_content_payload():
-    structure = Hyperparameters.model_validate(_structure_payload())
+    structure = Schema.model_validate(_structure_payload())
     state_logits = torch.full((2, 2, len(Tokens)), -50.0)
     state_logits[0, :, Tokens.valued.value] = 50.0
     state_logits[1, :, Tokens.null.value] = 50.0

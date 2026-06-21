@@ -11,7 +11,7 @@ from json2vec.structs.packages import Parcel
 from json2vec.structs.tree import Address
 
 if TYPE_CHECKING:
-    from json2vec.structs.experiment import Hyperparameters
+    from json2vec.structs.experiment import Schema
 
 
 class RotaryTransformerEncoderLayer(torch.nn.Module):
@@ -50,25 +50,25 @@ class RotaryTransformerEncoderLayer(torch.nn.Module):
         return inputs + self.ffn(self.ffn_norm(inputs))
 
 
-class ArrayEncoder(torch.nn.Module):
-    def __init__(self, hyperparameters: Hyperparameters, address: Address):
+class BranchEncoder(torch.nn.Module):
+    def __init__(self, schema: Schema, address: Address):
         super().__init__()
 
-        array = hyperparameters.arrays[address]
-        dropout = float(array.dropout or 0.0)
+        branch = schema.branches[address]
+        dropout = float(branch.dropout or 0.0)
 
         self.origin: Address = address
-        self.destination: Address = array.parent.address
+        self.destination: Address = branch.parent.address
 
         layers: list[RotaryTransformerEncoderLayer] = []
-        attention = AttentionMode.normalize(array.attention)
+        attention = AttentionMode.normalize(branch.attention)
         if attention != AttentionMode.none:
-            for _ in range(array.n_layers):
+            for _ in range(branch.n_layers):
                 layers.append(
                     RotaryTransformerEncoderLayer(
-                        d_model=hyperparameters.d_model,
-                        nhead=array.n_heads,
-                        n_kv_heads=attention.kv_heads(array.n_heads),
+                        d_model=schema.d_model,
+                        nhead=branch.n_heads,
+                        n_kv_heads=attention.kv_heads(branch.n_heads),
                         dropout=dropout,
                     )
                 )
@@ -77,10 +77,10 @@ class ArrayEncoder(torch.nn.Module):
 
         self.pool = LearnedQueryCrossAttention(
             n_context=1,
-            d_model=hyperparameters.d_model,
-            nhead=array.n_heads,
+            d_model=schema.d_model,
+            nhead=branch.n_heads,
             dropout=dropout,
-            n_linear=array.n_linear,
+            n_linear=branch.n_linear,
         )
 
     def forward(self, parcels: list[Parcel]) -> Parcel:

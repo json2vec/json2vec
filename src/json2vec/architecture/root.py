@@ -29,10 +29,11 @@ from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.logging.throughput import ThroughputLogger
 from json2vec.structs.enums import AttentionMode, Strata
 from json2vec.structs.experiment import (
-    Hyperparameters,
     NodeAttribute,
     NodePredicate,
+    Schema,
     SchemaField,
+    TreeFieldInput,
 )
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address, Node, Rate, Renderable
@@ -52,17 +53,17 @@ __all__ = [
 class Model(lit.LightningModule, Renderable):
     """Neural model generated from a `json2vec` schema tree.
 
-    `Model` owns the schema hyperparameters, tensorfield embedders, array
+    `Model` owns the schema tree, tensorfield embedders, branch
     encoders, decoders, and convenience methods for prediction, checkpointing,
     schema display and mutation.
 
     Example:
         ```python
-        import json2vec as j2v
+        import json2vec as jv
 
-        model = j2v.Model.from_schema(
-            j2v.Category("segment", max_vocab_size=32),
-            j2v.Category("label", target=True, max_vocab_size=4),
+        model = jv.Model.from_tree(
+            jv.Category("segment", size=32),
+            jv.Category("label", target=True, size=4),
             d_model=16,
             n_layers=1,
             n_heads=4,
@@ -73,14 +74,14 @@ class Model(lit.LightningModule, Renderable):
     """
 
     @classmethod
-    def from_schema(
+    def from_tree(
         cls,
-        *field_args: SchemaField,
+        *field_args: TreeFieldInput,
         d_model: int,
         n_layers: int,
         n_heads: int,
         batch_size: int = 1,
-        fields: Sequence[SchemaField] | None = None,
+        fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
         description: str | None = None,
         embed: bool = False,
@@ -89,31 +90,32 @@ class Model(lit.LightningModule, Renderable):
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
+        **field_kwargs: TreeFieldInput,
     ) -> Self:
         """Build a model directly from schema fields.
 
         Args:
             *field_args: Field constructors such as `Category`, `Number`, or
-                nested `Array` nodes.
+                nested `Branch` nodes.
             d_model: Shared model width.
-            n_layers: Number of encoder layers on generated array nodes.
+            n_layers: Number of encoder layers on generated branch nodes.
             n_heads: Attention heads used by generated nodes.
             batch_size: Batch size used by data modules, examples, and mocked
-                Lightning input arrays.
+                Lightning example inputs.
             fields: Optional sequence form of `field_args`.
-            name: Root array name. Defaults to `record`.
-            description: Optional description on the generated root array.
-            embed: Configure the generated root array as an embedding output.
-            attention: Attention mode for the generated root array.
-            n_linear: Feed-forward block count on the generated root array.
-            dropout: Optional dropout rate on the generated root array.
+            name: Root branch name. Defaults to `record`.
+            description: Optional description on the generated root branch.
+            embed: Configure the generated root branch as an embedding output.
+            attention: Attention mode for the generated root branch.
+            n_linear: Feed-forward block count on the generated root branch.
+            dropout: Optional dropout rate on the generated root branch.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
 
         Returns:
             A compiled `Model` with modules built for the schema.
         """
-        hyperparameters = Hyperparameters.from_schema(
+        schema = Schema.from_tree(
             *field_args,
             d_model=d_model,
             n_layers=n_layers,
@@ -125,9 +127,10 @@ class Model(lit.LightningModule, Renderable):
             attention=attention,
             n_linear=n_linear,
             dropout=dropout,
+            **field_kwargs,
         )
         return cls(
-            hyperparameters=hyperparameters,
+            schema=schema,
             batch_size=batch_size,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -136,7 +139,7 @@ class Model(lit.LightningModule, Renderable):
     @beartype
     def __init__(
         self,
-        hyperparameters: Hyperparameters,
+        schema: Schema,
         *,
         batch_size: int = 1,
         optimizer: OptimizerConfig | None = None,
@@ -146,13 +149,13 @@ class Model(lit.LightningModule, Renderable):
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0")
 
-        self.hyperparameters: Hyperparameters = hyperparameters
+        self.schema: Schema = schema
         self.batch_size: int = batch_size
         self.optimizer: OptimizerConfig | None = optimizer
         self.scheduler: SchedulerConfig | None = scheduler
         self.locks: Counter[str | Strata] = Counter()
         self.nodes: torch.nn.ModuleDict = torch.nn.ModuleDict()
-        self.schema: SchemaEditor = SchemaEditor(self)
+        self._schema_editor: SchemaEditor = SchemaEditor(self)
         self._contract_generation: int = 0
         self._contract_scheduler: ContractScheduler = ContractScheduler()
 
@@ -161,9 +164,9 @@ class Model(lit.LightningModule, Renderable):
         logger.bind(
             component="model",
             batch_size=self.batch_size,
-            requests=len(self.hyperparameters.active_requests),
-            arrays=len(self.hyperparameters.arrays),
-            embeds=len(self.hyperparameters.embed),
+            requests=len(self.schema.active_requests),
+            branches=len(self.schema.branches),
+            embeds=len(self.schema.embed),
         ).info("initialized Model module")
 
     def _build(self) -> None:
@@ -185,19 +188,19 @@ class Model(lit.LightningModule, Renderable):
         heading.append("[model]", style=self.RICH_TYPE_STYLE)
         for name, value in (
             ("batch_size", self.batch_size),
-            ("d_model", self.hyperparameters.d_model),
+            ("d_model", self.schema.d_model),
             ("parameters", f"{parameters:,}"),
-            ("arrays", len(self.hyperparameters.arrays)),
-            ("fields", len(self.hyperparameters.active_requests)),
-            ("targets", len(self.hyperparameters.target)),
-            ("embeds", len(self.hyperparameters.embed)),
+            ("branches", len(self.schema.branches)),
+            ("fields", len(self.schema.active_requests)),
+            ("targets", len(self.schema.target)),
+            ("embeds", len(self.schema.embed)),
         ):
             heading.append(" ")
             heading.append(f"{name}=", style="dim")
             heading.append(str(value), style="cyan")
         yield heading
 
-        lines = list(self.hyperparameters.fields.__rich_console__(console, options))
+        lines = list(self.schema.fields.__rich_console__(console, options))
         if not lines:
             return
         first = Text()
@@ -223,7 +226,7 @@ class Model(lit.LightningModule, Renderable):
         use_cache: bool = True,
     ) -> list[Node]:
         """Return schema nodes that satisfy every predicate."""
-        return self.schema.select(*predicates, include_root=include_root, use_cache=use_cache)
+        return self._schema_editor.select(*predicates, include_root=include_root, use_cache=use_cache)
 
     def update(
         self,
@@ -251,7 +254,7 @@ class Model(lit.LightningModule, Renderable):
                 `False` so updates always evaluate against current schema state.
             **values: Schema attributes to update.
         """
-        self.schema.update(
+        self._schema_editor.update(
             *predicates,
             strict=strict,
             allow_extra=allow_extra,
@@ -267,8 +270,8 @@ class Model(lit.LightningModule, Renderable):
         include_root: bool = True,
         use_cache: bool = True,
     ) -> None:
-        """Append new schema fields under one selected array node and rebuild modules."""
-        self.schema.extend(*args, include_root=include_root, use_cache=use_cache)
+        """Append new schema fields under one selected branch node and rebuild modules."""
+        self._schema_editor.extend(*args, include_root=include_root, use_cache=use_cache)
 
     def delete(
         self,
@@ -277,7 +280,7 @@ class Model(lit.LightningModule, Renderable):
         use_cache: bool = True,
     ) -> None:
         """Permanently remove selected schema nodes and rebuild modules."""
-        self.schema.delete(*predicates, include_root=include_root, use_cache=use_cache)
+        self._schema_editor.delete(*predicates, include_root=include_root, use_cache=use_cache)
 
     def reset(
         self,
@@ -287,7 +290,7 @@ class Model(lit.LightningModule, Renderable):
         descendants: bool = False,
     ) -> None:
         """Reinitialize selected runtime node modules while preserving schema values."""
-        self.schema.reset(
+        self._schema_editor.reset(
             *predicates,
             include_root=include_root,
             use_cache=use_cache,
@@ -306,7 +309,7 @@ class Model(lit.LightningModule, Renderable):
         **values: Any,
     ) -> Iterator[None]:
         """Temporarily mutate selected schema nodes and keep runtime modules synchronized."""
-        with self.schema.override(
+        with self._schema_editor.override(
             *predicates,
             strict=strict,
             allow_extra=allow_extra,
@@ -330,7 +333,7 @@ class Model(lit.LightningModule, Renderable):
         if ThroughputLogger not in attached_callback_types:
             callbacks.append(ThroughputLogger())
 
-        for request in self.hyperparameters.active_requests.values():
+        for request in self.schema.active_requests.values():
             plugin: Plugin = TENSORFIELDS[request.type]
             for factory in plugin.callback_factories:
                 if factory in factories:
@@ -387,7 +390,7 @@ class Model(lit.LightningModule, Renderable):
 
     @beartype
     def save(self, pathname: str | Path) -> str | Path:
-        """Save model weights and schema hyperparameters to a checkpoint."""
+        """Save model weights and schema schema to a checkpoint."""
         CheckpointState.save(self, pathname)
 
         return pathname
