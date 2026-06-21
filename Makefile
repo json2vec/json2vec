@@ -11,14 +11,14 @@ help: ## Show available targets.
 	@awk 'BEGIN {FS = ":.*##"; print "Targets:"} /^[a-zA-Z_-]+:.*##/ {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 dev: ## Start the Quarto preview server with live reload.
-	$(QUARTO) preview $(PREVIEW_FLAGS)
+	$(QUARTO) preview docs $(PREVIEW_FLAGS)
 
 preview: dev ## Alias for dev.
 
-render: ## Render the static docs site into site/.
-	$(QUARTO) render
+render: ## Render the static docs site into docs/site/.
+	$(QUARTO) render docs
 
 build: render ## Alias for render.
 
 clean: ## Remove rendered docs output.
-	rm -rf site
+	rm -rf docs/site

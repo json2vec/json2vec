@@ -12,7 +12,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
     root = _repo_root()
 
     expected = {
-        "index.qmd",
+        "docs/index.qmd",
         "docs/getting-started.qmd",
         "docs/ai-quickstart.qmd",
         "docs/core-concepts/model-tree.qmd",
@@ -43,7 +43,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
 
 def test_quarto_docs_use_current_public_api_style() -> None:
     root = _repo_root()
-    sources = "\n".join(path.read_text() for path in [root / "index.qmd", *sorted((root / "docs").rglob("*.qmd"))])
+    sources = "\n".join(path.read_text() for path in sorted((root / "docs").rglob("*.qmd")))
 
     assert "j2v.Model.from_schema(" in sources
     assert "j2v.Array(" in sources

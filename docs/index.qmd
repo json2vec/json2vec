@@ -138,33 +138,33 @@ without making a feature table the only representation the model can see.
 
 ## Where To Start
 
-- New to the package: [Getting Started](docs/getting-started.qmd)
-- Read the schema as a tree: [Model Tree](docs/core-concepts/model-tree.qmd)
-- Bind source records to fields: [Query Paths](docs/core-concepts/querypaths.qmd)
-- Short API map: [AI / Expert Quickstart](docs/ai-quickstart.qmd)
-- Modeling rationale: [Why `json2vec`](docs/motivation.qmd)
-- Built-in fields: [Data Types](docs/core-concepts/data-types.qmd)
-- Learning modes and embeddings: [Learning Modes & Embeddings](docs/core-concepts/embeddings.qmd)
-- Windowed reconstruction in arrays: [Dynamic Masking](docs/core-concepts/dynamic-masking.qmd)
-- Training execution: [Training With Lightning](docs/guides/lightning.qmd)
-- In-memory and streaming inputs: [Data Modules](docs/guides/data-modules.qmd)
-- Offline prediction jobs: [Batch Inference](docs/guides/batch-inference.qmd)
-- Serving-time output shaping: [Postprocessors](docs/guides/postprocessors.qmd)
-- Input ablation diagnostics: [Field Importance](docs/guides/field-importance.qmd)
-- Applied risk example: [Device Tenure](docs/case-studies/device-tenure.qmd)
+- New to the package: [Getting Started](getting-started.qmd)
+- Read the schema as a tree: [Model Tree](core-concepts/model-tree.qmd)
+- Bind source records to fields: [Query Paths](core-concepts/querypaths.qmd)
+- Short API map: [AI / Expert Quickstart](ai-quickstart.qmd)
+- Modeling rationale: [Why `json2vec`](motivation.qmd)
+- Built-in fields: [Data Types](core-concepts/data-types.qmd)
+- Learning modes and embeddings: [Learning Modes & Embeddings](core-concepts/embeddings.qmd)
+- Windowed reconstruction in arrays: [Dynamic Masking](core-concepts/dynamic-masking.qmd)
+- Training execution: [Training With Lightning](guides/lightning.qmd)
+- In-memory and streaming inputs: [Data Modules](guides/data-modules.qmd)
+- Offline prediction jobs: [Batch Inference](guides/batch-inference.qmd)
+- Serving-time output shaping: [Postprocessors](guides/postprocessors.qmd)
+- Input ablation diagnostics: [Field Importance](guides/field-importance.qmd)
+- Applied risk example: [Device Tenure](case-studies/device-tenure.qmd)
 
 ## Learning Path
 
 For a first pass, follow this sequence:
 
-[Getting Started](docs/getting-started.qmd) ->
-[Model Tree](docs/core-concepts/model-tree.qmd) ->
-[Query Paths](docs/core-concepts/querypaths.qmd) ->
-[Data Types](docs/core-concepts/data-types.qmd) ->
-[Dynamic Masking](docs/core-concepts/dynamic-masking.qmd) ->
-[Training With Lightning](docs/guides/lightning.qmd) ->
-[Data Modules](docs/guides/data-modules.qmd) ->
-[Batch Inference](docs/guides/batch-inference.qmd)
+[Getting Started](getting-started.qmd) ->
+[Model Tree](core-concepts/model-tree.qmd) ->
+[Query Paths](core-concepts/querypaths.qmd) ->
+[Data Types](core-concepts/data-types.qmd) ->
+[Dynamic Masking](core-concepts/dynamic-masking.qmd) ->
+[Training With Lightning](guides/lightning.qmd) ->
+[Data Modules](guides/data-modules.qmd) ->
+[Batch Inference](guides/batch-inference.qmd)
 
 ## Community
 

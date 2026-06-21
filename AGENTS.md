@@ -113,7 +113,7 @@ make render
 
 ## Documentation Entry Points
 
-- `index.qmd`
+- `docs/index.qmd`
 - `docs/getting-started.qmd`
 - `docs/ai-quickstart.qmd`
 - `docs/core-concepts/querypaths.qmd`

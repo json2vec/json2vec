@@ -131,7 +131,7 @@ trainer.fit(model=model, datamodule=datamodule)
 For larger jobs, the same model can run through normal Lightning callbacks,
 checkpointing, precision settings, device placement, and distributed
 strategies. See
-[Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning/).
+[Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning.html).
 
 ## Predict And Embed
 
@@ -174,8 +174,8 @@ trainer.predict(model=model, datamodule=predict_datamodule)
 `Writer` creates rank-partitioned Parquet files such as
 `predictions/rank-0.parquet`. Use a postprocessor when downstream systems need
 flat columns, renamed addresses, redacted payloads, or fewer fields. See
-[Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference/)
-and [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors/).
+[Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference.html)
+and [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors.html).
 
 ## Learning Modes
 
@@ -215,7 +215,7 @@ Choose the data module by where the records live:
 arguments are compiled regular expressions matched against discovered file
 paths.
 
-See [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules/)
+See [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules.html)
 for split configuration, sharding, sampling, buffers, and preprocessors.
 
 ## What Makes This Different
@@ -285,30 +285,30 @@ Python packages used by the Quarto docs.
 
 Start with:
 
-- [Getting Started](https://json2vec.github.io/json2vec/docs/getting-started.html)
-- [AI / Expert Quickstart](https://json2vec.github.io/json2vec/docs/ai-quickstart.html)
-- [Model Tree](https://json2vec.github.io/json2vec/docs/core-concepts/model-tree.html)
-- [Query Paths](https://json2vec.github.io/json2vec/docs/core-concepts/querypaths.html)
-- [Built-In Data Types](https://json2vec.github.io/json2vec/docs/core-concepts/data-types.html)
-- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/docs/core-concepts/embeddings.html)
-- [Training With Lightning](https://json2vec.github.io/json2vec/docs/guides/lightning.html)
-- [Data Modules](https://json2vec.github.io/json2vec/docs/guides/data-modules.html)
-- [Batch Inference](https://json2vec.github.io/json2vec/docs/guides/batch-inference.html)
+- [Getting Started](https://json2vec.github.io/json2vec/getting-started.html)
+- [AI / Expert Quickstart](https://json2vec.github.io/json2vec/ai-quickstart.html)
+- [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree.html)
+- [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths.html)
+- [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types.html)
+- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings.html)
+- [Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning.html)
+- [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules.html)
+- [Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference.html)
 
 Tutorials and guides:
 
-- [Postprocessors](https://json2vec.github.io/json2vec/docs/guides/postprocessors.html)
-- [Field Importance](https://json2vec.github.io/json2vec/docs/guides/field-importance.html)
-- [Field Stacking](https://json2vec.github.io/json2vec/docs/guides/field-stacking.html)
-- [Array](https://json2vec.github.io/json2vec/docs/data-types/array.html)
-- [Number](https://json2vec.github.io/json2vec/docs/data-types/number.html)
-- [Category](https://json2vec.github.io/json2vec/docs/data-types/category.html)
-- [Set](https://json2vec.github.io/json2vec/docs/data-types/set.html)
-- [Entity](https://json2vec.github.io/json2vec/docs/data-types/entity.html)
-- [DateParts](https://json2vec.github.io/json2vec/docs/data-types/dateparts.html)
-- [Vector](https://json2vec.github.io/json2vec/docs/data-types/vector.html)
-- [Text](https://json2vec.github.io/json2vec/docs/data-types/text.html)
-- [Device Tenure Case Study](https://json2vec.github.io/json2vec/docs/case-studies/device-tenure.html)
+- [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors.html)
+- [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance.html)
+- [Field Stacking](https://json2vec.github.io/json2vec/guides/field-stacking.html)
+- [Array](https://json2vec.github.io/json2vec/data-types/array.html)
+- [Number](https://json2vec.github.io/json2vec/data-types/number.html)
+- [Category](https://json2vec.github.io/json2vec/data-types/category.html)
+- [Set](https://json2vec.github.io/json2vec/data-types/set.html)
+- [Entity](https://json2vec.github.io/json2vec/data-types/entity.html)
+- [DateParts](https://json2vec.github.io/json2vec/data-types/dateparts.html)
+- [Vector](https://json2vec.github.io/json2vec/data-types/vector.html)
+- [Text](https://json2vec.github.io/json2vec/data-types/text.html)
+- [Device Tenure Case Study](https://json2vec.github.io/json2vec/case-studies/device-tenure.html)
 
 Build the docs locally with:
 
@@ -326,7 +326,7 @@ make render
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in fields
 - `tests/`: package test suite
-- `docs/`: Quarto pages, guides, reference pages, stylesheets, and sample data
+- `docs/`: Quarto project, pages, guides, stylesheets, and sample data
 
 ## Development
 
