@@ -1,134 +1,177 @@
+from enum import StrEnum
+
 import pytest
 
-from json2vec.preprocessors import base
+import json2vec as jv
+from json2vec.data import processors
+from json2vec.structs.enums import Strata
 
 
-@pytest.fixture(autouse=True)
-def restore_preprocessors():
-    snapshot = dict(base.PREPROCESSORS)
-    yield
-    base.PREPROCESSORS.clear()
-    base.PREPROCESSORS.update(snapshot)
+def test_processor_providers_are_string_enums():
+    assert issubclass(jv.PreprocessorProvider, StrEnum)
+    assert issubclass(jv.PostprocessorProvider, StrEnum)
+    assert jv.PreprocessorProvider.strata == "strata"
+    assert jv.PostprocessorProvider.metadata == "metadata"
 
 
-def test_preprocess_assigns_preprocessor_mode():
-    def transformation(observation: dict):
-        return observation
+def test_preprocess_returns_callable_processor_object():
+    @processors.preprocess
+    def add_marker(observation: dict):
+        return processors.Observation({"id": observation["id"], "marked": True})
 
-    transformation.__name__ = "__test_transformation_preprocessor"
-
-    def generator(observation: dict):
-        yield observation
-
-    generator.__name__ = "__test_generator_preprocessor"
-
-    base.preprocess(yields=False)(transformation)
-    base.preprocess(yields=True)(generator)
-
-    assert base.PREPROCESSORS[transformation.__name__].mode == base.PreprocessorMode.transformation
-    assert base.PREPROCESSORS[generator.__name__].mode == base.PreprocessorMode.generator
+    assert isinstance(add_marker, processors.Preprocessor)
+    assert add_marker({"id": 1}) == processors.Observation({"id": 1, "marked": True})
+    assert list(add_marker.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={})) == [
+        [{"id": 1, "marked": True}]
+    ]
 
 
-def test_preprocessor_mode_from_yields():
-    assert base.PreprocessorMode.from_yields(False) is base.PreprocessorMode.transformation
-    assert base.PreprocessorMode.from_yields(True) is base.PreprocessorMode.generator
+def test_preprocess_rejects_decorator_configuration_kwargs():
+    with pytest.raises(TypeError, match="unexpected preprocess keyword"):
+        processors.preprocess(yields=True)
 
 
-def test_preprocess_overwrites_duplicate_preprocessor_names():
-    def first(observation: dict):
-        return {"first": observation}
+def test_preprocessor_outputs_discard_none():
+    @processors.preprocess
+    def drop_low_ids(observation: dict):
+        if observation["id"] < 10:
+            return None
+        return processors.Observation(observation)
 
-    first.__name__ = "__duplicate_preprocessor"
-    base.preprocess(yields=False)(first)
-
-    def second(observation: dict):
-        return observation
-
-    second.__name__ = "__duplicate_preprocessor"
-
-    base.preprocess(yields=True)(second)
-
-    preprocessor = base.PREPROCESSORS["__duplicate_preprocessor"]
-    assert preprocessor.func is second
-    assert preprocessor.mode == base.PreprocessorMode.generator
+    assert list(drop_low_ids.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={})) == []
+    assert list(drop_low_ids.outputs({"id": 10}, strata=Strata.train, schema=None, encoding_context={})) == [
+        [{"id": 10}]
+    ]
 
 
-def test_preprocess_accepts_yield_keyword_via_kwargs():
-    def generator(observation: dict):
-        yield observation
+def test_preprocessor_outputs_expand_iterables_and_skip_none_items():
+    @processors.preprocess
+    def fan_out(observation: dict):
+        yield processors.Observation({"id": observation["id"]})
+        yield None
+        yield processors.Observation({"id": observation["id"] + 1})
 
-    generator.__name__ = "__yield_keyword_preprocessor"
-    base.preprocess(**{"yield": True})(generator)
-
-    assert base.PREPROCESSORS[generator.__name__].mode == base.PreprocessorMode.generator
-
-
-def test_preprocess_rejects_non_boolean_mode():
-    with pytest.raises(TypeError, match="yields must be a boolean"):
-        base.preprocess(yields="yes")
+    assert list(fan_out.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={})) == [
+        [{"id": 1}],
+        [{"id": 2}],
+    ]
 
 
-def test_preprocessor_call_filters_unknown_kwargs():
-    def returning(observation: dict, strata):
-        return observation, strata
-
-    preprocessor = base.Preprocessor(name="filtered", func=returning, mode=base.PreprocessorMode.transformation)
-
-    output = preprocessor({"id": 1}, strata="train", interprocess_encoding_context={"unused": True})
-    assert output == ({"id": 1}, "train")
-
-
-def test_transformation_outputs_wrap_dict_result():
-    def transformation(observation: dict):
+def test_preprocessor_outputs_reject_plain_dict_return():
+    @processors.preprocess
+    def legacy_dict(observation: dict):
         return {"id": observation["id"]}
 
-    preprocessor = base.Preprocessor(
-        name="wrapped-transformation",
-        func=transformation,
-        mode=base.PreprocessorMode.transformation,
-    )
-
-    assert list(preprocessor.outputs({"id": 1})) == [[{"id": 1}]]
+    with pytest.raises(TypeError, match="must return Observation"):
+        list(legacy_dict.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={}))
 
 
-def test_generator_outputs_wrap_each_object_from_list():
-    def generator(observation: dict):
-        return [{"id": observation["id"]}, {"id": observation["id"] + 1}]
-
-    preprocessor = base.Preprocessor(name="list-generator", func=generator, mode=base.PreprocessorMode.generator)
-
-    assert list(preprocessor.outputs({"id": 1})) == [[{"id": 1}], [{"id": 2}]]
-
-
-def test_generator_outputs_wrap_each_yielded_object():
-    def generator(observation: dict):
+def test_preprocessor_outputs_reject_plain_dict_yield():
+    @processors.preprocess
+    def legacy_generator(observation: dict):
         yield {"id": observation["id"]}
-        yield {"id": observation["id"] + 1}
 
-    preprocessor = base.Preprocessor(name="yield-generator", func=generator, mode=base.PreprocessorMode.generator)
-
-    assert list(preprocessor.outputs({"id": 1})) == [[{"id": 1}], [{"id": 2}]]
+    with pytest.raises(TypeError, match="expected Observation or None"):
+        list(legacy_generator.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={}))
 
 
-def test_transformation_outputs_reject_non_dict():
-    def transformation(observation: dict):
-        return observation["id"]
+def test_preprocessor_receives_named_pipeline_providers():
+    @processors.preprocess
+    def with_runtime(observation: dict, *, strata, encoding_context):
+        return processors.Observation(
+            {
+                "id": observation["id"],
+                "strata": strata,
+                "marker": encoding_context["marker"],
+            }
+        )
 
-    preprocessor = base.Preprocessor(
-        name="invalid-transformation",
-        func=transformation,
-        mode=base.PreprocessorMode.transformation,
-    )
+    assert list(
+        with_runtime.outputs(
+            {"id": 1},
+            strata=Strata.validate,
+            schema=None,
+            encoding_context={"marker": "seen"},
+        )
+    ) == [[{"id": 1, "strata": Strata.validate, "marker": "seen"}]]
 
-    with pytest.raises(TypeError, match="must produce dict objects"):
-        list(preprocessor.outputs({"id": 1}))
+
+def test_preprocessor_requires_user_params_to_be_bound():
+    @processors.preprocess
+    def with_user_param(observation: dict, *, marker: str):
+        return processors.Observation({"id": observation["id"], "marker": marker})
+
+    with pytest.raises(ValueError, match="requires unbound parameter"):
+        list(with_user_param.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={}))
+
+    bound = with_user_param.partial(marker="ready")
+    assert list(bound.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={})) == [
+        [{"id": 1, "marker": "ready"}]
+    ]
 
 
-def test_generator_outputs_reject_non_list_return():
-    def generator(observation: dict):
-        return observation
+def test_preprocessor_does_not_infer_provider_from_type_annotation():
+    @processors.preprocess
+    def typed_name_is_user_param(observation: dict, *, split: Strata):
+        return processors.Observation({"id": observation["id"], "split": split})
 
-    preprocessor = base.Preprocessor(name="invalid-generator", func=generator, mode=base.PreprocessorMode.generator)
+    with pytest.raises(ValueError, match="requires unbound parameter"):
+        list(typed_name_is_user_param.outputs({"id": 1}, strata=Strata.train, schema=None, encoding_context={}))
 
-    with pytest.raises(TypeError, match="must yield dict objects or return a list of dict objects"):
-        list(preprocessor.outputs({"id": 1}))
+
+def test_preprocessor_rejects_binding_pipeline_provider():
+    @processors.preprocess
+    def with_strata(observation: dict, *, strata):
+        return processors.Observation({"id": observation["id"], "strata": strata})
+
+    with pytest.raises(ValueError, match="provided by the pipeline"):
+        with_strata.partial(strata=Strata.train)
+
+
+def test_preprocessor_normalize_rejects_raw_callable():
+    def raw(observation: dict):
+        return jv.Observation(observation)
+
+    with pytest.raises(TypeError, match="preprocessor must be a Preprocessor object or None"):
+        processors.Preprocessor.normalize(raw)
+
+
+def test_postprocess_optional_unavailable_provider_receives_none():
+    @jv.postprocess
+    def add_batch_index(predictions: dict, *, batch_idx: int | None = None):
+        return {"predictions": predictions, "batch_idx": batch_idx}
+
+    assert add_batch_index.run({}, available={}) == {"predictions": {}, "batch_idx": None}
+
+
+def test_postprocess_required_unavailable_provider_errors():
+    @jv.postprocess
+    def needs_batch_index(predictions: dict, *, batch_idx: int):
+        return {"predictions": predictions, "batch_idx": batch_idx}
+
+    with pytest.raises(ValueError, match="not available in this runtime"):
+        needs_batch_index.run({}, available={})
+
+
+def test_postprocessor_normalize_rejects_raw_callable():
+    def raw(predictions: dict):
+        return predictions
+
+    with pytest.raises(TypeError, match="postprocessor must be a Postprocessor object or None"):
+        jv.Postprocessor.normalize(raw)
+
+
+def test_postprocess_rejects_context_dict_signature():
+    with pytest.raises(TypeError, match="first parameter must be 'predictions'"):
+
+        @jv.postprocess
+        def legacy_context(context: dict, predictions: dict):
+            return predictions
+
+
+def test_processors_reject_var_keyword_parameters():
+    with pytest.raises(TypeError, match="does not support \\*\\*kwargs"):
+
+        @processors.preprocess
+        def legacy_kwargs(observation: dict, **kwargs):
+            return processors.Observation(observation)

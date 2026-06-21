@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import lightning.pytorch as lit
 import polars as pl
@@ -12,6 +11,7 @@ import pyarrow.parquet as pq
 from lightning.pytorch import callbacks
 from tensordict import TensorDict
 
+from json2vec.data.processors import Postprocessor
 from json2vec.structs.enums import TensorKey
 from json2vec.structs.packages import Prediction
 from json2vec.structs.tree import Address
@@ -19,11 +19,6 @@ from json2vec.tensorfields.base import TensorFieldBase
 
 if TYPE_CHECKING:
     from json2vec.architecture.root import Model
-
-Postprocessor: TypeAlias = Callable[
-    [dict[str, Any], dict[Address, dict[str, Any]]],
-    dict[Address, dict[str, Any]] | None,
-]
 
 
 class Writer(callbacks.BasePredictionWriter):
@@ -37,7 +32,7 @@ class Writer(callbacks.BasePredictionWriter):
 
         self.path = Path(path)
         self.flush_every_n_batches: int | None = flush_every_n_batches
-        self.postprocessor: Postprocessor | None = postprocessor
+        self.postprocessor: Postprocessor | None = Postprocessor.normalize(postprocessor)
         self.schema: pa.Schema | None = None
         self.writer: pq.ParquetWriter | None = None
 
@@ -57,18 +52,20 @@ class Writer(callbacks.BasePredictionWriter):
         postprocessor = self.postprocessor
 
         if postprocessor is not None:
-            context = {
-                "input": batch,
-                "batch": batch,
-                TensorKey.metadata: batch[TensorKey.metadata],
-                "batch_indices": batch_indices,
-                "batch_idx": batch_idx,
-                "dataloader_idx": dataloader_idx,
-            }
-            processed = postprocessor(context, predictions)
+            processed = postprocessor.run(
+                predictions,
+                available={
+                    "input": batch,
+                    "batch": batch,
+                    "metadata": batch[TensorKey.metadata],
+                    "batch_indices": batch_indices,
+                    "batch_idx": batch_idx,
+                    "dataloader_idx": dataloader_idx,
+                },
+            )
 
             if processed is not None:
-                predictions = processed
+                predictions = dict(processed)
 
         if len(predictions) == 0:
             predictions_frame = pl.DataFrame({"predictions": [None] * num_rows})

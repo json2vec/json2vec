@@ -1,6 +1,6 @@
-import inspect
+"""Utilities for nested JSON-like values used during tensorfield encoding."""
+
 from collections.abc import Callable, Mapping
-from functools import partial
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
@@ -141,18 +141,17 @@ def extract_mask_literals(
 def _iter_leaf_nodes(
     nested: Any,
     shape: tuple[int, ...],
-    strides: tuple[int, ...],
     overflows: tuple[Overflow, ...],
     address: Address | str | None = None,
 ):
     ndim = len(shape)
-    stack: list[tuple[Any, int, int]] = [(nested, 0, 0)]
+    stack: list[tuple[Any, int, tuple[int, ...]]] = [(nested, 0, ())]
 
     while stack:
-        node, depth, base = stack.pop()
+        node, depth, index = stack.pop()
 
         if depth == ndim:
-            yield base, node
+            yield index, node
             continue
 
         if not isinstance(node, (list, tuple, np.ndarray)):
@@ -184,33 +183,23 @@ def _iter_leaf_nodes(
         else:
             indices = [(destination, destination) for destination in range(limit)]
 
-        step = strides[depth]
         for source_index, destination_index in reversed(indices):
-            stack.append((node[source_index], depth + 1, base + (destination_index * step)))
+            stack.append((node[source_index], depth + 1, (*index, destination_index)))
 
 
-def _fill_python(
-    nested: Any,
-    flat_values: np.ndarray,
-    flat_flags: np.ndarray,
-    shape: tuple[int, ...],
-    strides: tuple[int, ...],
-    overflows: tuple[Overflow, ...],
-    address: Address | str | None,
+def _write_leaf(
+    values: np.ndarray,
+    flags: np.ndarray,
+    index: Any,
+    value: Any,
     encode: Callable[[Any], Any] | None,
 ) -> None:
-    for flat_index, node in _iter_leaf_nodes(
-        nested=nested,
-        shape=shape,
-        strides=strides,
-        overflows=overflows,
-        address=address,
-    ):
-        if node is None:
-            flat_flags[flat_index] = Tokens.null.value
-        else:
-            flat_values[flat_index] = encode(node) if encode is not None else node
-            flat_flags[flat_index] = Tokens.valued.value
+    if value is None:
+        flags[index] = Tokens.null.value
+        return
+
+    values[index] = encode(value) if encode is not None else value
+    flags[index] = Tokens.valued.value
 
 
 @beartype
@@ -234,57 +223,15 @@ def pad(
         raise ValueError(f"overflows length must match shape rank: expected {ndim}, got {len(resolved_overflows)}")
 
     if ndim == 0:
-        if nested is None:
-            flags[...] = Tokens.null.value
-        else:
-            values[...] = encode(nested) if encode is not None else nested
-            flags[...] = Tokens.valued.value
+        _write_leaf(values, flags, ..., nested, encode)
         return values, flags
 
-    strides = [1] * ndim
-    for depth in range(ndim - 2, -1, -1):
-        strides[depth] = strides[depth + 1] * shape[depth + 1]
-    stride_tuple = tuple(strides)
-
-    flat_values = values.reshape(-1, *value_shape)
-    flat_flags = flags.reshape(-1)
-
-    _fill_python(
+    for index, node in _iter_leaf_nodes(
         nested=nested,
-        flat_values=flat_values,
-        flat_flags=flat_flags,
         shape=shape,
-        strides=stride_tuple,
         overflows=resolved_overflows,
         address=address,
-        encode=encode,
-    )
+    ):
+        _write_leaf(values, flags, index, node, encode)
 
     return values, flags
-
-
-@beartype
-class Pipeline:
-    def __init__(self, **arguments):
-        self.arguments: dict[str, Any] = arguments
-        self.steps: list[Callable] = []
-
-    def __or__(self, function: Callable) -> "Pipeline":
-        required = [name for name in inspect.signature(function).parameters.keys()]
-
-        available = set(required) & set(self.arguments.keys())
-
-        self.steps.append(partial(function, **{arg: self.arguments[arg] for arg in available}))
-
-        return self
-
-    def __repr__(self):
-        return f"Pipeline(steps={len(self.steps)}, arguments={self.arguments!r})"
-
-    def __iter__(self):
-        stream = self.steps[0]()
-
-        for step in self.steps[1:]:
-            stream = step(stream)
-
-        return iter(stream)

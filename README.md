@@ -319,10 +319,9 @@ make render
 ## Repository Layout
 
 - `src/json2vec/architecture`: model assembly, attention, pooling, and routing
-- `src/json2vec/data`: dataset fetch/read/process/batch/encode pipeline
+- `src/json2vec/data`: dataset fetch/read/process/batch/encode pipeline and preprocessor exports
 - `src/json2vec/inference`: serving and prediction callbacks
 - `src/json2vec/logging`: runtime logging callbacks
-- `src/json2vec/preprocessors`: preprocessor registry
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in fields
 - `tests/`: package test suite

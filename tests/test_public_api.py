@@ -13,12 +13,18 @@ def test_common_resources_are_available_from_package_root():
     assert json2vec.Branch.__name__ == "Branch"
     assert json2vec.where("type").name == "type"
     assert json2vec.preprocess.__name__ == "preprocess"
+    assert json2vec.postprocess.__name__ == "postprocess"
     assert json2vec.Preprocessor.__name__ == "Preprocessor"
+    assert json2vec.PreprocessorProvider.strata == "strata"
+    assert json2vec.Observation.__name__ == "Observation"
+    assert json2vec.Observation({"id": 1}).data == {"id": 1}
+    assert not hasattr(json2vec, "observe")
     assert json2vec.OptimizerConfig is not None
     assert json2vec.SchedulerConfig is not None
     assert json2vec.RollbackCheckpoint.__name__ == "RollbackCheckpoint"
     assert json2vec.Writer.__name__ == "Writer"
     assert json2vec.Postprocessor is not None
+    assert json2vec.PostprocessorProvider.metadata == "metadata"
     assert json2vec.Deployment.__name__ == "Deployment"
     assert json2vec.Accelerator.cpu == "cpu"
     assert json2vec.JSONBackend.orjson == "orjson"
@@ -33,4 +39,3 @@ def test_common_resources_are_available_from_package_root():
     assert json2vec.VocabularySyncCallback.__name__ == "VocabularySyncCallback"
     assert "number" in json2vec.TENSORFIELDS
     assert "set" in json2vec.TENSORFIELDS
-    assert isinstance(json2vec.PREPROCESSORS, dict)

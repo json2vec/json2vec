@@ -3,21 +3,8 @@ import pytest
 import json2vec as jv
 from json2vec.data.datasets.base import PreprocessorConfig
 from json2vec.data.datasets.streaming import StreamingDataModule
-from json2vec.preprocessors.base import PREPROCESSORS, preprocess
 from json2vec.structs.enums import Suffix
 from json2vec.structs.experiment import Schema
-
-
-def _preprocessor_name() -> str:
-    if PREPROCESSORS:
-        return next(iter(PREPROCESSORS))
-
-    def _dataset_test_preprocessor(observation: dict):
-        return observation
-
-    _dataset_test_preprocessor.__name__ = "__dataset_test_preprocessor"
-    preprocess(yields=False)(_dataset_test_preprocessor)
-    return _dataset_test_preprocessor.__name__
 
 
 def _schema():
@@ -44,37 +31,29 @@ def _model():
     )
 
 
-def test_preprocessor_normalization_rejects_unregistered_name():
-    with pytest.raises(ValueError, match="you haven't registered preprocessor"):
+def test_preprocessor_normalization_rejects_string_names():
+    with pytest.raises(TypeError, match="preprocessor must be a Preprocessor object or None"):
         PreprocessorConfig.normalize("__missing_preprocessor")
 
 
-def test_preprocessor_normalization_accepts_registered_callable():
+def test_preprocessor_normalization_accepts_processor_object():
+    @jv.preprocess
     def _dataset_callable_preprocessor(observation: dict):
-        return observation
+        return jv.Observation(observation)
 
-    _dataset_callable_preprocessor.__name__ = "__dataset_callable_preprocessor"
-    preprocessor = preprocess(yields=False)(_dataset_callable_preprocessor)
-
-    try:
-        assert PreprocessorConfig.normalize(preprocessor) == "__dataset_callable_preprocessor"
-    finally:
-        PREPROCESSORS.pop("__dataset_callable_preprocessor", None)
+    assert PreprocessorConfig.normalize(_dataset_callable_preprocessor) is _dataset_callable_preprocessor
 
 
-def test_preprocessor_normalization_accepts_configured_callable():
+def test_preprocessor_normalization_rejects_raw_callable():
     def _unregistered_dataset_callable_preprocessor(observation: dict):
         return observation
 
-    assert (
+    with pytest.raises(TypeError, match="preprocessor must be a Preprocessor object or None"):
         PreprocessorConfig.normalize(_unregistered_dataset_callable_preprocessor)
-        is _unregistered_dataset_callable_preprocessor
-    )
 
 
 def test_preprocessor_normalization_is_optional():
     assert PreprocessorConfig.normalize(None) is None
-    assert PreprocessorConfig.normalize(_preprocessor_name()) == _preprocessor_name()
 
 
 def test_streaming_datamodule_accepts_raw_split_pattern():

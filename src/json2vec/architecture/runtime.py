@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, NotRequired, TypeAlias, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import torch
 from loguru import logger
@@ -16,6 +16,7 @@ from json2vec.architecture.node import NodeModule
 from json2vec.data.datasets.base import EncodedBatch, EncodedInput
 from json2vec.data.iterables import encode as encode_batch
 from json2vec.data.iterables import mask as apply_mask
+from json2vec.data.processors import Postprocessor, Preprocessor
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -35,13 +36,6 @@ if TYPE_CHECKING:
 class Output(TypedDict):
     loss: NotRequired[torch.Tensor]
     predictions: NotRequired[list[Prediction]]
-
-
-Preprocessor: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
-Postprocessor: TypeAlias = Callable[
-    [dict[str, Any], dict[Address, dict[str, Any]]],
-    dict[Address, dict[str, Any]] | None,
-]
 
 
 class ModelRuntime:
@@ -208,15 +202,19 @@ class ModelRuntime:
         mask: bool = True,
     ) -> EncodedInput:
         strata = Strata.normalize(strata)
+        resolved_preprocessor = Preprocessor.normalize(preprocess)
 
-        if preprocess is not None:
+        if resolved_preprocessor is not None:
             observations: EncodedBatch = []
             for request in cast(list[dict[str, Any]], batch):
-                observation = preprocess(request)
-                if not isinstance(observation, dict):
-                    raise TypeError(f"preprocessor must return a dict object, got {type(observation).__name__}")
-
-                observations.append([observation])
+                observations.extend(
+                    resolved_preprocessor.outputs(
+                        request,
+                        strata=strata,
+                        schema=module.schema,
+                        encoding_context=module.interprocess_encoding_context,
+                    )
+                )
 
             batch = observations
         elif batch and isinstance(batch[0], dict):
@@ -255,17 +253,20 @@ class ModelRuntime:
 
         predictions = module.write(raw_predictions)
 
-        if postprocess is not None:
-            context = {
-                "batch": raw_batch,
-                "observations": inputs[TensorKey.metadata],
-                "input": inputs,
-                TensorKey.metadata: inputs[TensorKey.metadata],
-            }
-            processed = postprocess(context, predictions)
+        resolved_postprocessor = Postprocessor.normalize(postprocess)
+        if resolved_postprocessor is not None:
+            processed = resolved_postprocessor.run(
+                predictions,
+                available={
+                    "batch": raw_batch,
+                    "observations": inputs[TensorKey.metadata],
+                    "input": inputs,
+                    "metadata": inputs[TensorKey.metadata],
+                },
+            )
 
             if processed is not None:
-                predictions = processed
+                predictions = dict(processed)
 
         return predictions
 

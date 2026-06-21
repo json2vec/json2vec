@@ -19,7 +19,6 @@ from json2vec.data.datasets.base import _is_assigned_to_worker, _worker_identity
 from json2vec.data.datasets.custom import CustomBatchDataset, CustomDataModule
 from json2vec.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
 from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
-from json2vec.preprocessors.base import Preprocessor, PreprocessorMode
 from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
 from json2vec.structs.experiment import Schema
 from json2vec.structs.tree import Address
@@ -85,6 +84,21 @@ def test_worker_identity_combines_rank_and_dataloader_worker(monkeypatch: pytest
     monkeypatch.setattr(base, "get_worker_info", lambda: SimpleNamespace(id=2, num_workers=4))
 
     assert _worker_identity(global_rank=1, world_size=3) == (6, 12)
+
+
+def test_pipeline_binds_matching_arguments():
+    def source():
+        yield from range(5)
+
+    def step1(pipe):
+        yield from (x + 1 for x in pipe)
+
+    def step2(pipe, multiplier):
+        yield from (x * multiplier for x in pipe)
+
+    pipe = base.Pipeline(multiplier=2) | source | step1 | step2
+
+    assert list(pipe) == [2, 4, 6, 8, 10]
 
 
 def test_query_prepends_outer_batch_selector():
@@ -402,81 +416,69 @@ def test_read_unsupported_suffix_raises_value_error():
         )
 
 
-def test_process_transformation_preprocessor_wraps_dict_output(monkeypatch: pytest.MonkeyPatch):
+def test_process_transformation_preprocessor_wraps_observation_output():
+    @jv.preprocess
     def transformation(observation: dict):
-        return {"id": observation["id"]}
-
-    preprocessor = Preprocessor(name="__test_transformation", func=transformation, mode=PreprocessorMode.transformation)
-    monkeypatch.setitem(iterables.PREPROCESSORS, "__test_transformation", preprocessor)
+        return jv.Observation({"id": observation["id"]})
 
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
-            preprocessor="__test_transformation",
-            preprocessor_kwargs=None,
+            preprocessor=transformation,
             strata=Strata.train,
+            schema=_datamodule_schema(),
             interprocess_encoding_context={},
         )
     )
     assert output == [[{"id": 1}], [{"id": 2}]]
 
 
-def test_process_generator_preprocessor_wraps_list_outputs(monkeypatch: pytest.MonkeyPatch):
+def test_process_generator_preprocessor_wraps_list_outputs():
+    @jv.preprocess
     def generator(observation: dict):
-        return [{"id": observation["id"]}, {"id": observation["id"] + 100}]
-
-    preprocessor = Preprocessor(name="__test_generator", func=generator, mode=PreprocessorMode.generator)
-    monkeypatch.setitem(iterables.PREPROCESSORS, "__test_generator", preprocessor)
+        return [jv.Observation({"id": observation["id"]}), jv.Observation({"id": observation["id"] + 100})]
 
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}],
-            preprocessor="__test_generator",
-            preprocessor_kwargs=None,
+            preprocessor=generator,
             strata=Strata.train,
+            schema=_datamodule_schema(),
             interprocess_encoding_context={},
         )
     )
     assert output == [[{"id": 1}], [{"id": 101}]]
 
 
-def test_process_generator_preprocessor_receives_strata_and_state(monkeypatch: pytest.MonkeyPatch):
-    def generator(observation: dict, strata, interprocess_encoding_context):
-        yield {"id": observation["id"], "strata": strata, "marker": interprocess_encoding_context["marker"]}
-
-    preprocessor = Preprocessor(name="__test_generator_context", func=generator, mode=PreprocessorMode.generator)
-    monkeypatch.setitem(iterables.PREPROCESSORS, "__test_generator_context", preprocessor)
+def test_process_generator_preprocessor_receives_named_runtime_providers():
+    @jv.preprocess
+    def generator(observation: dict, *, strata, encoding_context):
+        yield jv.Observation({"id": observation["id"], "strata": strata, "marker": encoding_context["marker"]})
 
     output = list(
         iterables.process.__wrapped__(
             [{"id": 1}],
-            preprocessor="__test_generator_context",
-            preprocessor_kwargs=None,
+            preprocessor=generator,
             strata=Strata.validate,
+            schema=_datamodule_schema(),
             interprocess_encoding_context={"marker": "seen"},
         )
     )
     assert output == [[{"id": 1, "strata": Strata.validate, "marker": "seen"}]]
 
 
-def test_process_transformation_preprocessor_rejects_non_dict(monkeypatch: pytest.MonkeyPatch):
+def test_process_transformation_preprocessor_rejects_plain_dict_output():
+    @jv.preprocess
     def transformation(observation: dict):
-        return observation["id"]
+        return {"id": observation["id"]}
 
-    preprocessor = Preprocessor(
-        name="__test_invalid_transformation",
-        func=transformation,
-        mode=PreprocessorMode.transformation,
-    )
-    monkeypatch.setitem(iterables.PREPROCESSORS, "__test_invalid_transformation", preprocessor)
-
-    with pytest.raises(TypeError, match="must produce dict objects"):
+    with pytest.raises(TypeError, match="must return Observation"):
         list(
             iterables.process.__wrapped__(
                 [{"id": 1}],
-                preprocessor="__test_invalid_transformation",
-                preprocessor_kwargs=None,
+                preprocessor=transformation,
                 strata=Strata.train,
+                schema=_datamodule_schema(),
                 interprocess_encoding_context={},
             )
         )
@@ -487,8 +489,8 @@ def test_process_without_preprocessor_still_wraps_root_branch():
         iterables.process.__wrapped__(
             [{"id": 1}, {"id": 2}],
             preprocessor=None,
-            preprocessor_kwargs=None,
             strata=Strata.train,
+            schema=_datamodule_schema(),
             interprocess_encoding_context={},
         )
     )
@@ -764,7 +766,6 @@ def test_custom_datamodule_accepts_named_datasets_and_loader_configuration_per_s
     assert module.datasets[Strata.predict] is predict
     assert set(module.datasets) == {Strata.train, Strata.predict}
     assert module.preprocessor is None
-    assert module.preprocessor_kwargs == {}
     assert module.num_workers[Strata.train] == 0
     assert module.num_workers[Strata.validate] is None
     assert module.observation_buffer_size[Strata.train] == 13
@@ -874,10 +875,9 @@ def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest
     monkeypatch.setattr(custom, "mask", mask)
 
     batch_dataset = CustomBatchDataset(
-        schema=SimpleNamespace(requests={}),
+        schema=_datamodule_schema(),
         dataset=RecordsDataset([{"id": 1}, {"id": 2}, {"id": 3}]),
         preprocessor=None,
-        preprocessor_kwargs={},
         interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
@@ -935,7 +935,6 @@ def test_polars_datamodule_accepts_named_splits():
     assert module.dataframes[Strata.predict] is predict
     assert set(module.dataframes) == {Strata.train, Strata.predict}
     assert module.preprocessor is None
-    assert module.preprocessor_kwargs == {}
     assert module.val_dataloader() is None
 
 
@@ -1087,10 +1086,9 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
     monkeypatch.setattr(polars, "mask", mask)
 
     batch_dataset = PolarsBatchDataset(
-        schema=SimpleNamespace(requests={}),
+        schema=_datamodule_schema(),
         dataframe=pl.DataFrame({"id": [1, 2, 3]}),
         preprocessor=None,
-        preprocessor_kwargs={},
         interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
@@ -1112,7 +1110,7 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     def observe(root, suffix, pattern, strata, sharding, chunk_batch_size, file_buffer_size):
         yield {"id": 1}
 
-    def process(pipe, preprocessor, preprocessor_kwargs, strata, interprocess_encoding_context):
+    def process(pipe, preprocessor, strata, schema, interprocess_encoding_context):
         yield from ([item] for item in pipe)
 
     def sample(pipe, sample_rate, strata):
@@ -1141,7 +1139,6 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
         suffix=Suffix.ndjson,
         pattern=re.compile(r".*\.ndjson$"),
         preprocessor=None,
-        preprocessor_kwargs={},
         interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
@@ -1169,7 +1166,7 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
     def observe(root, suffix, pattern, strata, sharding, chunk_batch_size, file_buffer_size, global_rank, world_size):
         yield {"id": global_rank, "world_size": world_size}
 
-    def process(pipe, preprocessor, preprocessor_kwargs, strata, interprocess_encoding_context):
+    def process(pipe, preprocessor, strata, schema, interprocess_encoding_context):
         yield from ([item] for item in pipe)
 
     def sample(pipe, sample_rate, strata):
@@ -1197,7 +1194,6 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
         suffix=Suffix.ndjson,
         pattern=re.compile(r".*\.ndjson$"),
         preprocessor=None,
-        preprocessor_kwargs={},
         interprocess_encoding_context={"root/category": state},
         batch_size=2,
         strata=Strata.train,

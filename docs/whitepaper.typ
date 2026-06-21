@@ -979,9 +979,7 @@ The implementation validates queries when schemas are loaded and compiles them f
 
 Some data transformations are too domain-specific for a declarative query. Examples include parsing vendor-specific payloads, sampling time windows from a customer history, deriving auxiliary labels, normalizing inconsistent field names, or splitting one raw record into multiple training observations.
 
-For this, `json2vec` supports optional dataset preprocessors. A preprocessor runs before tensorization and receives the raw observation plus configured dataset keyword arguments. There are two modes:
-- A transformation preprocessor returns one modified observation.
-- A generator preprocessor yields zero or more observations from one input.
+For this, `json2vec` supports optional dataset preprocessors. A preprocessor runs before tensorization and receives the raw observation plus explicit named runtime values such as `strata`, `schema`, and `encoding_context`. A preprocessor returns `jv.Observation | None`, or yields zero or more `jv.Observation | None` values from one input.
 
 When no preprocessor is configured, observations pass through unchanged. A custom preprocessor can sit between a messy source system and a clean modeling schema:
 
@@ -989,14 +987,17 @@ When no preprocessor is configured, observations pass through unchanged. A custo
 import json2vec as jv
 
 
-@jv.preprocess(yields=True)
-def customer_windows(customer, window_days: int):
+@jv.preprocess
+def customer_windows(customer, *, window_days: int):
     for window in sample_windows(customer, days=window_days):
-        yield {
+        yield jv.Observation({
             "transactions": window["transactions"],
             "statements": window["statements"],
             "login_sessions": window["login_sessions"],
-        }
+        })
+
+
+preprocessor = customer_windows.partial(window_days=30)
 ```
 
 The schema still owns the model-facing contract. The preprocessor only prepares observations into a shape the schema can query. This separation keeps domain wrangling explicit without forcing developers to materialize a separate feature table.

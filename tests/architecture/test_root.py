@@ -750,8 +750,9 @@ def test_encode_nullable_false_rejects_null_inputs() -> None:
 
 
 def test_encode_accepts_preprocess() -> None:
+    @jv.preprocess
     def __root_helper_preprocess(observation: dict):
-        return {"color": observation["hue"]}
+        return jv.Observation({"color": observation["hue"]})
 
     model = _primed_prediction_model()
 
@@ -874,8 +875,9 @@ def test_inference_helpers_accept_postprocess() -> None:
     model = _primed_prediction_model()
     calls = []
 
-    def postprocess(context, predictions):
-        calls.append((context, predictions))
+    @jv.postprocess
+    def postprocess(predictions, *, batch, input, metadata):
+        calls.append((batch, input, metadata, predictions))
         return {
             Address("root", "label"): {"value": ["postprocessed"]},
             Address("root"): {"embedding": [[1.0, 2.0]]},
@@ -889,17 +891,18 @@ def test_inference_helpers_accept_postprocess() -> None:
     predictions = model.predict(batch=batch, postprocess=postprocess)
 
     assert len(calls) == 1
-    assert calls[0][0]["batch"] is batch
-    assert TensorKey.metadata in calls[0][0]["input"].keys()
-    assert list(calls[0][0][TensorKey.metadata]) == batch
-    assert Address("root", "label") in calls[0][1]
+    assert calls[0][0] is batch
+    assert TensorKey.metadata in calls[0][1].keys()
+    assert list(calls[0][2]) == batch
+    assert Address("root", "label") in calls[0][3]
     assert predictions[Address("root", "label")][TensorKey.value.name] == ["postprocessed"]
     assert predictions[Address("root")][TensorKey.embedding.name] == [[1.0, 2.0]]
 
 
 def test_inference_helpers_accept_preprocess() -> None:
+    @jv.preprocess
     def __root_helper_preprocess(observation: dict):
-        return {"color": observation["hue"]}
+        return jv.Observation({"color": observation["hue"]})
 
     model = _primed_prediction_model()
 

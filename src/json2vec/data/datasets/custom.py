@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import weakref
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from functools import partial, partialmethod
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 import lightning.pytorch as lit
 import torch
@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, IterableDataset
 from json2vec.data.datasets.base import (
     InterprocessEncodingContext,
     NonNegativeInt,
+    Pipeline,
     PositiveInt,
     PreprocessorConfig,
     RawObservation,
@@ -33,10 +34,9 @@ from json2vec.data.iterables import (
     shuffle,
     transform,
 )
-from json2vec.data.processing import Pipeline
+from json2vec.data.processors import Preprocessor
 from json2vec.distributed import rank as distributed_rank
 from json2vec.distributed import world_size as distributed_world_size
-from json2vec.preprocessors.base import Preprocessor
 from json2vec.structs.enums import Strata
 from json2vec.structs.experiment import Schema
 
@@ -82,7 +82,6 @@ class CustomBatchDataset(IterableDataset):
         schema: Schema,
         dataset: IterableDataset,
         preprocessor: PreprocessorConfig.Value,
-        preprocessor_kwargs: dict[str, Any],
         interprocess_encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
@@ -96,7 +95,6 @@ class CustomBatchDataset(IterableDataset):
         self.schema = schema
         self.dataset = dataset
         self.preprocessor = preprocessor
-        self.preprocessor_kwargs = preprocessor_kwargs
         self.interprocess_encoding_context = interprocess_encoding_context
         self.global_rank = distributed_rank() if global_rank is None else global_rank
         self.world_size = distributed_world_size() if world_size is None else world_size
@@ -115,7 +113,6 @@ class CustomBatchDataset(IterableDataset):
                 schema=self.schema,
                 dataset=self.dataset,
                 preprocessor=self.preprocessor,
-                preprocessor_kwargs=self.preprocessor_kwargs,
                 strata=self.strata,
                 interprocess_encoding_context=self.interprocess_encoding_context,
                 jmespath_resolution_monitor=JMESPathResolutionMonitor(),
@@ -136,7 +133,6 @@ def custom_dataloader(
     schema: Schema,
     dataset: IterableDataset,
     preprocessor: PreprocessorConfig.Value,
-    preprocessor_kwargs: dict[str, Any],
     interprocess_encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
@@ -159,7 +155,6 @@ def custom_dataloader(
             schema=schema,
             dataset=dataset,
             preprocessor=preprocessor,
-            preprocessor_kwargs=preprocessor_kwargs,
             interprocess_encoding_context=interprocess_encoding_context,
             batch_size=batch_size,
             strata=strata,
@@ -187,14 +182,13 @@ class CustomDataModule(lit.LightningDataModule):
         validate: IterableDataset | None = None,
         test: IterableDataset | None = None,
         predict: IterableDataset | None = None,
-        preprocessor: str | Callable[..., Any] | Preprocessor | None = None,
+        preprocessor: Preprocessor | None = None,
         datasets: DatasetMap | None = None,
         num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
         persistent_workers: bool | StrataMap[bool] = True,
         pin_memory: bool | StrataMap[bool] = True,
         observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
         sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
-        **kwargs: Any,
     ):
         super().__init__()
 
@@ -229,7 +223,6 @@ class CustomDataModule(lit.LightningDataModule):
 
         self.datasets = split_datasets
         self.preprocessor = PreprocessorConfig.normalize(preprocessor)
-        self.preprocessor_kwargs = dict(kwargs)
         try:
             self._model_ref = weakref.ref(model)
         except TypeError:
@@ -310,7 +303,6 @@ class CustomDataModule(lit.LightningDataModule):
             schema=self.schema,
             dataset=self.datasets[strata],
             preprocessor=self.preprocessor,
-            preprocessor_kwargs=self.preprocessor_kwargs,
             interprocess_encoding_context=interprocess_encoding_context,
             batch_size=self.batch_size,
             strata=strata,

@@ -11,7 +11,7 @@ from beartype import beartype
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
-from json2vec.data.processing import apply, extract_mask_literals, pad
+from json2vec.data.nested import apply, extract_mask_literals, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address

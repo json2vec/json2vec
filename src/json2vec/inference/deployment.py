@@ -1,7 +1,6 @@
 """Realtime deployment wrappers for `json2vec` checkpoints."""
 
 import asyncio
-import functools
 import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
@@ -24,6 +23,7 @@ from tensordict import TensorDict
 
 from json2vec.architecture.root import Model
 from json2vec.data.iterables import JMESPathResolutionMonitor, encode
+from json2vec.data.processors import Postprocessor, Preprocessor
 from json2vec.structs.enums import Strata, TensorKey
 from json2vec.structs.experiment import NodeAttribute, NodePredicate
 from json2vec.structs.packages import Prediction
@@ -94,8 +94,8 @@ class FastAPIRuntime:
         *,
         checkpoint: ModelSource,
         accelerator: Accelerator,
-        preprocessor=None,
-        postprocessor=None,
+        preprocessor: Preprocessor | None = None,
+        postprocessor: Postprocessor | None = None,
         update_operations: list[UpdateOperation] | None = None,
         request_signature: type[pydantic.BaseModel] | None = None,
         response_signature: type[pydantic.BaseModel] | None = None,
@@ -104,8 +104,8 @@ class FastAPIRuntime:
     ) -> None:
         self.model_source: ModelSource = checkpoint
         self.accelerator = accelerator
-        self.preprocessor = preprocessor
-        self.postprocessor = postprocessor
+        self.preprocessor: Preprocessor | None = Preprocessor.normalize(preprocessor)
+        self.postprocessor: Postprocessor | None = Postprocessor.normalize(postprocessor)
         self.update_operations = list(update_operations or [])
         self.request_signature = request_signature
         self.response_signature = response_signature
@@ -150,17 +150,23 @@ class FastAPIRuntime:
             if self.preprocessor is None:
                 observations: list[Any] = [[request]]
             else:
-                observation = self.preprocessor(request)
-                if not isinstance(observation, dict):
-                    raise TypeError(f"preprocessor must return a dict object, got {type(observation).__name__}")
-
-                observations = [[observation]]
+                model = getattr(self, "model", None)
+                observations = list(
+                    self.preprocessor.outputs(
+                        request,
+                        strata=Strata.predict,
+                        schema=model.schema if model is not None else None,
+                        encoding_context=getattr(self, "interprocess_encoding_context", {}),
+                    )
+                )
 
         except Exception as exception:
             return ErrorItem(status_code=422, message=str(exception))
 
         if len(observations) == 0 or any(x is None for x in observations):
             return ErrorItem(status_code=422, message="preprocessor returned no observations for request")
+        if len(observations) != 1:
+            return ErrorItem(status_code=422, message="deployment requests must encode exactly one observation")
 
         context["observations"] = observations
         return RequestItem(observations=observations)
@@ -186,9 +192,18 @@ class FastAPIRuntime:
 
         predictions = self.model.write(predictions=response.predictions)
         if self.postprocessor is not None:
-            processed = self.postprocessor(context, predictions)
+            available: dict[str, Any] = {}
+            for name in ("request", "observations"):
+                if name in context:
+                    available[name] = context[name]
+            if response.input is not None:
+                available["input"] = response.input
+                if TensorKey.metadata in response.input.keys():
+                    available["metadata"] = response.input[TensorKey.metadata]
+
+            processed = self.postprocessor.run(predictions, available=available)
             if processed is not None:
-                predictions = processed
+                predictions = dict(processed)
 
         encoded = Prediction.denest(dict(predictions=predictions))
         if self.response_signature is not None:
@@ -496,19 +511,19 @@ class Deployment(BaseSettings):
         return self
 
     @beartype
-    def preprocess(self, preprocessor, **kwargs: Any) -> "Deployment":
+    def preprocess(self, preprocessor: Preprocessor) -> "Deployment":
         """Attach an optional request preprocessor.
 
         If this method is not called, request objects are encoded unchanged.
         """
-        self._preprocessor = functools.partial(preprocessor, **kwargs) if kwargs else preprocessor
+        self._preprocessor = Preprocessor.normalize(preprocessor)
 
         return self
 
     @beartype
-    def postprocess(self, postprocessor, **kwargs: Any) -> "Deployment":
+    def postprocess(self, postprocessor: Postprocessor) -> "Deployment":
         """Attach an optional response postprocessor."""
-        self._postprocessor = functools.partial(postprocessor, **kwargs) if kwargs else postprocessor
+        self._postprocessor = Postprocessor.normalize(postprocessor)
 
         return self
 
