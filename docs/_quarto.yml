@@ -41,6 +41,10 @@ website:
         menu:
           - href: case-studies/device-tenure.qmd
             text: Device Tenure
+    right:
+      - icon: github
+        href: https://github.com/json2vec/json2vec
+        aria-label: GitHub
   sidebar:
     style: docked
     search: true
