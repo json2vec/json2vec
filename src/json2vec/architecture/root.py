@@ -16,7 +16,7 @@ from rich.text import Text
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 from torchjd.aggregation import UPGrad
-from torchjd.autojac import jac_to_grad, mtl_backward
+from torchjd.autojac import Incidence, build_incidence, jac_to_grad, jd_backward
 
 from json2vec.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from json2vec.architecture.contracts import ContractScheduler
@@ -346,6 +346,7 @@ class Model(lit.LightningModule, Renderable):
         self._contract_generation: int = 0
         self._contract_scheduler: ContractScheduler = ContractScheduler()
         self._jd_aggregation = None
+        self.incidence_matrix = None
 
         self._build()
         self._build_jd_components()
@@ -685,6 +686,7 @@ class Model(lit.LightningModule, Renderable):
     def on_fit_start(self):
         super().on_fit_start()
         self._build_jd_components()
+        self.incidence_matrix: Incidence | None = None
 
     def training_step(self, batch, batch_idx):
         opt = self.optimizers()
@@ -709,27 +711,31 @@ class Model(lit.LightningModule, Renderable):
         if self.distributed_jd == "off" or no_losses:
             self.manual_backward(loss_vec.sum())
         else:
-            addresses: list[Address] = output["addresses"]
-            root_embedding: torch.Tensor = output["root_embedding"]
-            shared_param_ids: set[int] = {id(parameter) for parameter in self.shared_params}
-            tasks_params: list[list[torch.nn.Parameter]] = [
-                [
-                    parameter
-                    for parameter in self.nodes[address].decoder.parameters()
-                    if parameter.requires_grad and id(parameter) not in shared_param_ids
-                ]
-                for address in addresses
-            ]
-            mtl_backward(
+            # addresses: list[Address] = output["addresses"]
+            # root_embedding: torch.Tensor = output["root_embedding"]
+            # shared_param_ids: set[int] = {id(parameter) for parameter in self.shared_params}
+            # tasks_params: list[list[torch.nn.Parameter]] = [
+            #     [
+            #         parameter
+            #         for parameter in self.nodes[address].decoder.parameters()
+            #         if parameter.requires_grad and id(parameter) not in shared_param_ids
+            #     ]
+            #     for address in addresses
+            # ]
+            all_parameters = list(self.parameters())
+            if self.incidence_matrix is None:
+                self.incidence_matrix = build_incidence(losses, all_parameters)
+            incident_parameters = [p for p in all_parameters if p in self.incidence_matrix]
+            jd_backward(
                 losses,
-                features=root_embedding,
-                tasks_params=tasks_params,
-                shared_params=self.shared_params,
+                params=incident_parameters,
+                incidence=self.incidence_matrix,
+                epsilon=0.01,
                 parallel_chunk_size=None,
             )
             has_jd_hooks = any(getattr(module, "_forward_hooks", None) for module in self._jd_aggregation.modules())
             jac_to_grad(
-                self.shared_params,
+                [p for p in incident_parameters if getattr(p, "jac", None) is not None],
                 self._jd_aggregation,
                 optimize_gramian_computation=not has_jd_hooks,
             )

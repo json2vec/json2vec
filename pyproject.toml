@@ -68,6 +68,9 @@ package-dir = { "" = "src" }
 where = ["src"]
 include = ["json2vec*"]
 
+[tool.uv.sources]
+torchjd = { git = "https://github.com/Reid-Taylor/TorchJD.git", branch = "feature/dynamic_gradient_stacking" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

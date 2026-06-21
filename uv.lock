@@ -877,7 +877,7 @@ requires-dist = [
     { name = "tensordict", specifier = ">=0.10.0" },
     { name = "torch", specifier = ">=2.7.1" },
     { name = "torchmetrics", specifier = ">=1.9.0" },
-    { name = "torchjd", specifier = ">=0.12.0" },
+    { name = "torchjd", git = "https://github.com/Reid-Taylor/TorchJD.git?branch=feature%2Fdynamic_gradient_stacking" },
     { name = "transformers", marker = "extra == 'text'", specifier = ">=4.55.0" },
     { name = "uvicorn", marker = "extra == 'serving'", specifier = ">=0.38.0" },
 ]
@@ -2807,14 +2807,10 @@ wheels = [
 
 [[package]]
 name = "torchjd"
-version = "0.12.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.15.0"
+source = { git = "https://github.com/Reid-Taylor/TorchJD.git?branch=feature%2Fdynamic_gradient_stacking#df0d4b0174b821a6d921584710b57c8c4078b5c6" }
 dependencies = [
     { name = "torch" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/85/30dca7819851dd4671ade7c0579d23c61971969a1dc1df23d8d4ecbb8d33/torchjd-0.12.0.tar.gz", hash = "sha256:0a8881e0659652e57dcedd8a186cf01264b905bc7d2e93bb33aabc43be456713", size = 74288, upload-time = "2026-05-28T13:38:38.977Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/2a/18bb37a40d79c03912d439ca56390b6ab02168bef838e5a9b3666fc2b60f/torchjd-0.12.0-py3-none-any.whl", hash = "sha256:7715ba7ee44426302664b156161145aa350bd157b9e8c94dda0f916bc5888ead", size = 94328, upload-time = "2026-05-28T13:38:37.89Z" },
 ]
 
 [[package]]

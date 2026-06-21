@@ -2,6 +2,7 @@ import pytest
 import torch
 
 import json2vec as jv
+from json2vec.architecture.root import Model
 from json2vec.structs.enums import Strata, TensorKey, Tokens
 from json2vec.structs.experiment import Schema
 from json2vec.tensorfields.extensions.entity import TensorField
@@ -195,14 +196,38 @@ def test_entity_embedder_accepts_independent_observation_local_ids():
     model(inputs, strata=Strata.train)
 
 
-def test_entity_training_loss_consumes_decoder_slot_logits_directly():
-    model = jv.Model(
+def test_entity_training_loss_consumes_decoder_slot_logits_directly(monkeypatch):
+    class OptimizerStub:
+        def zero_grad(self) -> None:
+            pass
+
+        def step(self) -> None:
+            pass
+
+    optimizer = OptimizerStub()
+
+    def optimizers(self):
+        return optimizer
+
+    def lr_schedulers(self):
+        return None
+
+    def manual_backward(self, loss, gradient=None, *args, **kwargs):
+        loss.backward(gradient=gradient)
+
+    monkeypatch.setattr(Model, "log", lambda self, **kwargs: None)
+    monkeypatch.setattr(Model, "optimizers", optimizers)
+    monkeypatch.setattr(Model, "lr_schedulers", lr_schedulers)
+    monkeypatch.setattr(Model, "manual_backward", manual_backward)
+
+    model = jv.Model.from_tree(
         jv.Branch(jv.Entity("id"), name="items", length=3),
         d_model=8,
         n_layers=1,
         n_heads=2,
         batch_size=2,
     )
+    model._trainer = type("TrainerStub", (), {"accumulate_grad_batches": 1})()  # noqa: SLF001
     address = "record/items/id"
     inputs = model.encode(
         [
