@@ -1,0 +1,120 @@
+project:
+  type: website
+  output-dir: site
+  render:
+    - index.qmd
+    - docs/**/*.qmd
+
+website:
+  title: "json2vec"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+      - href: docs/getting-started.qmd
+        text: Getting Started
+      - text: Core Concepts
+        menu:
+          - href: docs/core-concepts/model-tree.qmd
+            text: Model Tree
+          - href: docs/core-concepts/querypaths.qmd
+            text: Query Paths
+          - href: docs/core-concepts/data-types.qmd
+            text: Data Types
+          - href: docs/core-concepts/embeddings.qmd
+            text: Learning Modes & Embeddings
+          - href: docs/core-concepts/dynamic-masking.qmd
+            text: Dynamic Masking
+      - text: Guides
+        menu:
+          - href: docs/guides/lightning.qmd
+            text: Training With Lightning
+          - href: docs/guides/data-modules.qmd
+            text: Data Modules
+          - href: docs/guides/batch-inference.qmd
+            text: Batch Inference
+          - href: docs/guides/postprocessors.qmd
+            text: Postprocessors
+          - href: docs/guides/field-importance.qmd
+            text: Field Importance
+      - text: Case Studies
+        menu:
+          - href: docs/case-studies/device-tenure.qmd
+            text: Device Tenure
+  sidebar:
+    style: docked
+    search: true
+    contents:
+      - href: index.qmd
+        text: Home
+      - href: docs/getting-started.qmd
+        text: Getting Started
+      - href: docs/motivation.qmd
+        text: Motivation
+      - href: docs/ai-quickstart.qmd
+        text: AI / Expert Quickstart
+      - section: Core Concepts
+        contents:
+          - href: docs/core-concepts/model-tree.qmd
+            text: Model Tree
+          - href: docs/core-concepts/querypaths.qmd
+            text: Query Paths
+          - href: docs/core-concepts/data-types.qmd
+            text: Data Types
+          - href: docs/core-concepts/embeddings.qmd
+            text: Learning Modes & Embeddings
+          - href: docs/core-concepts/dynamic-masking.qmd
+            text: Dynamic Masking
+      - section: Data Types
+        contents:
+          - href: docs/data-types/array.qmd
+            text: Array
+          - href: docs/data-types/number.qmd
+            text: Number
+          - href: docs/data-types/category.qmd
+            text: Category
+          - href: docs/data-types/set.qmd
+            text: Set
+          - href: docs/data-types/entity.qmd
+            text: Entity
+          - href: docs/data-types/dateparts.qmd
+            text: DateParts
+          - href: docs/data-types/vector.qmd
+            text: Vector
+          - href: docs/data-types/text.qmd
+            text: Text
+      - section: Guides
+        contents:
+          - href: docs/guides/lightning.qmd
+            text: Training With Lightning
+          - href: docs/guides/data-modules.qmd
+            text: Data Modules
+          - href: docs/guides/batch-inference.qmd
+            text: Batch Inference
+          - href: docs/guides/postprocessors.qmd
+            text: Postprocessors
+          - href: docs/guides/field-stacking.qmd
+            text: Field Stacking
+          - href: docs/guides/field-importance.qmd
+            text: Field Importance
+      - section: Case Studies
+        contents:
+          - href: docs/case-studies/device-tenure.qmd
+            text: Device Tenure
+  search: true
+
+format:
+  html:
+    theme:
+      light:
+        - flatly
+        - docs/assets/stylesheets/theme-light.scss
+      dark:
+        - darkly
+        - docs/assets/stylesheets/theme-dark.scss
+    toc: true
+    code-copy: true
+    code-overflow: scroll
+    respect-user-color-scheme: true
+    css:
+      - docs/assets/stylesheets/quarto-marimo.css

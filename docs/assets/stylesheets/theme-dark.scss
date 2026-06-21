@@ -1,0 +1,11 @@
+/*-- scss:defaults --*/
+
+$primary: #151C24;
+$link-color: #587ea9;
+$navbar-bg: #223144;
+$sidebar-hl: #476c96;
+$toc-active-border: #151C24;
+
+main.content :not(pre) > code:not(.sourceCode) {
+    background-color: #293f5c !important;
+}

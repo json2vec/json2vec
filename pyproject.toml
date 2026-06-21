@@ -32,13 +32,7 @@ text = [
     "transformers>=4.55.0",
 ]
 docs = [
-    "fastapi>=0.124.0",
-    "mkdocs-material>=9.6",
-    "mkdocs-jupyter>=0.26.3",
-    "mkdocstrings[python]>=0.27",
-    "orjson>=3.10.0",
-    "pydantic-settings>=2.10.1",
-    "uvicorn>=0.38.0",
+    "marimo>=0.23.8",
 ]
 
 [dependency-groups]

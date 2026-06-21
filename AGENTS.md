@@ -108,18 +108,17 @@ Top-level inference exports:
 uv run pytest
 uv run pytest tests/test_public_api.py
 uv run ty check src/json2vec --output-format concise
-uv run mkdocs build --strict
+make render
 ```
 
 ## Documentation Entry Points
 
-- `docs/getting-started.md`
-- `docs/ai-quickstart.md`
-- `docs/core-concepts/querypaths.md`
-- `docs/core-concepts/data-types.md`
-- `docs/reference/api.md`
-- `docs/whitepaper.typ`
+- `index.qmd`
+- `docs/getting-started.qmd`
+- `docs/ai-quickstart.qmd`
+- `docs/core-concepts/querypaths.qmd`
+- `docs/core-concepts/data-types.qmd`
 
 When adding docs, prefer runnable inline Python snippets and current public
-imports. Keep notebooks self-contained; do not depend on external standalone
+imports. Keep Quarto pages self-contained; do not depend on external standalone
 scripts.

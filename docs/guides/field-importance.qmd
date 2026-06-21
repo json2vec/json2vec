@@ -1,0 +1,160 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Field Importance
+
+Field importance measures how much a trained supervised model depends on each
+input leaf. The pattern is simple: train with stochastic input pruning so the
+model has seen missing fields, test a baseline with all inputs active, then
+temporarily deactivate one input leaf at a time and compare the test loss.
+
+This is a model-behavior diagnostic, not a causal explanation. Higher loss
+after deactivation means the model depended more on that field under this
+training run, schema, data split, and random seed.
+
+## Train With Prunable Inputs
+
+Use `p_prune` on candidate input fields. During training, some whole leaf
+instances are withheld and reconstructed, which makes later deactivation less
+out-of-distribution than abruptly removing a field from a model that always saw
+it.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import lightning.pytorch as lit
+import polars as pl
+import torch
+
+import json2vec as j2v
+
+records = pl.read_ndjson("docs/data/iris.jsonl")
+
+model = j2v.Model.from_schema(
+    j2v.Number("sepal_length", p_prune=0.20),
+    j2v.Number("sepal_width", p_prune=0.20),
+    j2v.Number("petal_length", p_prune=0.20),
+    j2v.Number("petal_width", p_prune=0.20),
+    j2v.Category("species", target=True, max_vocab_size=4, topk=[2]),
+    d_model=32,
+    n_layers=2,
+    n_heads=4,
+    batch_size=32,
+    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
+)
+
+records.head(3)
+```
+
+`PolarsDataModule(...)` keeps train, validation, and test encoders tied to the
+same mutable schema object. That is what makes temporary schema overrides
+visible to `trainer.test(...)`.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+datamodule = j2v.PolarsDataModule(
+    model=model,
+    train=records,
+    validate=records,
+    test=records,
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+    observation_buffer_size=256,
+    chunk_batch_size=32,
+    sample_rate=1.0,
+)
+
+trainer = lit.Trainer(
+    accelerator="cpu",
+    max_epochs=16,
+    logger=False,
+    enable_progress_bar=False,
+    enable_model_summary=False,
+    enable_checkpointing=False,
+)
+
+trainer.fit(model=model, datamodule=datamodule)
+```
+
+## Score Ablations
+
+For scoring, clear input pruning so the baseline uses all active inputs. Then
+temporarily set `active=False` on one leaf for a single test run. The
+`model.override(...)` context manager restores the schema afterward.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.update(j2v.where("type") == "number", p_prune=0.0)
+
+baseline = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
+print(f"baseline: {baseline['loss/test']:.4f}")
+
+for leaf in model.select(j2v.where("type") == "number"):
+    with model.override(j2v.where("address") == leaf.address, active=False):
+        result = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
+        print(f"{leaf.name}: {result['loss/test']:.4f}")
+```
+
+The result is an ablation table. Sort by loss increase when you want a ranked
+view:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+rows = []
+baseline_loss = baseline["loss/test"]
+
+for leaf in model.select(j2v.where("type") == "number"):
+    with model.override(j2v.where("address") == leaf.address, active=False):
+        loss = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]["loss/test"]
+    rows.append(
+        {
+            "field": leaf.name,
+            "loss": loss,
+            "delta": loss - baseline_loss,
+        }
+    )
+
+pl.DataFrame(rows).sort("delta", descending=True)
+```
+
+## Reading Results
+
+Treat the output as an operational diagnostic:
+
+- A large positive `delta` suggests the model relied on that field.
+- A near-zero `delta` suggests the field was redundant, unused, noisy, or
+  replaceable by correlated fields.
+- A negative `delta` can happen when a field adds noise or when the training run
+  is too short to be stable.
+
+Run the same workflow across seeds and validation splits before making pruning
+decisions. For nested schemas, compare leaves within the same semantic branch
+before comparing unrelated branches.
+
+## Caveats
+
+Do not deactivate fields that the model was never trained to survive without.
+Use `p_prune` or a related reconstruction objective during training if
+ablation is part of the evaluation plan.
+
+This workflow tests one field at a time. It does not measure interactions
+between fields unless you explicitly deactivate groups with a selector that
+matches the branch or role you want to test.
+
+## Where Next
+
+- Use [Model Tree](../core-concepts/model-tree.qmd#roles-and-mutations) for
+  `active=False`, `model.update(...)`, and `model.override(...)`.
+- Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) for
+  reconstruction and embedding patterns.
+- Use [Data Modules](data-modules.qmd) for train/validate/test split setup.

@@ -1,0 +1,129 @@
+:root {
+  --qmo-cell-bg: #ffffff;
+  --qmo-cell-border: #d8dee8;
+  --qmo-cell-muted-bg: #eef2f6;
+  --qmo-rich-fg: #17202a;
+  --qmo-rich-cyan: #007f7c;
+  --qmo-rich-green: #1f7a3a;
+  --qmo-table-bg: #ffffff;
+  --qmo-table-fg: #17202a;
+  --qmo-table-muted-fg: #667085;
+  --qmo-code-font: "Fira Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --qmo-code-font-size: 0.78rem;
+  --qmo-code-line-height: 1.45;
+  --qmo-radius: 6px;
+}
+
+html[data-bs-theme="dark"],
+body.quarto-dark {
+  --qmo-cell-bg: #383838;
+  --qmo-cell-border: #3b4653;
+  --qmo-cell-muted-bg: #20262d;
+  --qmo-rich-fg: #f8fafc;
+  --qmo-rich-cyan: #5eead4;
+  --qmo-rich-green: #86efac;
+  --qmo-table-bg: #242a31;
+  --qmo-table-fg: #f8fafc;
+  --qmo-table-muted-fg: #cbd5e1;
+}
+
+main.content {
+  max-width: 980px;
+}
+
+.quarto-title-block .title {
+  letter-spacing: 0;
+}
+
+main.content .qmo-static-cell-output {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 5px;
+  overflow: auto;
+  background: var(--qmo-cell-bg);
+  color: var(--qmo-rich-fg);
+  border: 1px solid var(--qmo-cell-border);
+  border-radius: var(--qmo-radius);
+  font-size: var(--qmo-code-font-size);
+  line-height: var(--qmo-code-line-height);
+  scrollbar-width: thin;
+  margin-bottom: 25px;
+}
+
+main.content .qmo-static-cell-output > :first-child {
+  margin-top: 0;
+}
+
+main.content .qmo-static-cell-output > :last-child {
+  margin-bottom: 0;
+}
+
+main.content .qmo-static-cell-output pre {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0.8rem 1rem;
+  overflow: visible;
+  background: transparent;
+  color: var(--qmo-rich-fg);
+  font-family: var(--qmo-code-font);
+  font-size: var(--qmo-code-font-size);
+  line-height: var(--qmo-code-line-height);
+  white-space: pre;
+}
+
+main.content .qmo-static-cell-output img {
+  display: block;
+  max-width: 100%;
+}
+
+main.content .qmo-static-cell-output pre span[style*="color: #008080"] {
+  color: var(--qmo-rich-cyan) !important;
+  text-decoration-color: var(--qmo-rich-cyan) !important;
+}
+
+main.content .qmo-static-cell-output pre span[style*="color: #008000"] {
+  color: var(--qmo-rich-green) !important;
+  text-decoration-color: var(--qmo-rich-green) !important;
+}
+
+main.content .qmo-static-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  background: var(--qmo-table-bg);
+  color: var(--qmo-table-fg);
+  text-align: left;
+}
+
+main.content .qmo-static-table {
+  width: 100%;
+  min-width: 32rem;
+  margin: 0;
+  border-collapse: collapse;
+  background: var(--qmo-table-bg);
+  color: var(--qmo-table-fg);
+  font-size: 0.86rem;
+}
+
+main.content .qmo-static-table th,
+main.content .qmo-static-table td {
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--qmo-cell-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+main.content .qmo-static-table th {
+  color: var(--qmo-table-muted-fg);
+  font-weight: 700;
+  background: var(--qmo-cell-muted-bg);
+}
+
+main.content .qmo-static-table tbody tr:last-child td {
+  border-bottom: 0;
+}

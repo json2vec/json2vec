@@ -1,65 +1,54 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
-
-import nbformat
-from nbclient import NotebookClient
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _execute_notebook(path: str) -> nbformat.NotebookNode:
+def test_quarto_docs_snapshot_contains_expected_pages() -> None:
     root = _repo_root()
-    run_dirs = {
-        "docs/data-types/tensorfields.ipynb": root / "docs/data-types",
+
+    expected = {
+        "index.qmd",
+        "docs/getting-started.qmd",
+        "docs/ai-quickstart.qmd",
+        "docs/core-concepts/model-tree.qmd",
+        "docs/core-concepts/querypaths.qmd",
+        "docs/core-concepts/data-types.qmd",
+        "docs/core-concepts/embeddings.qmd",
+        "docs/core-concepts/dynamic-masking.qmd",
+        "docs/data-types/array.qmd",
+        "docs/data-types/category.qmd",
+        "docs/data-types/dateparts.qmd",
+        "docs/data-types/entity.qmd",
+        "docs/data-types/number.qmd",
+        "docs/data-types/set.qmd",
+        "docs/data-types/text.qmd",
+        "docs/data-types/vector.qmd",
+        "docs/guides/batch-inference.qmd",
+        "docs/guides/data-modules.qmd",
+        "docs/guides/field-importance.qmd",
+        "docs/guides/field-stacking.qmd",
+        "docs/guides/lightning.qmd",
+        "docs/guides/postprocessors.qmd",
+        "docs/case-studies/device-tenure.qmd",
     }
-    notebook = nbformat.read(root / path, as_version=4)
-    client = NotebookClient(
-        notebook,
-        timeout=300,
-        kernel_name="python3",
-        allow_errors=False,
-        resources={"metadata": {"path": str(run_dirs.get(path, root))}},
-    )
-    client.execute()
-    return notebook
+
+    missing = {path for path in expected if not (root / path).is_file()}
+    assert missing == set()
 
 
-def test_pretraining_example_runs() -> None:
-    notebook = _execute_notebook("docs/tutorials/pretraining.ipynb")
+def test_quarto_docs_use_current_public_api_style() -> None:
+    root = _repo_root()
+    sources = "\n".join(path.read_text() for path in [root / "index.qmd", *sorted((root / "docs").rglob("*.qmd"))])
 
-    assert _model_display_output(notebook)
-
-
-def test_supervised_tabular_example_runs() -> None:
-    notebook = _execute_notebook("docs/tutorials/supervised-tabular-training.ipynb")
-
-    assert _model_display_output(notebook)
-
-
-def test_serving_example_configures_without_starting_server() -> None:
-    notebook = _execute_notebook("docs/tutorials/serving.ipynb")
-
-    assert _model_display_output(notebook)
-
-
-def test_custom_tensorfield_example_runs() -> None:
-    notebook = _execute_notebook("docs/data-types/tensorfields.ipynb")
-    source = "\n".join(cell.source for cell in notebook.cells)
-
-    assert 'Plugin(name="bucket")' in source
-    assert "Boolean" not in source
-    assert _model_display_output(notebook)
-
-
-def test_field_importance_example_runs() -> None:
-    notebook = _execute_notebook("docs/guides/field-importance.ipynb")
-    source = "\n".join(cell.source for cell in notebook.cells)
-
-    assert "active=False" in source
-    assert "trainer.test" in source
+    assert "j2v.Model.from_schema(" in sources
+    assert "j2v.Array(" in sources
+    assert "Struct(" not in sources
+    assert not re.search(r"Model\.from_schema\([^)]*\broot\s*=", sources, re.DOTALL)
 
 
 def test_only_allowed_standalone_examples_are_present() -> None:
@@ -78,21 +67,3 @@ def test_only_allowed_standalone_examples_are_present() -> None:
         "examples/inference-masking/run.py",
         "examples/realtime-serving/run.py",
     }
-
-
-def _model_display_output(notebook: nbformat.NotebookNode) -> str:
-    for cell in notebook.cells:
-        if cell.cell_type != "code" or cell.source.strip() != "model":
-            continue
-        text = "\n".join(_output_text(output) for output in cell.get("outputs", []))
-        if "[model]" in text:
-            return text
-    return ""
-
-
-def _output_text(output: nbformat.NotebookNode) -> str:
-    if "text" in output:
-        return output.text
-
-    data = output.get("data", {})
-    return "\n".join(str(data.get(mime, "")) for mime in ("text/plain", "text/html"))

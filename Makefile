@@ -1,48 +1,24 @@
-.PHONY: notebooks notebooks-check
+.DEFAULT_GOAL := help
 
-NOTEBOOKS := $(shell find docs -type f -name '*.ipynb' | sort)
-export NOTEBOOKS
+QUARTO ?= uvx --from quarto-cli quarto
+HOST ?= 127.0.0.1
+PORT ?= 4200
+PREVIEW_FLAGS ?= --no-browser --host $(HOST) --port $(PORT)
 
-define RUN_NOTEBOOKS
-import os
-from pathlib import Path
+.PHONY: help dev preview render build clean
 
-import nbformat
-from nbclient import NotebookClient
+help: ## Show available targets.
+	@awk 'BEGIN {FS = ":.*##"; print "Targets:"} /^[a-zA-Z_-]+:.*##/ {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-root = Path.cwd()
-notebooks = [root / notebook for notebook in os.environ["NOTEBOOKS"].split()]
-write_notebooks = os.environ.get("WRITE_NOTEBOOKS") == "1"
-run_dirs = {
-    Path("docs/guides/tensorfields.ipynb"): Path("docs/guides"),
-}
+dev: ## Start the Quarto preview server with live reload.
+	$(QUARTO) preview $(PREVIEW_FLAGS)
 
-for path in notebooks:
-    notebook_path = path.relative_to(root)
-    cwd = root / run_dirs.get(notebook_path, Path("."))
-    print(f"executing {notebook_path} from {cwd}", flush=True)
-    notebook = nbformat.read(path, as_version=4)
-    client = NotebookClient(
-        notebook,
-        timeout=600,
-        kernel_name="python3",
-        allow_errors=False,
-        resources={"metadata": {"path": str(cwd)}},
-    )
-    client.execute()
-    if write_notebooks:
-        nbformat.write(notebook, path)
-        print(f"wrote {notebook_path}", flush=True)
-    else:
-        print(f"passed {notebook_path}", flush=True)
-endef
-export RUN_NOTEBOOKS
+preview: dev ## Alias for dev.
 
-notebooks:
-	WRITE_NOTEBOOKS=1 uv run python -c "$$RUN_NOTEBOOKS"
+render: ## Render the static docs site into site/.
+	$(QUARTO) render
 
-notebooks-check:
-	uv run python -c "$$RUN_NOTEBOOKS"
+build: render ## Alias for render.
 
-docs:
-	uv run mkdocs serve --dirtyreload
+clean: ## Remove rendered docs output.
+	rm -rf site

@@ -3,7 +3,7 @@
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&amp;logoColor=white" />
   <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2E8B57" /></a>
-  <a href="https://json2vec.github.io/json2vec/"><img alt="Documentation" src="https://img.shields.io/badge/docs-MkDocs-526CFE?logo=materialformkdocs&amp;logoColor=white" /></a>
+  <a href="https://json2vec.github.io/json2vec/"><img alt="Documentation" src="https://img.shields.io/badge/docs-Quarto-39729E?logo=quarto&amp;logoColor=white" /></a>
   <!-- discord-invite:start -->
   <a href="https://discord.gg/DVyZUkvTFA"><img alt="Discord channel invite" src="https://img.shields.io/badge/discord-join%20the%20channel-5865F2?logo=discord&amp;logoColor=white" /></a>
   <!-- discord-invite:end -->
@@ -279,42 +279,41 @@ uv sync --extra docs
 
 The `text` extra installs Hugging Face `transformers`. The `serving` extra
 installs FastAPI-backed deployment dependencies. The `docs` extra installs the
-MkDocs toolchain.
+Python packages used by the Quarto docs.
 
 ## Documentation Map
 
 Start with:
 
-- [Getting Started](https://json2vec.github.io/json2vec/getting-started/)
-- [AI / Expert Quickstart](https://json2vec.github.io/json2vec/ai-quickstart/)
-- [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree/)
-- [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths/)
-- [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types/)
-- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings/)
-- [Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning/)
-- [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules/)
-- [Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference/)
-- [API Reference](https://json2vec.github.io/json2vec/reference/api/)
+- [Getting Started](https://json2vec.github.io/json2vec/docs/getting-started.html)
+- [AI / Expert Quickstart](https://json2vec.github.io/json2vec/docs/ai-quickstart.html)
+- [Model Tree](https://json2vec.github.io/json2vec/docs/core-concepts/model-tree.html)
+- [Query Paths](https://json2vec.github.io/json2vec/docs/core-concepts/querypaths.html)
+- [Built-In Data Types](https://json2vec.github.io/json2vec/docs/core-concepts/data-types.html)
+- [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/docs/core-concepts/embeddings.html)
+- [Training With Lightning](https://json2vec.github.io/json2vec/docs/guides/lightning.html)
+- [Data Modules](https://json2vec.github.io/json2vec/docs/guides/data-modules.html)
+- [Batch Inference](https://json2vec.github.io/json2vec/docs/guides/batch-inference.html)
 
 Tutorials and guides:
 
-- [Hello World](https://json2vec.github.io/json2vec/tutorials/hello-world/)
-- [Supervised Tabular Training](https://json2vec.github.io/json2vec/tutorials/supervised-tabular-training/)
-- [Masked Pretraining](https://json2vec.github.io/json2vec/tutorials/pretraining/)
-- [Nested Supervised Training](https://json2vec.github.io/json2vec/tutorials/nested-supervised-training/)
-- [Serving](https://json2vec.github.io/json2vec/tutorials/serving/)
-- [Preprocessors](https://json2vec.github.io/json2vec/guides/preprocessors/)
-- [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors/)
-- [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance/)
-- [Field Stacking](https://json2vec.github.io/json2vec/guides/field-stacking/)
-- [Custom Data Types](https://json2vec.github.io/json2vec/data-types/tensorfields/)
-- [Device Tenure Case Study](https://json2vec.github.io/json2vec/case-studies/device-tenure/)
-- [Whitepaper](https://json2vec.github.io/json2vec/whitepaper.pdf)
+- [Postprocessors](https://json2vec.github.io/json2vec/docs/guides/postprocessors.html)
+- [Field Importance](https://json2vec.github.io/json2vec/docs/guides/field-importance.html)
+- [Field Stacking](https://json2vec.github.io/json2vec/docs/guides/field-stacking.html)
+- [Array](https://json2vec.github.io/json2vec/docs/data-types/array.html)
+- [Number](https://json2vec.github.io/json2vec/docs/data-types/number.html)
+- [Category](https://json2vec.github.io/json2vec/docs/data-types/category.html)
+- [Set](https://json2vec.github.io/json2vec/docs/data-types/set.html)
+- [Entity](https://json2vec.github.io/json2vec/docs/data-types/entity.html)
+- [DateParts](https://json2vec.github.io/json2vec/docs/data-types/dateparts.html)
+- [Vector](https://json2vec.github.io/json2vec/docs/data-types/vector.html)
+- [Text](https://json2vec.github.io/json2vec/docs/data-types/text.html)
+- [Device Tenure Case Study](https://json2vec.github.io/json2vec/docs/case-studies/device-tenure.html)
 
 Build the docs locally with:
 
 ```bash
-uv run --extra docs mkdocs build --strict
+make render
 ```
 
 ## Repository Layout
@@ -327,7 +326,7 @@ uv run --extra docs mkdocs build --strict
 - `src/json2vec/structs`: pydantic config models, enums, and tree nodes
 - `src/json2vec/tensorfields`: tensorfield plugin system and built-in fields
 - `tests/`: package test suite
-- `docs/`: tutorials, guides, diagrams, and whitepaper source
+- `docs/`: Quarto pages, guides, reference pages, stylesheets, and sample data
 
 ## Development
 

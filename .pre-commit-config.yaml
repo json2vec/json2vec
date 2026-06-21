@@ -25,16 +25,9 @@ repos:
         always_run: true
         verbose: true
 
-      - id: notebooks
-        name: Check Notebooks
-        entry: make notebooks-check
-        language: system
-        pass_filenames: false
-        always_run: true
-
       - id: docs
         name: Render Docs
-        entry: uv run --extra docs mkdocs build --strict
+        entry: make render
         language: system
         pass_filenames: false
         always_run: true

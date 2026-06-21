@@ -1,36 +1,67 @@
-name: docs
+name: Build docs
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
 jobs:
   build:
+    name: Render Quarto site
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - run: uv sync --extra docs
-      - run: make notebooks
-      - run: uv run --extra docs mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
-        if: github.ref == 'refs/heads/main'
+      - name: Check out docs
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync docs dependencies
+        run: uv sync --extra docs
+
+      - name: Render docs
+        run: make render
+
+      - name: Configure GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
-    if: github.ref == 'refs/heads/main'
+    name: Deploy to GitHub Pages
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
-      - id: deployment
+      - name: Deploy
+        id: deployment
         uses: actions/deploy-pages@v4
