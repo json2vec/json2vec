@@ -1,28 +1,30 @@
 import datetime
 from types import SimpleNamespace
 
-from loguru import logger
+import torch
 
 from json2vec.logging.throughput import ThroughputLogger
-from json2vec.structs.enums import Strata
+from json2vec.structs.enums import Metric, Strata
 
 
-def test_throughput_logger_logs_once_per_epoch():
-    messages: list[str] = []
-    sink_id = logger.add(messages.append, format="{message}")
+def test_throughput_logger_tracks_once_per_epoch():
+    tracked: list[tuple[tuple[str, ...], torch.Tensor]] = []
+
+    def track(names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
+        tracked.append((names, value))
+        return value
+
     callback = ThroughputLogger()
     callback.timestamp[Strata.train] = datetime.datetime.now() - datetime.timedelta(seconds=2)
-    module = SimpleNamespace(batch_size=10)
+    module = SimpleNamespace(batch_size=10, track=track)
 
-    try:
-        callback.count(trainer=object(), pl_module=module, outputs=None, batch=None, batch_idx=0, strata=Strata.train)
-        callback.count(trainer=object(), pl_module=module, outputs=None, batch=None, batch_idx=1, strata=Strata.train)
-        assert messages == []
+    callback.count(trainer=object(), pl_module=module, outputs=None, batch=None, batch_idx=0, strata=Strata.train)
+    callback.count(trainer=object(), pl_module=module, outputs=None, batch=None, batch_idx=1, strata=Strata.train)
+    assert tracked == []
 
-        callback.end(trainer=object(), pl_module=module, strata=Strata.train)
-    finally:
-        logger.remove(sink_id)
+    callback.end(trainer=object(), pl_module=module, strata=Strata.train)
 
-    assert len(messages) == 1
-    assert any("train epoch throughput:" in message for message in messages)
-    assert any("observations/s" in message for message in messages)
+    assert len(tracked) == 1
+    names, value = tracked[0]
+    assert names == (Metric.throughput, Strata.train)
+    assert value.item() > 0.0
