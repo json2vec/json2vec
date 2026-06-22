@@ -66,4 +66,5 @@ def test_only_allowed_standalone_examples_are_present() -> None:
         "examples/dynamic-masking/run.py",
         "examples/inference-masking/run.py",
         "examples/realtime-serving/run.py",
+        "examples/text-encoder/run.py",
     }

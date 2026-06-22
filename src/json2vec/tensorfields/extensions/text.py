@@ -3,16 +3,15 @@ from __future__ import annotations
 
 import enum
 import math
-import warnings
-from functools import cache
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from json2vec.data.nested import apply, extract_mask_literals, pad
+from json2vec.data.nested import extract_mask_literals, pad
 from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
 from json2vec.structs.packages import Parcel, Prediction
 from json2vec.structs.tree import Address
@@ -37,6 +36,7 @@ text.callback(CounterUpdateCallback)
 INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
 TEXT_TENSOR_KEYS = (INPUT_IDS, ATTENTION_MASK)
+DEFAULT_TEXT_MODEL = "google/bert_uncased_L-2_H-128_A-2"
 
 
 class Pooling(enum.StrEnum):
@@ -49,133 +49,89 @@ class Objective(enum.StrEnum):
     l1 = "l1"
     l2 = "l2"
 
-    def loss(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def loss(self, diff: torch.Tensor) -> torch.Tensor:
         if self == Objective.l1:
-            return torch.nn.functional.l1_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
-
-        return torch.nn.functional.mse_loss(input=inputs, target=targets, reduction="none").mean(dim=1)
-
-
-def _import_transformers():
-    try:
-        from transformers import AutoModel, AutoTokenizer  # ty:ignore[unresolved-import]
-    except ImportError as error:
-        message = (
-            "text tensorfield requires the optional dependency `transformers`. "
-            "Install it explicitly before using `type: text` fields; it is not installed by default."
-        )
-        warnings.warn(message, RuntimeWarning, stacklevel=2)
-        raise ImportError(message) from error
-
-    return AutoModel, AutoTokenizer
-
-
-@cache
-def _get_tokenizer(
-    model_name: str,
-    revision: str | None,
-    local_files_only: bool,
-):
-    _, AutoTokenizer = _import_transformers()
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        revision=revision,
-        local_files_only=local_files_only,
-    )
-
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        elif tokenizer.sep_token is not None:
-            tokenizer.pad_token = tokenizer.sep_token
+            diff = diff.absolute()
         else:
-            raise ValueError(f"text model '{model_name}' tokenizer does not define a pad/eos/sep token")
+            diff = diff.square()
 
-    return tokenizer
-
-
-_HF_MODELS: dict[tuple[str, str | None, bool], Any] = {}
+        return diff.mean(dim=1)
 
 
-def _get_model(
-    model_name: str,
-    revision: str | None,
-    local_files_only: bool,
-):
-    key = (model_name, revision, local_files_only)
+@dataclass
+class CachedModel:
+    _models: ClassVar[dict[str, "CachedModel"]] = {}
+    _tokenizers: ClassVar[dict[str, Any]] = {}
 
-    if key not in _HF_MODELS:
-        AutoModel, _ = _import_transformers()
-        model = AutoModel.from_pretrained(
-            model_name,
-            revision=revision,
-            local_files_only=local_files_only,
-        )
-        model.eval()
-        model.requires_grad_(False)
-        _HF_MODELS[key] = model
+    key: str
+    model: Any
+    hidden_size: int
+    device: torch.device | None = None
 
-    return _HF_MODELS[key]
+    @classmethod
+    def get_model(
+        cls,
+        key: str,
+    ) -> "CachedModel":
+        if key not in cls._models:
+            try:
+                from transformers import AutoModel  # ty:ignore[unresolved-import]
+            except ImportError:
+                raise ImportError("Text requires `transformers`; install `json2vec[text]`.")
 
+            model = AutoModel.from_pretrained(key)
+            model.eval()
+            model.requires_grad_(False)
+            hidden_size = getattr(model.config, "hidden_size", None)
+            if hidden_size is None:
+                raise ValueError(f"text model '{key}' does not expose `config.hidden_size`")
+            cls._models[key] = cls(key=key, model=model, hidden_size=int(hidden_size))
 
-def _hidden_size(
-    model_name: str,
-    revision: str | None,
-    local_files_only: bool,
-) -> int:
-    hidden_size = getattr(_get_model(model_name, revision, local_files_only).config, "hidden_size", None)
-    if hidden_size is None:
-        raise ValueError(f"text model '{model_name}' does not expose `config.hidden_size`")
+        return cls._models[key]
 
-    return int(hidden_size)
+    @classmethod
+    def get_tokenizer(cls, key: str):
+        if key not in cls._tokenizers:
+            try:
+                from transformers import AutoTokenizer  # ty:ignore[unresolved-import]
+            except ImportError:
+                raise ImportError("Text requires `transformers`; install `json2vec[text]`.")
 
+            tokenizer = AutoTokenizer.from_pretrained(key)
 
-def coerce_text(value: Any, *, address: Address) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"text field at '{address}' expects string values, got {type(value).__name__}")
+            if tokenizer.pad_token_id is None:
+                if tokenizer.eos_token is not None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                elif tokenizer.sep_token is not None:
+                    tokenizer.pad_token = tokenizer.sep_token
+                else:
+                    raise ValueError(f"text model '{key}' tokenizer does not define a pad/eos/sep token")
+            cls._tokenizers[key] = tokenizer
 
-    return value
+        return cls._tokenizers[key]
+
+    def module_for(self, device: torch.device) -> Any:
+        target = torch.device(device)
+        if self.device != target:
+            self.model.to(target)
+            self.device = target
+
+        self.model.eval()
+        return self.model
 
 
 @text.register
 class Request(RequestBase):
     """Text tensorfield request encoded by a frozen Hugging Face model."""
 
+    model_config = pydantic.ConfigDict(extra="allow", str_strip_whitespace=True)
+
     type: Literal["text"] = "text"
-    model_name: str
+    model: Annotated[str, pydantic.Field(min_length=1)] = DEFAULT_TEXT_MODEL
     max_length: Annotated[int, pydantic.Field(gt=0, default=128)] = 128
     encoder_batch_size: Annotated[int, pydantic.Field(gt=0, default=32)] = 32
     encoder_pooling: Pooling = Pooling.cls
     objective: Objective = Objective.l2
-    revision: str | None = None
-    local_files_only: bool = False
-
-    @pydantic.field_validator("model_name", mode="before")
-    @classmethod
-    def normalize_model_name(cls, value: str):
-        if not isinstance(value, str):
-            raise ValueError("model_name must be a string")
-
-        return value.strip()
-
-    @pydantic.field_validator("revision", mode="before")
-    @classmethod
-    def normalize_revision(cls, value: str | None):
-        if value is None:
-            return None
-
-        if not isinstance(value, str):
-            raise ValueError("revision must be a string when provided")
-
-        normalized = value.strip()
-        return normalized or None
-
-    @pydantic.model_validator(mode="after")
-    def check_model_name(self):
-        if not self.model_name:
-            raise ValueError("model_name must be a non-empty string")
-
-        return self
 
 
 @text.register
@@ -204,15 +160,8 @@ class TensorField(TensorFieldBase):
             leaf_depth=len(leading_shape),
         )
 
-        coerced = apply(
-            values,
-            coerce_text,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-
         data, state = pad(
-            nested=coerced,
+            nested=values,
             shape=leading_shape,
             dtype=object,
             pad_value=None,
@@ -235,11 +184,11 @@ class TensorField(TensorFieldBase):
 
         valued = state == Tokens.valued.value
         if valued.any():
-            tokenizer = _get_tokenizer(
-                request.model_name,
-                request.revision,
-                request.local_files_only,
-            )
+            invalid = next((value for value in data[valued].flat if not isinstance(value, str)), None)
+            if invalid is not None:
+                raise ValueError(f"text field at '{address}' expects string values, got {type(invalid).__name__}")
+
+            tokenizer = CachedModel.get_tokenizer(request.model)
             encoded = tokenizer(
                 data[valued].tolist(),
                 padding="max_length",
@@ -266,31 +215,23 @@ class TensorField(TensorFieldBase):
             batch_size=len(values),
         )
 
-    def _cache_targets(self):
-        if TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-    def _zero_content(self, selected: torch.Tensor):
-        expanded = selected.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
-
-        for key in TEXT_TENSOR_KEYS:
-            self.content[key] = self.content[key].masked_scatter(
-                expanded,
-                torch.zeros_like(input=self.content[key]),
-            )
-
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
         selected = selected.to(device=self.state.device, dtype=torch.bool)
         mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
 
         if cache_targets:
-            self._cache_targets()
+            if TensorKey.state not in self.targets.keys():
+                self.targets[TensorKey.state] = self.state.clone()
+            if TensorKey.content not in self.targets.keys():
+                self.targets[TensorKey.content] = self.content.clone()
 
         self.state = self.state.masked_scatter(selected, mask_token)
-        self._zero_content(selected)
+        expanded = selected.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
+        for key in TEXT_TENSOR_KEYS:
+            self.content[key] = self.content[key].masked_scatter(
+                expanded,
+                torch.zeros_like(input=self.content[key]),
+            )
 
         if trainable:
             self.trainable |= selected
@@ -337,7 +278,9 @@ class Embedder(EmbedderBase):
 
         self.origin: Address = address
         self.destination: Address = request.parent.address
-        self.hidden_size: int = _hidden_size(request.model_name, request.revision, request.local_files_only)
+        cached_model = CachedModel.get_model(request.model)
+        self.__dict__["_cached_model"] = cached_model
+        self.hidden_size: int = cached_model.hidden_size
         self.request = request
 
         self.embeddings = torch.nn.Embedding(
@@ -349,60 +292,6 @@ class Embedder(EmbedderBase):
             torch.nn.Linear(in_features=self.hidden_size, out_features=schema.d_model),
             torch.nn.GELU(),
         )
-
-        self.__dict__["_hf_model"] = _get_model(request.model_name, request.revision, request.local_files_only)
-        self.__dict__["_hf_device"] = None
-
-    @property
-    def hf_model(self):
-        return self.__dict__["_hf_model"]
-
-    def _ensure_hf_model_device(self, device: torch.device) -> Any:
-        current: torch.device | None = self.__dict__["_hf_device"]
-        if current != device:
-            self.hf_model.to(device)
-            self.__dict__["_hf_device"] = device
-
-        self.hf_model.eval()
-        return self.hf_model
-
-    def _pool(self, outputs: Any, attention_mask: torch.Tensor) -> torch.Tensor:
-        if self.request.encoder_pooling == Pooling.pooler:
-            pooled = getattr(outputs, "pooler_output", None)
-            if pooled is None:
-                raise ValueError(f"text model '{self.request.model_name}' does not expose pooler_output")
-            return pooled
-
-        hidden = getattr(outputs, "last_hidden_state", None)
-        if hidden is None:
-            raise ValueError(f"text model '{self.request.model_name}' does not expose last_hidden_state")
-
-        if self.request.encoder_pooling == Pooling.cls:
-            return hidden[:, 0]
-
-        mask = attention_mask.unsqueeze(-1).to(dtype=hidden.dtype)
-        denom = mask.sum(dim=1).clamp_min(1.0)
-        return (hidden * mask).sum(dim=1) / denom
-
-    def _encode_flat(self, token_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        if token_ids.numel() == 0:
-            return torch.zeros((0, self.hidden_size), device=token_ids.device, dtype=torch.float32)
-
-        model = self._ensure_hf_model_device(token_ids.device)
-
-        encoded: list[torch.Tensor] = []
-        for start in range(0, token_ids.size(0), self.request.encoder_batch_size):
-            stop = start + self.request.encoder_batch_size
-
-            with torch.inference_mode():
-                outputs = model(
-                    input_ids=token_ids[start:stop],
-                    attention_mask=attention_mask[start:stop],
-                )
-
-            encoded.append(self._pool(outputs, attention_mask[start:stop]).to(dtype=torch.float32))
-
-        return torch.cat(encoded, dim=0)
 
     @beartype
     def encode(
@@ -419,12 +308,42 @@ class Embedder(EmbedderBase):
 
         embeddings = torch.zeros((D, self.hidden_size), device=flat_ids.device, dtype=torch.float32)
         valued = flat_state.eq(Tokens.valued.value)
+        if not valued.any():
+            return embeddings.reshape(N, *dims, self.hidden_size)
 
-        if valued.any():
-            embeddings[valued] = self._encode_flat(
-                token_ids=flat_ids[valued],
-                attention_mask=flat_mask[valued],
-            )
+        valued_ids = flat_ids[valued]
+        valued_mask = flat_mask[valued]
+        model = self.__dict__["_cached_model"].module_for(flat_ids.device)
+        encoded: list[torch.Tensor] = []
+        for start in range(0, valued_ids.size(0), self.request.encoder_batch_size):
+            stop = start + self.request.encoder_batch_size
+            batch_mask = valued_mask[start:stop]
+
+            with torch.inference_mode():
+                outputs = model(
+                    input_ids=valued_ids[start:stop],
+                    attention_mask=batch_mask,
+                )
+
+            if self.request.encoder_pooling == Pooling.pooler:
+                pooled = getattr(outputs, "pooler_output", None)
+                if pooled is None:
+                    raise ValueError(f"text model '{self.request.model}' does not expose pooler_output")
+            else:
+                hidden = getattr(outputs, "last_hidden_state", None)
+                if hidden is None:
+                    raise ValueError(f"text model '{self.request.model}' does not expose last_hidden_state")
+
+                if self.request.encoder_pooling == Pooling.cls:
+                    pooled = hidden[:, 0]
+                else:
+                    mask = batch_mask.unsqueeze(-1).to(dtype=hidden.dtype)
+                    denom = mask.sum(dim=1).clamp_min(1.0)
+                    pooled = (hidden * mask).sum(dim=1) / denom
+
+            encoded.append(pooled.to(dtype=torch.float32))
+
+        embeddings[valued] = torch.cat(encoded, dim=0)
 
         return embeddings.reshape(N, *dims, self.hidden_size)
 
@@ -467,7 +386,7 @@ class Decoder(DecoderBase):
         super().__init__(schema=schema, address=address)
 
         request: Request = schema.requests[address]
-        hidden_size = _hidden_size(request.model_name, request.revision, request.local_files_only)
+        hidden_size = CachedModel.get_model(request.model).hidden_size
         self.classification = torch.nn.Linear(
             in_features=schema.d_model,
             out_features=len(Tokens),
@@ -531,7 +450,7 @@ def loss(
 
     loss += module.track(
         (address, strata, Metric.loss, TensorKey.content),
-        value=request.objective.loss(inputs=inputs, targets=targets).masked_select(valued).mean(),
+        value=request.objective.loss(diff).masked_select(valued).mean(),
     )
 
     module.track(
