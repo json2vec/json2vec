@@ -715,17 +715,6 @@ class Model(lit.LightningModule, Renderable):
         if self.distributed_jd == "off" or no_losses:
             self.manual_backward(loss_vec.sum())
         else:
-            # addresses: list[Address] = output["addresses"]
-            # root_embedding: torch.Tensor = output["root_embedding"]
-            # shared_param_ids: set[int] = {id(parameter) for parameter in self.shared_params}
-            # tasks_params: list[list[torch.nn.Parameter]] = [
-            #     [
-            #         parameter
-            #         for parameter in self.nodes[address].decoder.parameters()
-            #         if parameter.requires_grad and id(parameter) not in shared_param_ids
-            #     ]
-            #     for address in addresses
-            # ]
             all_parameters = list(self.parameters())
             if self.incidence_matrix is None:
                 self.incidence_matrix = build_incidence(losses, all_parameters)
