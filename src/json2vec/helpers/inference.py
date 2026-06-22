@@ -98,9 +98,6 @@ class InferenceConfig:
     text_min_cardinality_ratio: float = 0.5
     """Minimum distinct / observed ratio for a string column to be ``Text``."""
 
-    text_model_name: str = "distilbert-base-uncased"
-    """HuggingFace model used when a column is inferred as ``Text``."""
-
     vocab_cap: int = 50_000
     """Upper bound on inferred ``size`` for ``Category`` / ``Set``."""
 
@@ -374,7 +371,7 @@ def _decide_scalar(
             and card_ratio >= config.text_min_cardinality_ratio
         ):
             return _Decision(
-                Text(name=name, query=query, model_name=config.text_model_name, p_prune=p_prune),
+                Text(name=name, query=query, p_prune=p_prune),
                 reason=f"free text (avg {avg_tokens:.1f} tokens, {card_ratio:.0%} unique)",
             )
 
