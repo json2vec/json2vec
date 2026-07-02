@@ -41,27 +41,21 @@ class DatePart(enum.StrEnum):
     day_of_week = "day_of_week"
     hour_of_day = "hour_of_day"
     minute_of_hour = "minute_of_hour"
+    second_of_minute = "second_of_minute"
 
-    def register(self, depth: int):
+    def register(self, func: Callable[..., Any]) -> Callable[..., Any]:
         cls = type(self)
 
         # Lazy initialization
         if not hasattr(cls, "REGISTRY"):
             cls.REGISTRY: dict[DatePart, Callable[..., Any]] = {}
 
-        if not hasattr(cls, "DEPTH"):
-            cls.DEPTH: dict[DatePart, int] = {}
+        if self in cls.REGISTRY:
+            raise ValueError(f"{self.name} already has a registered function.")
 
-        def decorator(func: Callable[..., Any]):
-            if self in cls.REGISTRY:
-                raise ValueError(f"{self.name} already has a registered function.")
+        cls.REGISTRY[self] = func
 
-            cls.REGISTRY[self] = func
-            cls.DEPTH[self] = depth
-
-            return func
-
-        return decorator
+        return func
 
     def __call__(self, *args, **kwargs):
         func = getattr(type(self), "REGISTRY", {}).get(self)
@@ -70,10 +64,6 @@ class DatePart(enum.StrEnum):
             raise RuntimeError(f"No function registered for {self.name}")
 
         return func(*args, **kwargs)
-
-    @classmethod
-    def depth(cls, datepart: DatePart) -> int:
-        return cls.DEPTH[datepart]
 
 
 def _normalize_datepart_key(value: str) -> str:
@@ -92,52 +82,85 @@ def _datepart_lookup() -> dict[str, DatePart]:
     return lookup
 
 
-@DatePart.day_of_month.register(depth=31)
+@DatePart.day_of_month.register
 def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 31
     month_start = arr.astype("datetime64[M]")
-    return (arr - month_start).astype("timedelta64[D]").astype(int) + 1
+    value = (arr - month_start).astype("timedelta64[D]").astype(int) + 1
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.day_of_year.register(depth=366)
+@DatePart.day_of_year.register
 def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 366
     year_start = arr.astype("datetime64[Y]")
-    return (arr - year_start).astype("timedelta64[D]").astype(int) + 1
+    value = (arr - year_start).astype("timedelta64[D]").astype(int) + 1
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.month_of_year.register(depth=12)
+@DatePart.month_of_year.register
 def _(arr: np.ndarray) -> np.ndarray:
-    return (arr.astype("datetime64[M]") - arr.astype("datetime64[Y]")).astype(int) + 1
+    max_value = 12
+    value = (arr.astype("datetime64[M]") - arr.astype("datetime64[Y]")).astype(int) + 1
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.week_of_year.register(depth=53)
+@DatePart.week_of_year.register
 def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 53
     year_start = arr.astype("datetime64[Y]")
-    return ((arr.astype("datetime64[W]") - year_start.astype("datetime64[W]")).astype(int) + 1).astype(int)
+    value = ((arr.astype("datetime64[W]") - year_start.astype("datetime64[W]")).astype(int) + 1).astype(int)
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.day_of_week.register(depth=7)
+@DatePart.day_of_week.register
 def _(arr: np.ndarray) -> np.ndarray:
-    return (arr.astype("datetime64[D]").astype(int) + 4) % 7
+    max_value = 7
+    value = (arr.astype("datetime64[D]").astype(int) + 4) % 7
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.week_of_month.register(depth=6)
+@DatePart.week_of_month.register
 def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 6
     month_start = arr.astype("datetime64[M]")
     month_start_dow = (month_start.astype("datetime64[D]").astype(int) + 4) % 7
     day_offset = (arr - month_start).astype("timedelta64[D]").astype(int)
-    return ((day_offset + month_start_dow) // 7) + 1
+    value = ((day_offset + month_start_dow) // 7) + 1
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.hour_of_day.register(depth=24)
+@DatePart.hour_of_day.register
 def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 24
     day_start = arr.astype("datetime64[D]")
-    return (arr - day_start).astype("timedelta64[h]").astype(int)
+    value = (arr - day_start).astype("timedelta64[h]").astype(int)
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
-@DatePart.minute_of_hour.register(depth=60)
+@DatePart.minute_of_hour.register
 def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 60
     hour_start = arr.astype("datetime64[h]")
-    return (arr - hour_start).astype("timedelta64[m]").astype(int)
+    value = (arr - hour_start).astype("timedelta64[m]").astype(int)
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
+
+
+@DatePart.second_of_minute.register
+def _(arr: np.ndarray) -> np.ndarray:
+    max_value = 60
+    minute_start = arr.astype("datetime64[m]")
+    value = (arr - minute_start).astype("timedelta64[s]").astype(int)
+    radians = 2 * np.pi * value / max_value
+    return (np.sin(radians), np.cos(radians))
 
 
 dateparts: Plugin = Plugin(name="dateparts")
@@ -238,7 +261,7 @@ class TensorField(TensorFieldBase):
         data, state = pad(
             nested=values,
             shape=leading_shape,
-            dtype="datetime64[m]",
+            dtype="datetime64[s]",
             pad_value=np.nan,
             overflows=schema.overflows(address),
             address=address,
@@ -259,11 +282,10 @@ class TensorField(TensorFieldBase):
         dateparts: dict[DatePart, torch.Tensor] = {}
 
         for datepart in request.dateparts:
-            dateparts[datepart] = (
-                torch.tensor(datepart(data))
-                .add(other=len(Tokens))
-                .masked_scatter(mask=state != Tokens.valued.value, source=state)
-            )
+            sin, cos = datepart(data)
+            radian_embedding = torch.tensor(np.stack([sin, cos], axis=-1), dtype=torch.float)
+            radian_embedding = radian_embedding.masked_fill(~(state == Tokens.valued.value).unsqueeze(-1), 0.0)
+            dateparts[datepart] = radian_embedding
 
         content: TensorDict[DatePart, torch.Tensor] = TensorDict(dateparts)
 
@@ -287,8 +309,9 @@ class TensorField(TensorFieldBase):
 
         self.state: torch.Tensor = self.state.masked_scatter(selected, mask_token)
 
+        content_mask = selected.unsqueeze(-1)
         for datepart in self.content.keys():
-            self.content[datepart] = self.content[datepart].masked_scatter(selected, mask_token)
+            self.content[datepart] = self.content[datepart].masked_fill(content_mask, 0.0)
 
         if trainable:
             self.trainable |= selected
@@ -312,7 +335,7 @@ class TensorField(TensorFieldBase):
 
         dateparts: dict[DatePart, torch.Tensor] = {}
         for datepart in schema.requests[address].dateparts:
-            dateparts[datepart] = state.clone()
+            dateparts[datepart] = torch.zeros((*shape, 2), dtype=torch.float)
 
         return cls(
             state=state,
@@ -340,10 +363,7 @@ class Embedder(EmbedderBase):
         self.dateparts = torch.nn.ModuleDict()
 
         for datepart in request.dateparts:
-            self.dateparts[datepart] = torch.nn.Embedding(
-                num_embeddings=len(Tokens) + DatePart.depth(datepart) + 1,
-                embedding_dim=schema.d_model,
-            )
+            self.dateparts[datepart] = torch.nn.Linear(in_features=2, out_features=schema.d_model)
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -353,8 +373,8 @@ class Embedder(EmbedderBase):
         embeddings: torch.Tensor = self.embeddings(inputs.state.reshape(D))
 
         for datepart in self.dateparts:
-            embedder: torch.nn.Embedding = self.dateparts[datepart]
-            embeddings += embedder(inputs.content[datepart].reshape(D))
+            projection: torch.nn.Linear = self.dateparts[datepart]
+            embeddings = embeddings + projection(inputs.content[datepart].reshape(D, 2))
 
         return Parcel(
             payload=embeddings.reshape(N, *dims, -1),
@@ -377,8 +397,7 @@ class Decoder(DecoderBase):
         self.dateparts = torch.nn.ModuleDict()
 
         for datepart in schema.requests[address].dateparts:
-            dim = len(Tokens) + DatePart.depth(datepart) + 1
-            self.dateparts[datepart] = torch.nn.Linear(in_features=schema.d_model, out_features=dim)
+            self.dateparts[datepart] = torch.nn.Linear(in_features=schema.d_model, out_features=2)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -428,24 +447,22 @@ def loss(
     losses: list[torch.Tensor] = []
 
     for datepart in request.dateparts:
+        pred_raw: torch.Tensor = prediction.payload[TensorKey.content][datepart].reshape(numel, 2)
+        target: torch.Tensor = batch.targets[TensorKey.content][datepart].reshape(numel, 2)
+
+        pred: torch.Tensor = pred_raw / pred_raw.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        cosine: torch.Tensor = (pred * target).sum(dim=-1)
+
         losses.append(
             module.track(
                 (prediction.address, strata, Metric.loss, TensorKey.content, datepart),
-                value=(
-                    torch.nn.functional.cross_entropy(
-                        input=(inputs := prediction.payload[TensorKey.content][datepart].reshape(numel, -1)),
-                        target=(targets := batch.targets[TensorKey.content][datepart].reshape(numel)),
-                        reduction="none",
-                    )
-                    .masked_select(trainable)
-                    .mean()
-                ),
+                value=(1.0 - cosine).masked_select(trainable).mean(),
             )
         )
 
         module.track(
-            (prediction.address, strata, Metric.accuracy, TensorKey.content, datepart),
-            value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(),
+            (prediction.address, strata, Metric.mae, TensorKey.content, datepart),
+            value=cosine.clamp(min=-1.0, max=1.0).arccos().masked_select(trainable).mean(),
         )
 
     loss += torch.stack(losses).mean()

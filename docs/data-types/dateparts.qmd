@@ -98,10 +98,13 @@ canonical lower-case values.
 When `DateParts` is masked or used as a target, the decoder predicts:
 
 - `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
-- `content`: one categorical distribution for each configured date part.
+- `content`: a `(sin, cos)` pair on the unit circle for each configured date
+  part, treating each part as a continuous angular coordinate at its canonical
+  period.
 
-The loss averages the configured date-part classification losses after the
-state loss.
+The per-datepart loss is the cosine distance between the predicted and target
+unit-circle vectors, and the reported `mae` is the mean absolute angular error
+in radians. The state loss is added to the averaged datepart losses.
 
 ## Prediction Output
 
