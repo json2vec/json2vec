@@ -34,6 +34,19 @@ category: Plugin = Plugin(name="category")
 
 category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
+_NORMALIZE_EPS: float = 1e-12
+
+
+def _default_margin(size: int, d_model: int) -> float:
+    if size < 2:
+        return 0.0
+
+    if size <= d_model + 1:
+        simplex_max = size / (size - 1)
+        return min(0.5, 0.5 * simplex_max)
+
+    return max(0.05, 0.35 * (d_model / size) ** 0.5)
+
 
 @category.register
 class Request(RequestBase):
@@ -47,6 +60,8 @@ class Request(RequestBase):
         pydantic.Field(alias="size", serialization_alias="size", gt=0, default=1024),
     ] = 1024
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
+    scale: Annotated[float, pydantic.Field(gt=0.0, default=30.0)] = 30.0
+    margin: Annotated[float | None, pydantic.Field(ge=0.0, lt=1.0, default=None)] = None
     topk: list[int] | None = None
 
     @property
@@ -224,6 +239,11 @@ class Embedder(EmbedderBase):
         self.origin: Address = address
         self.destination: Address = request.parent.address
         self.size: int = request.size
+        self.margin: float = (
+            float(request.margin)
+            if request.margin is not None
+            else _default_margin(size=request.size, d_model=schema.d_model)
+        )
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=request.size)
 
@@ -245,6 +265,17 @@ class Embedder(EmbedderBase):
                 TensorKey.content.name: Counter(address=address, size=request.size),
             }
         )
+        with torch.no_grad():
+            content_weight = self.embeddings[TensorKey.content.name].weight
+            content_weight.copy_(torch.nn.functional.normalize(content_weight, dim=-1, eps=_NORMALIZE_EPS))
+
+    @property
+    def content_directions(self) -> torch.Tensor:
+        return torch.nn.functional.normalize(self.embeddings[TensorKey.content.name].weight, dim=-1, eps=_NORMALIZE_EPS)
+
+    def content_cosine(self, query: torch.Tensor) -> torch.Tensor:
+        query_hat = torch.nn.functional.normalize(query, dim=-1, eps=_NORMALIZE_EPS)
+        return query_hat @ self.content_directions.T
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -261,7 +292,7 @@ class Embedder(EmbedderBase):
 
         known = valued & content.lt(self.size)
         safe_content = content.masked_fill(~known, 0)
-        content_embedding = self.embeddings[TensorKey.content.name](safe_content) * known.unsqueeze(-1)
+        content_embedding = self.content_directions[safe_content] * known.unsqueeze(-1)
 
         embeddings: torch.Tensor = (self.embeddings[TensorKey.state.name](state) + content_embedding).reshape(
             N, *dims, -1
@@ -284,8 +315,6 @@ class Decoder(DecoderBase):
     def __init__(self, schema: Schema, address: Address):
         super().__init__(schema=schema, address=address)
 
-        request: Request = schema.requests[address]
-
         self.linears = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: torch.nn.Linear(
@@ -294,7 +323,7 @@ class Decoder(DecoderBase):
                 ),
                 TensorKey.content.name: torch.nn.Linear(
                     in_features=schema.d_model,
-                    out_features=request.size,
+                    out_features=schema.d_model,
                 ),
             }
         )
@@ -350,28 +379,40 @@ def loss(
     if not valued.any():
         return loss
 
-    content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
+    request: Request = cast(Request, module.schema.requests[prediction.address])
+    vocab_size: int = embedder.size
+    query = prediction.payload[TensorKey.content].reshape(N, -1)
     content_targets = batch.targets[TensorKey.content].reshape(N)
-    n_content_tokens = content_inputs.shape[-1]
-    invalid = valued & content_targets.gt(n_content_tokens)
+
+    invalid = valued & content_targets.gt(vocab_size)
     if invalid.any():
         raise ValueError(f"Token in address {prediction.address} exceeds vocabulary size")
 
-    known = valued & content_targets.lt(n_content_tokens)
-    unavailable = valued & content_targets.eq(n_content_tokens)
+    known = valued & content_targets.lt(vocab_size)
+    unavailable = valued & content_targets.eq(vocab_size)
 
-    content_loss_sum = content_inputs.new_zeros(())
+    cosine = embedder.content_cosine(query)
+
+    content_loss_sum = query.new_zeros(())
     if known.any():
+        cos_known = cosine[known]
+        tgt_known = content_targets[known]
+
+        one_hot = torch.zeros_like(cos_known)
+        one_hot.scatter_(1, tgt_known.unsqueeze(1), 1.0)
+        logits_known = request.scale * (cos_known - embedder.margin * one_hot)
+
         known_losses = torch.nn.functional.cross_entropy(
-            input=content_inputs[known],
-            target=content_targets[known],
+            input=logits_known,
+            target=tgt_known,
             weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
             reduction="none",
         )
         content_loss_sum = content_loss_sum + known_losses.sum()
 
     if unavailable.any():
-        unavailable_losses = -torch.nn.functional.log_softmax(content_inputs[unavailable], dim=1).mean(dim=1)
+        logits_unavailable = request.scale * cosine[unavailable]
+        unavailable_losses = -torch.nn.functional.log_softmax(logits_unavailable, dim=1).mean(dim=1)
         content_loss_sum = content_loss_sum + unavailable_losses.sum()
 
     content_loss = module.track(
@@ -387,7 +428,7 @@ def loss(
         module.track(
             (prediction.address, strata, Metric.accuracy, f"top{topk}"),
             value=(
-                content_inputs.topk(k=topk, dim=1)
+                cosine.topk(k=topk, dim=1)
                 .indices.eq(content_targets.unsqueeze(1))
                 .any(dim=1)
                 .masked_select(known)
@@ -398,7 +439,7 @@ def loss(
 
     module.track(
         (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=content_inputs.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
+        value=cosine.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
     )
 
     return loss
@@ -407,21 +448,23 @@ def loss(
 @category.register
 def write(module: Model, prediction: Prediction):
     node = module.nodes[prediction.address]
+    request: Request = cast(Request, module.schema.requests[prediction.address])
+    embedder: Embedder = node.embedder
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    content_logits: torch.Tensor = prediction.payload[TensorKey.content]
+    content_query: torch.Tensor = prediction.payload[TensorKey.content]
 
     tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
     state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
     state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
     state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
-    vocab = np.array(node.embedder.vocab.snapshot(), dtype=object)
+    vocab = np.array(embedder.vocab.snapshot(), dtype=object)
     labels = vocab
     content_shape = tuple(state_distribution.shape[:-1])
     content_labels = np.full(content_shape, None, dtype=object)
     content_probabilities = np.zeros(content_shape, dtype=np.float32)
 
-    requested_ks: list[int] = module.schema.requests[prediction.address].topk
+    requested_ks: list[int] = request.topk
     max_requested_k: int = max(requested_ks, default=0)
 
     def _pack_candidates(labels: np.ndarray, probabilities: np.ndarray) -> list[dict[str, float]] | list:
@@ -441,8 +484,10 @@ def write(module: Model, prediction: Prediction):
 
     topk_payload: list | None = _empty_candidates(content_shape)
     if len(vocab) > 0:
-        candidate_indices = torch.arange(len(vocab), device=content_logits.device, dtype=torch.int64)
-        candidate_logits = content_logits.index_select(dim=-1, index=candidate_indices)
+        candidate_indices = torch.arange(len(vocab), device=content_query.device, dtype=torch.int64)
+        directions = embedder.content_directions.index_select(dim=0, index=candidate_indices)
+        query_hat = torch.nn.functional.normalize(content_query, dim=-1, eps=_NORMALIZE_EPS)
+        candidate_logits = request.scale * (query_hat @ directions.T)
         log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
         max_logits, max_indices = candidate_logits.max(dim=-1)
         content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()

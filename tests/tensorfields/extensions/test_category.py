@@ -4,7 +4,7 @@ import polars as pl
 import torch
 from tensordict import TensorDict
 
-from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
 from relflow.tensorfields.extensions.category import (
@@ -200,7 +200,7 @@ def test_category_embedder_and_decoder_use_real_vocab_width():
 
     assert embedder.embeddings[TensorKey.content.name].num_embeddings == request.size
     assert embedder.counters[TensorKey.content.name].size == request.size
-    assert decoder.linears[TensorKey.content.name].out_features == request.size
+    assert decoder.linears[TensorKey.content.name].out_features == structure.d_model
 
 
 def test_category_embedder_zeroes_unavailable_and_non_valued_content_contributions():
@@ -239,39 +239,48 @@ class _DummyVocab:
         return ["ALPHA", "BETA", "GAMMA", "DELTA", "EPS"]
 
 
-class _DummyEmbedder:
-    def __init__(self):
-        self.vocab = _DummyVocab()
+def _dummy_write_module(*, d_model: int = 4, scale: float = 30.0, topk: list[int] | None = None):
+    payload = _structure_payload(topk=topk or [2, 3, 5])
+    payload["d_model"] = d_model
+    payload["fields"]["fields"][0]["fields"][0]["size"] = d_model
+    structure = Schema.model_validate(payload)
+    structure.requests[ADDRESS].scale = scale
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    for token in _DummyVocab().snapshot():
+        embedder.vocab.state.reserve(token, learn=True)
+
+    with torch.no_grad():
+        weight = embedder.embeddings[TensorKey.content.name].weight
+        weight.zero_()
+        for index in range(len(_DummyVocab().snapshot())):
+            weight[index, index] = 1.0
+
+    module = SimpleNamespace(
+        nodes={ADDRESS: SimpleNamespace(embedder=embedder)},
+        schema=structure,
+    )
+    return module, embedder, d_model
 
 
-class _DummyNode:
-    def __init__(self):
-        self.embedder = _DummyEmbedder()
-
-
-class _DummyModule:
-    def __init__(self):
-        self.nodes = {ADDRESS: _DummyNode()}
-        self.schema = SimpleNamespace(requests={ADDRESS: SimpleNamespace(topk=[2, 3, 5, 10], size=8)})
+def _basis_query(shape: tuple[int, ...], index: int, d_model: int) -> torch.Tensor:
+    query = torch.zeros(*shape, d_model)
+    query[..., index] = 1.0
+    return query
 
 
 def test_category_write_emits_state_and_content_payloads():
-    module = _DummyModule()
+    module, _embedder, d_model = _dummy_write_module(d_model=8, topk=[2, 3, 5])
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
     state_logits[1, 0, Tokens.padded.value] = 10.0
-    content_logits = torch.tensor(
-        [
-            [[0.1, 0.9, 0.2, 0.3, 0.4, 0.0, 0.0, 0.0]],
-            [[0.1, 0.2, 0.8, 0.3, 0.4, 0.0, 0.0, 0.0]],
-        ]
-    )
+    content_query = torch.stack([_basis_query((1,), 1, d_model), _basis_query((1,), 2, d_model)], dim=0)
     prediction = Prediction(
         address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
-                TensorKey.content: content_logits,
+                TensorKey.content: content_query,
             },
             batch_size=[2],
         ),
@@ -303,15 +312,15 @@ def test_category_write_emits_state_and_content_payloads():
 
 
 def test_category_write_ignores_logits_beyond_vocabulary_snapshot():
-    module = _DummyModule()
+    module, _embedder, d_model = _dummy_write_module(d_model=8, topk=[2, 3, 5])
+    query = _basis_query((1, 1), 4, d_model)
     state_logits = torch.zeros(1, 1, len(Tokens))
-    content_logits = torch.tensor([[[0.1, 0.2, 0.3, 0.4, 0.5, 0.0, 0.0, 100.0]]])
     prediction = Prediction(
         address=ADDRESS,
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
-                TensorKey.content: content_logits,
+                TensorKey.content: query,
             },
             batch_size=[1],
         ),
@@ -359,7 +368,7 @@ def test_category_loss_does_not_mutate_counters():
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
                 TensorKey.content: torch.zeros(
                     *field.content.shape,
-                    structure.requests[ADDRESS].size,
+                    structure.d_model,
                 ),
             },
             batch_size=field.batch_size,
@@ -406,7 +415,7 @@ def test_category_loss_uses_uniform_target_for_unavailable_content():
         payload=TensorDict(
             {
                 TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
-                TensorKey.content: torch.zeros(*field.content.shape, structure.requests[ADDRESS].size),
+                TensorKey.content: torch.zeros(*field.content.shape, structure.d_model),
             },
             batch_size=field.batch_size,
         ),
@@ -419,3 +428,44 @@ def test_category_loss_uses_uniform_target_for_unavailable_content():
         module.tracked[(ADDRESS, Strata.validate, "vocabulary", "size")],
         torch.tensor(0.0),
     )
+
+
+def test_category_content_loss_stays_finite_and_bounded_for_large_vocabulary():
+    payload = _structure_payload(p_unavailable=0.0)
+    payload["fields"]["fields"][0]["fields"][0]["size"] = 4096
+    structure = Schema.model_validate(payload)
+    d_model = structure.d_model
+    scale = structure.requests[ADDRESS].scale
+    state = _state(size=structure.requests[ADDRESS].size)
+
+    field = TensorField.new(
+        values=[[["ALPHA", "BETA"]], [["GAMMA", "DELTA"]]],
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+        interprocess_encoding_context=state,
+    )
+    field.mask(1.0)
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
+
+    torch.manual_seed(0)
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                TensorKey.content: torch.randn(*field.content.shape, d_model),
+            },
+            batch_size=field.batch_size,
+        ),
+    )
+
+    result = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+
+    assert torch.isfinite(result)
+    tracked_content = module.tracked[(ADDRESS, Strata.train, Metric.loss, TensorKey.content)]
+    assert torch.isfinite(tracked_content)
+    assert tracked_content.item() <= 2.0 * scale + float(torch.log(torch.tensor(4096.0))) + 5.0

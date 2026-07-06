@@ -73,4 +73,6 @@ def test_decoder_mean_pooling_repeats_heritage_mean_for_each_target_slot():
 
     assert isinstance(decoder.pool, MeanPool)
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
-    assert prediction.payload[TensorKey.content].shape == (2, 2, 8)
+    # CosFace: the content head emits a `d_model`-dimensional query rather
+    # than a `size`-wide logit vector.
+    assert prediction.payload[TensorKey.content].shape == (2, 2, schema.d_model)
