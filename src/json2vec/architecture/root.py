@@ -14,6 +14,7 @@ from lightning.pytorch import Callback
 from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
+from torchmetrics import Metric as TorchMetric
 
 from json2vec.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from json2vec.architecture.contracts import ContractScheduler
@@ -61,7 +62,7 @@ class Model(lit.LightningModule, Renderable):
         ```python
         import json2vec as jv
 
-        model = jv.Model.from_tree(
+        model = jv.Model(
             jv.Category("segment", size=32),
             jv.Category("label", target=True, size=4),
             d_model=16,
@@ -92,7 +93,9 @@ class Model(lit.LightningModule, Renderable):
         scheduler: SchedulerConfig | None = None,
         **field_kwargs: TreeFieldInput,
     ) -> Self:
-        """Build a model directly from schema fields.
+        """Compatibility wrapper for constructing a model from tree fields.
+
+        New code should call ``Model(...)`` directly with these same arguments.
 
         Args:
             *field_args: Field constructors such as `Category`, `Number`, or
@@ -115,11 +118,12 @@ class Model(lit.LightningModule, Renderable):
         Returns:
             A compiled `Model` with modules built for the schema.
         """
-        schema = Schema.from_tree(
+        return cls(
             *field_args,
             d_model=d_model,
             n_layers=n_layers,
             n_heads=n_heads,
+            batch_size=batch_size,
             fields=fields,
             name=name,
             description=description,
@@ -127,24 +131,70 @@ class Model(lit.LightningModule, Renderable):
             attention=attention,
             n_linear=n_linear,
             dropout=dropout,
-            **field_kwargs,
-        )
-        return cls(
-            schema=schema,
-            batch_size=batch_size,
             optimizer=optimizer,
             scheduler=scheduler,
+            **field_kwargs,
         )
 
     @beartype
     def __init__(
         self,
-        schema: Schema,
-        *,
+        *field_args: TreeFieldInput | Schema,
+        schema: Schema | None = None,
+        d_model: int | None = None,
+        n_layers: int | None = None,
+        n_heads: int | None = None,
         batch_size: int = 1,
+        fields: Sequence[TreeFieldInput] | None = None,
+        name: str = "record",
+        description: str | None = None,
+        embed: bool = False,
+        attention: AttentionMode | str = AttentionMode.mha,
+        n_linear: int = 1,
+        dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
+        **field_kwargs: Any,
     ):
+        """Build a model from tree fields, or from an existing ``schema``.
+
+        The public constructor accepts the same field and root-architecture
+        options as :meth:`from_tree`. Passing ``schema=...`` is retained for
+        checkpoint loading and lower-level integrations.
+        """
+        if field_args and isinstance(field_args[0], Schema):
+            if len(field_args) != 1 or schema is not None:
+                raise TypeError("a positional Schema cannot be combined with other fields or schema=")
+            schema = field_args[0]
+            field_args = ()
+
+        if schema is not None:
+            if field_args or fields is not None or field_kwargs:
+                raise TypeError("schema cannot be combined with tree fields")
+            if d_model is not None or n_layers is not None or n_heads is not None:
+                raise TypeError("schema cannot be combined with d_model, n_layers, or n_heads")
+        else:
+            required = {"d_model": d_model, "n_layers": n_layers, "n_heads": n_heads}
+            missing = [key for key, value in required.items() if value is None]
+            if missing:
+                names = ", ".join(missing)
+                raise TypeError(f"Model requires {names} when constructed from tree fields")
+
+            schema = Schema.from_tree(
+                *cast(tuple[TreeFieldInput, ...], field_args),
+                d_model=cast(int, d_model),
+                n_layers=cast(int, n_layers),
+                n_heads=cast(int, n_heads),
+                fields=fields,
+                name=name,
+                description=description,
+                embed=embed,
+                attention=attention,
+                n_linear=n_linear,
+                dropout=dropout,
+                **field_kwargs,
+            )
+
         super().__init__()
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0")
@@ -356,7 +406,7 @@ class Model(lit.LightningModule, Renderable):
 
         return callbacks
 
-    def track(self, names: tuple[str, ...], /, value: torch.Tensor) -> torch.Tensor:
+    def track(self, names: tuple[str, ...], /, value: torch.Tensor | TorchMetric) -> torch.Tensor | TorchMetric:
         def groupname(names: tuple[str, ...]) -> str:
             assert len(names) > 1
 
@@ -365,16 +415,17 @@ class Model(lit.LightningModule, Renderable):
 
             return f"{group}/{key}"
 
-        # These metrics are emitted from data-dependent branches, so DDP ranks cannot
-        # safely synchronize every log call as a collective. rank_zero_only keeps
-        # Lightning from running a sync while still marking the metric as handled.
+        # Scalar metrics are emitted from data-dependent branches, so DDP ranks cannot
+        # safely synchronize every scalar log call as a collective. Stateful
+        # TorchMetrics are updated/logged on every rank and can aggregate their state.
+        stateful = isinstance(value, TorchMetric)
         self.log(
             name=groupname(names),
-            value=value.detach(),
+            value=value.detach() if isinstance(value, torch.Tensor) else value,
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            rank_zero_only=True,
+            rank_zero_only=not stateful,
             batch_size=self.batch_size,
         )
 

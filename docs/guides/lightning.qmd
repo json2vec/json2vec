@@ -49,7 +49,7 @@ records = pl.DataFrame(
     }
 )
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,

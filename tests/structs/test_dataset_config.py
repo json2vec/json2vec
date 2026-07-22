@@ -22,7 +22,7 @@ def _schema():
 
 
 def _model():
-    return jv.Model.from_tree(
+    return jv.Model(
         jv.Category("id", size=16),
         d_model=8,
         n_layers=1,

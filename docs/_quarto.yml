@@ -75,6 +75,8 @@ website:
             text: Branch
           - href: data-types/number.qmd
             text: Number
+          - href: data-types/boolean.qmd
+            text: Boolean
           - href: data-types/category.qmd
             text: Category
           - href: data-types/set.qmd

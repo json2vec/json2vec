@@ -818,6 +818,7 @@ dependencies = [
     { name = "rich" },
     { name = "tensordict" },
     { name = "torch" },
+    { name = "torchmetrics" },
 ]
 
 [package.optional-dependencies]
@@ -870,6 +871,7 @@ requires-dist = [
     { name = "rich", specifier = ">=14.0.0" },
     { name = "tensordict", specifier = ">=0.10.0" },
     { name = "torch", specifier = ">=2.7.1" },
+    { name = "torchmetrics", specifier = ">=1.9.0" },
     { name = "transformers", marker = "extra == 'text'", specifier = ">=4.55.0" },
     { name = "uvicorn", marker = "extra == 'serving'", specifier = ">=0.38.0" },
 ]

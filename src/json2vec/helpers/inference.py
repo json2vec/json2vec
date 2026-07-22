@@ -1,6 +1,6 @@
 """Infer a `json2vec` schema directly from sample records.
 
-`Model.from_tree(...)` expects hand-written field constructors. This module
+`Model(...)` expects hand-written field constructors. This module
 derives those constructors from raw data instead, so a dataset can be turned
 into a model without first describing its shape by hand.
 
@@ -15,7 +15,7 @@ Inference has two layers:
    (cardinality, dtype, null rate, list lengths).
 
 The result is a list of field constructors ready to splat into
-``Model.from_tree(*fields, ...)``. Inference is a best-effort starting point:
+``Model(*fields, ...)``. Inference is a best-effort starting point:
 every threshold is tunable, and guesses can be corrected afterwards with
 ``model.update(...)`` / ``model.extend(...)``.
 """
@@ -35,6 +35,7 @@ from typing import Any
 from json2vec.structs.enums import Overflow
 from json2vec.structs.structure import Branch
 from json2vec.structs.tree import Leaf
+from json2vec.tensorfields.extensions.boolean import Request as Boolean
 from json2vec.tensorfields.extensions.category import Request as Category
 from json2vec.tensorfields.extensions.dateparts import Request as DateParts
 from json2vec.tensorfields.extensions.number import Request as Number
@@ -315,10 +316,10 @@ def _decide_scalar(
     # `target=True` is exactly `p_prune=1.0`; set the declared field directly.
     p_prune = 1.0 if column.key in config._targets else 0.0
 
-    # Booleans are categorical with a tiny vocabulary.
+    # Booleans use a fixed, vocabulary-free representation.
     if n_bool and n_bool == observed:
         return _Decision(
-            Category(name=name, query=query, size=2, p_prune=p_prune),
+            Boolean(name=name, query=query, p_prune=p_prune),
             reason=f"boolean column ({observed} values)",
         )
 
@@ -579,7 +580,7 @@ def infer_schema(
 
     Returns:
         A list of :class:`~json2vec.Branch` and leaf request constructors ready
-        to pass to ``Model.from_tree(*fields, ...)``.
+        to pass to ``Model(*fields, ...)``.
 
     Raises:
         ValueError: If no records are provided or no typable fields are found.

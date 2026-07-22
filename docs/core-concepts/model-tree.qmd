@@ -10,7 +10,7 @@ pyproject: |
 
 # Model Tree
 
-The schema you pass to `Model.from_tree(...)` becomes a tree. The generated
+The schema you pass to `Model(...)` becomes a tree. The generated
 root branch encodes one processed observation, nested `Branch(...)` nodes define
 shared child contexts, and leaf tensorfields read values from input records.
 
@@ -25,7 +25,7 @@ Each node has a stable slash-delimited address (`jv.Address`):
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="order",
     d_model=64,
     n_layers=2,
@@ -66,7 +66,7 @@ whether or not the customer returned any of the items.
 
 | Node kind | Created by | Runtime role |
 | --- | --- | --- |
-| Root branch | `Model.from_tree(..., name=...)` | Encodes the whole processed observation. |
+| Root branch | `Model(..., name=...)` | Encodes the whole processed observation. |
 | Branch | `Branch(..., name=..., length=...)` | Defines a child context, optionally applies local attention, and pools the representation to its parent. |
 | Leaf tensorfield | `Number`, `Category`, `Set`, `Vector`, and other tensorfields | Reads source values, stores typed tensors, embeds visible input, and decodes predictions when trained or requested. |
 

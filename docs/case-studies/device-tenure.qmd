@@ -88,7 +88,7 @@ This is a documentation sketch, not a full training script.
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="customer",
     d_model=128,
     n_layers=2,

@@ -40,7 +40,7 @@ inference, and serving.
 ```python
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="order",
     d_model=64,
     n_layers=2,
@@ -91,7 +91,7 @@ import json2vec as jv
 
 records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,

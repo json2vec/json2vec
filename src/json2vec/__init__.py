@@ -1,7 +1,7 @@
 """Public `json2vec` SDK surface.
 
 The top-level package exports the constructors and helpers used by most
-applications: `Model.from_tree(...)` for model construction, tensorfield
+applications: `Model(...)` for model construction, tensorfield
 request constructors such as `Category` and `Number`, data modules, schema
 mutation predicates, and the `@preprocess` decorator.
 """
@@ -55,6 +55,7 @@ from json2vec.structs.experiment import (
 from json2vec.structs.structure import Branch, Mask
 from json2vec.structs.tree import Address, Leaf
 from json2vec.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
+from json2vec.tensorfields.extensions.boolean import Request as Boolean
 from json2vec.tensorfields.extensions.category import Request as Category
 from json2vec.tensorfields.extensions.dateparts import Request as DateParts
 from json2vec.tensorfields.extensions.entity import Request as Entity
@@ -110,6 +111,7 @@ __all__ = [
     "Address",
     "Accelerator",
     "Branch",
+    "Boolean",
     "AttentionMode",
     "Category",
     "Component",

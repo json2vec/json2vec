@@ -57,7 +57,7 @@ def test_names_and_type_labels_have_background_styles() -> None:
         n_layers=1,
         n_heads=4,
     )._repr_html_()
-    model_html = jv.Model.from_tree(
+    model_html = jv.Model(
         jv.Number("amount"),
         jv.Number("label", target=True),
         name="record",
@@ -214,7 +214,7 @@ def test_schema_rich_display_uses_root_schema_tree() -> None:
 
 
 def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         jv.Category("label", target=True, size=2),
         name="record",
@@ -239,7 +239,7 @@ def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
 
 
 def test_model_select_pprint_uses_rich_node_display() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         jv.Category("species", target=True, size=4),
         name="record",
@@ -264,7 +264,7 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
 
 
 def test_tensorfield_rich_display_previews_state_tokens() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Category("letter", size=4, p_unavailable=0.0),
             name="letters",
@@ -290,7 +290,7 @@ def test_tensorfield_rich_display_previews_state_tokens() -> None:
 
 
 def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Branch(
                 jv.Category("letter", size=8, p_unavailable=0.0),

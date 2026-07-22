@@ -4,8 +4,8 @@ import json2vec as jv
 from json2vec.structs.enums import TensorKey
 
 
-def test_model_from_tree_builds_record_branch_and_infers_queries():
-    model = jv.Model.from_tree(
+def test_model_constructor_builds_record_branch_and_infers_queries():
+    model = jv.Model(
         jv.Category(
             "job_code",
             query='[*]."job code"',
@@ -52,9 +52,16 @@ def test_model_from_tree_builds_record_branch_and_infers_queries():
     assert params.target == ["record/label"]
 
 
-def test_model_from_tree_rejects_duplicate_sources():
+def test_model_from_tree_remains_a_compatibility_wrapper():
+    direct = jv.Model(jv.Number("amount"), d_model=16, n_layers=1, n_heads=4)
+    compatible = jv.Model.from_tree(jv.Number("amount"), d_model=16, n_layers=1, n_heads=4)
+
+    assert compatible.schema.model_dump(mode="python") == direct.schema.model_dump(mode="python")
+
+
+def test_model_constructor_rejects_duplicate_sources():
     with pytest.raises(ValueError, match="duplicate schema source field"):
-        jv.Model.from_tree(
+        jv.Model(
             jv.Number("amount"),
             jv.Number("amount"),
             d_model=16,
@@ -63,8 +70,8 @@ def test_model_from_tree_rejects_duplicate_sources():
         )
 
 
-def test_model_from_tree_accepts_branch_nodes_and_infers_nested_queries():
-    model = jv.Model.from_tree(
+def test_model_constructor_accepts_branch_nodes_and_infers_nested_queries():
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             jv.Category(
@@ -105,7 +112,7 @@ def test_branch_mask_shorthand_normalizes_and_exports_public_api():
         length=4,
         mask=policy,
     )
-    model = jv.Model.from_tree(branch, d_model=16, n_layers=1, n_heads=4)
+    model = jv.Model(branch, d_model=16, n_layers=1, n_heads=4)
 
     bound = model.schema.branches["record/transactions"]
     assert bound.masks == [policy]
@@ -129,7 +136,7 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="offset must be less than length=2"):
-        jv.Model.from_tree(
+        jv.Model(
             jv.Branch(
                 jv.Number("amount"),
                 name="transactions",
@@ -142,7 +149,7 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="duplicate mask name"):
-        jv.Model.from_tree(
+        jv.Model(
             jv.Branch(
                 jv.Number("amount"),
                 name="transactions",
@@ -155,7 +162,7 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="excludes every active descendant leaf"):
-        jv.Model.from_tree(
+        jv.Model(
             jv.Branch(
                 jv.Number("amount"),
                 name="transactions",
@@ -168,8 +175,8 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
 
-def test_model_from_tree_accepts_root_branch_options():
-    model = jv.Model.from_tree(
+def test_model_constructor_accepts_root_branch_options():
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=2,
@@ -195,9 +202,9 @@ def test_model_from_tree_accepts_root_branch_options():
     assert params.shapes["events/amount"] == (1,)
 
 
-def test_model_from_tree_rejects_root_length_argument():
+def test_model_constructor_rejects_root_length_argument():
     with pytest.raises(TypeError, match="tree field 'length'"):
-        jv.Model.from_tree(
+        jv.Model(
             jv.Number("amount"),
             d_model=16,
             n_layers=2,
@@ -206,9 +213,9 @@ def test_model_from_tree_rejects_root_length_argument():
         )
 
 
-def test_model_from_tree_rejects_root_branch_mask_options():
+def test_model_constructor_rejects_root_branch_mask_options():
     with pytest.raises(TypeError, match="tree field 'p_mask'"):
-        jv.Model.from_tree(
+        jv.Model(
             jv.Number("amount"),
             d_model=16,
             n_layers=2,
@@ -218,7 +225,7 @@ def test_model_from_tree_rejects_root_branch_mask_options():
 
 
 def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         jv.Category("label", target=True, embed=False),
         d_model=16,
@@ -265,7 +272,7 @@ def test_schema_helper_classmethods_back_public_dsl():
 
 
 def test_schema_select_returns_nodes_and_accepts_boolean_predicates():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         jv.Number("memo", active=False),
         d_model=16,
@@ -290,7 +297,7 @@ def test_schema_select_returns_nodes_and_accepts_boolean_predicates():
 
 
 def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         jv.Number("memo", active=False, p_mask=0.5, embed=True),
         d_model=16,
@@ -315,7 +322,7 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
 
 
 def test_model_update_applies_validated_values_before_rebuilding_modules():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Category("label", size=8, topk=[2]),
         d_model=16,
         n_layers=1,
@@ -335,7 +342,7 @@ def test_model_update_applies_validated_values_before_rebuilding_modules():
 
 
 def test_model_update_uses_current_schema_when_selection_cache_is_stale():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=1,
@@ -358,7 +365,7 @@ def test_model_update_uses_current_schema_when_selection_cache_is_stale():
 
 
 def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modules():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             name="transactions",
@@ -378,7 +385,7 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
 
 
 def test_model_extend_appends_category_field_and_preserves_existing_vocabulary():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Category("label", size=10),
         d_model=16,
         n_layers=1,
@@ -398,7 +405,7 @@ def test_model_extend_appends_category_field_and_preserves_existing_vocabulary()
 
 
 def test_model_extend_defaults_to_root_when_only_one_array_matches():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=1,
@@ -412,7 +419,7 @@ def test_model_extend_defaults_to_root_when_only_one_array_matches():
 
 
 def test_model_delete_removes_nodes_permanently_and_rebuilds_modules():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         jv.Number("risk_score"),
         d_model=16,
@@ -428,7 +435,7 @@ def test_model_delete_removes_nodes_permanently_and_rebuilds_modules():
 
 
 def test_model_delete_rejects_removing_the_final_request():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=1,
@@ -440,7 +447,7 @@ def test_model_delete_rejects_removing_the_final_request():
 
 
 def test_model_reset_reinitializes_runtime_node_without_changing_schema():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=1,
@@ -455,7 +462,7 @@ def test_model_reset_reinitializes_runtime_node_without_changing_schema():
 
 
 def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=1,
@@ -471,7 +478,7 @@ def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
 
 
 def test_model_override_target_restores_original_prune_rate():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number(name="amount", p_prune=0.25),
         d_model=16,
         n_layers=1,
@@ -488,7 +495,7 @@ def test_model_override_target_restores_original_prune_rate():
 
 
 def test_model_mutations_are_blocked_inside_training_loop_lock():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=16,
         n_layers=1,

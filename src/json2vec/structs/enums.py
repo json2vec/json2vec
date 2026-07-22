@@ -66,6 +66,7 @@ class TensorKey(enum.StrEnum):
 
 class Metric(enum.StrEnum):
     accuracy = "accuracy"
+    auc = "auc"
     precision = "precision"
     recall = "recall"
     loss = "loss"

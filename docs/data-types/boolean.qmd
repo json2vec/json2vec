@@ -1,0 +1,62 @@
+---
+marimo-static-output: true
+---
+
+# Boolean
+
+`Boolean` handles `bool | None` values without building or synchronizing a
+vocabulary. It works at any nesting depth represented by the surrounding
+`Branch` nodes.
+
+```python
+import json2vec as jv
+
+model = jv.Model(
+    d_model=16,
+    n_layers=1,
+    n_heads=4,
+    events=jv.Branch(length=8, succeeded=jv.Boolean),
+    converted=jv.Boolean(target=True),
+)
+```
+
+## Representation
+
+Visible content uses a fixed scalar representation:
+
+| Source value | Content |
+| --- | ---: |
+| `False` | `-1` |
+| `True` | `1` |
+| `None` | `0` |
+
+The normal tensorfield state channel distinguishes null, padded, and masked
+values, all of which have zero content. A fixed three-row embedding buffer maps
+the content into the model width. Every dimension of its `False`, zero, and
+`True` rows is `-1`, `0`, and `1`, respectively. The buffer follows the model
+across devices and checkpoints but is not optimized. There is no vocabulary,
+top-k search, or vocabulary synchronization callback.
+
+State and Boolean-class counters track observed training frequencies. Their
+frequency-derived weights balance state cross entropy and Boolean content loss.
+
+Targets use binary cross entropy with logits. Only valued targets contribute to
+the content loss and binary metrics; null, padded, and masked targets contribute
+only to state prediction. Training logs epoch-level content accuracy, precision,
+recall, and AUC using stateful TorchMetrics, in addition to state accuracy and
+the state/content losses.
+
+`threshold` defaults to `0.5` and controls the decision boundary used by
+accuracy, precision, recall, and the Boolean `value` in prediction output. AUC
+continues to use unthresholded probabilities.
+
+Predictions contain the thresholded Boolean value and probability of `True`:
+
+```python
+{
+    "record/converted": {
+        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ..., "other": ...},
+        "content": {"value": ..., "probability": ...},
+    }
+}
+```

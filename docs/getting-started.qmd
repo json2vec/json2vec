@@ -52,7 +52,7 @@ writes the prediction.
 
 ## Build The Model
 
-Use the package root import. `Model.from_tree(...)` turns the field
+Use the package root import. `Model(...)` turns the field
 declarations into a model tree. The root node is named `record` by default.
 
 ```{python .marimo}
@@ -66,7 +66,7 @@ import torch
 
 records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,
@@ -218,7 +218,7 @@ The matching schema gives `measurements` its own repeated context encoder:
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=24,
     n_layers=1,
     n_heads=4,

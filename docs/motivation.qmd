@@ -133,7 +133,7 @@ That lets the model be created directly from the API:
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,

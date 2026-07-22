@@ -27,6 +27,7 @@ query -> validate raw values -> tensorize content/state -> embed visible values
 | Source value | Recommended type | Use a different type when |
 | --- | --- | --- |
 | Continuous scalar | [`Number`](../data-types/number.qmd) | Numeric value is an ID, code, or class label. |
+| Boolean | [`Boolean`](../data-types/boolean.qmd) | The source has more than two labels; use `Category`. |
 | One bounded label | [`Category`](../data-types/category.qmd) | The value is a massive or unstable identifier; keep it as metadata or use `Entity` for local repeated equality. |
 | Zero or more labels | [`Set`](../data-types/set.qmd) | Labels have attributes or order; use `Branch`. |
 | Repeated objects | [`Branch`](../data-types/branch.qmd) | Repetition is only an upstream storage artifact; preprocess or flatten. |
@@ -49,6 +50,7 @@ Same raw value can need different types:
 | Type | Public `Model.predict(...)` content | State probabilities | Notes |
 | --- | --- | --- | --- |
 | `Number` | Yes, scalar value | Yes | Metrics are reported in original value scale. |
+| `Boolean` | Yes, value plus true probability | Yes | Vocabulary-free binary decoding. |
 | `Category` | Yes, best label plus optional top-k candidates | Yes | Unknown bucket is internal only. |
 | `Set` | Yes, per-label probabilities or thresholded labels | Yes | `threshold` can reduce API response size. |
 | `Vector` | Yes, reconstructed vector | Yes | Non-valued predictions return zero-vector content. |

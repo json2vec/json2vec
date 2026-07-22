@@ -208,7 +208,6 @@ class Preprocessor(Processor):
     @classmethod
     def normalize(cls, value: "Preprocessor | None") -> "Preprocessor | None":
         if value is None:
-            logger.bind(component="processor", processor="preprocessor", source="none").debug("no processor configured")
             return None
         if isinstance(value, cls):
             logger.bind(component="processor", processor="preprocessor", source="object", name=value.name).debug(
@@ -290,9 +289,6 @@ class Postprocessor(Processor):
     @classmethod
     def normalize(cls, value: "Postprocessor | None") -> "Postprocessor | None":
         if value is None:
-            logger.bind(component="processor", processor="postprocessor", source="none").debug(
-                "no processor configured"
-            )
             return None
         if isinstance(value, cls):
             logger.bind(component="processor", processor="postprocessor", source="object", name=value.name).debug(

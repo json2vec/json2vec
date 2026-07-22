@@ -12,14 +12,14 @@ import json2vec as jv
 
 The public surface should stay usable from `json2vec` directly: `Model`, `Branch`, built-in tensorfields, data modules, preprocessors, inference writers, deployment helpers, mutation predicates, and extension base classes.
 
-The schema is the architecture. `Model.from_tree(...)` receives field constructors and branch nodes, then builds the root branch, tensorfield embedders, context encoders, decoders, losses, and prediction outputs.
+The schema is the architecture. `Model(...)` receives field constructors and branch nodes, then builds the root branch, tensorfield embedders, context encoders, decoders, losses, and prediction outputs.
 
 ## Common API Patterns
 
 Minimal supervised model:
 
 ```python
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
@@ -32,7 +32,7 @@ model = jv.Model.from_tree(
 Nested repeated context:
 
 ```python
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
@@ -45,12 +45,12 @@ model = jv.Model.from_tree(
 )
 ```
 
-Root branch naming is passed to `Model.from_tree(...)` with `name=...`. The
+Root branch naming is passed to `Model(...)` with `name=...`. The
 generated root branch is always a singleton; use child `Branch(length=...)`
 for repeated data.
 
 ```python
-model = jv.Model.from_tree(
+model = jv.Model(
     name="event",
     d_model=32,
     n_layers=1,
@@ -62,8 +62,8 @@ model = jv.Model.from_tree(
 
 ## Gotchas
 
-- Do not use a public `Struct(...)` constructor. Public examples should use `Model.from_tree(...)` and `Branch(...)`.
-- `Model.from_tree(..., name="customer")` names the generated root branch. Older examples may say `root=...`; update them.
+- Do not use a public `Struct(...)` constructor. Public examples should use `Model(...)` and `Branch(...)`.
+- `Model(..., name="customer")` names the generated root branch. Older examples may say `root=...`; update them.
 - Inferred request queries are written from one processed observation: `[*].amount`, not `[*][*].amount`.
 - `Branch(name="transactions")` makes child default queries like `[*].transactions[*].amount`.
 - `Branch(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root branch uses internal `Overflow.error`.

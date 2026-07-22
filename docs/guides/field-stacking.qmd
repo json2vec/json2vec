@@ -23,7 +23,7 @@ Without stacking, two locations become two separate categorical fields:
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="itinerary",
     d_model=64,
     n_layers=2,
@@ -44,7 +44,7 @@ With stacking, the source fields become repeated values under one schema field:
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="itinerary",
     d_model=64,
     n_layers=2,
@@ -89,7 +89,7 @@ Stacking also works for repeated identity roles.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="payment",
     d_model=64,
     n_layers=2,
@@ -132,7 +132,7 @@ def stack_parties(record: dict) -> dict:
     }
 
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="payment",
     d_model=64,
     n_layers=2,
@@ -164,7 +164,7 @@ Stacking can represent state changes:
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="profile_change",
     d_model=32,
     n_layers=1,

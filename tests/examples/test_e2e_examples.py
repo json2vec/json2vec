@@ -45,7 +45,8 @@ def test_quarto_docs_use_current_public_api_style() -> None:
     root = _repo_root()
     sources = "\n".join(path.read_text() for path in sorted((root / "docs").rglob("*.qmd")))
 
-    assert "jv.Model.from_tree(" in sources
+    assert "jv.Model(" in sources
+    assert "jv.Model.from_tree(" not in sources
     assert "jv.Branch(" in sources
     assert "Struct(" not in sources
     assert not re.search(r"Model\.from_tree\([^)]*\broot\s*=", sources, re.DOTALL)

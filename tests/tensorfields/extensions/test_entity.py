@@ -165,7 +165,7 @@ def test_entity_mask_preserves_targets_before_replacement():
 
 
 def test_entity_embedder_accepts_independent_observation_local_ids():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(jv.Entity("id"), name="items", length=2),
         d_model=8,
         n_layers=1,
@@ -196,7 +196,7 @@ def test_entity_embedder_accepts_independent_observation_local_ids():
 
 
 def test_entity_training_loss_consumes_decoder_slot_logits_directly():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(jv.Entity("id"), name="items", length=3),
         d_model=8,
         n_layers=1,

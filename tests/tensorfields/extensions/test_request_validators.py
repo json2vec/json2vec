@@ -72,6 +72,19 @@ def test_set_threshold_rejects_values_above_one():
         Schema.model_validate(payload)
 
 
+def test_boolean_threshold_rejects_values_above_one():
+    payload = _structure_with_field(
+        {
+            "name": "enabled",
+            "type": "boolean",
+            "query": "[*].enabled",
+            "threshold": 1.1,
+        }
+    )
+    with pytest.raises(ValueError, match="less than or equal to 1"):
+        Schema.model_validate(payload)
+
+
 def test_dateparts_dateparts_reject_duplicates():
     payload = _structure_with_field(
         {

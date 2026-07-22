@@ -13,7 +13,7 @@ from json2vec.tensorfields.base import TENSORFIELDS
 
 
 def _model(*fields: jv.SchemaField) -> jv.Model:
-    return jv.Model.from_tree(
+    return jv.Model(
         *fields,
         d_model=8,
         n_layers=1,

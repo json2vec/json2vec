@@ -1039,7 +1039,7 @@ This means that the control flow is the same for pretraining and finetuning. The
 import json2vec as jv
 
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=128,
     n_layers=4,
     n_heads=4,
@@ -1053,7 +1053,7 @@ model.update(jv.where("type") == "category", p_mask=0.05)
 ```
 
 ```python
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=128,
     n_layers=4,
     n_heads=4,

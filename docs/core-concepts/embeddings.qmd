@@ -43,7 +43,7 @@ For recency windows or row-level masking inside branches, use
 
 ## Root Embeddings
 
-Set `embed=True` on `Model.from_tree(...)` to emit one representation for the
+Set `embed=True` on `Model(...)` to emit one representation for the
 whole record.
 
 ```{python .marimo}
@@ -52,7 +52,7 @@ whole record.
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="transaction",
     d_model=64,
     n_layers=2,
@@ -86,7 +86,7 @@ Set `embed=True` on a `Branch` to emit a representation for a repeated context.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="customer",
     d_model=128,
     n_layers=2,
@@ -130,7 +130,7 @@ semantic meaning and you want a representation at that address.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="customer",
     d_model=64,
     n_layers=2,
@@ -171,7 +171,7 @@ import json2vec as jv
 
 records = pl.read_ndjson("docs/data/digits.jsonl").head(24)
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="digit",
     d_model=24,
     n_layers=1,
@@ -230,7 +230,7 @@ reconstruction tasks because both use the same typed decoder path.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="transaction",
     d_model=64,
     n_layers=2,

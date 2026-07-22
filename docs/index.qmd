@@ -62,7 +62,7 @@ change the source keys read from each input record.
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,

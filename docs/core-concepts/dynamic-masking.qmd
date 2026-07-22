@@ -42,7 +42,7 @@ Attach `jv.Mask(...)` to a `Branch(...)` with `mask=` or `masks=`:
 
 import json2vec as jv
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="customer",
     d_model=64,
     n_layers=2,
@@ -169,7 +169,7 @@ def words(rng: random.Random) -> list[dict[str, list[dict[str, str]]]]:
 rng = random.Random(7)
 data = [{"words": words(rng)} for _ in range(5)]
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,

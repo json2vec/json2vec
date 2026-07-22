@@ -7,7 +7,7 @@ from json2vec.structs.enums import Strata, TensorKey, Tokens
 
 
 def test_branch_mask_count_targets_recent_real_slots_and_excludes_padding():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             name="items",
@@ -35,7 +35,7 @@ def test_branch_mask_count_targets_recent_real_slots_and_excludes_padding():
 
 
 def test_model_encode_mask_flag_applies_and_skips_branch_masks():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             name="items",
@@ -67,7 +67,7 @@ def test_model_encode_mask_flag_applies_and_skips_branch_masks():
 
 
 def test_branch_mask_exclude_predicate_skips_matching_leaf():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             jv.Category("code", size=8),
@@ -93,7 +93,7 @@ def test_branch_mask_exclude_predicate_skips_matching_leaf():
 
 
 def test_mask_literal_is_predict_only_and_does_not_enter_vocabulary():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Category("code", size=8),
         d_model=8,
         n_layers=1,
@@ -116,7 +116,7 @@ def test_mask_literal_is_predict_only_and_does_not_enter_vocabulary():
 
 
 def test_inferred_marks_only_masked_predict_slots():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Category("letter", size=8, p_unavailable=0.0),
             name="letters",
@@ -148,7 +148,7 @@ def test_inferred_marks_only_masked_predict_slots():
 
 
 def test_mask_literal_can_mask_whole_structured_leaf_but_not_leaf_items():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Vector("embedding", n_dim=2),
         d_model=8,
         n_layers=1,

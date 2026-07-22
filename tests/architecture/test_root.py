@@ -42,6 +42,26 @@ def _schema() -> Schema:
     )
 
 
+def test_model_accepts_schema_positionally_and_by_keyword() -> None:
+    schema = _schema()
+
+    positional = Model(schema)
+    keyword = Model(schema=schema)
+
+    assert positional.schema is schema
+    assert keyword.schema is schema
+
+
+def test_model_rejects_schema_combined_with_tree_configuration() -> None:
+    with pytest.raises(TypeError, match="schema cannot be combined"):
+        Model(schema=_schema(), d_model=8)
+
+
+def test_model_tree_constructor_requires_architecture_options() -> None:
+    with pytest.raises(TypeError, match="requires n_layers, n_heads"):
+        Model(jv.Number("amount"), d_model=8)
+
+
 def test_on_save_checkpoint_serializes_schema() -> None:
     schema = _schema()
     model = Model(schema=schema, batch_size=2)
@@ -667,7 +687,7 @@ def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
 
 
 def test_encode_branch_tail_overflow_keeps_last_values() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             name="events",
@@ -696,7 +716,7 @@ def test_encode_branch_tail_overflow_keeps_last_values() -> None:
 
 
 def test_encode_branch_error_overflow_raises() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Branch(
             jv.Number("amount"),
             name="events",
@@ -723,7 +743,7 @@ def test_encode_branch_error_overflow_raises() -> None:
 
 
 def test_encode_allows_null_inputs_by_default() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         amount=jv.Number,
         d_model=8,
         n_layers=1,
@@ -738,7 +758,7 @@ def test_encode_allows_null_inputs_by_default() -> None:
 
 
 def test_encode_nullable_false_rejects_null_inputs() -> None:
-    model = jv.Model.from_tree(
+    model = jv.Model(
         amount=jv.Number(nullable=False),
         d_model=8,
         n_layers=1,

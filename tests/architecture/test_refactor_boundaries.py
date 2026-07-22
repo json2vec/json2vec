@@ -12,7 +12,7 @@ from json2vec.structs import experiment, selectors
 
 
 def _model() -> jv.Model:
-    return jv.Model.from_tree(
+    return jv.Model(
         jv.Number(name="amount"),
         jv.Category(name="label", target=True, size=4),
         d_model=8,

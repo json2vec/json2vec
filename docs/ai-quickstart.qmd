@@ -28,7 +28,7 @@ Top-level records use field names directly. `json2vec` infers request queries fr
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
@@ -54,7 +54,7 @@ Use `Branch` to group fields that share a repeated context, such as line items.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
@@ -98,7 +98,7 @@ repeated coordinate instead of independent leaf value.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
@@ -126,7 +126,7 @@ The generated root branch is named `record` by default. Override it with `name=.
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     name="event",
     d_model=32,
     n_layers=1,
@@ -153,7 +153,7 @@ import torch
 
 records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,
@@ -218,7 +218,7 @@ Use `query=...` when the source shape is stable but does not match the schema na
 #| echo: true
 #| output: true
 
-model = jv.Model.from_tree(
+model = jv.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
@@ -298,7 +298,7 @@ Use `model=...` for an already constructed model during local setup, or
 ## Rules For Agents
 
 - Prefer `import json2vec as jv`.
-- Prefer `Model.from_tree(...)` and top-level exports.
+- Prefer `Model(...)` and top-level exports.
 - Use `name=...` to name the generated root context.
 - Set `size` on categorical fields where necessary.
 - Only put `Entity` under repeated contexts.

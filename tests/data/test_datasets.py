@@ -39,7 +39,7 @@ def _datamodule_schema():
 
 
 def _datamodule_model(batch_size: int = 2):
-    return jv.Model.from_tree(
+    return jv.Model(
         jv.Category("id", size=16),
         d_model=8,
         n_layers=1,
@@ -715,7 +715,7 @@ def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
 
 
 def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp_path: Path):
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=8,
         n_layers=1,
@@ -729,7 +729,7 @@ def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp
         train=re.compile(r".*\.ndjson$"),
         num_workers=0,
     )
-    restored = jv.Model.from_tree(
+    restored = jv.Model(
         jv.Number("risk_score"),
         d_model=8,
         n_layers=1,
@@ -832,7 +832,7 @@ def test_custom_datamodule_accepts_partial_dataset_mapping_until_loader_requeste
 
 
 def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=8,
         n_layers=1,
@@ -844,7 +844,7 @@ def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
         train=RecordsDataset([{"amount": 1.0, "risk_score": 2.0}]),
         num_workers=0,
     )
-    restored = jv.Model.from_tree(
+    restored = jv.Model(
         jv.Number("risk_score"),
         d_model=8,
         n_layers=1,
@@ -939,7 +939,7 @@ def test_polars_datamodule_accepts_named_splits():
 
 
 def test_polars_datamodule_refreshes_context_after_model_reset():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Category("code", size=16),
         d_model=8,
         n_layers=1,
@@ -963,7 +963,7 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
 
 
 def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Category("code", size=16),
         d_model=8,
         n_layers=1,
@@ -997,7 +997,7 @@ def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
 
 
 def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
-    model = jv.Model.from_tree(
+    model = jv.Model(
         jv.Number("amount"),
         d_model=8,
         n_layers=1,
@@ -1009,7 +1009,7 @@ def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
         train=pl.DataFrame({"amount": [1.0], "risk_score": [2.0]}),
         num_workers=0,
     )
-    restored = jv.Model.from_tree(
+    restored = jv.Model(
         jv.Number("risk_score"),
         d_model=8,
         n_layers=1,

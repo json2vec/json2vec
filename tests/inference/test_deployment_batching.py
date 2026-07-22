@@ -93,7 +93,7 @@ def test_fastapi_batcher_submit_many_splits_large_payload_by_max_batch_size():
 
 
 def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
-    model = Model.from_tree(
+    model = Model(
         Number(name="amount"),
         d_model=8,
         n_layers=1,
@@ -292,7 +292,7 @@ def test_fastapi_runtime_decode_validates_pydantic_request_model():
 
 def test_fastapi_runtime_setup_can_enable_query_monitor():
     runtime = deployment_module.FastAPIRuntime(
-        checkpoint=Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
+        checkpoint=Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
         accelerator=deployment_module.Accelerator.cpu,
         monitor_queries=True,
         query_monitor_every=7,
@@ -401,14 +401,14 @@ def test_deployment_launcher_configures_worker_import_string(monkeypatch):
 
 
 def test_deployment_launcher_rejects_workers_with_model_instance():
-    model = Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
 
     with pytest.raises(ValueError, match="workers > 1"):
         Deployment(model=model, workers=2).serve()
 
 
 def test_deployment_launcher_accepts_model_instance(monkeypatch):
-    model = Model.from_tree(
+    model = Model(
         Number(name="amount"),
         d_model=8,
         n_layers=1,
@@ -432,7 +432,7 @@ def test_deployment_launcher_accepts_model_instance(monkeypatch):
 
 
 def test_deployment_rejects_explicit_checkpoint_and_model():
-    model = Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
 
     with pytest.raises(ValueError, match="pass either checkpoint or model"):
         Deployment(checkpoint="model.ckpt", model=model)
@@ -482,7 +482,7 @@ def test_fastapi_runtime_setup_applies_queued_update_operations(monkeypatch):
 
 
 def test_fastapi_runtime_setup_uses_model_instance(monkeypatch):
-    model = Model.from_tree(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    model = Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
     monkeypatch.setattr(
         deployment_module.Model,
         "load",

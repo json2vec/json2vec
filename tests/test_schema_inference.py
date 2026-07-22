@@ -68,10 +68,9 @@ def test_id_named_int_becomes_category():
     assert fields["zip_code"].type == "category"
 
 
-def test_boolean_column_becomes_binary_category():
+def test_boolean_column_becomes_boolean():
     fields = _by_name(infer_schema([{"flag": True}, {"flag": False}, {"flag": True}]))
-    assert fields["flag"].type == "category"
-    assert fields["flag"].size == 2
+    assert fields["flag"].type == "boolean"
 
 
 def test_iso_date_column_becomes_dateparts():
@@ -108,7 +107,7 @@ def test_numpy_scalar_types_are_recognized():
     fields = _by_name(infer_schema(records))
     assert fields["i"].type == "category"  # low-cardinality integer
     assert fields["f"].type == "number"
-    assert fields["b"].type == "category" and fields["b"].size == 2
+    assert fields["b"].type == "boolean"
 
 
 def test_iso_datetime_with_time_adds_hour_part():
@@ -303,7 +302,7 @@ def test_inferred_schema_builds_a_working_model():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         fields = jv.helpers.infer_schema(records, target="returned")
-        model = jv.Model.from_tree(
+        model = jv.Model(
             *fields,
             d_model=16,
             n_layers=1,
