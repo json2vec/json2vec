@@ -37,7 +37,7 @@ Data modules use the same core ideas:
 | `persistent_workers` | Keeps worker processes alive between epochs when workers are enabled. |
 | `pin_memory` | Enables dataloader pinning when useful for accelerator transfer. |
 | `sample_rate` | Samples observations before batching. |
-| `observation_buffer_size` | Local shuffle buffer for processed observations. |
+| `observation_buffer_size` | Approximate per-rank shuffle-buffer budget for processed observations, divided across local workers. |
 | `chunk_batch_size` | Read chunk size for Polars and streaming sources. This is separate from `model.batch_size`. |
 
 Most execution options accept either one value or a mapping keyed by
@@ -280,7 +280,7 @@ needs to be fine-grained and record-order locality is not important.
 | --- | --- |
 | `file_buffer_size` | Shuffles file order before reading. |
 | `chunk_batch_size` | Read chunk size and chunk ownership unit. |
-| `observation_buffer_size` | Shuffles processed observations before batching. |
+| `observation_buffer_size` | Approximate per-rank shuffle budget, divided across local workers, for processed observations. |
 
 When `replacement=None`, training uses replacement sampling and non-training
 splits do not. Set `replacement` explicitly when you need different behavior.

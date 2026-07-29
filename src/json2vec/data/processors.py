@@ -179,17 +179,17 @@ class Processor:
             formatted = ", ".join(repr(name) for name in missing)
             raise ValueError(f"{self.kind} '{self.name}' requires unbound parameter(s): {formatted}")
 
-        logger.bind(component="processor", processor=self.kind, name=self.name).debug("validated processor bindings")
+        # logger.bind(component="processor", processor=self.kind, name=self.name).debug("validated processor bindings")
 
     def _call(self, primary: Any, runtime_values: Mapping[str, Any]) -> Any:
         self.validate_ready()
         supplied = {name: runtime_values[name] for name in self.runtime_params if name in runtime_values}
-        logger.bind(
-            component="processor",
-            processor=self.kind,
-            name=self.name,
-            providers=sorted(supplied),
-        ).debug("resolved processor providers")
+        # logger.bind(
+        #     component="processor",
+        #     processor=self.kind,
+        #     name=self.name,
+        #     providers=sorted(supplied),
+        # ).debug("resolved processor providers")
         return self.func(primary, **dict(self.bound_params), **supplied)
 
     def __call__(self, primary: Any, **runtime_values: Any) -> Any:

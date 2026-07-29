@@ -22,6 +22,7 @@ from json2vec.data.datasets.base import (
     RawObservation,
     SampleRate,
     StrataMap,
+    _worker_buffer_size,
     identity,
     share_interprocess_encoding_context,
 )
@@ -108,6 +109,7 @@ class CustomBatchDataset(IterableDataset):
             if hasattr(field_context, "configure_distributed"):
                 field_context.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
 
+        observation_buffer_size = _worker_buffer_size(self.observation_buffer_size)
         yield from (
             Pipeline(
                 schema=self.schema,
@@ -122,7 +124,7 @@ class CustomBatchDataset(IterableDataset):
             | observe_dataset
             | process
             | sample
-            | partial(shuffle, size=self.observation_buffer_size)
+            | partial(shuffle, size=observation_buffer_size)
             | batch
             | transform
             | mask

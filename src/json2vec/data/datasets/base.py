@@ -97,6 +97,16 @@ def _worker_identity(global_rank: int | None = None, world_size: int | None = No
     return (global_rank * worker_count) + worker_info.id, max(1, world_size) * worker_count
 
 
+def _worker_buffer_size(size: int) -> int:
+    """Divide an approximate per-rank buffer budget across local DataLoader workers."""
+    worker_info = get_worker_info()
+    if worker_info is None:
+        return size
+
+    worker_count = max(1, worker_info.num_workers)
+    return max(1, (size + worker_count - 1) // worker_count)
+
+
 def _is_assigned_to_worker(shard_key: str, worker_id: int, num_workers: int) -> bool:
     if num_workers <= 1:
         return True

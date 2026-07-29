@@ -86,6 +86,31 @@ def test_worker_identity_combines_rank_and_dataloader_worker(monkeypatch: pytest
     assert _worker_identity(global_rank=1, world_size=3) == (6, 12)
 
 
+def test_worker_buffer_size_is_unchanged_without_dataloader_workers(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(base, "get_worker_info", lambda: None)
+
+    assert base._worker_buffer_size(100_000) == 100_000
+
+
+@pytest.mark.parametrize(
+    ("size", "num_workers", "expected"),
+    [
+        (100_000, 16, 6_250),
+        (10, 4, 3),
+        (4, 16, 1),
+    ],
+)
+def test_worker_buffer_size_divides_budget_across_dataloader_workers(
+    monkeypatch: pytest.MonkeyPatch,
+    size: int,
+    num_workers: int,
+    expected: int,
+):
+    monkeypatch.setattr(base, "get_worker_info", lambda: SimpleNamespace(id=0, num_workers=num_workers))
+
+    assert base._worker_buffer_size(size) == expected
+
+
 def test_pipeline_binds_matching_arguments():
     def source():
         yield from range(5)
@@ -865,12 +890,20 @@ def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
 
 
 def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+
+    def shuffle(pipe, size, strata):
+        seen["observation_buffer_size"] = size
+        yield from pipe
+
     def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
     def mask(pipe, schema):
         yield from pipe
 
+    monkeypatch.setattr(custom, "_worker_buffer_size", lambda size: 3)
+    monkeypatch.setattr(custom, "shuffle", shuffle)
     monkeypatch.setattr(custom, "transform", transform)
     monkeypatch.setattr(custom, "mask", mask)
 
@@ -881,7 +914,7 @@ def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest
         interprocess_encoding_context={},
         batch_size=2,
         strata=Strata.train,
-        observation_buffer_size=1,
+        observation_buffer_size=10,
         sample_rate=1.0,
     )
 
@@ -889,6 +922,7 @@ def test_custom_batch_dataset_reads_records_through_pipeline(monkeypatch: pytest
         [[{"id": 1}], [{"id": 2}]],
         [[{"id": 3}]],
     ]
+    assert seen["observation_buffer_size"] == 3
 
 
 def test_polars_datamodule_accepts_dataframe_and_loader_configuration_per_strata():
@@ -1076,12 +1110,20 @@ def test_polars_datamodule_passes_replacement_to_dataset():
 
 
 def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch: pytest.MonkeyPatch):
+    seen = {}
+
+    def shuffle(pipe, size, strata):
+        seen["observation_buffer_size"] = size
+        yield from pipe
+
     def transform(pipe, schema, strata, interprocess_encoding_context):
         yield from pipe
 
     def mask(pipe, schema):
         yield from pipe
 
+    monkeypatch.setattr(polars, "_worker_buffer_size", lambda size: 3)
+    monkeypatch.setattr(polars, "shuffle", shuffle)
     monkeypatch.setattr(polars, "transform", transform)
     monkeypatch.setattr(polars, "mask", mask)
 
@@ -1094,7 +1136,7 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
         strata=Strata.train,
         sharding=ShardingStrategy.chunk,
         chunk_batch_size=2,
-        observation_buffer_size=1,
+        observation_buffer_size=10,
         sample_rate=1.0,
     )
 
@@ -1102,6 +1144,7 @@ def test_polars_batch_dataset_reads_dataframe_rows_through_pipeline(monkeypatch:
         [[{"id": 1}], [{"id": 2}]],
         [[{"id": 3}]],
     ]
+    assert seen["observation_buffer_size"] == 3
 
 
 def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.MonkeyPatch):
@@ -1117,6 +1160,10 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
         seen["sample_rate"] = sample_rate
         yield from pipe
 
+    def shuffle(pipe, size, strata):
+        seen["observation_buffer_size"] = size
+        yield from pipe
+
     def batch(pipe, batch_size):
         yield list(pipe)
 
@@ -1129,9 +1176,11 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
     monkeypatch.setattr(streaming, "observe", observe)
     monkeypatch.setattr(streaming, "process", process)
     monkeypatch.setattr(streaming, "sample", sample)
+    monkeypatch.setattr(streaming, "shuffle", shuffle)
     monkeypatch.setattr(streaming, "batch", batch)
     monkeypatch.setattr(streaming, "transform", transform)
     monkeypatch.setattr(streaming, "mask", mask)
+    monkeypatch.setattr(streaming, "_worker_buffer_size", lambda size: 3)
 
     batch_dataset = BatchDataset(
         schema=SimpleNamespace(requests={}),
@@ -1145,12 +1194,13 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
         sharding=ShardingStrategy.chunk,
         chunk_batch_size=1,
         file_buffer_size=1,
-        observation_buffer_size=1,
+        observation_buffer_size=10,
         sample_rate=0.25,
     )
 
     assert list(batch_dataset) == [[[{"id": 1}]]]
     assert seen["sample_rate"] == 0.25
+    assert seen["observation_buffer_size"] == 3
 
 
 def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPatch):
