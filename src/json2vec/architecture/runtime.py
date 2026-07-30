@@ -162,8 +162,11 @@ class ModelRuntime:
             extension: Plugin = TENSORFIELDS[request.type]
             loss_fn = cast(Callable[..., torch.Tensor], getattr(extension, "loss"))
 
-            loss: torch.Tensor = loss_fn(module=module, prediction=prediction, batch=batch[address], strata=strata)
-            losses.append(loss * torch.tensor(request.weight))
+            leaf_losses: list[torch.Tensor] = loss_fn(
+                module=module, prediction=prediction, batch=batch[address], strata=strata
+            )
+            weighted_losses = [loss * torch.tensor(request.weight) for loss in leaf_losses]
+            losses.extend(weighted_losses)
             addresses.append(address)
 
         if len(losses) == 0:

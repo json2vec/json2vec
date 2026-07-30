@@ -399,7 +399,7 @@ def test_category_loss_uses_uniform_target_for_unavailable_content():
         ),
     )
 
-    result = loss(module=module, prediction=prediction, batch=field, strata=Strata.validate)
+    result = torch.stack(loss(module=module, prediction=prediction, batch=field, strata=Strata.validate)).sum()
 
     assert torch.isfinite(result)
     assert torch.allclose(

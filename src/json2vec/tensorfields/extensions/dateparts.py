@@ -419,22 +419,26 @@ def loss(
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
-) -> torch.Tensor:
+) -> list[torch.Tensor]:
+    losses: list[torch.Tensor] = []
+
     numel: int = batch.targets[TensorKey.state].numel()
 
     trainable = batch.trainable.reshape(numel)
 
-    loss: torch.Tensor = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=(inputs := prediction.payload[TensorKey.state].reshape(numel, -1)),
-                target=(targets := batch.targets[TensorKey.state].reshape(numel)),
-                reduction="none",
-            )
-            .masked_select(mask=trainable)
-            .mean()
-        ),
+    losses.append(
+        module.track(
+            (prediction.address, strata, Metric.loss, TensorKey.state),
+            value=(
+                torch.nn.functional.cross_entropy(
+                    input=(inputs := prediction.payload[TensorKey.state].reshape(numel, -1)),
+                    target=(targets := batch.targets[TensorKey.state].reshape(numel)),
+                    reduction="none",
+                )
+                .masked_select(mask=trainable)
+                .mean()
+            ),
+        )
     )
 
     module.track(
@@ -443,8 +447,6 @@ def loss(
     )
 
     request: RequestBase = module.schema.requests[prediction.address]
-
-    losses: list[torch.Tensor] = []
 
     for datepart in request.dateparts:
         pred_raw: torch.Tensor = prediction.payload[TensorKey.content][datepart].reshape(numel, 2)
@@ -465,9 +467,7 @@ def loss(
             value=cosine.clamp(min=-1.0, max=1.0).arccos().masked_select(trainable).mean(),
         )
 
-    loss += torch.stack(losses).mean()
-
-    return loss
+    return losses
 
 
 @dateparts.register

@@ -14,9 +14,9 @@ from lightning.pytorch import Callback, strategies
 from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
-from torchmetrics import Metric as TorchMetric
 from torchjd.aggregation import UPGrad
 from torchjd.autojac import Incidence, build_incidence, jac_to_grad, jd_backward
+from torchmetrics import Metric as TorchMetric
 
 from json2vec.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from json2vec.architecture.contracts import ContractScheduler

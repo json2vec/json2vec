@@ -131,7 +131,7 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
     )
 
     module = _DummyModule(structure)
-    output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+    output = torch.stack(loss(module=module, prediction=prediction, batch=field, strata=Strata.train)).sum()
     assert torch.isclose(output, torch.tensor(expected, dtype=output.dtype))
 
 

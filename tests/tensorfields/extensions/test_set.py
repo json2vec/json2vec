@@ -258,7 +258,7 @@ def test_set_loss_does_not_mutate_counter():
         ),
     )
 
-    result = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+    result = torch.stack(loss(module=module, prediction=prediction, batch=field, strata=Strata.train)).sum()
 
     expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
     assert torch.equal(embedder.counters[TensorKey.state.name].counts, expected_state_counts)

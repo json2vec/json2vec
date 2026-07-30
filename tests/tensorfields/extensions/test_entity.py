@@ -247,4 +247,4 @@ def test_entity_training_loss_consumes_decoder_slot_logits_directly(monkeypatch)
     assert content.shape[-1] == 3
     assert content[..., 0].numel() == field.content.numel()
     output = model.training_step(inputs, batch_idx=0)
-    assert torch.isfinite(output["loss"])
+    assert torch.all(torch.isfinite(output["loss"]))

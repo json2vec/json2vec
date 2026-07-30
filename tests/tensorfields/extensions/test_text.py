@@ -353,7 +353,7 @@ def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch
     )
 
     module = _DummyModule(structure, embedder, decoder)
-    output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+    output = torch.stack(loss(module=module, prediction=prediction, batch=field, strata=Strata.train)).sum()
     assert torch.isclose(output, torch.tensor(expected, dtype=output.dtype), atol=1e-3)
 
 

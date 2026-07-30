@@ -140,7 +140,7 @@ def test_boolean_loss_tracks_binary_torchmetrics():
         ),
     )
 
-    result = loss(module, prediction, field, Strata.train)
+    result = torch.stack(loss(module, prediction, field, Strata.train)).sum()
 
     assert torch.isfinite(result)
     assert torch.equal(
@@ -236,7 +236,7 @@ def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_
         ),
     )
 
-    result = loss(module, prediction, field, Strata.train)
+    result = torch.stack(loss(module, prediction, field, Strata.train)).sum()
 
     assert torch.isfinite(result)
     assert (ADDRESS, Strata.train, Metric.loss, TensorKey.content) not in module.tracked

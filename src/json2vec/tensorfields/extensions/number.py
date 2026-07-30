@@ -443,7 +443,7 @@ def loss(
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
-) -> torch.Tensor:
+) -> list[torch.Tensor]:
     address: Address = prediction.address
     request: Request = module.schema.requests[prediction.address]
 
@@ -455,7 +455,7 @@ def loss(
     trainable: torch.Tensor = batch.trainable.reshape(N)
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
-    loss: torch.Tensor = module.track(
+    state_loss: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
@@ -469,11 +469,15 @@ def loss(
         ),
     )
 
+    valued = trainable & state_targets.eq(Tokens.valued.value)
+    if not valued.any():
+        return [state_loss]
+
     target: torch.Tensor = batch.targets[TensorKey.content].reshape(N)
     inputs: torch.Tensor = prediction.payload[TensorKey.content].reshape(N)
     diff: torch.Tensor = inputs.subtract(target)
 
-    loss += module.track(
+    content_loss = module.track(
         (address, strata, Metric.loss, TensorKey.content),
         value=request.objective.loss(
             input=diff / normalizer.var.sqrt().clamp_min(normalizer.epsilon),
@@ -494,7 +498,7 @@ def loss(
         value=diff.square().masked_select(trainable).float().mean().sqrt(),
     )
 
-    return loss
+    return [state_loss, content_loss]
 
 
 @number.register

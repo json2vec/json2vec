@@ -208,14 +208,14 @@ class Decoder(DecoderBase):
 
 
 @boolean.register
-def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: Strata) -> torch.Tensor:
+def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: Strata) -> list[torch.Tensor]:
     address = prediction.address
     embedder: Embedder = module.nodes[address].embedder
     trainable = batch.trainable.reshape(-1)
     state_targets = batch.targets[TensorKey.state].reshape(-1)
     state_logits = prediction.payload[TensorKey.state].reshape(state_targets.numel(), -1)
 
-    total = module.track(
+    state_loss = module.track(
         (address, strata, Metric.loss, TensorKey.state),
         value=torch.nn.functional.cross_entropy(
             state_logits[trainable],
@@ -236,11 +236,11 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
         # batch has no valued targets. The metrics remain unchanged here.
         for metric_name, metric in metrics.items():
             module.track((address, strata, metric_name, TensorKey.content), value=metric)
-        return total
+        return [state_loss]
 
     logits = prediction.payload[TensorKey.content].reshape(-1)[valued]
     targets = batch.targets[TensorKey.content].reshape(-1)[valued].gt(0).long()
-    total += module.track(
+    content_loss = module.track(
         (address, strata, Metric.loss, TensorKey.content),
         value=(
             torch.nn.functional.binary_cross_entropy_with_logits(logits, targets.float(), reduction="none")
@@ -252,7 +252,7 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
     for metric_name, metric in metrics.items():
         metric.update(probabilities, targets)
         module.track((address, strata, metric_name, TensorKey.content), value=metric)
-    return total
+    return [state_loss, content_loss]
 
 
 @boolean.register

@@ -314,7 +314,7 @@ def loss(
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
-) -> torch.Tensor:
+) -> list[torch.Tensor]:
     embedder: Embedder = module.nodes[prediction.address].embedder
     N: int = batch.targets[TensorKey.state].numel()
     trainable = batch.trainable.reshape(N)
@@ -322,7 +322,7 @@ def loss(
     state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
-    loss: torch.Tensor = module.track(
+    state_loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
@@ -347,7 +347,7 @@ def loss(
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
-        return loss
+        return [state_loss]
 
     content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
     content_targets = batch.targets[TensorKey.content].reshape(N)
@@ -377,10 +377,9 @@ def loss(
         (prediction.address, strata, Metric.loss, TensorKey.content),
         value=content_loss_sum / valued.float().sum().clamp_min(1.0),
     )
-    loss += content_loss
 
     if not known.any():
-        return loss
+        return [state_loss]
 
     for topk in module.schema.requests[prediction.address].topk:
         module.track(
@@ -400,7 +399,7 @@ def loss(
         value=content_inputs.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
     )
 
-    return loss
+    return [state_loss, content_loss]
 
 
 @category.register

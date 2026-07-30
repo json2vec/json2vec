@@ -1098,7 +1098,7 @@ def test_training_step_with_multi_loss_produces_finite_weighted_gradients(monkey
 
     loss_vec = output["loss"]
     assert loss_vec.ndim == 1
-    assert loss_vec.shape[0] == 2
+    assert loss_vec.shape[0] == 2 * 2
     assert torch.isfinite(loss_vec).all()
 
     assert len(captured_weights) == 1
@@ -1257,7 +1257,7 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
     model = Model(schema=_multi_loss_schema(), batch_size=2)
     model.on_fit_start()
     baseline = model.training_step(_multi_loss_batch(model), 0)
-    assert baseline["loss"].shape[0] == 2
+    assert baseline["loss"].shape[0] == 2 * 2
 
     model.extend(
         j2v.where("name") == "root",
@@ -1276,7 +1276,7 @@ def test_training_step_after_schema_extend_includes_new_field_loss(monkeypatch) 
     model.on_fit_start()
     output = model.training_step(inputs, 0)
 
-    assert output["loss"].shape[0] == baseline["loss"].shape[0] + 1
+    assert output["loss"].shape[0] == baseline["loss"].shape[0] + 2
     assert torch.isfinite(output["loss"]).all()
 
     vehicle_grads = [

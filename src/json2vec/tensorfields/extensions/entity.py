@@ -270,13 +270,13 @@ def loss(
     prediction: Prediction,
     batch: TensorFieldBase,
     strata: Strata,
-) -> torch.Tensor:
+) -> list[torch.Tensor]:
     N: int = batch.targets[TensorKey.state].numel()
     trainable = batch.trainable.reshape(N)
     state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
-    loss: torch.Tensor = module.track(
+    state_loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
@@ -296,7 +296,7 @@ def loss(
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
-        return loss
+        return [state_loss]
 
     inputs = prediction.payload[TensorKey.content].reshape(N, -1)
     targets = batch.targets[TensorKey.content].reshape(N)
@@ -305,7 +305,7 @@ def loss(
     if invalid.any():
         raise ValueError(f"Token in address {prediction.address} exceeds entity slot count")
 
-    loss += module.track(
+    content_loss = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),
         value=(
             torch.nn.functional.cross_entropy(
@@ -339,7 +339,7 @@ def loss(
         value=inputs.argmax(dim=1).eq(targets).masked_select(valued).float().mean(),
     )
 
-    return loss
+    return [state_loss, content_loss]
 
 
 @entity.register
