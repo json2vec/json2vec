@@ -71,6 +71,8 @@ categorical content is unavailable.
 | --- | --- | --- |
 | `size` | `1024` | Maximum number of real labels in the learned vocabulary. Must be positive. There is no extra unavailable class. |
 | `p_unavailable` | `0.01` | Probability of replacing each known valued label with unavailable content during training. Must be between `0` and `1`. |
+| `scale` | `30.0` | Positive multiplier applied to cosine similarities before the content loss and prediction softmax. |
+| `margin` | `None` | CosFace margin applied to the correct category during training. `None` selects a margin from `size` and `d_model`; an explicit value must be at least `0` and less than `1`. |
 | `topk` | `[]` | Optional top-k accuracy values and prediction candidates. Values are deduplicated and sorted; each must be a positive integer other than `1` and less than `size`. |
 
 Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
@@ -124,6 +126,54 @@ embedding returned by `embed=True`; see
 `p_unavailable` simulates the same valued-but-content-unavailable condition for
 known labels during training. It does not create a new state or teach the model
 to emit an unavailable class.
+
+## Hypersphere Decoder
+
+The content decoder emits a `d_model`-dimensional query rather than one
+independent logit per category. The query and category embeddings are
+normalized, and their cosine similarities become the class scores:
+
+$$
+\operatorname{logit}_j
+=
+\operatorname{scale}
+\left(
+\widehat{q}^{\mathsf T}\widehat{w}_j
+\right).
+$$
+
+The same category directions therefore serve two roles: they encode visible
+input labels and act as output-class prototypes. This ties input and output
+category semantics without making the decoder width depend on `size`.
+
+For an available target, training uses a CosFace-style objective. The configured
+`margin` is subtracted from the correct category's cosine similarity before
+cross entropy. A larger margin asks the decoder to separate the correct
+direction more strongly from competing directions. `scale` controls the
+sharpness of the resulting softmax.
+
+The default `margin=None` adapts the margin to vocabulary capacity and model
+dimension. It resolves to `0` for a one-label capacity, `0.5` when
+`2 <= size <= d_model + 1`, and otherwise
+`max(0.05, 0.35 * sqrt(d_model / size))`. Set an explicit margin when
+comparing experiments that must keep that geometry fixed. Setting `margin=0.0`
+removes the CosFace margin while retaining cosine classification.
+
+Training compares each valued query with all `size` category directions,
+including directions whose vocabulary slots have not been populated yet. This
+keeps the classifier shape and denominator stable while the online vocabulary
+expands. Prediction restricts candidates and probability normalization to the
+labels that have actually entered the vocabulary.
+
+An unavailable target has no category direction of its own. Its content loss
+instead encourages a uniform distribution over category directions, teaching
+the decoder not to align strongly with an arbitrary known label. Unavailable
+targets are excluded from top-1 and top-k content accuracy.
+
+Because content directions have unit norm, training also reports
+`embedding:valued_state_norm`. This makes it possible to monitor whether the
+shared `valued` state vector is becoming much larger than the category
+direction added to it.
 
 ## Loss And Metrics
 

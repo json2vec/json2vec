@@ -188,6 +188,14 @@ device appears multiple times inside one observation and one Entity leaf. Use
 `Category` for bounded labels that should have a persistent vocabulary across
 training and prediction.
 
+`Category` content embeddings are learned directions on a unit hypersphere.
+An available valued input adds its category direction to the learned `valued`
+state embedding. Unavailable content and non-valued states add zero content,
+while retaining their appropriate state embedding. The same directions are
+used as output-class prototypes for cosine decoding. See
+[`Category`](../data-types/category.qmd#state-content-and-encoder-input) for
+the full representation and unavailable-value behavior.
+
 ## An Unsupervised Schema
 
 This sketch has no label. The model learns by reconstructing masked values,

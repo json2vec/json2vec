@@ -34,7 +34,8 @@ category: Plugin = Plugin(name="category")
 
 category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
-_NORMALIZE_EPS: float = 1e-12
+# Smaller clamps can overflow zero-query CosFace gradients in float16 at the default scale.
+_NORMALIZE_EPS: float = 1e-3
 
 
 def _default_margin(size: int, d_model: int) -> float:
@@ -269,13 +270,14 @@ class Embedder(EmbedderBase):
             content_weight = self.embeddings[TensorKey.content.name].weight
             content_weight.copy_(torch.nn.functional.normalize(content_weight, dim=-1, eps=_NORMALIZE_EPS))
 
-    @property
-    def content_directions(self) -> torch.Tensor:
-        return torch.nn.functional.normalize(self.embeddings[TensorKey.content.name].weight, dim=-1, eps=_NORMALIZE_EPS)
+    def content_directions(self, indices: torch.Tensor | None = None) -> torch.Tensor:
+        embedding = self.embeddings[TensorKey.content.name]
+        content = embedding.weight if indices is None else embedding(indices)
+        return torch.nn.functional.normalize(content, dim=-1, eps=_NORMALIZE_EPS)
 
-    def content_cosine(self, query: torch.Tensor) -> torch.Tensor:
+    def content_cosine(self, query: torch.Tensor, indices: torch.Tensor | None = None) -> torch.Tensor:
         query_hat = torch.nn.functional.normalize(query, dim=-1, eps=_NORMALIZE_EPS)
-        return query_hat @ self.content_directions.T
+        return query_hat @ self.content_directions(indices).T
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -287,12 +289,12 @@ class Embedder(EmbedderBase):
         content = inputs.content.reshape(-1)
         valued = state.eq(Tokens.valued.value)
 
-        if valued.any() and (content.masked_select(valued) > self.size).any().item():
+        if (content.masked_select(valued) > self.size).any().item():
             raise ValueError(f"Token in address {self.origin} exceeds vocabulary size of {self.size}")
 
-        known = valued & content.lt(self.size)
-        safe_content = content.masked_fill(~known, 0)
-        content_embedding = self.content_directions[safe_content] * known.unsqueeze(-1)
+        available = valued & content.lt(self.size)
+        safe_content = content.masked_fill(~available, 0)
+        content_embedding = self.content_directions(safe_content) * available.unsqueeze(-1)
 
         embeddings: torch.Tensor = (self.embeddings[TensorKey.state.name](state) + content_embedding).reshape(
             N, *dims, -1
@@ -351,28 +353,32 @@ def loss(
 
     state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
     state_targets = batch.targets[TensorKey.state].reshape(N)
+    trainable_state_inputs = state_inputs[trainable]
+    trainable_state_targets = state_targets[trainable]
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=state_inputs,
-                target=state_targets,
-                weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
-                reduction="none",
-            )
-            .masked_select(trainable)
-            .mean()
-        ),
+        value=torch.nn.functional.cross_entropy(
+            input=trainable_state_inputs,
+            target=trainable_state_targets,
+            weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
+            reduction="none",
+        ).mean(),
     )
 
     module.track(
         (prediction.address, strata, Metric.accuracy, TensorKey.state),
-        value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
+        value=trainable_state_inputs.argmax(dim=1).eq(trainable_state_targets).float().mean(),
     )
     module.track(
         (prediction.address, strata, "vocabulary", "size"),
         value=state_inputs.new_tensor(len(embedder.vocab.snapshot()), dtype=torch.float32),
+    )
+    with torch.no_grad():
+        valued_state_norm = embedder.embeddings[TensorKey.state.name].weight[Tokens.valued.value].norm()
+    module.track(
+        (prediction.address, strata, "embedding", "valued_state_norm"),
+        value=valued_state_norm,
     )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
@@ -383,63 +389,61 @@ def loss(
     vocab_size: int = embedder.size
     query = prediction.payload[TensorKey.content].reshape(N, -1)
     content_targets = batch.targets[TensorKey.content].reshape(N)
+    valued_query = query[valued]
+    valued_targets = content_targets[valued]
 
-    invalid = valued & content_targets.gt(vocab_size)
-    if invalid.any():
+    if valued_targets.gt(vocab_size).any():
         raise ValueError(f"Token in address {prediction.address} exceeds vocabulary size")
 
-    known = valued & content_targets.lt(vocab_size)
-    unavailable = valued & content_targets.eq(vocab_size)
+    available = valued_targets.lt(vocab_size)
+    unavailable = valued_targets.eq(vocab_size)
 
-    cosine = embedder.content_cosine(query)
+    cosine = embedder.content_cosine(valued_query)
+    cos_available = cosine[available]
+    tgt_available = valued_targets[available]
 
     content_loss_sum = query.new_zeros(())
-    if known.any():
-        cos_known = cosine[known]
-        tgt_known = content_targets[known]
-
-        one_hot = torch.zeros_like(cos_known)
-        one_hot.scatter_(1, tgt_known.unsqueeze(1), 1.0)
-        logits_known = request.scale * (cos_known - embedder.margin * one_hot)
-
-        known_losses = torch.nn.functional.cross_entropy(
-            input=logits_known,
-            target=tgt_known,
-            weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
-            reduction="none",
+    logits_available = request.scale * cos_available
+    if embedder.margin > 0.0:
+        margin = logits_available.new_full(
+            (tgt_available.shape[0], 1),
+            -request.scale * embedder.margin,
         )
-        content_loss_sum = content_loss_sum + known_losses.sum()
+        logits_available.scatter_add_(1, tgt_available.unsqueeze(1), margin)
 
-    if unavailable.any():
-        logits_unavailable = request.scale * cosine[unavailable]
-        unavailable_losses = -torch.nn.functional.log_softmax(logits_unavailable, dim=1).mean(dim=1)
-        content_loss_sum = content_loss_sum + unavailable_losses.sum()
+    available_losses = torch.nn.functional.cross_entropy(
+        input=logits_available,
+        target=tgt_available,
+        weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
+        reduction="none",
+    )
+    content_loss_sum = content_loss_sum + available_losses.sum()
+
+    logits_unavailable = request.scale * cosine[unavailable]
+    unavailable_losses = -torch.nn.functional.log_softmax(logits_unavailable, dim=1).mean(dim=1)
+    content_loss_sum = content_loss_sum + unavailable_losses.sum()
 
     content_loss = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),
-        value=content_loss_sum / valued.float().sum().clamp_min(1.0),
+        value=content_loss_sum / valued_targets.numel(),
     )
     loss += content_loss
 
-    if not known.any():
+    if tgt_available.numel() == 0:
         return loss
 
-    for topk in module.schema.requests[prediction.address].topk:
+    requested_ks: list[int] = request.topk
+    top_indices = cos_available.topk(k=max(requested_ks), dim=1).indices if requested_ks else None
+    for topk in requested_ks:
+        assert top_indices is not None
         module.track(
             (prediction.address, strata, Metric.accuracy, f"top{topk}"),
-            value=(
-                cosine.topk(k=topk, dim=1)
-                .indices.eq(content_targets.unsqueeze(1))
-                .any(dim=1)
-                .masked_select(known)
-                .float()
-                .mean()
-            ),
+            value=(top_indices[:, :topk].eq(tgt_available.unsqueeze(1)).any(dim=1).float().mean()),
         )
 
     module.track(
         (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=cosine.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
+        value=cos_available.argmax(dim=1).eq(tgt_available).float().mean(),
     )
 
     return loss
@@ -485,9 +489,7 @@ def write(module: Model, prediction: Prediction):
     topk_payload: list | None = _empty_candidates(content_shape)
     if len(vocab) > 0:
         candidate_indices = torch.arange(len(vocab), device=content_query.device, dtype=torch.int64)
-        directions = embedder.content_directions.index_select(dim=0, index=candidate_indices)
-        query_hat = torch.nn.functional.normalize(content_query, dim=-1, eps=_NORMALIZE_EPS)
-        candidate_logits = request.scale * (query_hat @ directions.T)
+        candidate_logits = request.scale * embedder.content_cosine(content_query, indices=candidate_indices)
         log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
         max_logits, max_indices = candidate_logits.max(dim=-1)
         content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()

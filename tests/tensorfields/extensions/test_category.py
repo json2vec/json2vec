@@ -234,6 +234,97 @@ def test_category_embedder_zeroes_unavailable_and_non_valued_content_contributio
     assert torch.allclose(output, expected)
 
 
+def test_category_embedder_only_adds_content_for_available_valued_tokens():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    unavailable = structure.requests[ADDRESS].size
+    field = TensorField(
+        state=torch.tensor(
+            [
+                [
+                    Tokens.valued.value,
+                    Tokens.valued.value,
+                    Tokens.null.value,
+                    Tokens.padded.value,
+                    Tokens.masked.value,
+                    Tokens.other.value,
+                ]
+            ],
+            dtype=torch.int64,
+        ),
+        content=torch.tensor([[2, unavailable, 3, 4, 5, 6]], dtype=torch.int64),
+        trainable=torch.zeros((1, 6), dtype=torch.bool),
+        targets=TensorDict({}),
+        batch_size=1,
+    )
+
+    output = embedder(field).payload
+    state_embedding = embedder.embeddings[TensorKey.state.name](field.state)
+    content_contribution = output - state_embedding
+    expected = torch.zeros_like(content_contribution)
+    expected[0, 0] = torch.nn.functional.normalize(
+        embedder.embeddings[TensorKey.content.name].weight[2],
+        dim=-1,
+    )
+
+    assert torch.allclose(content_contribution, expected, atol=1e-6)
+    assert torch.allclose(content_contribution[0, 0].norm(), torch.tensor(1.0))
+
+    output.sum().backward()
+    content_gradient = embedder.embeddings[TensorKey.content.name].weight.grad
+    state_gradient = embedder.embeddings[TensorKey.state.name].weight.grad
+    assert content_gradient is not None
+    assert state_gradient is not None
+    assert content_gradient[2].abs().sum() > 0
+    assert torch.count_nonzero(content_gradient[:2]) == 0
+    assert torch.count_nonzero(content_gradient[3:]) == 0
+    assert torch.all(state_gradient.abs().sum(dim=-1) > 0)
+
+
+def test_category_embedder_normalizes_looked_up_rows_instead_of_full_table(monkeypatch):
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    field = TensorField(
+        state=torch.tensor([[Tokens.valued.value, Tokens.null.value]], dtype=torch.int64),
+        content=torch.tensor([[1, 0]], dtype=torch.int64),
+        trainable=torch.zeros((1, 2), dtype=torch.bool),
+        targets=TensorDict({}),
+        batch_size=1,
+    )
+    normalized_shapes: list[tuple[int, ...]] = []
+    normalize = torch.nn.functional.normalize
+
+    def track_normalize(inputs: torch.Tensor, *args, **kwargs):
+        normalized_shapes.append(tuple(inputs.shape))
+        return normalize(inputs, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "normalize", track_normalize)
+
+    embedder(field)
+
+    assert normalized_shapes == [(field.content.numel(), structure.d_model)]
+
+
+def test_category_cosface_is_finite_for_zero_float16_query_and_gradient():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS).half()
+    query = torch.zeros(2, structure.d_model, dtype=torch.float16, requires_grad=True)
+
+    cosine = embedder.content_cosine(query)
+    targets = torch.tensor([0, 1])
+    one_hot = torch.nn.functional.one_hot(targets, num_classes=embedder.size)
+    logits = structure.requests[ADDRESS].scale * (cosine - embedder.margin * one_hot)
+    content_loss = torch.nn.functional.cross_entropy(logits, targets)
+    content_loss.backward()
+
+    assert torch.isfinite(cosine).all()
+    assert torch.count_nonzero(cosine) == 0
+    assert query.grad is not None
+    assert torch.isfinite(query.grad).all()
+    assert embedder.embeddings[TensorKey.content.name].weight.grad is not None
+    assert torch.isfinite(embedder.embeddings[TensorKey.content.name].weight.grad).all()
+
+
 class _DummyVocab:
     def snapshot(self) -> list[str]:
         return ["ALPHA", "BETA", "GAMMA", "DELTA", "EPS"]
@@ -427,6 +518,168 @@ def test_category_loss_uses_uniform_target_for_unavailable_content():
     assert torch.allclose(
         module.tracked[(ADDRESS, Strata.validate, "vocabulary", "size")],
         torch.tensor(0.0),
+    )
+    assert torch.allclose(
+        module.tracked[(ADDRESS, Strata.validate, Metric.loss, TensorKey.content)],
+        torch.log(torch.tensor(float(structure.requests[ADDRESS].size))),
+    )
+
+
+def test_category_loss_scores_only_valued_targets_and_matches_cosface_reference(monkeypatch):
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    state = _state(size=structure.requests[ADDRESS].size)
+    field = TensorField.new(
+        values=[[["ALPHA", None]], [["BETA"]]],
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+        interprocess_encoding_context=state,
+    )
+    field.mask(1.0)
+    valued = field.trainable & field.targets[TensorKey.state].eq(Tokens.valued.value)
+    valued_indices = valued.reshape(-1).nonzero().flatten()
+    field.targets[TensorKey.content].reshape(-1)[valued_indices[-1]] = structure.requests[ADDRESS].size
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
+    torch.manual_seed(0)
+    content_query = torch.randn(*field.content.shape, structure.d_model, requires_grad=True)
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                TensorKey.content: content_query,
+            },
+            batch_size=field.batch_size,
+        ),
+    )
+
+    state_targets = field.targets[TensorKey.state]
+    valued = field.trainable & state_targets.eq(Tokens.valued.value)
+    valued_query = content_query[valued]
+    valued_targets = field.targets[TensorKey.content][valued]
+    cosine = embedder.content_cosine(valued_query)
+    available = valued_targets.lt(structure.requests[ADDRESS].size)
+    unavailable = valued_targets.eq(structure.requests[ADDRESS].size)
+    cos_available = cosine[available]
+    tgt_available = valued_targets[available]
+    one_hot = torch.nn.functional.one_hot(
+        tgt_available,
+        num_classes=structure.requests[ADDRESS].size,
+    )
+    reference_logits = structure.requests[ADDRESS].scale * (cos_available - embedder.margin * one_hot)
+    reference_available_loss = torch.nn.functional.cross_entropy(
+        input=reference_logits,
+        target=tgt_available,
+        weight=embedder.counters[TensorKey.content.name].weight,
+        reduction="none",
+    ).sum()
+    reference_unavailable_loss = (
+        -torch.nn.functional.log_softmax(
+            structure.requests[ADDRESS].scale * cosine[unavailable],
+            dim=1,
+        )
+        .mean(dim=1)
+        .sum()
+    )
+    reference_loss = (reference_available_loss + reference_unavailable_loss) / valued_targets.numel()
+    reference_query_gradient, reference_weight_gradient = torch.autograd.grad(
+        reference_loss,
+        (
+            content_query,
+            embedder.embeddings[TensorKey.content.name].weight,
+        ),
+        retain_graph=True,
+    )
+
+    query_shapes: list[tuple[int, ...]] = []
+    content_cosine = embedder.content_cosine
+
+    def track_content_cosine(query: torch.Tensor, indices: torch.Tensor | None = None):
+        query_shapes.append(tuple(query.shape))
+        return content_cosine(query=query, indices=indices)
+
+    monkeypatch.setattr(embedder, "content_cosine", track_content_cosine)
+
+    loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+    optimized_loss = module.tracked[(ADDRESS, Strata.train, Metric.loss, TensorKey.content)]
+    optimized_query_gradient, optimized_weight_gradient = torch.autograd.grad(
+        optimized_loss,
+        (
+            content_query,
+            embedder.embeddings[TensorKey.content.name].weight,
+        ),
+    )
+
+    assert query_shapes == [(int(valued.sum()), structure.d_model)]
+    assert torch.allclose(optimized_loss, reference_loss)
+    assert torch.allclose(optimized_query_gradient, reference_query_gradient)
+    assert torch.allclose(optimized_weight_gradient, reference_weight_gradient)
+    assert torch.count_nonzero(optimized_query_gradient[~valued]) == 0
+    assert torch.allclose(
+        module.tracked[(ADDRESS, Strata.train, "embedding", "valued_state_norm")],
+        embedder.embeddings[TensorKey.state.name].weight[Tokens.valued.value].norm(),
+    )
+
+
+def test_category_loss_reuses_nested_rankings_and_excludes_unavailable_from_metrics():
+    payload = _structure_payload(topk=[2, 3], p_unavailable=0.0)
+    payload["d_model"] = 8
+    structure = Schema.model_validate(payload)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
+    unavailable = structure.requests[ADDRESS].size
+    with torch.no_grad():
+        embedder.embeddings[TensorKey.content.name].weight.copy_(torch.eye(8))
+
+    field = TensorField(
+        state=torch.full((1, 3), Tokens.masked.value, dtype=torch.int64),
+        content=torch.zeros((1, 3), dtype=torch.int64),
+        trainable=torch.ones((1, 3), dtype=torch.bool),
+        targets=TensorDict(
+            {
+                TensorKey.state: torch.full((1, 3), Tokens.valued.value, dtype=torch.int64),
+                TensorKey.content: torch.tensor([[0, 1, unavailable]], dtype=torch.int64),
+            }
+        ),
+        batch_size=1,
+    )
+    content_query = torch.tensor(
+        [
+            [
+                [0.3, 0.9, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        ]
+    )
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(1, 3, len(Tokens)),
+                TensorKey.content: content_query,
+            },
+            batch_size=1,
+        ),
+    )
+
+    loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+
+    assert torch.allclose(
+        module.tracked[(ADDRESS, Strata.train, Metric.accuracy, TensorKey.content)],
+        torch.tensor(0.5),
+    )
+    assert torch.allclose(
+        module.tracked[(ADDRESS, Strata.train, Metric.accuracy, "top2")],
+        torch.tensor(0.5),
+    )
+    assert torch.allclose(
+        module.tracked[(ADDRESS, Strata.train, Metric.accuracy, "top3")],
+        torch.tensor(1.0),
     )
 
 
