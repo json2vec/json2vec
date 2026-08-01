@@ -99,14 +99,6 @@ class Processor:
         object.__setattr__(self, "user_params", frozenset(user_params))
         object.__setattr__(self, "name", _processor_name(self.func))
         self._validate_bound_params()
-        logger.bind(
-            component="processor",
-            processor=self.kind,
-            name=self.name,
-            decorated=self.decorated,
-            user_params=sorted(user_params),
-            runtime_params=sorted(runtime_params),
-        ).debug("normalized processor signature")
 
     def _classify_signature(self, signature: inspect.Signature) -> tuple[set[str], set[str]]:
         parameters = list(signature.parameters.values())

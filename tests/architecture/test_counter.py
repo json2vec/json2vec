@@ -130,6 +130,31 @@ def test_counter_update_callback_syncs_counters_in_deterministic_order(monkeypat
     assert calls == ["root/a/content", "root/a/state", "root/z/counter"]
 
 
+def test_counter_update_callback_finishes_epoch_metrics_before_distributed_sync(monkeypatch):
+    events = []
+    counter = Counter(address=Address("root/value"), size=2)
+    module = SimpleNamespace(
+        nodes={
+            Address("root", "value"): SimpleNamespace(
+                embedder=SimpleNamespace(counter=counter),
+            ),
+        }
+    )
+
+    class TrainerStub:
+        @property
+        def callback_metrics(self):
+            events.append("metrics")
+            return {}
+
+    monkeypatch.setattr("json2vec.tensorfields.shared.counter.is_distributed", lambda: True)
+    monkeypatch.setattr(Counter, "sync", lambda self: events.append("counter"))
+
+    CounterUpdateCallback().on_train_epoch_end(trainer=TrainerStub(), pl_module=module)
+
+    assert events == ["metrics", "counter"]
+
+
 def test_counter_str_exposes_details():
     counter = Counter(address=Address("details"), size=3)
     counter.counts.copy_(torch.tensor([4, 2, 1], dtype=torch.int64))

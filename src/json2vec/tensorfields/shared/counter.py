@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from lightning.pytorch import Callback
 
-from json2vec.distributed import all_reduce_sum
+from json2vec.distributed import all_reduce_sum, is_distributed, synchronize_epoch_metrics
 from json2vec.structs.enums import TensorKey, Tokens
 from json2vec.structs.tree import Address
 
@@ -178,6 +178,9 @@ class CounterUpdateCallback(Callback):
             for name, item in counter_map.items():
                 if isinstance(item, Counter):
                     resources[(address, str(name))] = item
+
+        if resources and is_distributed():
+            synchronize_epoch_metrics(trainer)
 
         for _, counter in sorted(resources.items(), key=lambda item: (str(item[0][0]), item[0][1])):
             counter.sync()

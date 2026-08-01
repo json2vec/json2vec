@@ -13,7 +13,13 @@ from lightning.pytorch import Callback, Trainer
 from loguru import logger
 
 from json2vec.data.nested import MASK_LITERAL
-from json2vec.distributed import all_gather_object, broadcast_object, is_distributed, is_rank_zero
+from json2vec.distributed import (
+    all_gather_object,
+    broadcast_object,
+    is_distributed,
+    is_rank_zero,
+    synchronize_epoch_metrics,
+)
 from json2vec.structs.tree import Address
 
 if TYPE_CHECKING:
@@ -378,6 +384,9 @@ def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -
     resources = OnlineVocabularyModel.from_model(pl_module)
     if not resources:
         return
+
+    if reason == "train_epoch_end":
+        synchronize_epoch_metrics(trainer)
 
     local_proposals = {address: vocab.drain_proposals() for address, vocab in resources.items()}
     gathered = all_gather_object(local_proposals)

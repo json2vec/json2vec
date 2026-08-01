@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
+
+if TYPE_CHECKING:
+    from lightning.pytorch import Trainer
 
 
 def is_distributed() -> bool:
@@ -26,6 +29,17 @@ def world_size() -> int:
 
 def is_rank_zero() -> bool:
     return rank() == 0
+
+
+def synchronize_epoch_metrics(trainer: Trainer) -> None:
+    """Finish Lightning's pending epoch-metric collectives on every rank.
+
+    Rank-zero-only callbacks such as progress bars can request epoch metrics
+    before other ranks do.  Accessing ``callback_metrics`` from a callback that
+    runs on every rank lets those ranks join the same TorchMetrics collectives
+    before JSON2Vec starts a different collective sequence.
+    """
+    _ = trainer.callback_metrics
 
 
 def all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
