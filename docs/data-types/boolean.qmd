@@ -4,9 +4,12 @@ marimo-static-output: true
 
 # Boolean
 
-`Boolean` handles `bool | None` values without building or synchronizing a
-vocabulary. It works at any nesting depth represented by the surrounding
-`Branch` nodes.
+**Example status — excerpt:** schema and payload blocks isolate Boolean behavior;
+use [Getting Started](../getting-started.qmd) for a tested lifecycle.
+
+Use `Boolean` for a true/false scalar or target. It has no learned vocabulary,
+so it is preferable to `Category(size=2)` when the source contract is genuinely
+Boolean.
 
 ```python
 import json2vec as jv
@@ -20,43 +23,94 @@ model = jv.Model(
 )
 ```
 
-## Representation
+Use `Category` if the source has labels such as `"yes"`, `"no"`, and
+`"unknown"`, or if more than two valued outcomes are meaningful. Do not use a
+Boolean content value to encode missingness; `None` already has a separate
+state.
+
+## Input Values And Representation
+
+`Boolean` accepts Python or NumPy Boolean scalars and `None`. Other scalar types,
+including integers and strings, are rejected. A missing repeated branch slot has
+state `padded`.
 
 Visible content uses a fixed scalar representation:
 
-| Source value | Content |
-| --- | ---: |
-| `False` | `-1` |
-| `True` | `1` |
-| `None` | `0` |
+| Source value | State | Content |
+| --- | --- | ---: |
+| `False` | `valued` | `-1` |
+| `True` | `valued` | `1` |
+| `None` | `null` | `0` |
 
-The normal tensorfield state channel distinguishes null, padded, and masked
-values, all of which have zero content. A fixed three-row embedding buffer maps
-the content into the model width. Every dimension of its `False`, zero, and
-`True` rows is `-1`, `0`, and `1`, respectively. The buffer follows the model
-across devices and checkpoints but is not optimized. There is no vocabulary,
-top-k search, or vocabulary synchronization callback.
+Padded and masked positions also have zero content. State remains separate, so
+zero content is not asked to distinguish null, padding, or masking.
 
-State and Boolean-class counters track observed training frequencies. Their
-frequency-derived weights balance state cross entropy and Boolean content loss.
+A fixed three-row buffer maps `-1`, `0`, and `1` into `d_model`: every dimension
+of the respective rows is `-1`, `0`, or `1`. The buffer follows the model across
+devices and checkpoints but is not optimized. Its result is added to a learned
+state embedding. This internal input representation is different from a public
+embedding requested with `embed=True`.
 
-Targets use binary cross entropy with logits. Only valued targets contribute to
-the content loss and binary metrics; null, padded, and masked targets contribute
-only to state prediction. Training logs epoch-level content accuracy, precision,
-recall, and AUC using stateful TorchMetrics, in addition to state accuracy and
-the state/content losses.
+## Configuration
 
-`threshold` defaults to `0.5` and controls the decision boundary used by
-accuracy, precision, recall, and the Boolean `value` in prediction output. AUC
-continues to use unthresholded probabilities.
+| Option | Default | Notes |
+| --- | --- | --- |
+| `threshold` | `0.5` | Decision boundary used by prediction `content.value` and tracked accuracy, precision, and recall. Must be between `0` and `1`. |
 
-Predictions contain the thresholded Boolean value and probability of `True`:
+Shared leaf options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight`
+are described in [Built-In Data Types](../core-concepts/data-types.qmd).
+
+## Loss And Metrics
+
+The decoder predicts five shared state logits and one Boolean content logit.
+Frequency counters observed during training derive weights for state cross
+entropy and Boolean binary cross entropy.
+
+Only valued targets contribute to Boolean content loss and binary metrics.
+Null, padded, masked, and reserved-other targets contribute only to state
+prediction. The page-level metrics are:
+
+- state accuracy and state loss;
+- Boolean content loss, accuracy, precision, recall, and AUC.
+
+`threshold` controls the discrete accuracy, precision, recall, and output value.
+AUC and binary cross entropy continue to use unthresholded probabilities. Tune
+the threshold using held-out data when false positives and false negatives have
+different costs.
+
+## Prediction Output
+
+Predictions contain the thresholded Boolean value and the probability of
+`True`. This is the complete shared envelope for the field:
 
 ```python
 {
     "record/converted": {
-        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ..., "other": ...},
+        "state": {
+            "valued": ...,
+            "null": ...,
+            "padded": ...,
+            "masked": ...,
+            "other": ...,
+        },
         "content": {"value": ..., "probability": ...},
+        "inferred": ...,
     }
 }
 ```
+
+Content is emitted for every decoded position. Interpret it together with the
+state distribution and `inferred` mask. The
+[Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
+explains those shared members.
+
+`Boolean` requires neither vocabulary synchronization nor top-k search, making
+its content path constant-size regardless of dataset cardinality.
+
+## Where Next
+
+- Use [Category](category.qmd) for discrete values with more than two labels.
+- Use [Built-In Data Types](../core-concepts/data-types.qmd) for shared leaf and
+  prediction behavior.
+- Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) to choose
+  targets, masking, and exported representations.

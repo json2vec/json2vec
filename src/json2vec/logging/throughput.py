@@ -20,6 +20,7 @@ class ThroughputLogger(Callback):
 
         self.timestamp: dict[Strata, datetime.datetime] = defaultdict(lambda: datetime.datetime.now())
         self.batches: dict[Strata, int] = defaultdict(int)
+        self.throughput: dict[Strata, float] = {}
 
     def start(self, trainer: Trainer, pl_module: Model, strata: Strata):
         self.timestamp[strata] = datetime.datetime.now()
@@ -34,6 +35,21 @@ class ThroughputLogger(Callback):
         elapsed = (now - then).total_seconds()
         observations = self.batches[strata] * pl_module.batch_size
         throughput = observations / elapsed if elapsed > 0.0 else 0.0
+        self.throughput[strata] = throughput
+
+        # Lightning does not register a result collection for prediction hooks,
+        # so LightningModule.log()/Model.track() raises at predict epoch end.
+        # Send the scalar straight to an attached logger and retain it on this
+        # callback for runtimes without a logger.
+        if strata == Strata.predict:
+            logger = getattr(trainer, "logger", None)
+            if logger is not None and getattr(trainer, "is_global_zero", True):
+                logger.log_metrics(
+                    {f"{Metric.throughput.value}/{strata.value}": throughput},
+                    step=getattr(trainer, "global_step", None),
+                )
+            return
+
         device = getattr(pl_module, "device", None)
 
         pl_module.track(

@@ -154,7 +154,8 @@ class TensorField(TensorFieldBase):
             if p_unavailable > 0.0:
                 # Unavailable content never appears naturally during training, because the
                 # train split is exactly where the vocabulary is built. We simulate a small
-                # amount of OOV behavior here so the decoder learns to use that bucket.
+                # amount of OOV behavior so the content objective does not reward any real
+                # class for valued inputs whose categorical content is unavailable.
                 is_known = state_tensor.eq(Tokens.valued.value) & content.ne(unavailable_index)
                 if is_known.any():
                     simulated = (

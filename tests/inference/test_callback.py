@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import lightning.pytorch as lit
+import polars as pl
 import torch
 from tensordict import TensorDict
 
@@ -63,3 +65,43 @@ def test_writer_postprocess_receives_batch_context(tmp_path):
     assert seen["batch_idx"] == 3
     assert seen["dataloader_idx"] == 4
     assert seen["predictions"]["root/label"]["value"] == ["ok"]
+
+
+def test_writer_completes_real_prediction_loop_with_throughput_callback(tmp_path):
+    model = jv.Model(
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=2,
+        amount=jv.Number,
+        label=jv.Category(target=True, size=2, p_unavailable=0.0),
+    )
+    model.encode(
+        [
+            {"amount": 1.0, "label": "no"},
+            {"amount": 2.0, "label": "yes"},
+        ],
+        strata="train",
+    )
+
+    datamodule = jv.PolarsDataModule(
+        model=model,
+        predict=pl.DataFrame({"amount": [1.5, 2.5]}),
+        num_workers=0,
+        persistent_workers=False,
+        pin_memory=False,
+    )
+    output = tmp_path / "predictions"
+    trainer = lit.Trainer(
+        accelerator="cpu",
+        callbacks=[jv.Writer(output)],
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+    trainer.predict(model=model, datamodule=datamodule, return_predictions=False)
+
+    frame = pl.read_parquet(output / "rank-0.parquet")
+    assert len(frame) == 2
+    assert frame.columns == ["inputs", "predictions"]

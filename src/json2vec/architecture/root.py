@@ -102,7 +102,9 @@ class Model(lit.LightningModule, Renderable):
                 nested `Branch` nodes.
             d_model: Shared model width.
             n_layers: Number of encoder layers on generated branch nodes.
-            n_heads: Attention heads used by generated nodes.
+            n_heads: Even attention-head count used by the generated root. It
+                must divide `d_model` and leave at least two dimensions per
+                head.
             batch_size: Batch size used by data modules, examples, and mocked
                 Lightning example inputs.
             fields: Optional sequence form of `field_args`.
@@ -110,7 +112,9 @@ class Model(lit.LightningModule, Renderable):
             description: Optional description on the generated root branch.
             embed: Configure the generated root branch as an embedding output.
             attention: Attention mode for the generated root branch.
-            n_linear: Feed-forward block count on the generated root branch.
+            n_linear: Learned-query cross-attention pooling block count on the
+                generated root branch. Each block also contains a feed-forward
+                network.
             dropout: Optional dropout rate on the generated root branch.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
@@ -441,7 +445,7 @@ class Model(lit.LightningModule, Renderable):
 
     @beartype
     def save(self, pathname: str | Path) -> str | Path:
-        """Save model weights and schema schema to a checkpoint."""
+        """Save model weights and schema to a checkpoint."""
         CheckpointState.save(self, pathname)
 
         return pathname

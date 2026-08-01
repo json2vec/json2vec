@@ -5,25 +5,31 @@ eval: false
 
 # Learning Modes & Embeddings
 
-`json2vec` uses one typed prediction mechanism for supervised,
-self-supervised, and unsupervised representation learning. Configure which leaf
-values are hidden from the encoder with `target=True`, `p_mask`, or `p_prune`,
-then request embeddings from the schema nodes you want to export with
-`embed=True`. If root, branch, and leaf addresses are unfamiliar, read
-[Model Tree](model-tree.qmd) first.
+**Example status — excerpt:** schemas illustrate learning roles unless a block
+explicitly says it is a complete run.
+
+`json2vec` uses one typed prediction mechanism for supervised and
+self-supervised learning. Configure which leaf values are hidden from the
+encoder with `target=True`, `p_mask`, or `p_prune`, then request embeddings from
+the schema nodes you want to export with `embed=True`. Those embeddings can
+support unsupervised downstream tasks such as clustering. If root, branch, and
+leaf addresses are unfamiliar, read [Model Tree](model-tree.qmd) first.
 
 The model does not maintain separate supervised and self-supervised code paths.
 Supervised learning is the special case where a target field is hidden from the
 input 100% of the time and decoded from the remaining context:
 
 - `target=True` is exact shorthand for `p_prune=1.0`: it hides a field from
-  input for every training example and trains a supervised prediction.
-- `p_mask` randomly hides individual observed values during training and asks
-  the model to reconstruct them.
-- `p_prune` randomly removes whole leaf field instances during training and
-  asks the model to reconstruct them.
-- branch `mask=` / `masks=` hide repeated coordinates and project that selection
-  onto descendant leaves.
+  input for every train, validation, and test example, supplies empty input for
+  it during prediction, and defines a supervised prediction.
+- `p_mask` independently samples configured leaf positions in train,
+  validation, and test, asking the model to reconstruct their original state
+  and content. The current implementation also samples null and padded
+  positions, not only valued ones.
+- `p_prune` samples whole leaf instances per observation and expands the choice
+  across all of that leaf's positions in the same non-predict strata.
+- branch `mask=` / `masks=` define non-padded repeated-coordinate windows, then
+  sample each affected descendant leaf independently in non-predict strata.
 - `embed=True` emits an embedding for that schema node during prediction. It
   does not make the field a target.
 
@@ -33,13 +39,43 @@ use `target=True` or `p_prune=1.0` for that always-hidden behavior.
 `p_mask=1.0` is not a valid configuration; value masking is stochastic and uses
 rates lower than `1.0`.
 
-Unsupervised embedding workflows are built from the same machinery: train on
-masked or pruned reconstruction objectives without an external label, then emit
-representations with `embed=True`.
+These configured policies are not train-loop-only switches: validation and test
+apply them too, while prediction bypasses them. Stochastic policies can therefore
+make evaluation metrics vary across passes; see
+[Dynamic Masking](dynamic-masking.qmd#current-selection-semantics).
 
-For recency windows or row-level masking inside branches, use
-[Dynamic Masking](dynamic-masking.qmd). For independent leaf values, use
-`p_mask` or `p_prune`.
+Self-supervised embedding workflows use reconstruction objectives without an
+external label, then emit representations with `embed=True`. Downstream use of
+those representations may be supervised or unsupervised.
+
+For recency windows or repeated-coordinate masking inside branches, use
+[Dynamic Masking](dynamic-masking.qmd). Its current per-leaf sampling is not an
+atomic row mask across sibling fields. For independent leaf positions, use
+`p_mask`; for observation-level leaf removal, use `p_prune`.
+
+## Internal And Exported Embeddings
+
+The word *embedding* refers to two different interfaces in these docs:
+
+1. A datatype's internal input representation converts tensorized state and
+   content into `d_model` before the model tree encodes it. For example, a
+   Category adds a state embedding to an available label's content embedding;
+   unavailable and non-valued categorical content contributes a zero content
+   vector while the state embedding remains distinct.
+2. The public `embedding` requested with `embed=True` is a contextual model
+   output at a schema address. The prediction writer L2-normalizes that vector
+   before returning it.
+
+These are not interchangeable. A Category embedding-table row is not the public
+leaf embedding, and neither is a raw `Vector` field. Root and branch outputs
+represent encoded contexts. A leaf output is produced through that leaf's
+contextual decoder pooling; when the leaf was visible solely because
+`embed=True`, its decoded payload can have `inferred=false`.
+
+Compare exported embeddings from the same model and schema address unless a
+separate alignment method has been validated. Equal width alone does not put
+unrelated nodes—or embeddings from different checkpoints—into a shared semantic
+space.
 
 ## Root Embeddings
 
@@ -148,9 +184,9 @@ model
 ```
 
 Use `Entity` for local repeated-identity matching, such as whether the same
-device appears multiple times inside one observation. Use `Category` for
-bounded labels that should have a persistent vocabulary across training and
-prediction.
+device appears multiple times inside one observation and one Entity leaf. Use
+`Category` for bounded labels that should have a persistent vocabulary across
+training and prediction.
 
 ## An Unsupervised Schema
 
@@ -218,8 +254,10 @@ digit = predictions[jv.Address("digit")]["embedding"]
 pixels = predictions[jv.Address("digit", "pixels")]["embedding"]
 ```
 
-Root embeddings return one vector per input observation. Branch embeddings return
-vectors shaped by the retained slots at that branch address.
+Root embeddings return one vector per input observation. A branch pools its
+retained child slots and returns one vector per parent coordinate, not one vector
+for every retained child slot. Nested branch output therefore keeps the relevant
+ancestor coordinates while summarizing the branch's own repeated dimension.
 
 ## Combining Learning Signals
 
@@ -257,8 +295,7 @@ For small interactive workflows, call `Model.predict(...)` directly.
 #| output: true
 
 predictions = model.predict(records)
-root = predictions[jv.Address("customer")]["embedding"]
-events = predictions[jv.Address("customer", "events")]["embedding"]
+root = predictions[jv.Address("transaction")]["embedding"]
 ```
 
 For larger offline jobs, use the [Batch Inference](../guides/batch-inference.qmd)

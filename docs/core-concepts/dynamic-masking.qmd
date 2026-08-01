@@ -5,16 +5,19 @@ eval: false
 
 # Dynamic Masking
 
-Dynamic masking hides values during training so the model learns to reconstruct
-them from surrounding context. Leaf fields already support local stochastic
-masking with `p_mask`, pruning with `p_prune`, and supervised targets with
-`target=True`. Branch masks add one more control: they select slices of a
-repeated context and apply that selection to descendant tensorfields.
+**Example status — excerpt:** masking blocks isolate selection behavior; apply
+them to a tested training workflow before comparing quality.
+
+Dynamic masking hides values in non-predict loops so the model can learn and be
+evaluated on reconstruction from surrounding context. Leaf fields support local
+stochastic masking with `p_mask`, pruning with `p_prune`, and supervised targets
+with `target=True`. Branch masks add one more control: they define candidate
+slices of a repeated context for descendant tensorfields.
 
 Use branch masks when the hiding rule is about a repeated coordinate rather than
-one leaf value. Common examples are "mask half of the last 10 retained events,"
-"mask three early line items," or "mask the amount and merchant for selected
-transactions while leaving country visible."
+one leaf value. Common examples are "sample from the last 10 retained events"
+or "sample three early line items." A branch mask supplies the shared candidate
+window, but the current implementation samples each affected leaf separately.
 
 ## Leaf Masking Versus Branch Masking
 
@@ -23,14 +26,46 @@ Use the narrowest mechanism that matches the modeling intent.
 | Mechanism | Configure on | What gets hidden |
 | --- | --- | --- |
 | `target=True` | leaf tensorfield | Every instance of that leaf, for supervised prediction. |
-| `p_prune=...` | leaf tensorfield | Whole leaf instances sampled independently. |
-| `p_mask=...` | leaf tensorfield | Observed leaf values sampled independently. |
-| `jv.Mask(...)` | `Branch` | Repeated branch coordinates, projected onto descendant leaves. |
+| `p_prune=...` | leaf tensorfield | One decision per observation, expanded across every position of that leaf. |
+| `p_mask=...` | leaf tensorfield | Every configured position sampled independently, including null and padded positions. |
+| `jv.Mask(...)` | `Branch` | Non-padded repeated coordinates sampled independently for each affected descendant leaf. |
 
-Leaf masking is enough when every value can be sampled independently. Branch
-masking is better when one repeated row should be hidden consistently across
-several fields, or when the sampling window is defined by recency inside a
-branch.
+Leaf masking is appropriate when each position may be sampled from the entire
+leaf. Branch masking adds a repeated-coordinate window—often a recency
+window—and leaf exclusions. It does **not** currently provide atomic row masking
+across several sibling fields.
+
+## Current Selection Semantics
+
+All three configured mechanisms replace selected input state with `masked`,
+zero the selected datatype content, cache the original state/content as targets,
+and mark the positions trainable. The selection masks differ:
+
+- `p_mask` draws a Bernoulli sample for every configured position from the
+  original state snapshot. In normal non-predict ingestion it can select valued,
+  null, or padded positions; the prediction-only `<MASK>` literal is rejected.
+- `p_prune` draws one Bernoulli sample per batch observation, then expands it
+  across every branch position belonging to that leaf. `target=True` is
+  `p_prune=1.0`.
+- a branch `Mask` treats every state except `padded` as occupied. Its candidates
+  in normal ingestion are therefore valued or null. A custom tensorfield that
+  constructs another non-padded state follows the same rule. Sampling is rerun
+  for each non-excluded descendant leaf.
+
+::: {.callout-warning}
+The current data path applies `p_mask`, `p_prune`, and branch masks in train,
+validation, and test strata; only prediction bypasses these configured policies.
+Consequently, stochastic validation/test metrics evaluate a sampled masking
+distribution and can vary across passes. Fix random seeds and aggregate repeated
+evaluation when that variance matters, or use deterministic `target=True` for a
+fixed supervised target. Lightning evaluation mode does not disable masking.
+:::
+
+Every selected position can contribute to state loss because its original state
+is cached. Content-loss eligibility remains datatype-specific; for example,
+Category content accuracy excludes unavailable targets, while Boolean content
+metrics use valued targets only. Do not read `trainable=true` as “the original
+content was valued.”
 
 ## Branch Masks
 
@@ -59,10 +94,10 @@ model = jv.Model(
 model
 ```
 
-This selects the last 10 retained, non-padded `events` slots for each
-observation and masks about half of those slots. The same selected event rows
-are projected onto each active descendant leaf unless the mask excludes that
-leaf.
+For each active descendant leaf, this finds its last 10 retained, non-padded
+`events` slots and independently masks about half of those candidates. Amount
+and event type therefore use the same window but are not guaranteed to hide the
+same rows. Use `exclude` to keep a leaf entirely outside this policy.
 
 `mask=` is shorthand for a one-item list. Use `masks=` when one branch needs
 more than one masking policy:
@@ -83,6 +118,10 @@ jv.Branch(
 )
 ```
 
+Each policy is applied in list order to each affected leaf. Policies may select
+overlapping positions; all of them use the leaf state snapshot from before the
+policy sequence when constructing candidates.
+
 ## Mask Options
 
 Each `Mask` chooses a candidate window, then samples from that window.
@@ -92,7 +131,7 @@ Each `Mask` chooses a candidate window, then samples from that window.
 | `rate` | `None` | Bernoulli probability for each candidate slot. Mutually exclusive with `count`. |
 | `count` | `None` | Exact number of candidate slots to sample per parent coordinate, capped by available candidates. Mutually exclusive with `rate`. |
 | `window` | `None` | Candidate span length. `None` means all slots in the selected coordinate space. |
-| `branch` | `False` | Use fixed padded branch coordinates instead of observed non-padded coordinates. |
+| `branch` | `False` | Position the window against the fixed branch length rather than the retained non-padded extent. Padded slots are still removed from candidates. |
 | `start` | `False` | Take the window from the start instead of the end. |
 | `offset` | `0` | Skip slots away from the selected edge before taking the window. |
 | `exclude` | `None` | One predicate, or a list of predicates, for descendant leaves that should not receive this mask. |
@@ -100,13 +139,14 @@ Each `Mask` chooses a candidate window, then samples from that window.
 Exactly one of `rate` or `count` is required.
 
 The default coordinate mode is `branch=False, start=False`, which means "the end
-of the retained real values." This is usually the right choice for recency
+of the retained non-padded positions." This is usually the right choice for recency
 histories, especially with `overflow="tail"`.
 
 ## Window Coordinates
 
 Mask windows are resolved after preprocessing, query extraction, overflow
-handling, and padding. Padding is never selected.
+handling, and padding. Branch masks never select padding. Null positions count
+as occupied and remain eligible.
 
 For a branch with `length=8`, `window=3`, and retained values shaped like
 this:
@@ -212,8 +252,10 @@ TensorField [tensorfield] state=(5, 1, 3, 8) device=cpu trainable=22
  targets=content, state
 ```
 
-Randomness is intentionally stochastic, so exact masked positions can differ
-between runs.
+Here `count=2` equals the two-coordinate candidate `window`, so every eligible
+window is fully selected and the displayed positions are deterministic for
+these records. Use a smaller `count` than `window` when you want stochastic
+selection within the window.
 
 ## Debugging Encodes
 
@@ -245,8 +287,8 @@ singleton. The display previews `state[0, 0]`.
 
 ## Excluding Leaves
 
-Use `exclude=` when a row should be selected for some descendant fields but not
-others:
+Use `exclude=` when a branch-mask policy should sample some descendant fields
+but leave others untouched:
 
 ```{python .marimo}
 #| echo: true

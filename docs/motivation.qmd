@@ -10,122 +10,76 @@ pyproject: |
 
 # Motivation
 
-`json2vec` is motivated by a practical modeling problem: important business data
-rarely starts as one clean table.
+**Example status — sketch:** schemas on this page motivate modeling choices;
+they are not evaluated benchmark results.
 
-Customers have accounts, accounts have transactions, customers have login
-sessions, sessions have clickstream events, orders have line items, products have
-metadata, and every level may contain useful signal. Traditional machine
-learning workflows usually force that structure into handcrafted tabular
-features before a model ever sees it.
+The central bet behind `json2vec` is narrow: when relationships inside a record
+carry signal, the model should be able to see those relationships before they
+are reduced to handcrafted features.
 
-That flattening step is often where the real cost lives. Teams spend months
-building feature pipelines, maintaining rolling aggregates, keeping training and
-serving transformations consistent, and deciding which nested relationships are
-worth preserving. The model may be flexible, but the surrounding representation
-is rigid.
+That is not a claim that every dataset should be nested or every tabular model
+should be replaced. It is a response to a class of systems where building the
+flat feature row has become a second, rigid modeling architecture.
 
-`json2vec` starts from a different assumption: nested business data should be
-modeled in its natural shape, and the schema should be enough to instantiate the
-model that encodes it.
+## The Representation Problem
 
-## When `json2vec` Helps
+Important operational data often arrives as related contexts:
 
-Use `json2vec` when the relationships inside a record are part of the signal:
-orders with line items, users with sessions, accounts with transactions,
-devices with event histories, or entities with repeated measurements.
+```text
+customer
+|-- profile
+|-- transactions[]
+|-- statements[]
+`-- login_sessions[]
+    `-- events[]
+```
 
-Do not reach for it just because a table has many columns. If flattening the
-record loses no meaningful context, a simpler tabular model may be the better
-tool.
+A conventional pipeline may turn this object into rolling sums, counts, last
+seen values, and fixed trailing windows. Those features can be effective. They
+also make choices before learning begins:
 
-## The Problem
+- which histories deserve a window;
+- which order and local relationships to preserve;
+- which aggregation periods matter;
+- how long each context may be;
+- which transformation must be reproduced online;
+- which derived features need to change for a new task.
 
-A flat feature table is a lossy reduction of an event history.
+Flattening is therefore not neutral. It is a lossy model of the source record,
+implemented in data-pipeline code.
 
-Flattening can work, but it creates hard tradeoffs:
+## When Preserving Structure Helps
 
-- Important local context is collapsed into summaries before learning begins.
-- Long histories become fixed trailing windows or handcrafted recency features.
-- Feature code tends to diverge between offline training and online serving.
-- New use cases require new feature engineering work instead of schema changes.
-- Explainability often points to derived feature names instead of business
-  events.
+Use `json2vec` when the relationships themselves are plausible signal:
 
-The problem becomes sharper in domains such as fraud, risk, recommendations,
-marketplaces, telemetry, and operational monitoring. These domains are not just
-"wide tables." They are collections of related contexts.
+- line-item combinations inside an order;
+- behavior within a login session;
+- sequences of measurements from one device;
+- transactions considered in a separate context from statements;
+- nested histories whose useful windows have different lengths.
 
-For example, an account-takeover snapshot may include:
+Use a simpler tabular model when rows are already independent observations or
+when aggregates retain everything the decision needs. A flat baseline remains
+valuable even for a nested problem: it reveals whether the additional
+structure earns its memory, latency, and operational cost.
 
-- recent transactions,
-- monthly statement history,
-- login sessions,
-- clickstream events inside each login session,
-- device identifiers,
-- regions,
-- timestamps,
-- profile changes,
-- and one or more fraud labels.
-
-Each branch has a different natural sequence length and a different semantic
-meaning. A single flat sequence or feature vector is a poor fit for that shape.
-
-## What `json2vec` Tries To Provide
-
-`json2vec` is built around a few requirements.
-
-First, the model architecture should be dynamic. Developers should not need to
-hand-code a new neural architecture every time the data shape changes. A schema
-should define the model tree, tensorfield requests, targets, embeddings, and
-context encoders.
-
-Second, the model should support hierarchical context encoding. A transaction
-can be modeled alongside other transactions, then summarized into an account or
-customer context. A clickstream event can be modeled inside its login session
-instead of competing with unrelated behavior in one flat window.
-
-Third, transfer learning should work with schema evolution. Teams should be able
-to pretrain a broad model, then add fields, remove fields, set targets, prune
-inputs, or expose embeddings for a narrower task.
-
-Fourth, datatypes should be extensible with plugin support.
-Numbers, categories, sets, entities, timestamps, text, vectors, and custom field
-types need different tensorization, masking, decoding, loss, and output behavior.
-They should share a training loop without being forced into one crude representation.
-
-Fifth, model inspection should be part of the modeling surface. A nested model
-should expose nested embeddings, schema-level displays, field pruning operations,
-and "what if" workflows that operate on the original observation shape.
-
-Finally, querying and preprocessing should live in the same path used for
-training and inference. The same schema and optional preprocessors and postprocessors
-should feed offline training, batch inference, and serving.
-
-These requirements map to the rest of the docs:
-
-| Capability | Start here |
-| --- | --- |
-| Dynamic schema architecture | [Model Tree](core-concepts/model-tree.qmd) |
-| Hierarchical context encoding | [Model Tree](core-concepts/model-tree.qmd), [Branch](data-types/branch.qmd) |
-| Schema evolution | [Model Tree](core-concepts/model-tree.qmd#roles-and-mutations) |
-| Datatype plugins | [Built-In Data Types](core-concepts/data-types.qmd) |
-| Reconstruction and embeddings | [Learning Modes & Embeddings](core-concepts/embeddings.qmd), [Dynamic Masking](core-concepts/dynamic-masking.qmd) |
-| Diagnostics | [Field Importance](guides/field-importance.qmd) |
-| Querying and wrangling | [Query Paths](core-concepts/querypaths.qmd), [Data Modules](guides/data-modules.qmd#preprocessors) |
+Preserving hierarchy also does not invent relationships that are absent from
+the schema. Separate sibling branches have separate contexts. Repeated
+identifiers do not automatically align across branches, and `Entity` indices
+are local rather than a global join key. Cross-context identity must be made
+explicit by restructuring or preprocessing the observation.
 
 ## Schema As Model Blueprint
 
-In `json2vec`, the schema is not metadata around the model. It is the model
-blueprint.
+JSON2Vec makes the record schema executable:
 
-Leaf fields become typed tensorfield requests. Branch nodes define shared
-contexts, optionally apply local attention, and pool those contexts upward.
-Targets describe values the model should learn to reconstruct or predict.
-Embedding settings describe which nodes should expose intermediate
-representations.
-
-That lets the model be created directly from the API:
+- leaf declarations choose datatype-specific validation, tensorization,
+  embedding, loss, metrics, and prediction behavior;
+- `Branch` declarations define bounded contexts whose children can interact
+  before a pooled representation flows upward;
+- learning roles choose values to hide and reconstruct;
+- `embed=True` chooses representations to expose;
+- names and queries bind source values to stable model addresses.
 
 ```{python .marimo}
 #| echo: true
@@ -134,156 +88,153 @@ That lets the model be created directly from the API:
 import json2vec as jv
 
 model = jv.Model(
+    name="account",
     d_model=64,
     n_layers=2,
     n_heads=4,
-    batch_size=16,
     embed=True,
-    alcohol=jv.Number,
-    malic_acid=jv.Number,
-    color_intensity=jv.Number,
-    proline=jv.Number,
-    cultivar=jv.Category(target=True, size=4),
+    customer_tier=jv.Category(size=16),
+    transactions=jv.Branch(
+        length=128,
+        overflow="tail",
+        merchant_category=jv.Category(size=256),
+        amount=jv.Number,
+    ),
+    is_fraud=jv.Category(target=True, size=2),
 )
 
 model
 ```
 
-The same object can then be mutated explicitly:
+The schema is both a data contract and an architecture blueprint, but it is not
+the raw source contract by itself. Optional preprocessors and leaf queries still
+decide which point-in-time values enter an observation. See
+[Data Flow](core-concepts/data-flow.qmd) for the complete boundary.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+## Why Several Local Contexts?
 
-model.update(jv.where("type") == "number", p_mask=0.10)
-model.update(jv.where("name") == "cultivar", target=True)
-model.update(jv.where("name") == "proline", active=False)
-```
+One long sequence forces unrelated items to compete for the same positions and
+attention pattern. A tree can give transactions, login sessions, and events
+inside each session different lengths and local encoders.
 
-This matters because a schema can evolve with the use case. A pretraining model,
-a fine-tuned model, an embedding model, and a serving deployment can be
-different configurations of the same underlying tree. See
-[Model Tree](core-concepts/model-tree.qmd) for the node structure and schema
-mutation workflow.
+That supports a more faithful hypothesis: event interactions can be learned
+inside a session, then the session can be summarized into the customer context.
+Transaction interactions can be learned separately before their summary reaches
+the same customer.
 
-## Hierarchical Contexts
+This is a modeling capability, not proof of better quality. The benefit depends
+on ordering, window selection, the availability of sufficient training data,
+and whether the target truly depends on local relationships. It should be
+measured against simpler baselines on a leakage-safe split.
 
-Many structured-data models can handle either tabular fields or one sequence.
-Business data often needs many contexts at once.
+The [Device Tenure](case-studies/device-tenure.qmd) page is an architectural
+case-study sketch, not an evaluated benchmark.
 
-Consider a fraud model. Transactions, statement histories, login sessions, and
-clickstream events each deserve their own local context. The model should learn
-relationships among transactions separately from relationships among clickstream
-events inside one login session. Those summaries can then flow upward into the
-customer-level representation.
+## Typed Fields Share One Training Loop
 
-This hierarchy helps preserve behavior that would otherwise be diluted.
+Numbers, bounded categories, sets, local identities, timestamps, text, and
+vectors do not have the same representation or learning objective. JSON2Vec
+uses tensorfields so each type owns those details while every field participates
+in the same tree traversal and Lightning loop.
 
-One practical adversarial pattern is the flushing problem.
-If a model only sees the last `N` events in one flat window, a bad actor may be
-able to generate harmless events that push important events out of view. A
-password reset, email change, and new-device login may disappear behind noise.
+The common interface separates value state from type-specific content. That
+lets the model distinguish an explicit null, branch padding, and a value hidden
+for reconstruction without assigning those conditions ordinary content values.
+See [Built-In Data Types](core-concepts/data-types.qmd) for the shared contract
+and each datatype page for its type-specific behavior.
 
-Nested contexts reduce that risk. Login-session events stay local to their
-session. Transactions stay in their transaction context. Statement histories
-stay separate from clickstream behavior. Each branch can use a window size that
-matches the business meaning of that branch. The [Device Tenure](case-studies/device-tenure.qmd)
-case study shows this pattern in an account-risk setting.
+The tensorfield boundary is designed to be extensible. Treat extension APIs
+according to their documented support level rather than assuming every internal
+base class carries a long-term compatibility guarantee.
 
-## Transfer Learning With Schema Evolution
+## Supervised And Reconstruction Roles
 
-Foundation models for business data are usually organization-specific. They
-depend on internal data contracts, privacy requirements, risk tolerance, and
-regulatory constraints.
+Supervised prediction and masked reconstruction use the same basic question:
 
-That does not mean every team should rebuild the same modeling framework.
+> Given the visible context, what should this hidden value be?
 
-The useful shared layer is the modeling language: schema patterns, datatype
-plugins, training loops, evaluation harnesses, deployment paths, and diagnostics.
-An organization can pretrain a broad model on general behavior, then adapt it to
-specific use cases by changing the schema.
+`target=True` always hides a supervised answer. `p_mask` and `p_prune` sample
+reconstruction tasks. A branch mask limits descendant sampling to candidate
+coordinates or windows; descendants still sample independently, so it is not
+an atomic row mask. Embedding export does not hide a value or create a loss.
 
-Examples:
+A shared mechanism makes it possible to combine supervised and self-supervised
+objectives without creating a separate feature representation. It does not make
+those objectives equally useful: masking rates, target weights, and the amount
+of signal in neighboring fields remain empirical decisions. See
+[Learning Modes & Embeddings](core-concepts/embeddings.qmd).
 
-- Add a new target for account takeover fraud.
-- Add a task-specific entity field for device history.
-- Remove or hide fields that are inappropriate for a sensitive decision.
-- Continue pretraining after an upstream data contract changes.
-- Fine-tune a model by setting target fields explicitly.
+## Evolving A Schema
 
-The goal is not that every organization shares the same model weights. The goal
-is that teams can use a shared surface for building and evaluating structured
-data encoders.
+Real data contracts and modeling goals change. JSON2Vec exposes the schema tree
+so a workflow can select nodes and update, extend, delete, reset, or temporarily
+override them.
 
-## Datatypes Are Plugins
+Potential uses include:
 
-The schema defines shape, but tensorfields define field behavior.
+- adding a supervised target to a pretrained encoder;
+- hiding fields that are unavailable or inappropriate for a deployment;
+- exporting a branch embedding for retrieval;
+- adding a new context after an upstream contract changes;
+- comparing an ablated schema with the original.
 
-A datatype owns how raw values become tensors, how missing values are
-represented, how masking and pruning work, how field embeddings are produced,
-how predictions are decoded, and how losses are computed.
+Shape-changing mutations can require new parameters, and compatible weights do
+not guarantee a compatible model meaning. Schema changes need validation,
+artifact versioning, and often renewed training. Mutation is a controlled
+mechanism for evolution, not automatic transfer learning.
 
-That local ownership is what allows `json2vec` to support different field
-semantics under one model traversal:
+## Inspection Without Causal Claims
 
-- `Number` fields can use regression-style reconstruction.
-- `Category` fields can learn bounded online vocabularies.
-- `Set` fields can model unordered collections of labels.
-- `Entity` fields can represent local sameness without a global vocabulary.
-- `DateParts` fields can decompose timestamps into calendar parts.
-- `Text` and `Vector` fields can bridge into pretrained or dense
-  representations.
+Because outputs retain schema addresses, practitioners can inspect decoded
+values and embeddings at the root, branch, or leaf where they were produced.
+Field-importance workflows can hide selected input fields and measure how a
+chosen metric changes.
 
-The architecture does not need to know whether a value started as a float, a
-string category, a timestamp, or an identifier. By the time the value reaches the
-context encoder, the datatype has converted it into a common vector interface.
+Those are model diagnostics. They show dependence of this model on this input
+under a stated perturbation; they do not establish causality, fairness, or a
+complete explanation of a business decision. Governance, authorization,
+decision capture, and audit policy remain responsibilities of the surrounding
+system.
 
-## Explainability Through Structure
+See [Field Importance](guides/field-importance.qmd) for the diagnostic workflow.
 
-`json2vec` treats the schema tree as an inspectable object.
+## The Costs Of Keeping Structure
 
-Pruning is one example. When a field is pruned, its observed value is removed
-from model input and cached as a target. The model must reconstruct it from the
-remaining context. This turns a field into a question:
+Hierarchy moves representation decisions into the schema; it does not remove
+them. Practitioners still need to choose:
 
-> Given everything else in this observation, what does the model believe this
-> hidden field should be?
+- branch lengths and overflow behavior;
+- field types and vocabulary capacities;
+- model width, depth, heads, and attention modes;
+- temporal and identity split rules;
+- preprocessing and schema-version contracts;
+- the quality, latency, and memory budget for operation.
 
-That mechanism supports supervised learning, but it also supports diagnostics.
-A developer can remove a branch, hold the rest of the pipeline constant, and
-measure what changes. If removing login-session clickstream events degrades
-account-takeover performance, that branch is contributing signal.
+Long branches increase padding and attention work. Large categorical capacities
+increase learned and scored parameters. Deeper trees and additional decoded
+targets add compute. Performance claims therefore need workload, hardware,
+precision, and batch context rather than a universal observations-per-second
+number.
 
-Embedding trees are another example. The model can emit vectors at selected
-addresses, not only at the root. Two customers may look similar globally but
-diverge inside login sessions. Two transactions may look different locally while
-their parent account histories remain similar. Embeddings at multiple addresses
-make that distinction observable. See
-[Learning Modes & Embeddings](core-concepts/embeddings.qmd) for export
-patterns.
+## One Configured Path
 
-Finally, counterfactual analysis can be expressed in the original record shape.
-Instead of asking which derived feature moved, a practitioner can edit the raw
-observation:
+Training-serving skew often appears when offline and online systems implement
+the same transformation twice. JSON2Vec keeps queries, optional preprocessing,
+tensorization, model execution, prediction writing, and optional
+postprocessing on one configured path.
 
-- remove a suspicious login event,
-- change a transaction amount,
-- move a session to a known device,
-- add a normal statement month,
-- or remove a burst of low-value activity.
+That path only stays consistent when the actual artifact and processor
+configuration are preserved. A service that rewrites normalization, loads a
+different vocabulary, or changes schema queries has changed the model contract
+even if it loads the same weights.
 
-The same schema then re-encodes the modified observation.
+The practical objective is not “no feature engineering.” It is to make the
+learned record representation, the data boundary, and their tradeoffs explicit
+in one inspectable schema-driven workflow.
 
-## One Path For Training And Serving
+## Continue
 
-Training-serving skew is common when offline feature pipelines and online
-inference services implement the same logic twice.
-
-`json2vec` avoids that by keeping extraction and optional preprocessing close to
-the model. Tensorfield queries define where values come from. Preprocessors can
-normalize or reshape observations. The same model schema is used for training,
-prediction, embedding, and serving.
-
-This is the core motivation: make structured business data modeling less about
-maintaining derived feature systems and more about directly describing the data
-structure that should be learned.
+- Build and restore a first artifact in [Getting Started](getting-started.qmd).
+- Follow a record through the system in [Data Flow](core-concepts/data-flow.qmd).
+- Read the public hierarchy in [Model Tree](core-concepts/model-tree.qmd).
+- Choose queries or preprocessing in [Binding Data](core-concepts/binding-data.qmd).

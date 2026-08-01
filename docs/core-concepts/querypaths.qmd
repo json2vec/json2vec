@@ -3,37 +3,30 @@ marimo-static-output: true
 eval: false
 ---
 
-# Query Paths
+# Advanced Query Paths
 
-This guide is limited to how `json2vec` binds schema fields to values in
-JSON-like input records.
+This is the JMESPath reference for schemas whose source paths cannot be handled
+by ordinary field and branch names. Start with [Binding Data](binding-data.qmd):
+it owns default inference and the decision between a query and a preprocessor.
 
-Each leaf field has a request-level `query`. When `query` is omitted,
-`json2vec` infers one from the field name and its parent `Branch` nodes. When the
-source payload does not match the schema names, pass an explicit
-[JMESPath](https://jmespath.org/) expression with `query=...`.
-
-Queries are the bridge between your raw record shape and the model tree. Branches
-define repeated contexts, but only leaf tensorfields such as `Number`,
-`Category`, and `Entity` bind directly to source values with `query`.
-Those leaf queries can be set when the field is constructed, updated later with
-`model.update(...)`, or temporarily overridden with `model.override(...)`.
-
-For JMESPath syntax beyond the patterns below, use the upstream
-[JMESPath tutorial](https://jmespath.org/tutorial.html),
+Use the patterns here for renamed or quoted keys, nested source paths, filters,
+indexes, slices, and temporary query changes. For JMESPath language details,
+see the upstream [tutorial](https://jmespath.org/tutorial.html),
 [examples](https://jmespath.org/examples.html), and
 [specification](https://jmespath.org/specification.html).
 
-## Request-Level Queries
+::: {.callout-note}
+Code blocks on this reference page are independent excerpts. The query
+assertions under [Test Before Encoding](#test-before-encoding) are directly
+runnable.
+:::
 
-`json2vec` request queries are written relative to one processed observation.
-One processed observation is represented as a list, even when it contains a
-single record:
+## The Request-Level Contract
 
-```{python .marimo}
-#| echo: true
-#| output: true
+JSON2Vec runs each leaf query against one processed observation. One ordinary
+raw record is wrapped as a one-item observation:
 
+```python
 processed_observation = [
     {"amount": 12.50, "merchant": "bookshop"}
 ]
@@ -41,326 +34,64 @@ processed_observation = [
 
 The request query for `amount` is:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 request_query = "[*].amount"
 ```
 
-During encoding, `json2vec` adds the outer batch selector before running
-JMESPath:
+During batch encoding, JSON2Vec adds the outer batch selector internally. Do
+not include it in the configured request:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-encoded_batch = [
-    [{"amount": 12.50, "merchant": "bookshop"}],
-    [{"amount": 8.25, "merchant": "bakery"}],
-]
-
-request_query = "[*].amount"
-internal_search = "[*][*].amount"
+```text
+configured request: [*].amount
+internal search:    [*][*].amount
 ```
 
-Write the request query, not the internal batch query. In normal schemas,
-`[*].amount` is correct and `[*][*].amount` is over-nested.
+The three boundaries are:
 
-The three shapes are:
-
-| Shape | Example | Who usually handles it |
+| Boundary | Example | Owned by |
 | --- | --- | --- |
-| Raw record | `{"amount": 12.50}` | Your code or source system |
-| Processed observation | `[{"amount": 12.50}]` | `json2vec` wraps raw dicts this way |
-| Encoded batch | `[[{"amount": 12.50}], [{"amount": 8.25}]]` | Data modules and `model.encode(...)` |
+| Raw record | `{"amount": 12.50}` | source system / caller |
+| Processed observation | `[{"amount": 12.50}]` | preprocessor contract and automatic wrapping |
+| Encoded batch | `[[{"amount": 12.50}], [{"amount": 8.25}]]` | data module or `model.encode(...)` |
 
-For the public convenience APIs, pass raw dictionaries:
+Public prediction accepts raw dictionaries:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 predictions = model.predict([{"amount": 12.50}])
 ```
 
-You usually only pass the nested encoded shape when testing lower-level
-tensorization behavior.
+The full request-level rules are:
 
-## Default Query Rules
+- begin at the processed observation, normally with `[*].`;
+- write a full source path—an explicit query is not relative to its parent
+  `Branch`;
+- preserve one result dimension for each branch in the schema path;
+- use `[*]` to preserve an array and `[]` only to flatten intentionally;
+- use JMESPath syntax, not JSONPath (`[*].amount`, not `$.amount`).
 
-When a leaf field omits `query`, `json2vec` builds the query from the schema
-path:
+## Renamed And Nested Source Keys
 
-```text
-[*].<array_name>[*].<nested_array_name>[*].<field_name>
-```
+A stable schema may read a versioned or nested source path:
 
-For a top-level field, there are no nested array selectors after the root
-observation selector:
-
-```text
-[*].<field_name>
-```
-
-Names that are valid JMESPath identifiers are emitted directly. Schema names
-that contain `-` are quoted automatically:
-
-| Schema name | Inferred member |
-| --- | --- |
-| `amount` | `.amount` |
-| `customer_tier` | `.customer_tier` |
-| `device-id` | `."device-id"` |
-
-Schema names may contain letters, digits, `_`, and `-`. Source keys with spaces
-or other punctuation should normally be read with an explicit `query`.
-
-## Flat Defaults
-
-For flat records, field names usually match source keys:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "amount": 12.50,
-    "merchant": "bookshop",
-    "is_fraud": "false",
-}
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 import json2vec as jv
 
 model = jv.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    amount=jv.Number,
-    merchant=jv.Category(size=4096),
-    is_fraud=jv.Category(size=2),
-)
-
-model
-```
-
-The inferred request queries are:
-
-| Address | Query |
-| --- | --- |
-| `record/amount` | `[*].amount` |
-| `record/merchant` | `[*].merchant` |
-| `record/is_fraud` | `[*].is_fraud` |
-
-Changing the root branch name changes addresses, not source queries:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    name="transaction",
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    amount=jv.Number,
-)
-
-model
-```
-
-| Address | Query |
-| --- | --- |
-| `transaction/amount` | `[*].amount` |
-
-## Nested Defaults
-
-Use `Branch` when the source contains fields that share a repeated context:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "order_source": "web",
-    "line_items": [
-        {"sku": "A12", "quantity": 2, "price": 19.99},
-        {"sku": "B07", "quantity": 1, "price": 45.50},
-    ],
-}
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    d_model=64,
-    n_layers=2,
-    n_heads=4,
-    order_source=jv.Category(size=32),
-    line_items=jv.Branch(
-        length=32,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number,
+    amount=jv.Number(query="[*].transaction.amount_usd"),
+    merchant=jv.Category(
+        query="[*].transaction.merchant_name",
+        size=4096,
     ),
-)
-
-model
-```
-
-The inferred child queries include the parent array selector:
-
-| Address | Query |
-| --- | --- |
-| `record/order_source` | `[*].order_source` |
-| `record/line_items/sku` | `[*].line_items[*].sku` |
-| `record/line_items/quantity` | `[*].line_items[*].quantity` |
-| `record/line_items/price` | `[*].line_items[*].price` |
-
-Query shape follows the schema shape. Against one processed observation,
-`[*].line_items[*].sku` returns one list of item values for each root record:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-[["A12", "B07"]]
-```
-
-That nested result is intentional. It preserves the root record dimension and
-the `line_items` dimension. Branch overflow is resolved after query selection,
-using the order returned by the query. Use `overflow="tail"` on a `Branch` when
-the newest records are at the end of that result, or `overflow="error"` when
-truncation should fail fast.
-
-## Multiple Nested Branches
-
-Default inference extends through every parent `Branch`:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "accounts": [
-        {
-            "account_type": "checking",
-            "transactions": [
-                {"merchant": "bookshop", "amount": 12.50},
-                {"merchant": "bakery", "amount": 8.25},
-            ],
-        }
-    ]
-}
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    d_model=64,
-    n_layers=2,
-    n_heads=4,
-    accounts=jv.Branch(
-        length=8,
-        account_type=jv.Category(size=16),
-        transactions=jv.Branch(
-            length=128,
-            merchant=jv.Category(size=4096),
-            amount=jv.Number,
-        ),
-    ),
-)
-
-model
-```
-
-The nested defaults are:
-
-| Address | Query |
-| --- | --- |
-| `record/accounts/account_type` | `[*].accounts[*].account_type` |
-| `record/accounts/transactions/merchant` | `[*].accounts[*].transactions[*].merchant` |
-| `record/accounts/transactions/amount` | `[*].accounts[*].transactions[*].amount` |
-
-## Custom Query Rules
-
-Pass `query=...` on a leaf field when the source path does not match the schema
-name.
-
-Important rules:
-
-- Write the query from the processed-observation level, usually beginning with
-  `[*].`.
-- Do not include the extra outer batch selector.
-- Explicit queries are full request-level paths. They are not relative to the
-  parent `Branch`.
-- The result shape should match the field's schema location. A leaf under one
-  `Branch` should usually return nested lists with one array dimension.
-- Use JMESPath syntax, not JSONPath syntax. For example, use `[*].amount`, not
-  `$.amount`.
-
-Use a [preprocessor](../guides/data-modules.qmd#preprocessors) instead of a
-dense query when the source needs Python logic:
-
-| Need | Use |
-| --- | --- |
-| Rename or select stable fields | `query=...` |
-| Quote unusual source keys | `query=...` |
-| Read nested arrays without changing shape | `query=...` |
-| Sort, window, or filter with business rules | preprocessor |
-| Derive recency, elapsed time, or normalized values | preprocessor |
-| Split one source object into many observations | yielding preprocessor |
-| Normalize inconsistent source formats | preprocessor |
-
-## Updating Leaf Queries
-
-Queries are leaf-node schema attributes. If the model structure is right but the
-source payload changes, you can update the query on the matching leaf instead
-of rebuilding the schema:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model.update(
-    jv.where("address") == "record/amount",
-    query="[*].transaction.amount_usd",
+    label=jv.Category(query="[*].outcome", target=True, size=2),
 )
 ```
 
-For serving, experiments, or one-off checks, use `model.override(...)` as a
-context manager. The original query is restored when the context exits:
+For this source record:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-with model.override(
-    jv.where("address") == "record/amount",
-    query="[*].fallback.amount",
-):
-    predictions = model.predict(records)
-```
-
-Select leaf tensorfields when changing `query`. `Branch` nodes define model
-structure and addresses, but they do not bind directly to source values.
-
-## Renamed Source Keys
-
-The schema name can be stable even when the input key is awkward or versioned:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 record = {
     "transaction": {
         "amount_usd": 12.50,
@@ -370,49 +101,15 @@ record = {
 }
 ```
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    amount=jv.Number(query="[*].transaction.amount_usd"),
-    merchant=jv.Category(query="[*].transaction.merchant_name", size=4096),
-    label=jv.Category(query="[*].outcome", size=8),
-)
-
-model
-```
-
-| Address | Query |
-| --- | --- |
-| `record/amount` | `[*].transaction.amount_usd` |
-| `record/merchant` | `[*].transaction.merchant_name` |
-| `record/label` | `[*].outcome` |
+the model addresses remain `record/amount`, `record/merchant`, and
+`record/label`. Queries change source lookup, not schema identity.
 
 ## Quoted Source Keys
 
-Use quoted JMESPath members when source keys contain spaces, punctuation, or
-characters that are not valid bare identifiers:
+Use quoted JMESPath members when keys contain spaces, punctuation, or characters
+that are not valid bare identifiers:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "job code": "ENG-2",
-    "transaction": {
-        "amount-usd": 12.50,
-    },
-}
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model = jv.Model(
     d_model=32,
     n_layers=1,
@@ -420,22 +117,19 @@ model = jv.Model(
     job_code=jv.Category(query='[*]."job code"', size=128),
     amount=jv.Number(query='[*].transaction."amount-usd"'),
 )
-
-model
 ```
 
-In Python, it is usually easiest to wrap the query string in single quotes when
-the JMESPath expression contains quoted object keys.
+Single-quoted Python strings are convenient when the query contains
+double-quoted object members. Schema names themselves may contain letters,
+digits, `_`, and `-`; inferred paths quote a schema name containing `-`
+automatically.
 
-## Custom Queries Under Branches
+## Explicit Paths Under A Branch
 
-When a schema branch name differs from the source array path, set full explicit
-queries on the child leaves:
+When a schema branch name differs from the source array path, every child leaf
+receives a full request-level query:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 record = {
     "payload": {
         "items": [
@@ -444,11 +138,6 @@ record = {
         ]
     }
 }
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
 
 model = jv.Model(
     d_model=64,
@@ -456,150 +145,139 @@ model = jv.Model(
     n_heads=4,
     line_items=jv.Branch(
         length=32,
-        sku=jv.Category(query="[*].payload.items[*].product.sku", size=2048),
+        sku=jv.Category(
+            query="[*].payload.items[*].product.sku",
+            size=2048,
+        ),
         quantity=jv.Number(query="[*].payload.items[*].qty"),
     ),
 )
-
-model
 ```
 
-The output addresses use the schema names:
+Both results retain the root and `line_items` dimensions:
 
-| Address | Query |
-| --- | --- |
-| `record/line_items/sku` | `[*].payload.items[*].product.sku` |
-| `record/line_items/quantity` | `[*].payload.items[*].qty` |
-
-## Filtered Branches
-
-JMESPath filters are useful when only some child objects should populate a
-schema branch:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "events": [
-        {"event_type": "login", "device_id": "D1", "risk_score": 0.2},
-        {"event_type": "purchase", "device_id": "D1", "risk_score": 0.7},
-        {"event_type": "login", "device_id": "D2", "risk_score": 0.8},
-    ]
-}
+```text
+sku       -> [["A12", "B07"]]
+quantity  -> [[2, 1]]
 ```
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Do not shorten these to paths relative to `line_items`; branches do not run a
+source query of their own.
 
+## Filters And Alignment
+
+JMESPath filters can select a subset of child objects:
+
+```python
 model = jv.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
     login_events=jv.Branch(
         length=16,
-        device_id=jv.Entity(query="[*].events[?event_type == 'login'].device_id"),
-        risk_score=jv.Number(query="[*].events[?event_type == 'login'].risk_score"),
+        device_id=jv.Entity(
+            query="[*].map(&device_id, events[?event_type == 'login'])"
+        ),
+        risk_score=jv.Number(
+            query="[*].map(&risk_score, events[?event_type == 'login'])"
+        ),
     ),
 )
-
-model
 ```
 
-Both leaves use the same filter so `device_id` and `risk_score` remain aligned
-within `login_events`.
+Every sibling uses the same filter, and `map` preserves a result—including
+`None`—for every selected event. A direct projection such as
+`events[?event_type == 'login'].risk_score` drops null or missing scores; even
+with an identical filter, that can shift later scores onto earlier device
+coordinates. If one query returns three devices and another returns two scores,
+the branch no longer describes coherent event rows.
 
-::: {.callout-note}
-You can filter nested arrays with a query path, but use a
-[preprocessor](../guides/data-modules.qmd#preprocessors) when filtering depends
-on sorting, windowing, request time, or other business rules.
-Sibling fields under the same `Branch` should use the same filter so their values
-remain aligned.
-:::
+Use a [preprocessor](../guides/data-modules.qmd#preprocessors) when filtering
+depends on sorting, an `as_of` timestamp, multi-step business rules, or anything
+that should be tested on child objects as a unit.
 
-## Index And Slice Queries
+## Indexes And Slices
 
-JMESPath supports indexes and slices. These can be useful when a field should
-read a fixed position or a bounded window from a source array:
+Indexes read a fixed position; slices retain a bounded portion of an array:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "legs": [
-        {"origin_airport": "IAD", "destination_airport": "DEN"},
-        {"origin_airport": "DEN", "destination_airport": "SFO"},
-    ],
-    "events": [
-        {"amount": 12.50},
-        {"amount": 8.25},
-        {"amount": 99.00},
-    ],
-}
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model = jv.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    first_origin=jv.Category(query="[*].legs[0].origin_airport", size=512),
+    first_origin=jv.Category(
+        query="[*].legs[0].origin_airport",
+        size=512,
+    ),
     recent_events=jv.Branch(
         length=10,
-        amount=jv.Number(query="[*].events[:10].amount"),
+        amount=jv.Number(query="[*].events[-10:].amount"),
     ),
 )
-
-model
 ```
 
-The slice query preserves the root dimension and returns up to ten event amounts
-per processed record.
+The slice returns up to ten event amounts while preserving the root dimension.
+The name `recent_events` is only correct if source ordering is guaranteed to put
+newest events last. If ordering must be established or the cutoff is temporal,
+sort and filter in a preprocessor instead.
 
-::: {.callout-note}
-You can slice nested arrays with a query path, but use a
-[preprocessor](../guides/data-modules.qmd#preprocessors) when you need to sort
-first, choose a time window, or make the slicing rule testable outside JMESPath.
-:::
+Branch `length` and `overflow` are often clearer than hard-coding a slice in
+every child query: they keep one retention rule on the shared context. Use a
+query slice when source selection itself is intentionally different.
 
-## Common Query Examples
+## Update Or Temporarily Override A Query
 
-| Input shape | Query | Result shape for one processed observation |
+`query` is a leaf schema attribute. Update it when a source contract changes but
+the schema identity remains valid:
+
+```python
+model.update(
+    jv.where("address") == "record/amount",
+    query="[*].transaction.amount_usd",
+)
+```
+
+Use `override(...)` for an experiment or compatibility check that should restore
+the original schema afterward:
+
+```python
+with model.override(
+    jv.where("address") == "record/amount",
+    query="[*].fallback.amount",
+):
+    predictions = model.predict(records)
+```
+
+Select leaf tensorfields when changing queries. A different query can change
+the meaning of a field even if tensor shapes remain compatible, so validate the
+result and version the changed artifact.
+
+## Common Patterns
+
+| Input shape | Query | Result for one processed observation |
 | --- | --- | --- |
 | `{"amount": 12.5}` | `[*].amount` | `[12.5]` |
-| `{"merchant_id": "M1"}` | `[*].merchant_id` | `["M1"]` |
 | `{"device-id": "D1"}` | `[*]."device-id"` | `["D1"]` |
 | `{"job code": "ENG-2"}` | `[*]."job code"` | `["ENG-2"]` |
 | `{"customer": {"tier": "gold"}}` | `[*].customer.tier` | `["gold"]` |
-| `{"transaction": {"amount_usd": 12.5}}` | `[*].transaction.amount_usd` | `[12.5]` |
 | `{"tags": ["new", "vip"]}` | `[*].tags` | `[["new", "vip"]]` |
-| `{"embedding": [0.1, 0.2]}` | `[*].embedding` | `[[0.1, 0.2]]` |
 | `{"items": [{"sku": "A"}, {"sku": "B"}]}` | `[*].items[*].sku` | `[["A", "B"]]` |
-| `{"events": [{"type": "login"}, {"type": "buy"}]}` | `[*].events[*].type` | `[["login", "buy"]]` |
 | `{"events": [{"type": "login"}, {"type": "buy"}]}` | `[*].events[?type == 'login'].type` | `[["login"]]` |
 | `{"events": [{"score": 1}, {"score": 2}]}` | `[*].events[:1].score` | `[[1]]` |
 | `{"legs": [{"origin": "IAD"}]}` | `[*].legs[0].origin` | `["IAD"]` |
 | `{"accounts": [{"txns": [{"amount": 1}]}]}` | `[*].accounts[*].txns[*].amount` | `[[[1]]]` |
 
-Avoid flattening operators such as `[]` unless you intentionally want to remove
-an array dimension. Most fields under `Branch` should use `[*]` at each array
-level so values remain aligned with the schema tree.
-
-For example:
+The flattening distinction is easy to miss:
 
 | Intent | Query | Result |
 | --- | --- | --- |
-| Preserve `items` as one array under the root record | `[*].items[*].sku` | `[["A", "B"]]` |
-| Flatten away the `items` dimension | `[*].items[].sku` | `["A", "B"]` |
+| Preserve `items` under one root record | `[*].items[*].sku` | `[["A", "B"]]` |
+| Flatten away the item dimension | `[*].items[].sku` | `["A", "B"]` |
 
-## Testing A Query
+## Test Before Encoding
 
-When a query does not resolve, test it against one processed observation:
+Test an expression against a one-item processed observation before involving the
+model:
 
 ```{python .marimo}
 #| echo: true
@@ -618,28 +296,35 @@ observation = [
     }
 ]
 
-assert jmespath.search("[*].payload.items[*].product.sku", observation) == [["A12", "B07"]]
+query = "[*].payload.items[*].product.sku"
+assert jmespath.search(query, observation) == [["A12", "B07"]]
 ```
 
-If that works, use the same string as `query=...`. Do not add another leading
-`[*]`; `json2vec` adds the batch selector internally.
+If this assertion works, use the same string as `query=...`; do not add another
+leading `[*]`.
 
-You may also inspect processed model inputs via `Model.encode(...)`:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-tensors = model.encode([{"amount": 12.50, "merchant": "bookshop"}])
-print(tensors)
-```
+Then use `model.encode(records)` to inspect what all leaf queries produced
+together. Encoding is the right diagnostic when each expression works alone but
+branch shapes or sibling alignment are still wrong.
 
 ## Troubleshooting
 
 | Symptom | Likely issue | Fix |
 | --- | --- | --- |
-| Query syntax is rejected while building the model | The expression is not valid JMESPath | Compile it with `jmespath.compile(...)` or test it in the JMESPath playground. |
-| Query repeatedly returns empty results | The source path does not exist for the input records | Test against one processed observation and check key names exactly. |
-| Branch child values are misaligned | Different child queries filter or flatten differently | Use the same array path and filters for sibling fields. |
-| Shape is flatter than expected | The query used `[]` flattening or skipped a `[*]` level | Use `[*]` at every schema branch level. |
-| Query starts with `[*][*]` | You wrote the internal batch query | Remove the extra leading selector. |
+| Query is rejected while building the model | Invalid JMESPath | Compile with `jmespath.compile(...)` or test against one observation. |
+| Query repeatedly returns empty results | Source path or key does not exist | Check exact keys on a representative processed observation. |
+| Query starts with `[*][*]` | Internal batch selector was configured manually | Remove one leading selector. |
+| Branch child values are misaligned | Sibling paths filter, slice, or flatten differently, or a projection elides null leaf results | Apply one coordinated preprocessor; for stable sparse siblings, use identical selection plus null-preserving `map(&field, array)` queries. |
+| Result is flatter than the schema | `[]` flattened an array or a `[*]` level is missing | Preserve one array dimension for each parent branch. |
+| “Recent” slice selects old values | Source ordering assumption is wrong | Sort in a preprocessor and test the cutoff rule. |
+| Values are selected correctly but encoded state/content is unexpected | Datatype conversion, vocabulary, or missing-value rule | Inspect `model.encode(...)`, then use the relevant datatype reference. |
+
+## Where Next
+
+- Return to [Binding Data](binding-data.qmd) for default inference and
+  preprocessor decisions.
+- Use [Data Flow](data-flow.qmd) to understand what happens after query
+  selection.
+- Use [Data Modules](../guides/data-modules.qmd) for preprocessor wiring.
+- Use [Temporal Validation](../guides/temporal-validation.qmd) for tested
+  point-in-time windows.

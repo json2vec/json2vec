@@ -5,32 +5,37 @@ eval: false
 
 # Training With Lightning
 
-`json2vec` builds on top of PyTorch Lightning. A `jv.Model` is a Lightning
-`LightningModule`, and the data modules in `json2vec` are Lightning
-`LightningDataModule` implementations. The schema defines the model tree,
-typed inputs, losses, targets, and embeddings; Lightning runs the training,
-validation, test, and prediction loops.
+**Example status — runnable:** the fit/validate/save/load/predict pattern is
+executed by `uv run pytest tests/examples/test_e2e_examples.py`.
 
-That means normal Lightning tools apply: `Trainer`, callbacks, checkpointing,
-logging, device placement, precision settings, and distributed strategies.
+`jv.Model` is a Lightning `LightningModule`, and JSON2Vec data modules implement
+Lightning's `LightningDataModule` contract. JSON2Vec owns the schema-generated
+model, typed losses, and prediction writing; Lightning owns execution.
 
-This design decision was not taken lightly: the requirements with extensible 
-callback management, complex loop management,and device configurations
-aligned really well with the abstractions provided by Lightning.
-`json2vec` aims to expose as much flexibility and customization to users as possible.
+Use this guide when the schema and data splits already exist and you need to
+configure a training loop. See [Data Modules](data-modules.qmd) for ingestion
+and [Evaluation And Metrics](evaluation.qmd) for interpreting the result.
 
-## Ownership
+## What Each Layer Owns
 
-| Concern | Owned by |
+| Concern | Owner |
 | --- | --- |
-| Schema, addresses, query paths, targets, embeddings | `json2vec` |
-| Tensorization, typed value state, datatype-specific losses | `json2vec` |
-| Optimizer and scheduler hooks | `jv.Model` through Lightning |
-| Epochs, devices, precision, callbacks, logging, checkpoints | Lightning `Trainer` |
-| Data loading and tensorization batches | `jv.PolarsDataModule` or `jv.StreamingDataModule` |
-| Batch prediction writing | Lightning `Trainer.predict(...)` plus `jv.Writer` |
+| Schema, addresses, queries, targets, embeddings | JSON2Vec model |
+| Tensorization, value state, datatype losses and metrics | JSON2Vec model and data module |
+| Optimizer and scheduler factories | `jv.Model` configuration |
+| Epochs, devices, precision, callbacks, loggers, checkpoints | Lightning `Trainer` |
+| Data loading, workers, preprocessing, masking, sharding | JSON2Vec data module |
+| Batch prediction files | `Trainer.predict(...)` with `jv.Writer` |
+
+Normal Lightning callbacks, loggers, device placement, precision modes, and
+distributed strategies apply. JSON2Vec also installs the internal callbacks
+needed by active tensorfields and runtime contracts.
 
 ## Minimal Training Loop
+
+The following is a runnable API example. It deliberately reuses the tiny frame
+for validation so the code remains compact; do not treat its validation metric
+as evidence of generalization.
 
 ```{python .marimo}
 #| echo: true
@@ -38,14 +43,15 @@ aligned really well with the abstractions provided by Lightning.
 
 import lightning.pytorch as lit
 import polars as pl
+import torch
 
 import json2vec as jv
 
 records = pl.DataFrame(
     {
-        "amount": [12.5, 8.0, 19.0],
-        "merchant": ["books", "coffee", "books"],
-        "fraud": ["no", "no", "yes"],
+        "amount": [12.5, 8.0, 19.0, 27.5],
+        "merchant": ["books", "coffee", "books", "grocery"],
+        "fraud": ["no", "no", "yes", "no"],
     }
 )
 
@@ -54,8 +60,12 @@ model = jv.Model(
     n_layers=1,
     n_heads=4,
     batch_size=2,
+    optimizer=lambda module: torch.optim.AdamW(
+        module.parameters(),
+        lr=1e-3,
+    ),
     amount=jv.Number,
-    merchant=jv.Category(size=128),
+    merchant=jv.Category(size=3),
     fraud=jv.Category(target=True, size=2),
 )
 
@@ -76,52 +86,103 @@ trainer = lit.Trainer(
 )
 
 trainer.fit(model=model, datamodule=datamodule)
+results = trainer.validate(model=model, datamodule=datamodule)
+print(results[0]["loss/validate"])
 ```
 
-The same model and data module can be passed to other Lightning loops:
+An optimizer is required before fitting. Pass either an optimizer instance or
+a factory that accepts the model. A factory is normally safer because
+Lightning can construct it at the right time and device placement.
+
+Configure a scheduler with the model's `scheduler` argument when needed. A
+scheduler factory receives `(model, optimizer)`; a Lightning-compatible
+scheduler configuration can also be supplied directly.
+
+## Configure The Matching Loop And Split
+
+Lightning calls the corresponding JSON2Vec step for each stage:
+
+| Trainer entry point | Data-module split | JSON2Vec stage |
+| --- | --- | --- |
+| `trainer.fit(...)` | `train`, optionally `validate` | `train`, `validate` |
+| `trainer.validate(...)` | `validate` | `validate` |
+| `trainer.test(...)` | `test` | `test` |
+| `trainer.predict(...)` | `predict` | `predict` |
+
+Configure the split before invoking its loop. Missing optional splits are
+skipped during `fit`, but an explicit loop has nothing to consume without its
+matching split.
+
+The stage controls vocabulary learning, sampling, masking, logged metric names,
+and prediction metadata. Do not use a training dataloader as a convenient
+prediction path: use the intended split so those semantics remain explicit.
+
+## Log And Inspect Metrics
+
+JSON2Vec logs epoch-level metrics through Lightning. The weighted total losses
+are `loss/train`, `loss/validate`, and `loss/test`; individual leaves emit
+address-specific state and content metrics. Throughput is measured for every
+stage. Train, validation, and test throughput use normal module metrics;
+prediction throughput is sent directly to an attached logger and retained on
+the installed throughput callback because Lightning prediction hooks do not
+support `LightningModule.log(...)`.
+
+After a loop:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-trainer.validate(model=model, datamodule=datamodule)
-trainer.test(model=model, datamodule=datamodule)
-trainer.predict(model=model, datamodule=datamodule)
+for name, value in trainer.callback_metrics.items():
+    print(name, value)
 ```
 
-Configure the matching split on the data module before using each loop.
+Attach any Lightning logger for durable experiment tracking. The exact naming
+contract, loss composition, and model-selection advice live in
+[Evaluation And Metrics](evaluation.qmd).
 
-## Callbacks
+## Select And Restore Checkpoints
 
-Lightning callbacks work normally:
+An ordinary Lightning callback records the best path:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
 checkpoint = lit.callbacks.ModelCheckpoint(
+    dirpath="checkpoints",
     monitor="loss/validate",
     mode="min",
+    save_top_k=1,
+    save_last=True,
 )
 
 trainer = lit.Trainer(callbacks=[checkpoint])
 ```
 
-`json2vec` also installs internal callbacks when needed. For example, schema
-mutation is blocked while Lightning owns an active training, validation, test,
-or prediction loop.
+Use `jv.RollbackCheckpoint` with the same arguments when the in-memory `model`
+should be restored to the best full checkpoint at the end of `fit`:
 
-::: {.callout-warning}
-Do not call `model.update(...)`, `model.extend(...)`, `model.delete(...)`,
-or other schema mutations from inside an active Lightning loop. Mutate the
-schema between runs, or use `model.override(...)` around a complete
-evaluation call.
-:::
+```{python .marimo}
+#| echo: true
+#| output: true
 
-## Interactive Prediction
+checkpoint = jv.RollbackCheckpoint(
+    dirpath="checkpoints",
+    monitor="loss/validate",
+    mode="min",
+    save_top_k=1,
+)
+```
 
-For small batches, `model.predict(...)` is a convenience method that accepts raw
-dictionaries and returns the written prediction payload directly:
+Do not set `save_weights_only=True` for `RollbackCheckpoint`. For persistence,
+resuming, and checkpoint compatibility, see
+[Model Lifecycle](model-lifecycle.qmd).
+
+## Interactive Prediction Is A Separate Convenience Path
+
+For a small list of raw dictionaries, `model.predict(...)` handles encoding,
+inference mode, and output writing without creating a Trainer:
 
 ```{python .marimo}
 #| echo: true
@@ -135,22 +196,61 @@ predictions = model.predict(
 )
 ```
 
-Use this for debugging, notebooks, and small request batches. For high-volume
-prediction, use `trainer.predict(...)` with a data module and `jv.Writer`.
+Use it for notebooks, smoke tests, and small request batches. It is not a
+replacement for a data module and `trainer.predict(...)` in a large job. See
+[Prediction Output](prediction-output.qmd) for the returned mapping and
+[Batch Inference](batch-inference.qmd) for Parquet output.
 
-## Production Notes
+## Mutation And Active Loops
 
-Examples often set `num_workers=0`, `persistent_workers=False`, and
-`pin_memory=False` so they run reliably in notebooks and documentation builds.
-Those settings are not production recommendations. For larger jobs, tune
-workers, sharding, buffers, accelerator settings, logging, and checkpointing
-through Lightning and the data module options.
+JSON2Vec blocks schema mutation while Lightning owns a training, validation,
+test, or prediction loop.
+
+::: {.callout-warning}
+Do not call `model.update(...)`, `model.extend(...)`, `model.delete(...)`,
+`model.reset(...)`, or enter `model.override(...)` from an active loop or
+callback. Mutate between complete runs, then rebuild any detached data-module
+contract if necessary.
+:::
+
+Changing module shapes also invalidates optimizer state. Treat a shape-changing
+mutation as a new training phase and verify checkpoint compatibility rather
+than trying to splice it into a running Trainer.
+
+## Production Tuning Boundaries
+
+Documentation examples use CPU, one epoch, and zero data-loader workers for
+repeatability. Those values are not production defaults.
+
+Tune these layers independently and measure the result:
+
+- model width, depth, attention, branch lengths, and vocabulary capacities;
+- `model.batch_size` and Lightning precision/device strategy;
+- data-module workers, buffers, sampling, and sharding; and
+- checkpoint frequency and logger overhead.
+
+The built-in throughput measurement estimates processed observations from
+completed batches and `model.batch_size`. A short final batch can make that
+estimate slightly high, and comparisons are meaningful only with equivalent
+workload, hardware, and measurement windows. After `trainer.predict(...)`, look
+for `throughput/predict` in the attached logger rather than
+`trainer.callback_metrics`.
+
+## Common Failures
+
+| Symptom | Likely cause or next check |
+| --- | --- |
+| Fit raises `optimizer must be passed` | Configure `model.optimizer` with an instance or factory. |
+| An explicit loop has no data | Add the matching `validate`, `test`, or `predict` split. |
+| Checkpoint monitor is missing | Inspect exact keys in `trainer.callback_metrics` and ensure validation runs each epoch. |
+| Mutation raises during a callback | Move the mutation between complete Lightning runs. |
+| Notebook settings are slow on a server | Tune workers, pinning, devices, precision, and batch size for that environment. |
+| Metrics are good only on the tutorial frame | Build a non-overlapping, leakage-safe validation split. |
 
 ## Where Next
 
-- Use [Data Modules](data-modules.qmd) to choose `PolarsDataModule` or
-  `StreamingDataModule`.
-- Use [Batch Inference](batch-inference.qmd) to write predictions with
-  `jv.Writer`.
-- Use [preprocessors](data-modules.qmd#preprocessors) for input-side Python
-  logic.
+- Choose ingestion and preprocessing with [Data Modules](data-modules.qmd).
+- Interpret results with [Evaluation And Metrics](evaluation.qmd).
+- Preserve the selected model with [Model Lifecycle](model-lifecycle.qmd).
+- Choose interactive, batch, or online prediction in
+  [Prediction Output](prediction-output.qmd).

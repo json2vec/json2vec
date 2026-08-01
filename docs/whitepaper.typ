@@ -66,16 +66,19 @@ Business data rarely starts as a clean table. It is usually nested, historical, 
 
 What my VP was really asking was this: Is there a way to model complex business data without having to resort to tabular reductions of nested relationships?
 
-Several organizations have pursued this problem over the last decade: a branch of applied research that is generally referred to as _sequence modeling_. When I was at Capital One, I attempted several approaches in this space while modeling fraud use cases. Sequence modeling can work, and it can outperform traditional tabular solutions. JP Morgan, Capital One, NuBank, IBM, Stripe, and Revolut, among other financial institutions, are all racing to implement these foundational sequence models.
-
-They are all converging on a similar approach: hierarchical transformer encoder blocks to embed a collection of nested contexts.
+Teams have pursued this problem through sequence and representation modeling.
+When I was at Capital One, I attempted several approaches in this space for
+fraud use cases. A promising design direction is to use hierarchical encoder
+blocks for collections of nested contexts; this paper presents that direction
+as an architectural motivation, not evidence that the industry has converged on
+one implementation.
 
 However, these implementations are often rigid, proprietary, or inaccessible to developers. In practice, they tend to lack six core components:
 
 1. *Dynamic model architecture*: Model architecture is usually hard-coded or limited to a strict subset of possible topographies, which limits reuse across domains. See @sec:schema[Dynamic Model Architecture Instantiation]
 2. *Hierarchical context encoding*: Most systems cannot naturally represent multiple nested contexts, such as monthly statements, transactions, login sessions, and clickstream events. See @sec:nested-contexts[Hierarchical Context Encoding].
 3. *Transfer learning*: Business foundation models are hard to reuse if their schemas cannot evolve as teams add or remove features and targets. See @sec:mutability[Transfer Learning with Schema Evolution].
-4. *Extensible datatype support*: Real business data needs type-aware support for categories, numbers, text, entities, embeddings, dates, and user-defined datatypes. See @sec:datatypes[Extensible Datatype Plugin System].
+4. *Typed datatype support*: Real business data needs specialized support for categories, numbers, text, entities, embeddings, and dates. The current external custom-datatype registry remains experimental and is not artifact-compatible. See @sec:datatypes[Datatype Plugin Architecture].
 5. *Explainability*: Business models often operate on sensitive decisions, so developers need ways to inspect model behavior beyond a single opaque prediction. See @sec:explainability[Explainability].
 6. *Integrated querying and transformation*: Source data arrives in inconsistent shapes and formats, so developers need flexible querying and transformation without maintaining a separate feature pipeline. See @sec:integration[Integrated Querying, Wrangling, and Logging].
 
@@ -90,7 +93,9 @@ Combining these processes with the six capabilities above produces a generalizab
 A pretrained business foundation model will almost always be tied to a particular organization, data contract, risk tolerance, and regulatory environment. A shared framework, however, can be reused without requiring organizations to share private customer data or adopt the same internal feature pipeline.
 
 That creates an opportunity for collaboration across industries.
-Organizations can contribute shared schema patterns, datatype plugins, model components, evaluation harnesses, synthetic datasets, and benchmark tasks. They can compare approaches for nested transactions, event streams, entity relationships, time-aware fields, and real-time inference without each team rebuilding the same proprietary framework behind closed doors.
+Organizations can contribute shared schema patterns, experimental datatype
+prototypes, model components, evaluation harnesses, synthetic datasets, and
+benchmark tasks. A stable external datatype SDK remains future work.
 
 The goal is not that every organization uses the same model.
 The goal is that they can use the same modeling language and benchmark surface. If the architecture, data contracts, and evaluation tools are open-source, the community can make measurable progress on structured business-data modeling instead of fragmenting into incompatible internal systems.
@@ -101,7 +106,12 @@ The rest of this document describes how `json2vec` fulfills these requirements a
 
 Generalizability breaks down when any of the following capabilities is missing.
 
-Without *dynamic model architecture*, *hierarchical context encoding*, and *extensible datatype support*, model developers cannot express the range of architectures required for complex structured data. Developers need a succinct way to describe a target data structure, use built-in datatypes or create their own, and instantiate a model from any valid `json`-like document.
+Without *dynamic model architecture*, *hierarchical context encoding*, and
+typed datatype support, model developers cannot express the range of
+architectures required for complex structured data. Developers need a succinct
+way to describe a target structure and use supported built-in datatypes. A
+stable create-your-own-datatype contract requires persistence and compatibility
+guarantees that the current experimental registry does not yet provide.
 
 However, architecture flexibility alone is not enough. An organization's foundation model is only practical across many use cases if its schema can evolve. Teams need to add and remove fields as their use cases change. An _overloaded_ foundation model is pretrained on every available data field; it may be slow, expensive, unwieldy, and inappropriate for sensitive use cases, such as credit decisioning with personal information. An _underloaded_ foundation model is trained only on universally relevant fields; it may underperform task-specific models that use handcrafted features for the task at hand. Without use-case-specific information, such as device identifiers or biometrics for fraud, a foundation model may supplement model development but cannot act as a standalone implementation.
 
@@ -268,24 +278,25 @@ This illustrates an important point: `json2vec` can create a family of models, i
 
 However, the architectures instantiated from the pipeline are flexible. Inputs and outputs are defined in the same schema. Developers can mark any field as an output target that the other fields must reconstruct.
 
-For example, developers can pretrain the model with this schema, then finetune it by keeping `tokens` visible while "pruning" `sentiment` and `part_of_speech`, which makes them supervised targets:
+For example, developers can pretrain a model with stochastic reconstruction,
+then make `sentiment` and `part_of_speech` supervised targets while keeping
+`tokens` visible:
 
-```yaml
-name: "my-finetune-job"
-task: "fit"
-dataset: ...
-structure: ...
-trainer: ...
-pruned:
-  - "observation/context/part_of_speech"
-  - "observation/sentiment"
+```python
+model.update(jv.where("name") == "sentiment", target=True)
+model.update(jv.where("name") == "part_of_speech", target=True)
 ```
 
-After finetuning this model with these two fields pruned, you may input just the wordpiece tokens and the model will predict just the parts of speech per token and the sentiment of the message as a whole.
+`target=True` is the public shorthand for `p_prune=1.0`: the selected leaf is
+always hidden from encoder input while its original value remains the training
+target. After finetuning, input may omit these target fields and the model will
+decode them from the visible wordpiece tokens.
 
 The same underlying code handles pretraining and finetuning. This is discussed in more detail in @sec:training.
 
-In short: a "finetuned" model is a special case in which a subset of fields are always _pruned_, while the remaining fields are never masked.
+In short: a supervised finetuning configuration is a special case in which a
+subset of fields use `target=True`; other fields may remain visible or retain
+intentional stochastic reconstruction objectives.
 
 === Basic Chess Encoding
 
@@ -362,7 +373,7 @@ The same flexibility can support related targets. For example, the model could t
 
 Many architectures already support tabular inputs or a single sequence-like context.
 
-`json2vec` uniquely enables multiple contexts, each of which may have its own child contexts. I refer to this as hierarchical context encoding.
+`json2vec` supports multiple contexts, each of which may have its own child contexts. I refer to this as hierarchical context encoding.
 The implementation details of how information moves through this tree are described in @sec:forward-pass.
 
 Hierarchical context encoding is not just a technical detail. It is useful in practical settings. For example:
@@ -652,11 +663,13 @@ Many production models use a fixed-size trailing window: the last 400 transactio
 
 For example, an account takeover attempt may include meaningful signals such as `forgot password`, `change email`, new-device login, or unusual transfer setup. If the model only sees a flat trailing window, an attacker may be able to dilute or _flush_ that context by repeatedly logging in and out, generating harmless clickstream events, or sending many small transfers.
 
-Hierarchical context encoding makes this harder. Instead of forcing all behavior into one flat sequence, the model can preserve separate windows for transactions, login sessions, and clickstream events within each session. The suspicious password-reset and email-change flow remains local to the session where it happened, even if later activity creates noise elsewhere.
+Hierarchical context encoding is one possible mitigation to test. Instead of forcing all behavior into one flat sequence, a schema can preserve separate windows for transactions, login sessions, and clickstream events within each session. That design may keep a suspicious password-reset and email-change flow local to its session even when later activity creates noise elsewhere.
 
 Because there are multiple context windows, flushing behavior can be separated by frequency, relevance, and sensitivity, allowing the most important events to live in different contexts.
 
-This is one of the practical reasons nested contexts matter. They are not only a cleaner representation of the data; they reduce the number of ways important behavioral context can be accidentally (or intentionally) pushed out of view.
+This is a design hypothesis, not a demonstrated security guarantee. Evaluate it
+with explicit flush-style perturbations, branch truncation measurements, and a
+flat-window baseline before claiming that it reduces attack paths.
 
 Custom preprocessing functions defined in @sec:preprocessors provide another mitigation. Developers can programmatically filter out irrelevant events during training and inference before they enter the model context.
 
@@ -664,7 +677,12 @@ Custom preprocessing functions defined in @sec:preprocessors provide another mit
 
 The schema is the basis of modeling with `json2vec`. The schema is meant to be flexible and adaptable to accommodate changes to upstream data.
 
-If you load an old model checkpoint with an altered schema, compatible parameters are restored, new parameters are initialized, and removed fields are ignored.
+`Model.load(...)` reconstructs the schema saved in the artifact; it does not
+accept a replacement schema. After loading, the public mutation methods can
+evolve that model. Compatible parameters and field-owned state are retained
+when their address, type, and tensor shape still match, while new or
+shape-incompatible modules are initialized. The evolved model must be trained,
+evaluated, and saved as a new artifact.
 
 Fields may be added and removed because each parent context has a flexible context width.
 
@@ -679,9 +697,9 @@ Without schema evolution, the organization would need to resort to one or both o
 By using transfer learning with schema evolution, teams can adapt foundation models with new fields for their individual use cases.
 
 
-== Extensible Datatype Plugin System <sec:datatypes>
+== Datatype Plugin Architecture <sec:datatypes>
 
-Schemas define the shape of the model, but datatype plugins define how each data field behaves.
+Schemas define the shape of the model, but datatype plugins define how each data field behaves. The built-in datatypes use this architecture internally. Although registry and base objects are importable, dynamically registered external request types do not currently round-trip through saved schema validation; treat custom tensorfields as an experimental, same-process extension surface rather than a stable artifact-compatible plugin SDK.
 
 A field's `type` is not only a validation hint. It selects a small bundle of components that know how to:
 - Validate datatype-specific schema parameters
@@ -703,7 +721,7 @@ foo: Plugin = Plugin(name="foo")
 @foo.register
 class Request(RequestBase):
     type: Literal["foo"]
-    # datatype-specific schema schema
+    # datatype-specific schema
 
 @foo.register
 class TensorField(TensorFieldBase):
@@ -725,15 +743,17 @@ def loss(module, prediction, batch, strata):
 @foo.register
 def write(module, prediction):
     # datatype-specific inference output
-    # optional for non-supervised targets (text)
+    # optional when the datatype has no public decoded payload
 ```
 
 The important point is that the architecture receives a uniform interface while the datatype plugin remains free to be specialized.
 
 A `number` plugin can use continuous regression losses, a `category` plugin can use cross-entropy over a bounded vocabulary, a `dateparts` plugin can decompose timestamps into calendar components, a `text` plugin can call a pretrained Hugging Face encoder, and a `vector` plugin can learn against distances from dense embeddings.
 
-This design keeps the system extensible without forcing every datatype into the same crude representation.
-Adding a new datatype should not require rewriting the model traversal, the dataloader, the masking policy, or the training loop. It should only require implementing the datatype's local contract.
+This design keeps built-in datatypes specialized without forcing every value
+into the same crude representation. A future stable extension SDK can expose
+the same component boundary once registration, persistence, compatibility, and
+distributed loading have explicit guarantees.
 
 Developers may, in the future, implement `image`, `video`, or `audio` datatypes, but media fields require more deliberate file, object-store, and batching semantics than the current core examples cover.
 
@@ -745,9 +765,9 @@ The `category` datatype handles this with an online vocabulary tokenizer. During
 
 The model will never learn vocabulary observed outside of training, which could lead to unexpected behavior.
 
-When a category appears outside the learned vocabulary, `json2vec` does not treat the field as missing. The field is still present, but its content is routed into a reserved unavailable bucket. This distinction matters. A transaction with a new merchant category is different from a transaction with no merchant category at all.
+When a category appears outside the learned vocabulary, `json2vec` does not treat the field as missing. Its state remains `valued`, while tensorization uses an internal unavailable sentinel. The sentinel is not an embedding-table row or output class: unavailable categorical content contributes a zero content vector, leaving the separate `valued` state embedding to record that a source value was present. A transaction with a new merchant category is therefore different from a transaction with no merchant category at all.
 
-To make the unavailable bucket learnable, training can deliberately route a small fraction of known categories into that bucket with `p_unavailable`. This gives the decoder examples of how to behave when serving receives labels that were not present in the training split.
+Training can deliberately replace a small fraction of known category content with the same unavailable condition through `p_unavailable`. If such content becomes a reconstruction target, it uses a uniform objective over the real classes and is excluded from categorical content accuracy. The decoder still scores exactly `size` real labels; unavailable is never emitted as a predicted label.
 
 For example:
 
@@ -761,30 +781,29 @@ For example:
 ```
 #querynote()
 
-This field learns a bounded categorical vocabulary, reserves capacity for unseen labels, and can optionally report top-k alternatives during prediction.
+This field learns up to 5000 real labels and can optionally report top-k alternatives from the populated training vocabulary during prediction. Validation, test, and prediction inputs never expand that vocabulary. See the current #link("https://json2vec.github.io/json2vec/data-types/category.html")[Category reference] for the complete runtime, metric, and output contract.
 
 === Unified Enumerable State Management
 
-Every datatype needs to represent more than content. It also needs to represent whether the content exists, whether it was padded, whether it was deliberately masked, and whether it was pruned into a supervised target.
+Every datatype needs to represent more than content. It also needs to represent whether the content exists, whether it was padded, or whether it was deliberately hidden.
 
 `json2vec` handles this with a shared state vocabulary:
-- `valued`: the field has real observed content
+- `valued`: a source value exists, even if vocabulary-backed content is unavailable
 - `null`: the source value is explicitly absent (`None`)
 - `padded`: the value was introduced only to fill a fixed context shape
-- `masked`: the value is hidden for self-supervised pretraining
-- `pruned`: the value is hidden as a supervised target
+- `masked`: the input value is hidden by masking, pruning, or a supervised target
 - `other`: a reserved state for datatype-specific extensions
 
 Each `TensorField` therefore carries four pieces of information:
 - `content`: the datatype-specific tensor representation
 - `state`: the enumerable state token for each position
 - `trainable`: which positions should contribute to loss
-- `targets`: cached original values used when masked or pruned positions are decoded
+- `targets`: cached original values used when hidden positions are decoded
 
 This is what makes the training and finetuning path the same path.
-Pretraining sets some positions to `masked`; finetuning sets target fields to `pruned`. In both cases, the model sees incomplete input and the datatype decoder learns to reconstruct the hidden value.
+Pretraining masks sampled positions; pruning and `target=True` hide whole leaf instances. The current runtime applies configured masking and pruning in train, validation, and test; prediction bypasses those stochastic policies while supervised targets are still supplied as hidden inputs. All hiding operations set the selected _input_ state to `masked`, cache the original target, and mark trainable positions. Pruning is an operation, not a sixth state token. During prediction, a separate public `inferred` mask says which decoded positions were masked in the request.
 
-Because this state system is shared, new datatypes get masking, pruning, padding, and missing-value behavior without inventing their own control flow. The datatype only needs to decide what its `content` tensor means and how to score decoded predictions.
+Because this state system is shared, new datatypes get masking, pruning, padding, and missing-value behavior without inventing their own control flow. The datatype still decides what its `content` tensor means, which selected states contribute to content loss, and how to write decoded predictions. See the current #link("https://json2vec.github.io/json2vec/core-concepts/data-types.html")[Data Types reference] for the canonical state and prediction-envelope contract.
 
 === Built-In Entity Encoding
 
@@ -793,9 +812,9 @@ Examples include devices inside login sessions, accounts inside a transfer graph
 
 These values are usually high-cardinality and unstable. Treating them as ordinary categories can waste vocabulary capacity, while treating them as raw strings can make generalization brittle.
 
-The `entity` datatype instead locally re-indexes hashable scalar values within each encoded observation. If the same `device_id` appears in three login sessions in the same observation, those positions receive the same local entity index. A different device receives a different local entity index. The indices are meaningful inside the observation, but they do not need to be globally stable across the entire corpus.
+The `entity` datatype instead locally re-indexes hashable scalar values within each encoded observation and Entity leaf. If the same `device_id` appears in three login sessions in the same observation and leaf, those positions receive the same local entity index. A different device receives a different local entity index. Indexing restarts at zero for every observation, follows first-seen order, and does not align across separate Entity leaves, observations, batches, or checkpoints.
 
-This gives the model a way to learn sameness, repetition, and co-occurrence patterns without maintaining an enormous global entity vocabulary. In other words, an `entity` defines an ephemeral, machine-readable temporary identifier. It allows the model to compare objects within a context without learning anything specific about the object globally.
+This gives the model a way to learn sameness, repetition, and co-occurrence patterns without maintaining an enormous global entity vocabulary. In other words, an `entity` defines an ephemeral, machine-readable temporary identifier. It allows the model to compare repeated values within one leaf without learning anything specific about the object globally. Cross-collection identity requires restructuring or stacking both roles into that same leaf; two sibling Entity fields do not share a code space.
 
 For example:
 
@@ -1013,11 +1032,11 @@ First, the model logs field-level metrics through the same datatype plugins that
 Second, the training pipeline logs lifecycle and throughput information. Throughput is tracked in observations per second, which is useful when tuning batch size, dataloader workers, sharding strategy, or remote execution resources.
 
 Third, prediction output is written in an analysis-friendly format. Batch prediction writes parquet records containing:
-- the original input metadata
+- the processed, model-facing observation metadata
 - supervised predictions
 - optional embeddings
 
-This makes offline evaluation straightforward. A developer can train or finetune a model, run prediction over a validation or production sample, and inspect the original inputs alongside the model's reconstructed targets and intermediate embeddings.
+This makes offline evaluation straightforward. A developer can train or finetune a model, run prediction over a validation or production sample, and inspect the processed observations alongside the model's reconstructed targets and intermediate embeddings. Raw source fields appear only when the preprocessor retains them in its emitted observation.
 
 The framework can also attach standard experiment trackers when configured, including local CSV or TensorBoard logging and remote systems such as Weights & Biases, Neptune, Comet, or MLflow.
 
@@ -1189,5 +1208,9 @@ To serve the feature in real time, the system needed a large low-latency store o
 With `json2vec`, the problem can be expressed differently.
 Instead of materializing one handcrafted tenure feature, the raw observation can include a history of login sessions or transactions with device identifiers and timestamps. The `entity` datatype can show the model which events used the same device, while the timestamp fields preserve when those events occurred.
 
-That gives the model access to a richer pattern than a single number.
-It can learn whether the current device appeared before, how often it appeared, whether it appears across normal sessions, whether it is associated with other unusual behavior, and how that pattern interacts with the rest of the customer history. The expensive tabular feature becomes a simple structured input, and the model receives more context than the original feature could represent.
+That gives the model access to more raw context than a single tenure number.
+The hypothesis is that it may learn recurrence, frequency, and interactions with
+other behavior without materializing the handcrafted pair-store feature. This
+has not been established by the current documentation; the
+#link("https://json2vec.github.io/json2vec/case-studies/device-tenure.html")[Device Tenure case study]
+is explicitly an unevaluated schema sketch, not a measured replacement.

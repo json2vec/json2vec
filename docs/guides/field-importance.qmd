@@ -5,6 +5,9 @@ eval: false
 
 # Field Importance
 
+**Example status — excerpt:** blocks assume a trained model and held-out data;
+they illustrate an ablation procedure rather than a standalone benchmark.
+
 Field importance measures how much a trained supervised model depends on each
 input leaf. The pattern is simple: train with stochastic input pruning so the
 model has seen missing fields, test a baseline with all inputs active, then
@@ -31,7 +34,10 @@ import torch
 
 import json2vec as jv
 
-records = pl.read_ndjson("docs/data/iris.jsonl")
+records = pl.read_ndjson("docs/data/iris.jsonl").with_row_index()
+train_records = records.filter((pl.col("index") % 5) < 3).drop("index")
+validate_records = records.filter((pl.col("index") % 5) == 3).drop("index")
+test_records = records.filter((pl.col("index") % 5) == 4).drop("index")
 
 model = jv.Model(
     d_model=32,
@@ -43,10 +49,10 @@ model = jv.Model(
     sepal_width=jv.Number(p_prune=0.20),
     petal_length=jv.Number(p_prune=0.20),
     petal_width=jv.Number(p_prune=0.20),
-    species=jv.Category(target=True, size=4, topk=[2]),
+    species=jv.Category(target=True, size=3, topk=[2]),
 )
 
-records.head(3)
+train_records.head(3)
 ```
 
 `PolarsDataModule(...)` keeps train, validation, and test encoders tied to the
@@ -59,9 +65,9 @@ visible to `trainer.test(...)`.
 
 datamodule = jv.PolarsDataModule(
     model=model,
-    train=records,
-    validate=records,
-    test=records,
+    train=train_records,
+    validate=validate_records,
+    test=test_records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
@@ -81,6 +87,10 @@ trainer = lit.Trainer(
 
 trainer.fit(model=model, datamodule=datamodule)
 ```
+
+The modulo split keeps this example self-contained. A real experiment should
+use domain-appropriate time, identity, or grouped boundaries; see
+[Temporal Validation](temporal-validation.qmd).
 
 ## Score Ablations
 
@@ -144,8 +154,10 @@ before comparing unrelated branches.
 ## Caveats
 
 Do not deactivate fields that the model was never trained to survive without.
-Use `p_prune` or a related reconstruction objective during training if
-ablation is part of the evaluation plan.
+Use `p_prune` or a related reconstruction objective if ablation is part of the
+evaluation plan. The current pipeline applies configured pruning in train,
+validation, and test, so account for stochastic evaluation when the rate is
+between zero and one.
 
 This workflow tests one field at a time. It does not measure interactions
 between fields unless you explicitly deactivate groups with a selector that
@@ -153,8 +165,9 @@ matches the branch or role you want to test.
 
 ## Where Next
 
-- Use [Model Tree](../core-concepts/model-tree.qmd#roles-and-mutations) for
+- Use [Model Tree](../core-concepts/model-tree.qmd#schema-roles-and-mutations) for
   `active=False`, `model.update(...)`, and `model.override(...)`.
 - Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) for
   reconstruction and embedding patterns.
 - Use [Data Modules](data-modules.qmd) for train/validate/test split setup.
+- Use [Evaluation and Metrics](evaluation.qmd) before interpreting loss deltas.

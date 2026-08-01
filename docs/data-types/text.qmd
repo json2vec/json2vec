@@ -4,11 +4,14 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "json2vec[text] @ git+https://github.com/json2vec/json2vec.git",
   ]
 ---
 
 # Text
+
+**Example status — excerpt:** core blocks isolate Text behavior; the optional
+model integration excerpt requires an external Hugging Face download.
 
 Use `Text` for string fields encoded by a frozen Hugging Face model. The text
 encoder produces a dense representation that `json2vec` projects into the model
@@ -44,8 +47,10 @@ the desired signal.
 The text tensorfield requires the optional `transformers` dependency.
 
 ```bash
-uv sync --extra text
+python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
 ```
+
+In a contributor checkout, use `uv sync --extra text` instead.
 
 Without that extra, using `type: text` raises an import error when `json2vec`
 tries to load the tokenizer or encoder.
@@ -58,6 +63,11 @@ files only.
 
 `Text` expects string values. `None` is encoded as a null state, and missing
 branch positions are encoded as padded state.
+
+A non-string valued input raises a `ValueError`; it is not silently coerced.
+An empty string is still a valued string. The tokenizer truncates content past
+`max_length`, so monitor that limit when long text can carry the deciding
+signal.
 
 Text is tokenized with the configured Hugging Face tokenizer using max-length
 padding and truncation. Token IDs and attention masks are stored as tensorfield
@@ -88,15 +98,17 @@ ticket_events = jv.Branch(
 ticket_events
 ```
 
-### Tiny BERT Local Smoke Test
+### Tiny BERT Integration Excerpt
 
-For a quick local check, keep the `json2vec` model shallow and use the default
-small BERT miniature. The first run downloads the Hugging Face model into the
-local cache; later `Text` fields with the same `model` reuse the same frozen
-encoder module inside the process.
+This excerpt becomes a local integration check after the optional model assets
+are available. Keep the `json2vec` model shallow and use the default small BERT
+miniature. The first run downloads the Hugging Face model into the local cache;
+later `Text` fields with the same `model` reuse the same frozen encoder module
+inside the process. It is not executed by the core docs suite because it
+requires that external download.
 
 ```bash
-uv sync --extra text
+python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
 ```
 
 ```python
@@ -123,7 +135,7 @@ records = [
 predictions = model.predict(records)
 record_embedding = predictions[jv.Address("record")]["embedding"]
 
-print(record_embedding.shape)
+print(len(record_embedding), len(record_embedding[0]))
 ```
 
 This is a wiring smoke test, not a trained classifier. It exercises tokenizer
@@ -147,11 +159,17 @@ output.
 
 When `Text` is masked or used as a target, the decoder predicts:
 
-- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `state`: logits for `valued`, `null`, `padded`, `masked`, and reserved
+  `other`.
 - `content`: the frozen encoder hidden embedding for the original text.
 
 The decoder does not generate text tokens. It reconstructs the frozen text
 embedding used as the target representation.
+
+State uses frequency-weighted cross entropy and reports state accuracy. Valued
+targets use the configured `l1` or `l2` content objective and report MAE and
+RMSE in the frozen encoder's hidden-vector space. Null, padded, masked, and
+reserved-other targets do not contribute to content loss.
 
 ## Prediction Output
 
@@ -160,8 +178,31 @@ generated text in `Model.predict(...)`. Configure it as an input feature or
 embedding-reconstruction target, not as a generated-text output. Configure
 `embed=True` when you want the field address to emit an `embedding` payload.
 
+## Persistence And Deployment
+
+`Model.save(...)` preserves the Text request configuration, JSON2Vec projection,
+schema, and trained weights. It does not bundle the Hugging Face tokenizer or
+encoder assets named by `model`. The same model identifier must remain
+downloadable, or the referenced local path and its assets must be present in
+every process that calls `Model.load(...)`, predicts, or serves the artifact.
+
+For offline or reproducible deployment, pin the external model revision,
+materialize it at a stable local path, and ship that directory alongside the
+JSON2Vec artifact. See [Prediction Output](../guides/prediction-output.qmd) for
+the separate contract of the embeddings returned to callers.
+
 ## Notes
 
 The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
 by `json2vec`. Use `encoder_batch_size` to manage memory when many text values are
 flattened from nested branches.
+
+## Where Next
+
+- Use [Vector](vector.qmd) when the dense representation is already present in
+  each source record.
+- Use [Category](category.qmd) for bounded string labels whose exact identity
+  matters more than semantic similarity.
+- Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) to
+  distinguish frozen text content, JSON2Vec's internal projection, and public
+  `embed=True` output.

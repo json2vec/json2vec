@@ -1,0 +1,308 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Online Serving
+
+**Example status — excerpt:** commands define the supported HTTP/runtime
+contract but require a trained artifact and a service-specific process setup.
+
+`jv.Deployment` exposes a saved JSON2Vec model through a FastAPI application.
+It loads one checkpoint, batches concurrent requests, runs prediction, and
+returns an HTTP-safe form of the canonical address-keyed output.
+
+::: {.callout-warning title="Operational maturity"}
+The repository provides and tests this serving runtime, but it does not define
+a compatibility window, availability target, authentication layer, or
+production autoscaling policy. Treat the API as version-coupled to the
+checkpoint, put it behind your normal service controls, and load-test your
+actual model and payloads before production use.
+:::
+
+## Install The Serving Extra
+
+FastAPI, Uvicorn, and the JSON backends are optional dependencies:
+
+```bash
+python -m pip install "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git"
+```
+
+This matches the current source-distribution installation documented in
+[Getting Started](../getting-started.qmd). Without the extra, accessing
+`jv.Deployment` raises an installation error.
+
+## Start A Server
+
+Save a selected model artifact first, then point the deployment at its local or
+mounted filesystem path:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import json2vec as jv
+
+deployment = jv.Deployment(
+    checkpoint="artifacts/fraud-model.ckpt",
+    accelerator="auto",
+    host="0.0.0.0",
+    port=8000,
+    max_batch_size=128,
+    batch_timeout=0.005,
+)
+
+deployment.serve()
+```
+
+`serve()` blocks while Uvicorn runs. For tests or integration into another ASGI
+process, use `deployment.app()` to obtain the FastAPI application instead.
+
+The runtime exposes:
+
+- `GET /health`, returning `{"status": "ok"}`; and
+- `POST /predict`, accepting one JSON object or an array of JSON objects.
+
+## Send Requests
+
+Send the raw record shape expected by the saved schema or its configured
+preprocessor:
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H 'content-type: application/json' \
+  -d '{"amount": 12.5, "merchant": "books"}'
+```
+
+A successful single-record response is:
+
+```json
+{
+  "predictions": {
+    "record/fraud": {
+      "state": {"valued": 0.91, "null": 0.02, "padded": 0.01, "masked": 0.05, "other": 0.01},
+      "content": {"value": "no", "probability": 0.78, "topk": []},
+      "inferred": true
+    }
+  }
+}
+```
+
+Scores are illustrative. See [Prediction Output](prediction-output.qmd) for the
+full envelope and datatype-specific differences.
+
+Post an array to submit several independent records:
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H 'content-type: application/json' \
+  -d '[{"amount": 12.5, "merchant": "books"}, {"amount": 8.0, "merchant": "coffee"}]'
+```
+
+The response is an array with one response object per input, in input order.
+
+## Configure Dynamic Batching
+
+Each worker owns a queue and one model runtime. It drains up to
+`max_batch_size` requests for one model call. `batch_timeout` is the maximum
+number of seconds to wait for more queued requests after the first request
+arrives.
+
+| Choice | Tradeoff |
+| --- | --- |
+| Larger `max_batch_size` | Can improve accelerator utilization, but raises peak memory and tail latency. |
+| Positive `batch_timeout` | Can form fuller batches at moderate traffic, but intentionally adds queueing latency. |
+| `batch_timeout=0.0` | Processes currently ready requests immediately; best for latency-first or low-traffic services. |
+
+Measure throughput and latency together. A value copied from another model is
+not a production recommendation because branch lengths, vocabulary widths,
+embeddings, and hardware all change the cost of a request.
+
+## Choose A Device And JSON Backend
+
+Supported accelerators are:
+
+| Value | Behavior |
+| --- | --- |
+| `"auto"` | Select CUDA when available, otherwise MPS when available, otherwise CPU. |
+| `"cpu"` | Run on CPU. |
+| `"cuda"` | Request a CUDA device. |
+| `"mps"` | Request Apple Metal. |
+
+There is currently no public device-index option on `Deployment`. Control
+device visibility in the process environment when multiple accelerators are
+present.
+
+`json_backend="orjson"` is the default. Set `json_backend="stdlib"` for
+FastAPI's standard JSON parsing and response class. Validate numerical and
+non-string-key behavior if you switch backends.
+
+## Reuse The Training Preprocessor
+
+Attach the same decorated JSON2Vec preprocessor and bound arguments used by the
+training data module:
+
+The excerpt assumes `normalize_transaction` and `compact_response` are
+decorated with `@jv.preprocess` and `@jv.postprocess`, respectively.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+deployment = (
+    jv.Deployment(checkpoint="artifacts/fraud-model.ckpt")
+    .preprocess(normalize_transaction)
+    .postprocess(compact_response)
+)
+```
+
+In online serving, each HTTP object must produce exactly one
+`jv.Observation`. A preprocessor that drops the request or yields several
+observations produces an error envelope whose internal `status_code` is `422`.
+For an otherwise valid object/array request, the current `/predict` transport
+still returns HTTP `200`; clients must inspect the envelope. Data-module
+preprocessors may expand a source record into multiple training observations,
+so not every training preprocessor is valid at the request boundary.
+
+A deployment postprocessor may request these named runtime values:
+
+- `request`: the validated request dictionary;
+- `observations`: processed model-facing observations;
+- `input`: encoded tensorfields; and
+- `metadata`: processed observation metadata from the encoded input.
+
+Providers from other runtimes, such as writer `batch_idx`, are unavailable. If
+one postprocessor is shared across entry points, unavailable parameters must be
+optional.
+
+## Validate Request And Response Schemas
+
+Attach Pydantic models to validate requests and publish useful OpenAPI schemas:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+from pydantic import BaseModel
+
+
+class FraudRequest(BaseModel):
+    amount: float
+    merchant: str
+
+
+deployment = jv.Deployment(
+    checkpoint="artifacts/fraud-model.ckpt"
+).forge(request=FraudRequest)
+```
+
+`forge(request=..., response=...)` accepts either model independently. The
+request model is validated before preprocessing. The response model validates
+the final, postprocessed response and also defines its OpenAPI schema. Because
+the default address-keyed response is dynamic, a fixed response model is most
+useful after a postprocessor creates an application-specific shape.
+
+Pydantic models document an interface; they do not provide authentication,
+authorization, request size limits, rate limiting, or backward-compatible
+versioning. Add those at the surrounding service or gateway.
+
+## Apply A Startup Schema Update
+
+`Deployment.update(...)` queues the same attribute update supported by
+`Model.update(...)` and applies it after loading:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+deployment = jv.Deployment(
+    checkpoint="artifacts/fraud-model.ckpt"
+).update(
+    jv.where("name") == "fraud",
+    target=False,
+)
+```
+
+Use startup updates sparingly. They create an inference schema that differs
+from the saved artifact and can change which inputs and outputs are active.
+Prefer saving and validating a separately versioned model when the mutation is
+part of the durable contract.
+
+## Run Multiple Workers Carefully
+
+`workers>1` starts Uvicorn worker processes. It requires a checkpoint path;
+in-memory `model=` or `checkpoint=model` sources are rejected. Each process
+loads its own model and owns its own request queue.
+
+There are two important limits in the current launcher:
+
+1. each worker replicates model memory, including accelerator memory; and
+2. attached `forge`, `preprocess`, `postprocess`, and `update` builder state is
+   not transferred to worker processes by `serve()`.
+
+Use a single worker when those attachments are required. For a multi-worker
+deployment with custom application wiring, construct the app in an importable
+application module and let your ASGI process manager own worker startup. Verify
+accelerator placement explicitly; multiple workers can otherwise contend for
+the same visible GPU.
+
+## Environment Configuration
+
+`Deployment()` reads case-insensitive settings from JSON2Vec-prefixed or short
+environment variables:
+
+| Constructor field | Environment variables |
+| --- | --- |
+| `checkpoint` | `JSON2VEC_CHECKPOINT`, `CHECKPOINT` |
+| `max_batch_size` | `JSON2VEC_MAX_BATCH_SIZE`, `MAX_BATCH_SIZE` |
+| `batch_timeout` | `JSON2VEC_BATCH_TIMEOUT`, `BATCH_TIMEOUT` |
+| `workers` | `JSON2VEC_WORKERS`, `WORKERS` |
+| `accelerator` | `JSON2VEC_ACCELERATOR`, `ACCELERATOR` |
+| `host` | `JSON2VEC_HOST`, `HOST` |
+| `port` | `JSON2VEC_PORT`, `PORT` |
+| `log_level` | `JSON2VEC_LOG_LEVEL`, `LOG_LEVEL` |
+| `monitor_queries` | `JSON2VEC_MONITOR_QUERIES`, `MONITOR_QUERIES` |
+| `query_monitor_every` | `JSON2VEC_QUERY_MONITOR_EVERY`, `QUERY_MONITOR_EVERY` |
+| `json_backend` | `JSON2VEC_JSON_BACKEND`, `JSON_BACKEND` |
+
+`monitor_queries=True` periodically checks for schema queries that resolve only
+to empty or null-like results and raises a diagnostic error. It is useful while
+validating an integration, but it is not full drift monitoring.
+
+## Failure Behavior
+
+| Condition | Response or behavior |
+| --- | --- |
+| Model cannot load | Application startup fails; the server does not become ready. |
+| Malformed JSON | HTTP `400` with empty `predictions` and an `error` object. |
+| Body is not an object or array of objects | HTTP `422` with an error envelope. |
+| Request validation or preprocessing fails after an object is accepted | HTTP `200` with empty `predictions` and `error.status_code=422`; clients must inspect the body. |
+| Inference or postprocessing raises unexpectedly | Unhandled server error; log and monitor it as HTTP `500`. |
+| `GET /health` | Confirms the app is running after startup, but does not probe downstream systems or prediction quality. |
+
+The error envelope contains a numeric `status_code` and message. The embedded
+code is not always the HTTP transport status in the current runtime. Avoid
+exposing sensitive source values or stack traces through custom exception
+handling.
+
+## Production Checklist
+
+- Load the exact checkpoint selected on held-out validation data.
+- Version the package, checkpoint, processor code, and external schemas
+  together.
+- Put TLS, authentication, authorization, body limits, and rate limiting at the
+  service boundary.
+- Load-test representative nested payloads and record both latency percentiles
+  and throughput.
+- Monitor process health, error rates, queueing, memory, and application-level
+  model quality.
+- Decide how clients discover breaking schema or response changes.
+- Keep a rollback artifact and smoke-test it in a fresh process.
+
+## Where Next
+
+- Preserve compatible artifacts with [Model Lifecycle](model-lifecycle.qmd).
+- Define the response with [Prediction Output](prediction-output.qmd) and
+  [Postprocessors](postprocessors.qmd).
+- Use [Batch Inference](batch-inference.qmd) when requests do not need an online
+  latency contract.

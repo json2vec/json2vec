@@ -5,12 +5,23 @@ eval: false
 
 # Batch Inference
 
-`model.predict([...])` is the interactive path for a list of raw dictionaries.
-For large prediction jobs, use a data module with Lightning
-`trainer.predict(...)`. Attach `jv.Writer(...)` to write each prediction batch
-to Parquet as it finishes.
+**Example status — excerpt:** blocks show the supported wiring but assume a
+trained artifact and application paths. Use the contract-tested
+[Getting Started](../getting-started.qmd) lifecycle first.
 
-## Minimal Batch Prediction
+Use `model.predict([...])` to inspect a small list in memory. Use a prediction
+data module, Lightning's `trainer.predict(...)`, and `jv.Writer` when results
+should stream to Parquet without accumulating the whole job in Python memory.
+
+This guide assumes a saved, selected model and input records that match its
+training-time preprocessor contract. See [Model Lifecycle](model-lifecycle.qmd)
+and [Prediction Output](prediction-output.qmd) first when defining that
+contract.
+
+## Write A DataFrame To Parquet
+
+This excerpt shows the complete prediction wiring; replace the artifact and
+frame with your own:
 
 ```{python .marimo}
 #| echo: true
@@ -21,8 +32,11 @@ import polars as pl
 
 import json2vec as jv
 
+model = jv.Model.load("artifacts/fraud-model.ckpt")
+
 predict_frame = pl.DataFrame(
     {
+        "request_id": ["r-001", "r-002"],
         "amount": [12.5, 8.0],
         "merchant": ["books", "coffee"],
     }
@@ -31,12 +45,13 @@ predict_frame = pl.DataFrame(
 datamodule = jv.PolarsDataModule(
     model=model,
     predict=predict_frame,
+    preprocessor=training_preprocessor,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
 )
 
-writer = jv.Writer("predictions")
+writer = jv.Writer("predictions/run-2026-08-01")
 
 trainer = lit.Trainer(
     accelerator="cpu",
@@ -44,55 +59,83 @@ trainer = lit.Trainer(
     logger=False,
 )
 
-trainer.predict(model=model, datamodule=datamodule)
+trainer.predict(
+    model=model,
+    datamodule=datamodule,
+    return_predictions=False,
+)
 ```
 
-`Writer` is a Lightning prediction callback. It belongs in
-`Trainer(callbacks=[...])` and runs during `trainer.predict(...)`.
+Omit `preprocessor=...` only when training also used the raw source shape
+unchanged. `Writer` is a Lightning prediction callback; it belongs in
+`Trainer(callbacks=[...])` and writes during `trainer.predict(...)`.
+`return_predictions=False` prevents Lightning from also retaining every batch
+output in process memory after the callback has written it.
 
-## Output Files
+## Output Files And Rows
 
-`Writer` creates one Parquet file per local rank:
+`Writer` opens one file per **local** rank:
 
 ```text
-predictions/
+predictions/run-2026-08-01/
   rank-0.parquet
   rank-1.parquet
 ```
 
-Single-process jobs usually write only `rank-0.parquet`. Distributed jobs write
-one file per local rank, and downstream jobs should read all rank files.
+A single-process job normally writes only `rank-0.parquet`. Each Parquet row
+contains:
 
-Each row contains:
-
-- `inputs`: row metadata captured during encoding.
+- `inputs`: the processed, model-facing observation captured during prediction;
+  and
 - `predictions`: a nested struct keyed by schema address.
 
-Target predictions are included for configured targets. Embeddings are included
-for nodes configured with `embed=True`.
+Targets and reconstructed masked fields contain their decoded payloads. Nodes
+configured with `embed=True` also contain embeddings. Read
+[Prediction Output](prediction-output.qmd) for the canonical `state`, `content`,
+`inferred`, and `embedding` members.
+
+Use a new output directory for each run. Opening the same rank pathname again
+replaces that file; `Writer` does not create a run manifest, merge rank files,
+or publish an atomic success marker.
+
+::: {.callout-warning}
+File names use `trainer.local_rank`. In a multi-node job, different nodes can
+have the same local rank. Do not point all nodes at one shared directory unless
+the job supplies node-specific output paths; otherwise writers can collide.
+On node-local filesystems, collect every node's rank files downstream.
+:::
 
 ## Writer Options
 
 | Argument | Meaning |
 | --- | --- |
 | `path` | Local or mounted output directory for rank-partitioned Parquet files. |
-| `flush_every_n_batches` | Optional Parquet writer flush interval. |
-| `postprocessor` | Optional callable that rewrites prediction dictionaries before write. |
+| `flush_every_n_batches` | Optional best-effort flush interval when the active PyArrow writer exposes `flush`. |
+| `postprocessor` | Optional decorated `jv.Postprocessor` that reshapes a prediction batch before writing. |
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
 writer = jv.Writer(
-    "predictions",
+    "predictions/run-2026-08-01",
     flush_every_n_batches=100,
 )
 ```
 
-## Postprocess Before Writing
+The writer closes its Parquet handle at the end of the prediction loop. A
+process crash can leave a partial file; use an external job marker or atomic
+publish step when downstream readers require completeness.
 
-Use a postprocessor when downstream consumers need flat columns, renamed
-addresses, filtered payloads, or fewer fields.
+## Shape Rows Before Writing
+
+Use a writer postprocessor for flat warehouse fields, renamed addresses,
+filtering, or redaction. Writer values must stay aligned with the prediction
+batch.
+
+`metadata` is a list of processed observations. Each observation is represented
+as a list containing the model-facing record, so a one-to-one preprocessor uses
+`observation[0]`:
 
 ```{python .marimo}
 #| echo: true
@@ -103,95 +146,130 @@ import json2vec as jv
 
 @jv.postprocess
 def compact_rows(predictions, *, metadata):
-    label = predictions.get(jv.Address("record", "label"), {}).get("content", {})
+    label = predictions.get(
+        jv.Address("record", "fraud"), {}
+    ).get("content", {})
 
     return {
         jv.Address("record", "warehouse_row"): {
-            "request_id": [item.get("request_id") for item in metadata],
-            "label": label.get("value"),
-            "label_probability": label.get("probability"),
+            "request_id": [
+                observation[0].get("request_id")
+                for observation in metadata
+            ],
+            "fraud": label.get("value"),
+            "fraud_probability": label.get("probability"),
         }
     }
 
 
 writer = jv.Writer(
-    "warehouse-predictions",
+    "predictions/warehouse-run",
     postprocessor=compact_rows,
 )
 ```
 
-Keep returned lists row-aligned with the prediction batch. That lets the writer
-build a valid Parquet table.
+Every returned column must have the same number of rows. The values under each
+top-level address/string key must form a mapping that Polars can turn into a
+frame. If the first batch establishes one Arrow schema and a later batch has an
+incompatible shape, writing or schema casting fails.
 
-Writer postprocessors can request named runtime values such as:
+Writer postprocessors can request these runtime values by name:
 
-| Parameter | Meaning |
+| Parameter | Value in this runtime |
 | --- | --- |
-| `input` | Encoded Lightning batch. |
-| `batch` | Alias for the encoded batch. |
-| `metadata` | Raw input metadata for each row. |
-| `batch_indices` | Lightning batch indices when provided. |
+| `input` | Encoded tensorfield batch. |
+| `batch` | Alias for the encoded tensorfield batch. |
+| `metadata` | Row-aligned processed observations. |
+| `batch_indices` | Lightning batch indices when supplied. |
 | `batch_idx` | Prediction batch index. |
 | `dataloader_idx` | Prediction dataloader index. |
 
-For more output-shaping patterns, see [Postprocessors](postprocessors.qmd).
+For reusable processor rules and the cross-runtime provider matrix, see
+[Postprocessors](postprocessors.qmd).
 
-## Streaming Prediction
+## Stream File-Backed Inputs
 
-For file-backed local or S3 inputs, use `StreamingDataModule` with a `predict`
-split:
+Use `StreamingDataModule` when local or S3-backed files should be read in
+chunks:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
-
-import lightning.pytorch as lit
-
-import json2vec as jv
 
 datamodule = jv.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
     predict=r"/predict/.*\.parquet$",
+    preprocessor=training_preprocessor,
     sharding="chunk",
 )
 
 trainer = lit.Trainer(
     accelerator="gpu",
     devices=1,
-    callbacks=[jv.Writer("predictions")],
+    callbacks=[jv.Writer("predictions/streaming-run")],
 )
 
-trainer.predict(model=model, datamodule=datamodule)
+trainer.predict(
+    model=model,
+    datamodule=datamodule,
+    return_predictions=False,
+)
 ```
 
-`StreamingDataModule` can read from S3. `Writer` writes to a local or mounted
-filesystem path, so copy or sync those rank files downstream when the final
-destination is object storage.
+`StreamingDataModule` can read S3 sources. `Writer` writes to a local or mounted
+filesystem path, so a separate publish step must copy rank files to object
+storage when required.
 
-## Choosing An Inference Path
+Choose `file`, `chunk`, or `record` sharding based on file sizes and desired
+parallelism. See [Data Modules](data-modules.qmd#sharding) for the ownership
+rules and buffer options.
+
+## Choose An Inference Path
 
 | Need | Use |
 | --- | --- |
-| Debug one request shape | `model.predict([...])` |
-| Notebook demo | `model.predict([...])` |
-| Batch DataFrame prediction | `PolarsDataModule(..., predict=...)` plus `Writer` |
-| Batch file or S3 prediction | `StreamingDataModule(..., predict=...)` plus `Writer` |
-| Online service | `jv.Deployment` |
+| Inspect one request shape | `model.predict([...])` |
+| Notebook or artifact smoke test | `model.predict([...])` |
+| DataFrame-to-Parquet job | `PolarsDataModule(..., predict=...)` with `jv.Writer` |
+| File/S3-to-Parquet job | `StreamingDataModule(..., predict=...)` with `jv.Writer` |
+| Latency-bound HTTP requests | [`jv.Deployment`](serving.qmd) |
 
-## Common Mistakes
+Batch and online paths solve different operational problems. Do not loop over
+`model.predict([record])` for a large batch job, and do not introduce an HTTP
+service when an asynchronous Parquet job meets the requirement.
 
-- Forgetting to configure a `predict` split on the data module.
-- Calling `model.predict(...)` in a Python loop for a large batch job.
-- Returning non-row-aligned lists from a writer postprocessor.
-- Reading only one `rank-*.parquet` file from a distributed prediction job.
-- Using a different preprocessor at prediction time than the one used during
-  training.
+## Verify A Completed Job
+
+At minimum:
+
+1. enumerate every expected node/rank output file;
+2. verify total rows against the input after intentional preprocessing drops or
+   expansion;
+3. inspect required address and content fields;
+4. check null counts and join identifiers; and
+5. load representative outputs in the downstream system before publishing the
+   run as complete.
+
+JSON2Vec reports `throughput/predict` directly to an attached Lightning logger
+on the global-zero rank. Prediction hooks cannot use Lightning module metrics,
+so this value is not expected in `trainer.callback_metrics`; the installed
+throughput callback also retains the measurement for programmatic integrations.
+
+## Common Failures
+
+| Symptom | Likely cause or next check |
+| --- | --- |
+| No predictions are written | Configure a `predict` split and attach `Writer` to the Trainer. |
+| Rows cannot join to inputs | Preserve an identifier in processed observation metadata and keep postprocessor columns aligned. |
+| Only part of a distributed job appears | Read every node/rank file and check for local-rank path collisions. |
+| A later batch fails Arrow schema casting | Keep postprocessor keys and value types stable across all batches. |
+| Production values differ from validation | Reuse the same checkpoint and JSON2Vec preprocessor code/bindings. |
+| S3 output is missing | `Writer` does not upload; publish its local/mounted files separately. |
 
 ## Where Next
 
-- Use [Data Modules](data-modules.qmd) to choose Polars or streaming inputs.
-- Use [Postprocessors](postprocessors.qmd) to reshape outputs.
-- Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) to configure
-  embedding outputs.
+- Choose inputs, preprocessing, and sharding in [Data Modules](data-modules.qmd).
+- Define cross-runtime shapes with [Postprocessors](postprocessors.qmd).
+- Interpret address payloads in [Prediction Output](prediction-output.qmd).

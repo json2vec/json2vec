@@ -10,13 +10,16 @@ pyproject: |
 
 # Branch
 
+**Example status — excerpt:** branch schemas isolate structural choices; use
+[Getting Started](../getting-started.qmd) for a tested lifecycle.
+
 Use `Branch` to name a shared context for child fields. In raw data this is
 often a repeated collection such as transactions, line items, sessions, or
 measurements: the child leaves are the attributes of each item in that
 collection.
 
 A branch gives those leaves one coordinate system. `length`, `overflow`, and
-branch masks apply to the collection as a whole; child queries stay aligned
+branch-mask windows are defined over that collection; child queries stay aligned
 under the branch address; and branch embeddings represent the grouped context.
 At runtime, child leaf embeddings are gathered into the branch. If
 `attention!="none"`, a transformer encoder lets items in the context interact;
@@ -166,19 +169,38 @@ Common branch contexts include:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `name` | required | Public schema name and inferred source key. |
+| `name` | `None`; inferred when bound | Public schema name and inferred source key. A parent keyword normally supplies it; an unbound branch must acquire a name before schema compilation. |
 | `fields` | `[]` | Child branches or tensorfields. Positional constructor arguments become `fields`. |
 | `length` | `1` | Number of repeated slots retained per observation. Must be positive. |
 | `overflow` | `"head"` | How to handle more than `length` child records: `"head"` keeps the first records, `"tail"` keeps the last records, and `"error"` raises. |
-| `attention` | `"mha"` | Attention implementation for the branch encoder. Use `"none"` to skip transformer attention and only pool the child context. |
+| `attention` | `"mha"` | Encoder attention mode: `"mha"`, `"gqa"`, `"mqa"`, or `"none"`. |
 | `n_layers` | `1` | Number of encoder layers for this branch. |
-| `n_heads` | `4` | Attention heads for this branch. Must be even. |
-| `n_linear` | `1` | Number of feed-forward linear layers in this branch. |
+| `n_heads` | `4` | Attention heads for this branch. Must be positive and even, divide the model's `d_model`, and leave at least two dimensions per head. |
+| `n_linear` | `1` | Number of learned-query cross-attention pooling blocks. Each block contains cross-attention and a feed-forward network. |
 | `dropout` | `None` | Optional dropout rate. |
-| `mask` | `None` | One `jv.Mask(...)` policy for selecting repeated coordinates during training. |
+| `mask` | `None` | One `jv.Mask(...)` policy for selecting repeated coordinates in train, validation, and test; prediction bypasses configured masks. |
 | `masks` | `[]` | Multiple named or unnamed `jv.Mask(...)` policies for the same branch. |
 | `embed` | `False` | Includes this branch node in `Model.predict(...)` outputs under `embedding`. See [Learning Modes & Embeddings](../core-concepts/embeddings.qmd). |
 | `description` | `None` | Optional schema metadata. |
+
+### Attention Modes
+
+All attention modes keep `n_heads` query heads. They differ in how many
+key/value heads the branch encoder allocates:
+
+| Mode | Key/value heads | Tradeoff |
+| --- | ---: | --- |
+| `"mha"` | `n_heads` | Full multi-head attention and the largest key/value projections. This is the default. |
+| `"gqa"` | `n_heads / 2` | Groups pairs of query heads around shared key/value heads, reducing key/value parameters and memory. |
+| `"mqa"` | `1` | Shares one key/value head across all query heads for the smallest key/value projections. |
+| `"none"` | `0` | Omits the branch's self-attention encoder layers; learned query pooling still summarizes the child context. |
+
+`gqa` and `mqa` can reduce key/value projection cost, but sharing key/value
+heads also changes model capacity. Treat them as configuration choices to
+validate on the target workload, not guaranteed quality-preserving speedups.
+The public node contract requires an even positive `n_heads` value. It must
+also satisfy `d_model % n_heads == 0` and `d_model // n_heads >= 2` so every
+attention head can construct its rotary embedding.
 
 ## Nesting
 
@@ -216,12 +238,44 @@ information through the model.
 on `Branch`. To apply the same masking or pruning rate to every child field, use
 `model.update(...)` with a selector that matches those leaves.
 
-Configure `mask=` or `masks=` on a branch when the selection is about repeated
-coordinates rather than independent leaf values. Branch masks are resolved after
-query extraction, overflow handling, and padding, then projected to active
-descendant leaves. See [Dynamic Masking](../core-concepts/dynamic-masking.qmd).
+Configure `mask=` or `masks=` on a branch when the candidate window is about
+repeated coordinates rather than independent leaf values. Branch masks are
+resolved after query extraction, overflow handling, and padding. Padding is
+excluded, but null positions remain eligible.
+
+The current implementation samples each affected descendant leaf independently;
+a single branch policy does not guarantee that sibling fields hide the same row.
+Use `exclude=` to remove leaves from the policy, and do not rely on branch masks
+for atomic row masking until that behavior is explicitly supported. See
+[Dynamic Masking](../core-concepts/dynamic-masking.qmd).
 
 Configure `embed=True` on a branch when you want `Model.predict(...)` to return
 a representation for the grouped context under that branch address. See
 [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) for root,
 branch, and leaf embedding patterns.
+
+## Performance And Failure Boundaries
+
+Every child leaf is tensorized to the fixed branch `length`, so overly generous
+lengths increase padding, memory, and encoder work even when most observations
+are short. Attention-enabled branches also make interaction cost grow faster
+than linearly with the retained context. Choose a length from measured data,
+make truncation intentional, and monitor how often `overflow="head"` or
+`"tail"` discards records.
+
+Use `overflow="error"` while validating a strict upstream contract. Prefer a
+preprocessor when retention depends on timestamps, business priority, or a rule
+more complex than keeping the first or last records. See
+[Performance And Distributed Operation](../guides/performance.qmd) for sizing
+and profiling guidance.
+
+## Where Next
+
+- Use [Model Tree](../core-concepts/model-tree.qmd) for branch addresses and
+  hierarchical context flow.
+- Use [Binding Data](../core-concepts/binding-data.qmd) and
+  [Query Paths](../core-concepts/querypaths.qmd) for child source binding.
+- Use [Dynamic Masking](../core-concepts/dynamic-masking.qmd) for the exact
+  repeated-coordinate mask contract.
+- Use [Model Configuration](../guides/model-configuration.qmd) to size branch
+  depth, heads, attention mode, and dropout.

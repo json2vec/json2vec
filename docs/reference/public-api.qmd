@@ -1,0 +1,230 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Public API Map
+
+**Example status — excerpt:** inspection blocks illustrate discovery APIs and
+assume a model where stated.
+
+Normal applications should import JSON2Vec from the package root:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import json2vec as jv
+```
+
+This page maps the intended top-level surface to its conceptual documentation.
+It is a discovery reference, not a replacement for signatures or the workflow
+guides. Objects not exported from `json2vec` may still be necessary for advanced
+extension internals and should be treated as more version-coupled.
+
+## Modeling
+
+| Export | Purpose | Guide |
+| --- | --- | --- |
+| `Model` | Build, train, mutate, save, load, encode, and predict with a schema-backed Lightning module. | [Getting Started](../getting-started.qmd), [Model Configuration](../guides/model-configuration.qmd) |
+| `Branch` | Define a fixed-length nested/repeated context. | [Branch](../data-types/branch.qmd) |
+| `Mask` | Define positional masking on a repeated branch. | [Dynamic Masking](../core-concepts/dynamic-masking.qmd) |
+| `Address` | Represent a stable slash-delimited node/output path. | [Model Tree](../core-concepts/model-tree.qmd) |
+| `Schema`, `SchemaField` | Inspect or integrate with the validated schema representation. Most users construct it through `Model`. | [Model Tree](../core-concepts/model-tree.qmd) |
+| `where`, `predicate`, `NodePredicate`, `NodeAttribute` | Select nodes for inspection and schema mutation. | [Schema Mutation](../guides/schema-mutation.qmd) |
+| `Leaf` | Base tree leaf type used by advanced integrations. | [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd) |
+
+### `Model(...)`
+
+| Parameter | Required/default | Meaning |
+| --- | --- | --- |
+| positional/keyword fields | At least one request | Tensorfields and child branches that become the generated root's children. |
+| `fields` | `None` | Sequence form of the same root children; cannot duplicate names supplied positionally or by keyword. |
+| `d_model` | Required | Shared representation width. |
+| `n_layers` | Required | Generated root self-attention depth. |
+| `n_heads` | Required | Generated root attention/pooling heads; positive, even, a divisor of `d_model`, and small enough that `d_model // n_heads >= 2`. |
+| `batch_size` | `1` | Expected batch size used by data modules, examples, and logging. |
+| `name` | `"record"` | Generated singleton root name and address prefix. |
+| `description` | `None` | Human-readable root metadata. |
+| `embed` | `False` | Emit the normalized root embedding during prediction. |
+| `attention` | `"mha"` | Root self-attention mode: `mha`, `gqa`, `mqa`, or `none`. |
+| `n_linear` | `1` | Root learned-query cross-attention pooling block count. Each block also contains a feed-forward network. |
+| `dropout` | `None` | Root attention/feed-forward dropout rate. |
+| `optimizer` | `None` | Optimizer instance or factory; required before fitting. |
+| `scheduler` | `None` | Optional scheduler configuration or factory. |
+
+Passing `schema=...` is a lower-level/load integration and cannot be combined
+with tree fields or root architecture arguments.
+
+## Built-In Datatypes
+
+| Export | Source value | Public decoded content |
+| --- | --- | --- |
+| `Number` | Continuous scalar with meaningful distance | Numeric value |
+| `Boolean` | Strict Boolean | Boolean value and probability |
+| `Category` | One bounded persistent label | Best known label, probability, optional top-k |
+| `Set` | Multiple bounded persistent labels | Known labels and probabilities, optionally thresholded |
+| `Entity` | Observation-local repeated identity | Training metrics; no decoded identity label |
+| `DateParts` | Datetime parsed into configured cyclical parts | No decoded public calendar value currently |
+| `Vector` | Fixed-width numeric vector | Vector content |
+| `Text` | Text tokenized by an optional model/tokenizer | No decoded text currently; configure `embed=True` for contextual output |
+
+Use [Data Types And Value State](../core-concepts/data-types.qmd) to choose a
+type, then use its individual reference for options and limitations.
+
+## Data And Processors
+
+| Export | Purpose | Guide |
+| --- | --- | --- |
+| `PolarsDataModule` | In-memory Polars-backed train/validate/test/predict data. | [Data Modules](../guides/data-modules.qmd) |
+| `StreamingDataModule` | Local/S3 file streaming, sharding, buffering, and sampling. | [Data Modules](../guides/data-modules.qmd) |
+| `CustomDataModule` | Integrate custom iterable sources with the shared encoding path. | [Data Modules](../guides/data-modules.qmd) |
+| `preprocess`, `Preprocessor`, `Observation` | Turn raw records into zero, one, or multiple model-facing observations. | [Binding Data](../core-concepts/binding-data.qmd) |
+| `postprocess`, `Postprocessor`, `Predictions`, `PostprocessorResult` | Reshape or filter address-keyed prediction output. | [Postprocessors](../guides/postprocessors.qmd) |
+| `RawObservation`, `RawBatch`, `Metadata` | Public typing aliases for processor integrations. | [Data Modules](../guides/data-modules.qmd) |
+| `MASK_LITERAL`, `MaskLiteral` | Mark literal positions as masked in processed input. | [Dynamic Masking](../core-concepts/dynamic-masking.qmd) |
+| `helpers` | Namespace for `infer_schema` and `InferenceConfig`, which derive a best-effort starting schema from sample records. | [Schema inference helper](#schema-inference-helper) |
+
+Provider enums `PreprocessorProvider` and `PostprocessorProvider` describe names
+the pipeline can inject into decorated function signatures. Most users request
+providers by their documented parameter names rather than reading these enums.
+
+### Schema inference helper
+
+`jv.helpers.infer_schema(...)` profiles sample records and returns field
+constructors ready to pass positionally to `Model`. Its guesses are a starting
+point, not a substitute for reviewing semantics, target leakage, category
+capacity, branch lengths, and overflow behavior.
+
+```python
+records = [
+    {"amount": 12.5, "merchant": "A", "label": "ok"},
+    {"amount": 8.0, "merchant": "B", "label": "review"},
+]
+
+fields = jv.helpers.infer_schema(
+    records,
+    config=jv.helpers.InferenceConfig(target="label"),
+    explain=True,
+)
+
+model = jv.Model(*fields, d_model=32, n_layers=1, n_heads=4)
+```
+
+Pass either an `InferenceConfig` or its fields as keyword overrides, not both.
+Inference samples from the front of large inputs, so use a representative,
+training-only sample and inspect every returned request before training.
+
+## Prediction And Operation
+
+| Export | Purpose | Guide |
+| --- | --- | --- |
+| `Writer` | Write rank-partitioned batch prediction output. | [Batch Inference](../guides/batch-inference.qmd) |
+| `Deployment` | Build a FastAPI-backed dynamically batched prediction service. Requires the `serving` extra. | [Serving](../guides/serving.qmd) |
+| `Accelerator` | Serving device selection: auto, CPU, CUDA, or MPS. | [Serving](../guides/serving.qmd) |
+| `JSONBackend` | Serving JSON implementation selection. | [Serving](../guides/serving.qmd) |
+| `Input`, `ModelSource`, `UpdateOperation` | Type aliases for advanced deployment integrations. | [Serving](../guides/serving.qmd) |
+
+Serving exports are loaded lazily. Importing core `json2vec` does not require the
+serving dependencies; accessing these symbols without the extra raises an
+installation error with the required command.
+
+## Training And Lifecycle
+
+| Export | Purpose | Guide |
+| --- | --- | --- |
+| `RollbackCheckpoint` | Save/select Lightning checkpoints and restore the best full model state at fit end. | [Model Lifecycle](../guides/model-lifecycle.qmd) |
+| `OptimizerConfig`, `SchedulerConfig` | Public typing aliases for model optimizer/scheduler inputs. | [Model Configuration](../guides/model-configuration.qmd) |
+| `VocabularySyncCallback` | Synchronize supported online vocabularies in distributed training. Normally auto-configured. | [Performance And Scaling](../guides/performance.qmd) |
+| `MutationLockCallback`, `RuntimePlacementCallback` | Keep mutation and device placement safe around Lightning loops. Normally auto-configured. | [Schema Mutation](../guides/schema-mutation.qmd) |
+
+## Enums
+
+| Export | Values / role |
+| --- | --- |
+| `Tokens` | `valued`, `null`, `padded`, `masked`, reserved `other` |
+| `TensorKey` | Shared tensor/payload keys such as state, content, targets, embedding, and inferred |
+| `Strata` | train, validate, test, predict |
+| `Metric` | Shared metric labels such as loss, accuracy, MAE, RMSE, and throughput |
+| `AttentionMode` | mha, gqa, mqa, none |
+| `Overflow` | head, tail, error |
+| `ShardingStrategy` | file, chunk, record |
+| `Suffix` | Supported streaming file suffixes |
+| `Component` | Tensorfield plugin component names |
+
+## Experimental Extension Internals
+
+| Export | Purpose |
+| --- | --- |
+| `Plugin`, `TENSORFIELDS` | Register and inspect tensorfield implementations. |
+| `RequestBase` | Base request/schema leaf. |
+| `TensorFieldBase` | Base state/content tensor container contract. |
+| `EmbedderBase` | Base visible-input encoder. |
+| `DecoderBase` | Base heritage pooling and prediction decoder. |
+
+These objects are importable, but the extension surface is experimental rather
+than a stable plugin SDK. In particular, dynamically registered request types
+do not currently survive `Model.save(...)` / `Model.load(...)` schema
+validation. Keep experiments in one process, pin the package, and follow the
+limits in [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd).
+
+## Inspect Configuration Programmatically
+
+Datatype requests are Pydantic models. Their schema is useful for tooling and
+for detecting defaults at the installed version:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+category_schema = jv.Category.model_json_schema()
+print(category_schema["properties"].keys())
+```
+
+For a bound model, use the Rich display or inspect validated requests:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+print(model)
+print(model.schema.requests)
+```
+
+The second block is an inspection excerpt using a model built elsewhere.
+
+## Compatibility
+
+The published site currently tracks the repository's `main` branch; versioned
+documentation snapshots are not retained. The documented Git installation also
+tracks that branch unless a revision is pinned. For reproducible work, install
+an explicit tag or commit and record that source revision, the distribution
+version, processor code, and dependency environment with every artifact:
+
+```bash
+python -m pip install \
+  "json2vec @ git+https://github.com/json2vec/json2vec.git@<commit>"
+```
+
+Use documentation from the matching source checkout for an older artifact.
+Saved artifacts own their validated built-in schema plus field preprocessing
+state and weights; do not reconstruct them from copied constructor snippets
+when exact parity matters.
+
+Support maturity differs by workflow:
+
+| Surface | Current policy |
+| --- | --- |
+| Built-in schema, training, persistence, and interactive/batch prediction | Covered by the repository test suite; pin a revision because no long-term compatibility window is published. |
+| Online serving | Provided and tested, but version-coupled and without an availability or compatibility guarantee. See [Online Serving](../guides/serving.qmd). |
+| Distributed training and streaming | Supported through Lightning/data-module paths, but topology, sharding, vocabulary synchronization, and artifact parity must be validated on the target cluster. See [Performance And Scaling](../guides/performance.qmd). |
+| Custom tensorfields | Experimental same-process surface; dynamically registered request types are not artifact-compatible. See [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd). |
+
+When upgrading:
+
+1. load representative artifacts in the new environment;
+2. compare their schema and prediction contract on fixed requests;
+3. run validation/test data again;
+4. exercise every optional serving/text integration and any same-process custom
+   tensorfield experiment;
+5. retain the previous environment and artifact until rollout succeeds.

@@ -10,6 +10,9 @@ pyproject: |
 
 # Number
 
+**Example status — excerpt:** schema and payload blocks isolate Number behavior;
+use [Getting Started](../getting-started.qmd) for a tested lifecycle.
+
 Use `Number` for continuous scalar values: prices, counts, measurements,
 scores, datetime durations, and other numeric features.
 
@@ -75,10 +78,10 @@ Common number fields include:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `jitter` | `0.0` | Adds training-time uniform noise after normalization to prevent overfitting. Must be `>= 0.0`. |
+| `jitter` | `0.0` | Adds training-time triangular noise after normalization. The noise is the difference of two independent uniforms, scaled to the interval `[-jitter, jitter]`, with its peak at zero. Must be `>= 0.0`. |
 | `n_bands` | `8` | Advanced: negative exponent bound for log-spaced Fourier frequencies. Must be positive. |
 | `offset` | `4` | Advanced: positive exponent bound for log-spaced Fourier frequencies. Must be positive. |
-| `alpha` | `None` | Optional exponential update rate for the online normalizer. `None` uses cumulative statistics. |
+| `alpha` | `None` | Optional exponential update rate for the online normalizer. Must be strictly between `0` and `1`; `None` uses cumulative statistics. |
 | `objective` | `"mae"` | Content reconstruction objective: `"mae"`, `"mse"`, or `"huber"`. |
 
 The total number of Fourier frequencies is `n_bands + offset + 1`.
@@ -99,7 +102,8 @@ checkpoint.
 
 When a `Number` is masked or used as a target, the decoder predicts:
 
-- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `state`: probabilities for `valued`, `null`, `padded`, `masked`, and the
+  reserved `other` state.
 - `content`: a scalar numeric value.
 
 The content loss is computed in normalized units, while tracked `mae` and
@@ -110,7 +114,8 @@ The content loss is computed in normalized units, while tracked `mae` and
 Rendered examples use string paths for readability. The Python dictionary
 returned by `Model.predict(...)` is keyed by `jv.Address` objects.
 
-`Model.predict(...)` returns a state probability map plus numeric content:
+`Model.predict(...)` returns a state probability map, numeric content, and the
+shared `inferred` mask. This is the complete field envelope:
 
 ```{python .marimo}
 #| echo: true
@@ -118,11 +123,24 @@ returned by `Model.predict(...)` is keyed by `jv.Address` objects.
 
 {
     "record/amount": {
-        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "state": {
+            "valued": ...,
+            "null": ...,
+            "padded": ...,
+            "masked": ...,
+            "other": ...,
+        },
         "content": ...,
+        "inferred": ...,
     }
 }
 ```
+
+Interpret content together with the state distribution. A numeric prediction is
+written for every decoded position even when the most likely state is not
+`valued`. The
+[Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
+explains state probabilities and `inferred`.
 
 ## Notes
 
@@ -134,3 +152,13 @@ are meaningful.
 When a continuous scalar is not the right representation, binned numerical data
 or CDF-style transforms can be implemented with a custom data type or a
 preprocessor.
+
+## Where Next
+
+- Use [DateParts](dateparts.qmd) for recurring calendar coordinates.
+- Use [Category](category.qmd) when a numeric-looking value is actually a code
+  or label.
+- Use [Data Modules](../guides/data-modules.qmd) to keep derived numeric features
+  consistent across training and prediction.
+- Use [Model Lifecycle](../guides/model-lifecycle.qmd) to preserve the learned
+  normalization buffers with the schema and weights.

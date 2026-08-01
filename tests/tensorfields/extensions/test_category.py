@@ -203,20 +203,33 @@ def test_category_embedder_and_decoder_use_real_vocab_width():
     assert decoder.linears[TensorKey.content.name].out_features == request.size
 
 
-def test_category_embedder_treats_unavailable_as_zero_content_contribution():
+def test_category_embedder_zeroes_unavailable_and_non_valued_content_contributions():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     embedder = Embedder(schema=structure, address=ADDRESS)
     unavailable = structure.requests[ADDRESS].size
     field = TensorField(
-        state=torch.tensor([[Tokens.valued.value]], dtype=torch.int64),
-        content=torch.tensor([[unavailable]], dtype=torch.int64),
-        trainable=torch.zeros((1, 1), dtype=torch.bool),
+        state=torch.tensor(
+            [
+                [
+                    Tokens.valued.value,
+                    Tokens.valued.value,
+                    Tokens.null.value,
+                    Tokens.padded.value,
+                    Tokens.masked.value,
+                    Tokens.other.value,
+                ]
+            ],
+            dtype=torch.int64,
+        ),
+        content=torch.tensor([[0, unavailable, 0, 0, 0, 0]], dtype=torch.int64),
+        trainable=torch.zeros((1, 6), dtype=torch.bool),
         targets=TensorDict({}),
         batch_size=1,
     )
 
     output = embedder(field).payload
     expected = embedder.embeddings[TensorKey.state.name](field.state)
+    expected[:, 0] += embedder.embeddings[TensorKey.content.name](field.content[:, 0])
 
     assert torch.allclose(output, expected)
 

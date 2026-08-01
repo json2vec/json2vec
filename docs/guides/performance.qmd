@@ -1,0 +1,229 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Performance And Scaling
+
+**Example status — excerpt:** settings are tuning patterns, not portable
+benchmarks or complete training jobs.
+
+JSON2Vec performance is determined by the schema shape as much as by model
+width. Fixed branch lengths, datatype capacities, data-loader behavior, and
+prediction output can dominate before raw parameter count does.
+
+Treat every throughput number as workload-specific. Record the schema, input
+length distribution, hardware, precision, batch size, software version, and
+output configuration next to the result.
+
+## Measure The Whole Path
+
+Separate four measurements:
+
+| Measurement | Includes | Use it to diagnose |
+| --- | --- | --- |
+| Data preparation | Read, decode, preprocess, query, vocabulary/normalizer work | File format, workers, remote I/O, and Python transforms. |
+| Encode + forward | Tensorization and model execution | Branch lengths, datatype capacity, model width/depth, device utilization. |
+| Write/postprocess | CPU transfer, probability conversion, embeddings, top-k, reshaping | Oversized output contracts and Python serialization. |
+| End-to-end service | Queue, dynamic batching, all stages above, JSON, network | User-visible latency and saturation. |
+
+Lightning runs include JSON2Vec's `throughput/train`, `throughput/validate`,
+`throughput/test`, or `throughput/predict` epoch metric. It estimates processed
+observations from completed batches and configured model batch size. Use it for
+comparisons under the same setup, then confirm important results with an
+external end-to-end measurement.
+
+Train, validation, and test throughput use Lightning's module-metric path.
+Prediction has no Lightning result collection, so `throughput/predict` is kept
+on the `ThroughputLogger` callback and sent directly to an attached logger; do
+not expect it in `trainer.callback_metrics`.
+
+## Control Repeated Context First
+
+Every `Branch(length=...)` reserves a fixed number of positions. Short records
+are padded; long records are truncated or rejected according to `overflow`.
+For attention-enabled branches, work also grows with interactions among local
+positions.
+
+Before increasing a branch length:
+
+1. measure the observed length distribution by split;
+2. choose a percentile or business rule, not the maximum outlier;
+3. select `overflow="head"` or `"tail"` from event meaning;
+4. log truncation outside JSON2Vec if losing records matters operationally;
+5. compare quality and throughput at two or three candidate lengths.
+
+Nested branches multiply shape. A long child inside a long parent can create a
+large padded tensor even when most observations are sparse. Window, filter, or
+summarize irrelevant events in a preprocessor before expanding model capacity.
+
+## Size Width And Depth
+
+- `d_model` widens datatype embeddings, projections, attention, pooling, and
+  decoders across the entire tree.
+- `n_layers` adds sequential self-attention blocks to a branch.
+- `n_linear` adds learned-query cross-attention pooling blocks; each block also
+  contains a feed-forward network.
+- `dropout` may improve generalization but does not reduce inference cost.
+
+Increase width only after verifying the input contract and observing
+underfitting. Increase depth only after a width comparison. Use
+`sum(p.numel() for p in model.parameters())` for parameter size, but profile
+representative activations because repeated context often controls memory.
+
+## Compare Attention Modes
+
+`mha`, `gqa`, and `mqa` share the same query-head count. GQA uses half as many
+key/value heads (minimum one); MQA uses one. This reduces key/value projection
+width, but local attention still considers the same positions.
+
+`attention="none"` removes the branch's self-attention stack while retaining
+learned query pooling. It is useful for short branches, low-cost baselines, or
+testing whether cross-position interaction adds value.
+
+Benchmark each mode on the intended PyTorch version and accelerator. Kernel
+support and shape can matter more than theoretical parameter savings.
+
+## Budget Datatype Capacity
+
+### Category And Set
+
+Category and Set content storage grows with `size × d_model`, and decoding or
+scoring grows with `size`. A fixed-width projection elsewhere in a decoder does
+not make a large vocabulary free.
+
+- choose capacity from expected distinct training labels plus explicit
+  headroom;
+- monitor Category `vocabulary:size` by address;
+- investigate capacity warnings rather than silently increasing every field;
+- use `Entity` when only observation-local equality matters;
+- keep high-cardinality join identifiers as metadata when they are not a model
+  feature;
+- avoid large `topk` output unless consumers use it.
+
+### Text And Vector
+
+Text cost depends on tokenizer/model choice and configured token length; it also
+requires the `text` extra. Vector cost grows with source vector width and the
+projection into `d_model`. Measure transfer and parsing as well as forward time
+when vectors arrive from another service.
+
+## Feed The Accelerator
+
+For small in-memory work, `PolarsDataModule` removes file discovery and remote
+I/O from the experiment. For larger jobs, tune `StreamingDataModule` with the
+actual storage layout.
+
+Important controls include:
+
+- `num_workers`: parallel readers/preprocessors; too many can increase memory
+  and contention;
+- `persistent_workers`: avoids worker restart between epochs when workers are
+  long-lived;
+- `pin_memory`: useful for CUDA transfer, usually unnecessary for CPU-only work;
+- observation and shuffle buffers: larger buffers improve mixing but consume
+  memory;
+- file/chunk/record sharding: choose from file sizes and worker/rank count;
+- file format and row-group size: determine decode and remote-read granularity;
+- `sample_rate`: useful for bounded experiments, not a substitute for a valid
+  split.
+
+Run a data-only or CPU baseline when the accelerator is idle. If increasing
+batch size does not improve device utilization, the bottleneck may be query,
+preprocessing, or I/O.
+
+## Use Precision And Batch Size Deliberately
+
+Configure numerical precision and accumulation on Lightning's `Trainer`. Start
+with a batch that fits comfortably, then increase while watching memory,
+throughput, and validation behavior.
+
+Larger batches can improve device utilization but change the number of optimizer
+updates per epoch. Preserve effective optimization conditions when comparing
+throughput experiments—for example by controlling learning rate, accumulation,
+and total update count.
+
+Mixed precision can reduce activation memory on supported accelerators. Validate
+numeric behavior for each datatype and loss rather than assuming identical
+quality.
+
+## Distributed Training
+
+::: {.callout-warning title="Distributed support level"}
+JSON2Vec provides Lightning-compatible distributed execution, streaming
+sharding, vocabulary synchronization, and rank-partitioned output, and these
+paths have focused tests. There is no cross-version distributed compatibility
+guarantee or universal topology recipe. Pin the package, validate record
+ownership and vocabulary state at the intended world size, and treat each
+hardware/data layout as an integration you must benchmark.
+:::
+
+JSON2Vec registers callbacks that synchronize online vocabularies and place
+late-created modules on the active device. Distributed runs still require a
+consistent contract:
+
+- every rank constructs the same schema and callback set;
+- input shards do not overlap unless repetition is intentional;
+- all ranks perform schema mutations in the same order between loops;
+- vocabulary synchronization cost is included in the benchmark;
+- global batch size and number of optimizer steps are recorded;
+- validation/test aggregation is checked on more than one world size.
+
+Scale only after one rank is input-efficient. More ranks amplify remote I/O,
+worker count, vocabulary coordination, and output files.
+
+## Optimize Prediction Output
+
+Prediction can spend substantial time moving and serializing data:
+
+- enable `embed=True` only at addresses consumers need;
+- request only useful Category top-k values;
+- use a postprocessor to remove internal or unused fields;
+- use `Writer` for partitioned batch output rather than collecting a whole
+  dataset in memory;
+- set service `max_batch_size` and latency against the real request-size
+  distribution;
+- benchmark JSON backend and response schema validation separately.
+
+An online latency target and an offline throughput target usually need different
+batch sizes.
+
+## Benchmark Record
+
+Store at least this metadata with a result:
+
+```yaml
+json2vec_version: 0.4.11
+device: "example: NVIDIA GPU model or CPU model"
+precision: "32-true"
+batch_size: 128
+world_size: 1
+records: 100000
+branch_length_percentiles: {p50: 12, p95: 48, max_configured: 64}
+d_model: 64
+layers_by_branch: {record: 2, events: 1}
+attention_by_branch: {record: mha, events: gqa}
+output: {targets: [label], embeddings: [record], topk: 3}
+measurement_boundary: "raw parquet read through parquet prediction write"
+```
+
+The values above are a reporting template, not a benchmark result.
+
+## Failure Signals
+
+| Signal | Diagnostic | Likely fix |
+| --- | --- | --- |
+| Accelerator utilization is low | Time read/preprocess/encode separately from forward | Increase appropriate workers/buffers, simplify Python preprocessing, or fix remote I/O before widening the model. |
+| Memory is high with mostly short histories | Compare observed lengths with configured branch shapes | Shorten/window branches or choose a justified overflow policy. |
+| More ranks do not improve throughput | Check ownership, remote I/O, worker multiplication, and synchronization time | Correct sharding and remove the serial bottleneck before adding ranks. |
+| Prediction is slower than training forward | Measure CPU conversion, top-k, embeddings, postprocessing, and writes | Narrow the output contract and use partitioned `Writer` output. |
+| Callback throughput disagrees with load tests | Compare measurement boundaries and partial final batches | Publish both callback and end-to-end measurements with their exact boundaries. |
+
+## Where Next
+
+- Use [Model Configuration](model-configuration.qmd) for architecture choices.
+- Use [Data Modules](data-modules.qmd) for worker, buffer, and sharding options.
+- Use [Batch Inference](batch-inference.qmd) and [Serving](serving.qmd) for the
+  two operating paths.
+- Use [Troubleshooting](troubleshooting.qmd) when utilization or output shape is
+  unexpected.

@@ -1,0 +1,232 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Prediction Output
+
+**Example status — excerpt:** payloads isolate the public contract. The
+five-state envelope and `inferred` behavior are exercised by the docs contract
+tests.
+
+JSON2Vec's canonical prediction is an address-keyed mapping. Each key identifies
+a node in the schema tree; each value contains the outputs configured for that
+node. Interactive prediction, the Parquet writer, and online serving preserve
+this information while wrapping or serializing it differently.
+
+## Produce An Interactive Prediction
+
+`Model.predict(...)` accepts a list of raw dictionaries. Omit supervised target
+values: `target=True` fields are hidden inputs and are inferred from visible
+context.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+predictions = model.predict(
+    [
+        {"amount": 12.5, "merchant": "books"},
+        {"amount": 8.0, "merchant": "coffee"},
+    ]
+)
+
+fraud = predictions[jv.Address("record", "fraud")]
+```
+
+Python keys are `jv.Address` objects, which are string subclasses. Use an
+`Address` when reading them in application code and `str(address)` when
+serializing them yourself.
+
+## The Canonical Payload
+
+Suppose the root has `embed=True` and `fraud` is a categorical target. A
+complete one-row result has this structure; the floating-point scores below
+are representative, not fixed values:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+{
+    jv.Address("record"): {
+        "embedding": [[0.31, -0.18, 0.42, ...]],
+    },
+    jv.Address("record", "fraud"): {
+        "state": {
+            "valued": [0.91],
+            "null": [0.02],
+            "padded": [0.01],
+            "masked": [0.05],
+            "other": [0.01],
+        },
+        "content": {
+            "value": ["no"],
+            "probability": [0.78],
+            "topk": [[]],
+        },
+        "inferred": [True],
+    },
+}
+```
+
+The leading list dimension is the input batch. It remains present even for one
+record. Nested or repeated leaves have additional dimensions determined by
+their branch lengths.
+
+The shared members are:
+
+| Member | Meaning |
+| --- | --- |
+| `state` | Probabilities for `valued`, `null`, `padded`, `masked`, and reserved `other`. Present on decoded leaf outputs. |
+| `content` | Datatype-specific decoded value or scores. Present on decoded leaf outputs. |
+| `inferred` | Boolean mask showing which positions were masked in prediction input. Present when state/content was decoded. |
+| `embedding` | Public node embedding requested with `embed=True`. Nonzero vectors are L2-normalized before writing. |
+
+`state` and `content` are complementary. A content decoder can still emit a
+candidate when the predicted state favors `null` or another non-valued state;
+applications that care about missingness should interpret both.
+
+## What `inferred` Means
+
+During `Model.predict(...)`, `inferred` is `true` exactly where the encoded
+input state is `masked`.
+
+- A `target=True` field is hidden at prediction time, so its output normally
+  has `inferred=true`.
+- A caller can explicitly mask an input position using JSON2Vec's prediction
+  mask literal; the decoded position is also inferred.
+- A visible field configured only with `embed=True` can be decoded and embedded
+  while retaining `inferred=false`.
+
+`inferred` is not confidence, correctness, or a statement that the source key
+was absent. It describes the model input contract for that output position.
+
+## Which Addresses Appear
+
+JSON2Vec does not echo every visible field. An address appears when prediction
+produces something worth writing, including:
+
+- a supervised target whose datatype has decoded public output;
+- a masked position reconstructed by a datatype with decoded public output; or
+- a leaf or branch configured with `embed=True`.
+
+A branch embedding can contain only `embedding`. A decoded leaf can contain
+`state`, `content`, and `inferred`, plus `embedding` when requested. Therefore,
+consumers should depend on configured addresses rather than assume all schema
+nodes are present.
+
+## Content Is Datatype-Specific
+
+The envelope is shared, but `content` is not:
+
+| Datatype | Typical written content |
+| --- | --- |
+| `Category` | `value`, `probability`, and configured `topk` candidates. |
+| `Boolean` | Thresholded `value` and the probability of `True`. |
+| `Number` | Numeric prediction. |
+| `Set` | Per-label probabilities or a thresholded label-to-score mapping. |
+| `DateParts` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
+| `Vector` | Reconstructed vector values. |
+| `Entity` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
+| `Text` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
+
+The relevant [datatype page](../core-concepts/data-types.qmd) is authoritative
+for content members and their interpretation. A Category probability is
+normalized over its populated vocabulary, for example, while a Boolean value
+uses its configured threshold.
+
+## Interactive, Batch, And HTTP Shapes
+
+The same model-facing information crosses three different transport contracts:
+
+| Path | Outer contract | Address keys | Batch dimension |
+| --- | --- | --- | --- |
+| `model.predict(records)` | Prediction mapping | `Address` objects in Python | Preserved in payload lists. |
+| `jv.Writer` | Parquet rows with `inputs` and `predictions` columns | Nested struct field names | One input observation per row. |
+| `POST /predict` | `{"predictions": {...}}` | JSON strings such as `record/fraud` | A single request is denested; a request array returns an array of responses. |
+
+A single HTTP response therefore looks like:
+
+```json
+{
+  "predictions": {
+    "record/fraud": {
+      "state": {
+        "valued": 0.91,
+        "null": 0.02,
+        "padded": 0.01,
+        "masked": 0.05,
+        "other": 0.01
+      },
+      "content": {
+        "value": "no",
+        "probability": 0.78,
+        "topk": []
+      },
+      "inferred": true
+    }
+  }
+}
+```
+
+Online serving removes the internal one-row batch dimension. Posting an array
+of JSON objects returns an array containing one such response per object; it
+does not combine their address payloads into one batched mapping.
+
+## Preprocessors And Postprocessors
+
+A JSON2Vec preprocessor runs before queries and encoding. Its emitted
+observation—not necessarily the raw request—is the input represented in writer
+metadata. Use the identical preprocessor and bound parameters at training and
+prediction time.
+
+A postprocessor replaces or mutates the canonical address mapping. Once a
+postprocessor returns an application-specific shape, that shape becomes the
+contract for that entry point. Do not describe it as canonical JSON2Vec output;
+version and test it as an application response or warehouse schema.
+
+See [Postprocessors](postprocessors.qmd) for the runtime values available to
+interactive, writer, and deployment postprocessors.
+
+## Verify A Consumer Contract
+
+Prefer structural checks over hard-coded model scores:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+output = model.predict([{"amount": 12.5, "merchant": "books"}])
+payload = output[jv.Address("record", "fraud")]
+
+assert set(payload) >= {"state", "content", "inferred"}
+assert set(payload["state"]) == {
+    "valued",
+    "null",
+    "padded",
+    "masked",
+    "other",
+}
+assert len(payload["inferred"]) == 1
+```
+
+Add datatype-specific assertions for the addresses your consumer requires.
+When a postprocessor changes the shape, test the postprocessed result instead.
+
+## Common Mistakes
+
+- Treating `inferred` as a probability or anomaly signal.
+- Reading content without considering the predicted state.
+- Expecting every visible input field to appear in output.
+- Assuming interactive one-row lists and denested HTTP scalars are identical.
+- Depending on exact floating-point values across hardware instead of shapes
+  and tolerances.
+- Exposing embeddings without considering payload size, privacy, and whether
+  the consumer actually needs them.
+
+## Where Next
+
+- Write large prediction jobs with [Batch Inference](batch-inference.qmd).
+- Define application shapes with [Postprocessors](postprocessors.qmd).
+- Expose the HTTP contract with [Online Serving](serving.qmd).

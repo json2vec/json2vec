@@ -10,51 +10,15 @@ pyproject: |
 
 # Home
 
-`json2vec` is for predictive modeling on records that are not naturally flat.
-Customers have transactions, orders have line items, sessions have clickstream
-events, devices recur across histories, and every level can carry signal.
+**Example status — excerpt:** the opening schema demonstrates the public model
+surface; continue to [Getting Started](getting-started.qmd) for the tested
+artifact lifecycle.
 
-Most ML pipelines handle that shape by flattening it first: build rolling
-aggregates, hand-pick windows, maintain feature stores, and then train a model
-on one fixed row. That can work, but it makes representation a separate
-engineering system. `json2vec` takes the opposite path: describe the structured
-record, and the schema becomes the model.
-
-The framework is designed for large production datasets, not just toy nested
-examples: training and batch inference over billions of observations, with
-throughput-oriented data paths and logging for pipelines that can process
-100k+ observations per second on appropriately sized hardware. The examples in
-these docs stay deliberately small so the modeling loop is easy to inspect.
-
-## Core Idea
-
-A `json2vec` schema is both a data contract and an architecture blueprint.
-
-- Leaf fields such as `Number`, `Category`, `Set`, `Entity`, `Text`, and
-  `Vector` become datatype-specific tensorfields.
-- `Branch` nodes define shared contexts for child fields, with optional local
-  attention and pooling before the representation flows upward.
-- Targets, masks, pruning, and embeddings are configured on the same schema
-  tree.
-- Prediction output is keyed by schema address, so decoded values and
-  embeddings remain attached to the part of the record that produced them.
-
-That lets one model surface support supervised prediction, self-supervised
-reconstruction, embedding export, schema mutation, field importance, and serving
-without rebuilding the data representation for each workflow.
-
-## Execution Model
-
-`json2vec` builds Lightning-compatible models. The schema defines the model
-tree, typed losses, prediction outputs, and embeddings; Lightning runs the
-fit, validation, test, and prediction loops, including device placement,
-callbacks, logging, checkpointing, and distributed execution.
-
-## A Schema Defines A Model
-
-The generated root schema node is named `record` by default. This example names
-it `order`, which changes output addresses such as `order/returned` but does not
-change the source keys read from each input record.
+`json2vec` builds PyTorch/Lightning models for records that are not naturally
+flat. An order can contain line items, a customer can have several histories,
+and a session can contain events. You describe those fields and relationships
+as a schema; `json2vec` uses the schema as both the input contract and the model
+blueprint.
 
 ```{python .marimo}
 #| echo: true
@@ -63,107 +27,107 @@ change the source keys read from each input record.
 import json2vec as jv
 
 model = jv.Model(
+    name="order",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
     customer_tier=jv.Category(size=16),
-    returned=jv.Category(target=True, size=2),
     line_items=jv.Branch(
-        embed=True,
         length=32,
         sku=jv.Category(size=2048),
         quantity=jv.Number,
         price=jv.Number,
     ),
+    returned=jv.Category(target=True, size=2),
 )
 
 model
 ```
 
-This model reads records shaped like:
+This model reads an order as a structured object. The line items interact in
+their own repeated context before that context is pooled into the order. The
+`returned` value is hidden and learned as a supervised target. The root address
+is `order`, so its target prediction is written at `order/returned`.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+## Why Preserve The Record Shape?
 
-{
-    "customer_tier": "gold",
-    "line_items": [
-        {"sku": "A12", "quantity": 2, "price": 19.99},
-        {"sku": "B07", "quantity": 1, "price": 45.50},
-    ],
-    "returned": "false",
-}
-```
+Flattening nested records into one feature row can be the right choice. It can
+also discard ordering and local relationships, force every history into the
+same window, and move important modeling decisions into a separate feature
+pipeline.
 
-The model learns from the order as a structured object. The `line_items` branch
-has its own repeated context, `returned` is withheld and decoded as a supervised
-target, and `embed=True` asks prediction to emit embeddings at configured
-addresses.
+`json2vec` is useful when those relationships are part of the signal:
 
-## What Is Different
+- orders with line items;
+- accounts with transactions and statements;
+- users with sessions and events;
+- devices with repeated measurements;
+- mixed-type records where each history needs its own length and overflow rule.
 
-- **Hierarchical context encoding:** child records interact locally before their
-  representation flows upward. A login session, transaction list, or order
-  item list can keep its own window instead of competing inside one flat
-  sequence.
-- **Extensible datatypes:** each field type owns validation, tensorization,
-  missing-state handling, masking, decoding, loss, metrics, and output writing.
-- **Unified training roles:** `target=True`, `p_prune`, and `p_mask` all use the
-  same reconstruction path, so supervised and self-supervised objectives share
-  the model tree.
-- **Embedding trees:** embeddings can come from the root, branches, or selected
-  leaves, making branch-level retrieval and diagnostics possible.
-- **Schema evolution:** models are completely mutable and can be updated, extended, deleted, reset, or
-  temporarily overridden after construction.
-- **Scale-oriented runtime:** online preprocessing state, streaming data
-  modules, throughput logging, and checkpointed tensorfield state are designed
-  for high-volume training and prediction jobs.
-- **One path for training and serving:** queries, preprocessors, tensorization,
-  model execution, prediction writing, and postprocessors stay in the same
-  configured path.
+Use a simpler tabular model when flattening loses no meaningful context. Read
+[Motivation](motivation.qmd) for the longer design argument and the boundaries
+of the approach.
 
-## When It Fits
+## What The Schema Controls
 
-Use `json2vec` when relationships inside the record matter: account histories,
-fraud or risk snapshots, order and fulfillment events, flight itineraries,
-operations telemetry, user sessions, repeated measurements, or any mixed
-datatype object where flattening would discard useful structure.
+- Leaf types such as `Number`, `Category`, `Set`, `Entity`, `DateParts`,
+  `Text`, and `Vector` own value encoding, loss, metrics, and prediction output.
+- `Branch` nodes preserve repeated contexts and pool them into their parent.
+- `target=True`, masking, and pruning decide which values are hidden and
+  learned from context.
+- `embed=True` selects root, branch, or leaf representations to export during
+  prediction.
+- Field names and optional queries bind raw record values to stable schema
+  addresses.
 
-Use a simpler tabular model when flattening loses no meaningful context. The
-point is not to replace every table. The point is to model nested business data
-without making a feature table the only representation the model can see.
+Lightning owns the training, validation, test, and prediction loops. JSON2Vec
+owns the schema-derived model, typed tensors, losses, and output contract.
 
-## Where To Start
+## Choose Your Route
 
-- New to the package: [Getting Started](getting-started.qmd)
-- Read the schema as a tree: [Model Tree](core-concepts/model-tree.qmd)
-- Bind source records to fields: [Query Paths](core-concepts/querypaths.qmd)
-- Short API map: [AI / Expert Quickstart](ai-quickstart.qmd)
-- Modeling rationale: [Why `json2vec`](motivation.qmd)
-- Built-in fields: [Data Types](core-concepts/data-types.qmd)
-- Learning modes and embeddings: [Learning Modes & Embeddings](core-concepts/embeddings.qmd)
-- Windowed reconstruction in branches: [Dynamic Masking](core-concepts/dynamic-masking.qmd)
-- Training execution: [Training With Lightning](guides/lightning.qmd)
-- In-memory and streaming inputs: [Data Modules](guides/data-modules.qmd)
-- Offline prediction jobs: [Batch Inference](guides/batch-inference.qmd)
-- Serving-time output shaping: [Postprocessors](guides/postprocessors.qmd)
-- Input ablation diagnostics: [Field Importance](guides/field-importance.qmd)
-- Applied risk example: [Device Tenure](case-studies/device-tenure.qmd)
+| If you want to… | Start with… |
+| --- | --- |
+| Install the package and produce a first prediction | [Getting Started](getting-started.qmd) |
+| See how one raw record becomes tensors, losses, and output | [Data Flow](core-concepts/data-flow.qmd) |
+| Understand branches, leaves, contexts, and addresses | [Model Tree](core-concepts/model-tree.qmd) |
+| Bind ordinary or mismatched input records | [Binding Data](core-concepts/binding-data.qmd) |
+| Choose the representation for a field | [Built-In Data Types](core-concepts/data-types.qmd) |
+| Train and evaluate a model | [Training With Lightning](guides/lightning.qmd) |
+| Interpret metrics and select a model | [Evaluation And Metrics](guides/evaluation.qmd) |
+| Save, restore, or resume an artifact | [Model Lifecycle](guides/model-lifecycle.qmd) |
+| Run large offline prediction jobs | [Batch Inference](guides/batch-inference.qmd) |
+| Operate an online endpoint | [Online Serving](guides/serving.qmd) |
+| Look up a familiar API quickly | [AI / Expert Quickstart](ai-quickstart.qmd) |
 
-## Learning Path
+## Supported Workflows
 
-For a first pass, follow this sequence:
+The public workflow covers schema construction, in-memory and streaming data
+modules, Lightning training, interactive prediction, Parquet batch output,
+postprocessing, and optional FastAPI-backed serving. Schema mutation, dynamic
+masking, field importance, and field stacking are available as more advanced
+workflows.
 
-[Getting Started](getting-started.qmd) ->
-[Model Tree](core-concepts/model-tree.qmd) ->
-[Query Paths](core-concepts/querypaths.qmd) ->
-[Data Types](core-concepts/data-types.qmd) ->
-[Dynamic Masking](core-concepts/dynamic-masking.qmd) ->
-[Training With Lightning](guides/lightning.qmd) ->
-[Data Modules](guides/data-modules.qmd) ->
-[Batch Inference](guides/batch-inference.qmd)
+Scale depends on the schema, branch lengths, vocabulary sizes, hardware,
+precision, data pipeline, and batch size. Each page labels its examples as
+runnable, excerpt, or sketch; none is a portable throughput benchmark for a
+production workload.
+
+## First Learning Path
+
+[Getting Started](getting-started.qmd) →
+[Data Flow](core-concepts/data-flow.qmd) →
+[Model Tree](core-concepts/model-tree.qmd) →
+[Data Types](core-concepts/data-types.qmd) →
+[Binding Data](core-concepts/binding-data.qmd) →
+[Learning Modes & Embeddings](core-concepts/embeddings.qmd) →
+[Data Modules](guides/data-modules.qmd) →
+[Training With Lightning](guides/lightning.qmd) →
+[Evaluation And Metrics](guides/evaluation.qmd) →
+[Model Lifecycle](guides/model-lifecycle.qmd) →
+[Prediction Output](guides/prediction-output.qmd) → choose
+[Batch Inference](guides/batch-inference.qmd) or
+[Online Serving](guides/serving.qmd).
 
 ## Community
 

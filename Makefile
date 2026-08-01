@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-QUARTO ?= uvx --from quarto-cli quarto
+QUARTO ?= uvx --from quarto-cli==1.9.38 quarto
 HOST ?= 127.0.0.1
 PORT ?= 4200
 PREVIEW_FLAGS ?= --no-browser --host $(HOST) --port $(PORT)

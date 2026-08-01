@@ -1,0 +1,212 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Temporal Validation And Leakage
+
+**Example status — excerpt:** split and preprocessing blocks are patterns to
+apply to a domain dataset, not an evaluated model result.
+
+Nested histories make time leakage easy to introduce. A label may be assigned at
+one time while a child event, aggregate, or vocabulary entry was created later.
+Define what was knowable at an observation's prediction time before choosing a
+model or tuning a branch.
+
+## Start With An `as_of` Contract
+
+Every supervised observation should have an explicit cutoff:
+
+```json
+{
+  "account_id": "acct_123",
+  "as_of": "2026-01-15T12:00:00Z",
+  "events": [
+    {"timestamp": "2026-01-14T09:30:00Z", "kind": "login"}
+  ],
+  "outcome_in_next_7_days": "false"
+}
+```
+
+The contract is:
+
+- model inputs contain only facts available at or before `as_of`;
+- the target is defined strictly after `as_of` over a named outcome horizon;
+- training, validation, test, and serving apply the same inclusion rules;
+- joins use event-time availability, not the time a backfill happened to run.
+
+Keep `as_of` and stable identifiers as metadata when they are needed for audit
+or joining but should not be learned as raw inputs.
+
+## Build Windows In One Preprocessor
+
+Use the public preprocessor contract when raw histories need sorting, filtering,
+or feature derivation. Return `jv.Observation`, not a plain dictionary:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+from datetime import datetime, timezone
+
+import json2vec as jv
+
+
+@jv.preprocess
+def trailing_history(observation, *, strata, cutoffs):
+    as_of = datetime.fromisoformat(cutoffs[str(strata)].replace("Z", "+00:00"))
+    events = []
+
+    for event in observation["events"]:
+        timestamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+        if timestamp > as_of:
+            continue
+
+        age_days = (as_of - timestamp).total_seconds() / 86_400
+        if age_days <= 90:
+            events.append(
+                {
+                    "kind": event["kind"],
+                    "days_since_event": age_days,
+                }
+            )
+
+    events.sort(key=lambda event: event["days_since_event"], reverse=True)
+    return jv.Observation(
+        {
+            "events": events,
+            "outcome_in_next_7_days": observation.get("outcome_in_next_7_days"),
+        }
+    )
+
+
+preprocessor = trailing_history.partial(
+    cutoffs={
+        "train": "2025-06-30T23:59:59Z",
+        "validate": "2025-09-30T23:59:59Z",
+        "test": "2025-12-31T23:59:59Z",
+        "predict": "2026-01-15T12:00:00Z",
+    }
+)
+```
+
+This is an illustrative cutoff policy. Many datasets already contain a distinct
+`as_of` per observation; in that case, read it from the observation and still
+use `strata` to enforce allowed ranges.
+
+Pass the same preprocessor to data modules and interactive or online inference:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+datamodule = jv.PolarsDataModule(
+    model=model,
+    train=train_records,
+    validate=validate_records,
+    test=test_records,
+    preprocessor=preprocessor,
+)
+
+predictions = model.predict(requests, preprocess=preprocessor)
+```
+
+## Choose Split Boundaries Deliberately
+
+Three common split policies answer different questions:
+
+| Split | What it measures | Main risk |
+| --- | --- | --- |
+| Time only | Performance on a future period for identities seen historically | Memorized identity or household history can cross the boundary. |
+| Identity only | Generalization to entirely unseen identities | The validation period may not reflect future drift. |
+| Time and identity | Generalization to future observations and unseen identities | Harder task with fewer examples; may not match a returning-customer product. |
+
+Use the policy that matches deployment. If requests score returning accounts,
+a time split with past-only histories may be correct. If requests score new
+accounts, reserve identities as well. Report the policy next to every metric.
+
+Do not randomly split event rows and then rebuild customer histories. That can
+place events from one customer's future in the training representation of a
+validation observation.
+
+## Check Every Source Of Future Information
+
+Audit more than timestamps:
+
+- labels or statuses updated after the prediction decision;
+- chargeback, dispute, or return fields joined back onto earlier events;
+- aggregates computed over the entire available table;
+- global normalizers, vocabularies, or target encoders fit before splitting;
+- child arrays sorted or truncated using a future field;
+- identifiers or policy codes introduced only after a rollout;
+- data availability lag, where an event occurred before `as_of` but was not yet
+  visible to the production system.
+
+JSON2Vec learns numeric normalization and Category/Set vocabulary during the
+training split. Validation, test, and prediction reuse that state. Keep split
+roles correct so future labels do not expand training vocabulary.
+
+## Validate The Prepared Observation
+
+Inspect a few records on both sides of every boundary before fitting:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+encoded = model.encode(
+    validation_examples,
+    preprocess=preprocessor,
+    strata="validate",
+)
+
+print(encoded)
+```
+
+For each sampled observation, verify:
+
+1. no input event is newer than its `as_of`;
+2. the target window begins after `as_of`;
+3. branch truncation kept the intended side of the history;
+4. the target is hidden from model input;
+5. validation-only categories are unavailable rather than added to vocabulary;
+6. the same raw request produces the same model-facing shape in serving.
+
+Automate these checks in the data pipeline. A high validation score cannot
+compensate for an invalid observation contract.
+
+## Evaluate Drift Separately From Model Selection
+
+Keep one validation period for model selection and a later untouched test
+period for the final estimate. For a deployed model, add rolling time slices and
+report:
+
+- target rate and missingness;
+- vocabulary coverage and capacity;
+- branch length and truncation rates;
+- primary task metric and threshold metric;
+- slice metrics for materially different populations;
+- prediction confidence or calibration diagnostics where defined.
+
+Do not interpret an embedding cluster or one field ablation as causal evidence.
+Use them as diagnostics alongside held-out outcomes.
+
+## Failure Signals
+
+| Signal | Diagnostic | Likely fix |
+| --- | --- | --- |
+| Validation is implausibly strong | Search visible nested events and derived fields for post-`as_of` information | Rebuild windows before query/tensorization and regenerate splits. |
+| Validation vocabulary grows | Inspect which strata populated encoding state | Fit vocabulary/normalization only from training, then encode validation and test without updates. |
+| The same entity appears across splits | Join split membership by customer/account/device/session key | Split by the identity unit that can leak, not individual rows. |
+| Serving records differ from validation | Run the same raw example through both processor bindings | Version and deploy processor code and bound parameters with the artifact. |
+| Windowing drops every observation | Count preprocessor outputs and cutoff comparisons | Fix timezone/cutoff semantics and fail before training an empty split. |
+
+## Where Next
+
+- Use [Data Modules](data-modules.qmd) for split configuration and the full
+  preprocessor contract.
+- Use [Evaluation and Metrics](evaluation.qmd) to choose selection and threshold
+  metrics.
+- Use [Branch](../data-types/branch.qmd) for recency-oriented `overflow="tail"`.
+- Use [Device Tenure](../case-studies/device-tenure.qmd) for a structured-history
+  sketch that applies these controls.

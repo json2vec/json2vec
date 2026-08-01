@@ -1,0 +1,234 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Schema Mutation
+
+**Example status — excerpt:** the initial mutation sequence is self-contained,
+while trainer-dependent blocks are explicitly linked to the complete Lightning
+workflow.
+
+A JSON2Vec schema is live model state. Mutation methods update the schema and
+keep compatible runtime modules, parameters, vocabularies, and normalizers
+attached where their address and tensor shape still match.
+
+Use mutation for controlled experiments, staged targets, inference views, and
+schema evolution. Treat it as a model change: inspect the result, evaluate it,
+and save the artifact you intend to operate.
+
+## Example Model
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import json2vec as jv
+
+model = jv.Model(
+    name="order",
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    amount=jv.Number,
+    channel=jv.Category(size=8),
+    returned=jv.Category(target=True, size=2),
+)
+
+model
+```
+
+## Select Before You Change
+
+`model.select(...)` is read-only. Predicates are combined with logical AND:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+numbers = model.select(jv.where("type") == "number")
+target = model.select(jv.where("name") == "returned")
+
+print([str(node.address) for node in numbers])
+print([str(node.address) for node in target])
+```
+
+Prefer stable attributes such as `address`, `name`, and `type`. A callable is
+available for conditions that cannot be expressed with `jv.where(...)`:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+embedded = model.select(lambda node: getattr(node, "embed", False))
+```
+
+Check the selected addresses before a broad update or delete. `include_root`
+defaults to `True` for selection and update, and to `False` for delete.
+
+## Update Attributes
+
+`update(...)` changes every selected node that accepts the requested values and
+then rebuilds the runtime graph:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.update(jv.where("type") == "number", p_mask=0.10)
+model.update(jv.where("name") == "returned", weight=2.0, topk=[])
+```
+
+Updates are strict by default. If a selector matches mixed node types and one
+does not support the option, JSON2Vec raises instead of silently applying a
+partial change. Narrow the predicate or use `strict=False` only when partial
+application is intentional.
+
+`target=True` is normalized to `p_prune=1.0`; `target=False` sets
+`p_prune=0.0`.
+
+## Extend One Branch
+
+`extend(...)` requires exactly one selected branch, followed by one or more new
+fields:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.extend(
+    jv.where("name") == "order",
+    jv.Boolean("expedited"),
+    jv.Category("region", size=32),
+)
+
+model
+```
+
+New fields receive new runtime modules. Existing compatible modules keep their
+state. Duplicate sibling names and extensions that match zero or multiple
+branches fail validation.
+
+## Delete Permanently
+
+`delete(...)` removes selected roots and all their descendants:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.delete(jv.where("name") == "expedited")
+```
+
+Deletion cannot remove the generated root, every request, or leave a branch
+without any request descendants. There is no automatic undo; use
+`override(...)` for a temporary ablation.
+
+## Reset Learned Runtime State
+
+`reset(...)` keeps schema values but reinitializes selected runtime modules:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.reset(jv.where("name") == "channel")
+```
+
+For a stateful field, this discards learned weights and field-owned state such
+as its vocabulary. Pass `descendants=True` when selecting a branch and intending
+to reset its full subtree. Re-train or deliberately refit preprocessing state
+after a reset.
+
+Use reset when you want reinitialization. Ordinary updates rebuild the graph but
+reload state-dictionary entries whose keys, types, and tensor shapes remain
+compatible. A shape-changing option such as vocabulary capacity may therefore
+reinitialize the incompatible tensors while preserving unrelated modules.
+
+## Override Temporarily
+
+`override(...)` changes the schema for the duration of a context manager, then
+restores the prior schema and rebuilds it with whatever compatible runtime
+state exists when the context exits:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+with model.override(jv.where("name") == "amount", active=False):
+    ablated_predictions = model.predict(
+        [{"channel": "web"}]
+    )
+
+restored_predictions = model.predict(
+    [{"amount": 42.0, "channel": "web"}]
+)
+```
+
+This is the appropriate primitive for field-ablation evaluation or a temporary
+inference view. Do not retain references to node modules created only inside the
+context. It is a schema override, not a transaction over weights or field-owned
+state: compatible parameter or vocabulary changes made inside the context are
+not rolled back automatically.
+
+## Mutation Boundaries
+
+Schema mutation cannot run while JSON2Vec is inside an active `forward`,
+interactive inference call, or Lightning train/validate/test/predict loop.
+Mutate between complete loops:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+trainer.fit(model=model, datamodule=datamodule)
+
+model.update(jv.where("name") == "amount", p_mask=0.0)
+
+trainer.test(model=model, datamodule=datamodule)
+```
+
+The snippet above is an excerpt: `trainer` and `datamodule` come from the
+complete [Lightning guide](lightning.qmd).
+
+In distributed work, every rank must make the same mutation in the same order.
+Do not mutate from one rank or from a callback in the middle of a collective
+loop.
+
+## Save The Result You Intend To Use
+
+After a permanent mutation and its evaluation, save a new artifact:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.save("artifacts/order-v2.jv")
+loaded = jv.Model.load("artifacts/order-v2.jv")
+```
+
+Record the old and new schema, the predicate and values used, validation
+results, and the data/preprocessor version. An artifact name alone is not a
+schema migration record.
+
+## Mutation Checklist
+
+Before shipping a changed schema:
+
+1. print the selected addresses and the mutated Rich tree;
+2. encode representative train and inference observations;
+3. confirm which parameters and preprocessing states were preserved;
+4. re-evaluate every supervised target and important slice;
+5. test save/load parity;
+6. test batch and online request compatibility;
+7. save under a new version and retain rollback metadata.
+
+## Where Next
+
+- Use [Field Importance](field-importance.qmd) for a complete temporary-ablation
+  workflow.
+- Use [Model Lifecycle](model-lifecycle.qmd) for persistence and checkpoint
+  boundaries.
+- Use [Model Tree](../core-concepts/model-tree.qmd) for nodes and addresses.
+- Use [Troubleshooting](troubleshooting.qmd) for selection, shape, and active-loop
+  errors.

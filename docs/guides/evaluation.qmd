@@ -1,0 +1,251 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Evaluation And Metrics
+
+**Example status — excerpt:** metric snippets assume a completed trainer run.
+Use the CI-backed [Iris case study](../case-studies/iris-reproducible.qmd) for a
+complete baseline, split, checkpoint, and held-out result.
+
+Evaluation answers two different questions: whether JSON2Vec is learning its
+typed reconstruction objectives, and whether the resulting model helps the
+business task that motivated it. The logged metrics answer the first question.
+You still need an honest validation split and, where appropriate, a downstream
+baseline to answer the second.
+
+This guide assumes you have a trained `jv.Model` and a data module with a
+`validate` split. See [Training With Lightning](lightning.qmd) for the training
+loop and [Data Modules](data-modules.qmd) for split construction.
+
+## Run Validation
+
+This is the minimal evaluation call:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+results = trainer.validate(model=model, datamodule=datamodule)
+print(results[0]["loss/validate"])
+```
+
+Lightning returns one metrics dictionary per validation dataloader. The same
+epoch-level values are available to configured loggers and in
+`trainer.callback_metrics` after a loop.
+
+Keep validation deterministic enough to compare runs. In particular, do not
+subsample it accidentally:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+datamodule = jv.PolarsDataModule(
+    model=model,
+    train=train_frame,
+    validate=validate_frame,
+    sample_rate={"train": 0.25, "validate": 1.0},
+)
+```
+
+## Read Metric Names
+
+JSON2Vec reports metrics once per epoch. Global metrics use:
+
+```text
+<metric>/<stage>
+```
+
+For example:
+
+- `loss/train`
+- `loss/validate`
+- `throughput/train`
+- `throughput/validate`
+
+Training, validation, and test metrics go through `Model.log(...)`, so they are
+available to Lightning loggers and result collections. Lightning does not
+support module logging from prediction hooks: `throughput/predict` is sent
+directly to an attached logger on the global-zero rank and is also retained by
+the installed throughput callback. Do not expect it in
+`trainer.callback_metrics` after `trainer.predict(...)`.
+
+Metrics for one schema leaf use:
+
+```text
+<address-with-colons>/<stage>:<metric>:<component>
+```
+
+Slashes in the schema address become colons so the first slash still separates
+the logger group. For a `Category` target at `record/fraud`, representative
+names are:
+
+```text
+record:fraud/validate:loss:state
+record:fraud/validate:accuracy:state
+record:fraud/validate:loss:content
+record:fraud/validate:accuracy:content
+record:fraud/validate:vocabulary:size
+```
+
+A configured category `topk=[3]` additionally emits
+`record:fraud/validate:accuracy:top3`. Metric availability is datatype-specific;
+each [datatype reference](../core-concepts/data-types.qmd) lists the metrics it
+owns.
+
+## Understand The Loss
+
+`loss/validate` is the sum of the active leaf losses after multiplying each
+leaf by its schema `weight`. A leaf can contribute both:
+
+- a **state loss**, which learns whether a value is valued, null, padded,
+  masked, or the reserved `other` state; and
+- a **content loss**, whose meaning depends on the datatype—for example,
+  categorical classification or numeric reconstruction.
+
+The address-specific losses are logged before the leaf `weight` is applied.
+Consequently, adding those logger values by hand does not reproduce the global
+loss when weights differ from `1.0`.
+
+Global loss is appropriate for optimization and often for early stopping, but
+it is not automatically the best product metric. A lower aggregate loss can
+hide a regression on the one target the application cares about. Track that
+target's content metric and a business-facing metric alongside it.
+
+::: {.callout-note}
+If a batch contains no trainable fields, JSON2Vec returns a differentiable zero
+loss and logs a warning. Repeated warnings usually mean the queries, targets,
+masking rates, or split contents are not producing learning examples.
+:::
+
+## State And Content Need Separate Interpretation
+
+High state accuracy does not imply good content prediction. A model can learn
+that a field is usually `valued` while still predicting its value poorly.
+Conversely, content metrics are normally evaluated only where that datatype
+has a meaningful valued target.
+
+Review at least:
+
+| Signal | Question it answers |
+| --- | --- |
+| State loss and accuracy | Does the model recognize missingness and masking structure? |
+| Content loss | Is the datatype-specific training objective improving? |
+| Content accuracy, MAE, RMSE, AUC, or top-k | Is decoded content improving in an interpretable unit? |
+| Category vocabulary size | Is an online categorical vocabulary close to its configured capacity? |
+| Throughput | Did an input or configuration change alter execution speed? |
+
+Datatype metrics do not all have the same denominator. For example, Category
+content accuracy excludes unavailable values that are not in its learned
+vocabulary, while its state metrics still evaluate the value state. Consult the
+datatype page before comparing metrics across fields.
+
+## Classification Thresholds And Imbalance
+
+`Boolean.threshold` controls the value written at prediction time. It does not
+change the training objective, and changing it does not retrain the model.
+Choose a threshold on validation data using the cost of false positives and
+false negatives rather than assuming `0.5` is optimal.
+
+For bounded categorical targets, ordinary accuracy can obscure rare classes.
+Use configured top-k accuracy only when returning several candidates is useful
+to the application. Also inspect per-class performance outside JSON2Vec when
+class imbalance matters; the built-in scalar metrics are not a confusion
+matrix or calibration report.
+
+Output probabilities are model scores, not a guarantee of calibration or an
+out-of-distribution detector. Validate calibration on held-out data before
+turning a score into an operational confidence claim.
+
+## Select A Checkpoint
+
+Choose a monitor that matches the decision you are making:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+checkpoint = jv.RollbackCheckpoint(
+    dirpath="checkpoints",
+    filename="best-{epoch:02d}",
+    monitor="loss/validate",
+    mode="min",
+    save_top_k=1,
+)
+
+trainer = lit.Trainer(callbacks=[checkpoint])
+trainer.fit(model=model, datamodule=datamodule)
+```
+
+`RollbackCheckpoint` writes full Lightning checkpoints and restores the best
+one into `model` at the end of fitting. Use `mode="max"` for metrics such as
+accuracy or AUC. The monitored name must actually be emitted by every
+validation epoch; otherwise Lightning cannot rank checkpoints.
+
+When the primary product target is one leaf, monitoring its metric can be more
+appropriate than global loss:
+
+```text
+record:fraud/validate:accuracy:content
+```
+
+Accuracy can be unstable on small or imbalanced splits, so make this choice
+from the validation design rather than from metric direction alone. See
+[Model Lifecycle](model-lifecycle.qmd) for the difference between these full
+checkpoints and `model.save(...)` artifacts.
+
+## Design A Trustworthy Split
+
+A validation metric is useful only when the split represents future use.
+
+- Split by time when predictions concern future events. Ensure every nested
+  history is cut off at the observation's `as_of` time.
+- Split by entity when repeated customer, account, device, or session identity
+  would otherwise leak between train and validation.
+- Fit vocabularies and numeric normalization from training observations. Do not
+  send validation records through the training dataloader merely to populate
+  preprocessing state.
+- Apply the same JSON2Vec preprocessor code and bound parameters to every
+  split, while allowing stage-aware behavior only when it is intentional.
+- Keep labels and post-outcome events out of visible nested context.
+
+Using the training frame as validation is acceptable only in a tiny API
+demonstration. Label it as such; it does not measure generalization.
+
+Use [Temporal Validation And Leakage](temporal-validation.qmd) to define time
+cutoffs, entity isolation, nested-history windows, and split-safe preprocessing
+before treating a metric as evidence of future performance.
+
+## Decide Whether The Model Learned Something Useful
+
+Before promoting a checkpoint:
+
+1. Compare against a simple baseline, such as the majority class, a constant
+   numeric predictor, or the existing production system.
+2. Confirm global and primary-target metrics improve on a genuinely held-out
+   split.
+3. Slice results by important cohorts and by value state; aggregate scores can
+   hide failures on null, rare, or long-history observations.
+4. Inspect prediction payloads, including `inferred`, rather than assuming
+   every decoded field was requested as a target.
+5. Re-run the exact saved artifact through the intended interactive, batch, or
+   serving path.
+
+## Common Failures
+
+| Symptom | Likely cause or next check |
+| --- | --- |
+| `loss/validate` is missing | No validation split, validation was disabled, or no trainable fields reached the loop. |
+| Only state metrics improve | The model learned missingness but not typed content; inspect content queries, capacity, and masking. |
+| Vocabulary size reaches capacity | Increase `size` deliberately or choose a different datatype; unseen values become unavailable. |
+| Validation is much better than production | Check time/entity leakage and train/serve preprocessing parity. |
+| Throughput changes between runs | Compare hardware, precision, batch size, worker count, branch lengths, and measured observation count. |
+| A checkpoint monitor is not found | Copy the exact emitted key from `trainer.callback_metrics` or the logger. |
+
+## Where Next
+
+- Preserve the selected artifact with [Model Lifecycle](model-lifecycle.qmd).
+- Inspect the complete [Prediction Output](prediction-output.qmd) contract.
+- Use [Batch Inference](batch-inference.qmd) for held-out predictions at scale.

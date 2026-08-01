@@ -10,12 +10,15 @@ pyproject: |
 
 # DateParts
 
-Use `DateParts` when calendar position matters more than timestamp magnitude:
-hour of day, day of week, month of year, and related cyclical buckets.
+**Example status — excerpt:** schema blocks isolate calendar encoding; use
+[Getting Started](../getting-started.qmd) for a tested lifecycle.
+
+Use `DateParts` when calendar position or recurrence matters: second of minute,
+hour of day, day of week, month of year, or related cyclical coordinates.
 
 ```json
 {
-  "created_at": "2026-05-28T14:30:00"
+  "created_at": "2026-05-28T14:30:45"
 }
 ```
 
@@ -27,100 +30,108 @@ import json2vec as jv
 
 created_at = jv.DateParts(
     "created_at",
-    dateparts=["day of week", "HourOfDay"],
+    dateparts=["day of week", "HourOfDay", "second_of_minute"],
     pattern="%Y-%m-%dT%H:%M:%S",
 )
 
 created_at
 ```
 
-Use `DateParts` for recurrence and seasonality: hour of day, day of week,
-month, business cycles, and operational schedules. Use a derived `Number` for
-elapsed time, age, recency, duration, or ordering. For example, compute
-`days_since_transaction` before inference when the signal is the difference
-between inference time and transaction time.
+Use `DateParts` for recurring calendar position. Derive a `Number` when elapsed
+time, age, recency, duration, ordering, or distance between two timestamps is the
+signal. For example, compute `days_since_transaction` in preprocessing using an
+explicit request-time reference.
 
 | Need | Prefer |
 | --- | --- |
-| Hour, weekday, month, or seasonal recurrence | `DateParts` |
-| Age, duration, recency, or ordering | derived `Number` |
-| Request-time-dependent windows | preprocessor plus `Number` |
+| Second, minute, hour, weekday, month, or seasonal recurrence | `DateParts` |
+| Age, duration, recency, or ordering | Derived `Number` |
+| Request-time-dependent windows | Preprocessor plus `Number` |
 
-Avoid raw timestamps as features by default. They can encourage the model to
-learn dataset-specific time boundaries, rollout dates, policy changes, or
-train/test split artifacts instead of general patterns.
+Avoid raw timestamps as features by default. They can encourage a model to
+memorize collection windows, rollout dates, policy changes, or train/test split
+boundaries instead of learning a recurring pattern.
 
 ## Input Values
 
 `DateParts` accepts datetime-like values that NumPy can coerce to
-`datetime64[m]`. If `pattern` is provided, source values are parsed with
-`datetime.strptime` first. `None` is encoded as a null state, and missing branch
-positions are encoded as padded state.
+second-resolution `datetime64[s]`. When `pattern` is configured, source values
+are parsed with `datetime.strptime` first. `None` has state `null`, and a missing
+repeated branch slot has state `padded`.
 
-Internal precision is minutes. Seconds can be parsed, but no built-in date part
-uses second-level precision.
-
-## Examples
-
-Common date-part fields include:
-
-- Transaction time, login time, request time, or event time.
-- Seasonal features such as month of year or day of year.
-- Operational cycles such as hour of day, day of week, or minute of hour.
-- Calendar-position signals where exact elapsed time is less important than recurrence.
+Preprocess timestamps into one consistent timezone before encoding. `DateParts`
+does not impose an application timezone policy or convert local times for you.
 
 ## Configuration
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `dateparts` | required | Non-empty, unique list of date parts to extract. Friendly casing and separators are normalized. |
-| `pattern` | `None` | Optional `datetime.strptime` pattern for string inputs. |
+| `dateparts` | required | Non-empty list of unique date parts to extract. Friendly casing and separators are normalized. |
+| `pattern` | `None` | Optional valid `datetime.strptime` pattern for source strings. |
 
-Available date parts:
+Available date parts are:
 
-| Date part | Buckets |
-| --- | --- |
-| `Day Of Year` | 366 |
-| `Week Of Year` | 53 |
-| `Month Of Year` | 12 |
-| `Day Of Month` | 31 |
-| `Week Of Month` | 6 |
-| `Day Of Week` | 7 |
-| `Hour Of Day` | 24 |
-| `Minute Of Hour` | 60 |
+| Date part | Period |
+| --- | ---: |
+| `day_of_year` | 366 |
+| `week_of_year` | 53 |
+| `month_of_year` | 12 |
+| `day_of_month` | 31 |
+| `week_of_month` | 6 |
+| `day_of_week` | 7 |
+| `hour_of_day` | 24 |
+| `minute_of_hour` | 60 |
+| `second_of_minute` | 60 |
 
-`dateparts` accepts common spellings such as `"day_of_week"`, `"day of week"`,
-`"Day-Of-Week"`, `"DAY_OF_WEEK"`, and `"DayOfWeek"`. Serialized schemas use the
-canonical lower-case values.
+Inputs such as `"day_of_week"`, `"day of week"`, `"Day-Of-Week"`,
+`"DAY_OF_WEEK"`, and `"DayOfWeek"` all resolve to the same part. Serialized
+schemas use the canonical lower-case underscore values.
 
-## Target Behavior
+## Representation
 
-When `DateParts` is masked or used as a target, the decoder predicts:
+Each requested part becomes a `(sin, cos)` pair on its unit circle. This keeps
+the boundary close: minute `59` is near minute `0`, for example. The tensorfield
+stores these pairs at second-level timestamp precision, and non-valued states
+receive zero part content. State remains separate from the part vectors.
 
-- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
-- `content`: a `(sin, cos)` pair on the unit circle for each configured date
-  part, treating each part as a continuous angular coordinate at its canonical
-  period.
+Each part has its own projection into `d_model`; the projected parts and state
+embedding are added to create the internal field representation. Requesting
+more parts therefore adds both computation and parameters, and it can expose
+redundant calendar signals. Select parts justified by the task rather than
+including every period automatically.
 
-The per-datepart loss is the cosine distance between the predicted and target
-unit-circle vectors, and the reported `mae` is the mean absolute angular error
-in radians. The state loss is added to the averaged datepart losses.
+## Loss And Metrics
+
+For every trainable selected position, the decoder emits five state logits and
+one two-dimensional vector per configured part. Each predicted part vector is
+normalized before scoring.
+
+- State uses cross entropy and reports state accuracy.
+- Each part uses cosine distance, `1 - cosine(prediction, target)`.
+- Each part's metric named `mae` is mean absolute angular error in radians,
+  computed with `arccos(cosine)`.
+- The content contribution is the mean of the configured per-part losses and is
+  added to state loss.
+
+The angular metric is not bucket accuracy and is not measured in seconds,
+minutes, or hours. Convert radians to a domain unit only with that part's period,
+and remember that every part is cyclical.
 
 ## Prediction Output
 
-`DateParts` currently trains and reports losses and accuracies, but it does not
-emit decoded timestamp values in `Model.predict(...)`. Configure it as an input
-feature or reconstruction target when the model should learn timestamp
-structure, not when you need decoded timestamp values. It can still contribute
-to model context and reconstruction losses. Configure `embed=True` when you want
-the field address to emit an `embedding` payload.
+`DateParts` has no public decoded state/content writer, so
+`Model.predict(...)` does not reconstruct a timestamp or emit part buckets.
+It can still act as a visible input and train state, cosine-loss, and angular
+error metrics when masked or targeted.
 
-## Notes
+Configure `embed=True` when a normalized representation at this field address
+is useful. The public embedding is not a decoded datetime; see
+[Internal And Exported Embeddings](../core-concepts/embeddings.qmd#internal-and-exported-embeddings).
 
-Use `Number` for monotonic timestamps, ages, intervals, or durations where
-numeric distance matters. `DateParts` discards that continuous distance and
-keeps only the requested calendar buckets.
+## Where Next
 
-Preprocess timestamps to a consistent timezone before encoding. `json2vec` stores
-dateparts at minute precision and does not apply an application-specific
-timezone policy.
+- Use [Number](number.qmd) for monotonic time, age, intervals, or duration.
+- Use [Built-In Data Types](../core-concepts/data-types.qmd) for shared state and
+  masking semantics.
+- Use [Data Modules](../guides/data-modules.qmd) to keep timezone conversion and
+  request-time feature derivation consistent across splits and prediction.

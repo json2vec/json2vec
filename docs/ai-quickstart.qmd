@@ -3,63 +3,40 @@ marimo-static-output: true
 eval: false
 ---
 
-# AI Quickstart
+# AI / Expert Quickstart
 
-This page gives AI agents and experienced Python users the shortest reliable
-path through `json2vec`. If you are new to the package, start with
+**Example status — excerpt:** blocks are terse API reminders. The tested
+end-to-end contract is [Getting Started](getting-started.qmd).
+
+This is a compact map for readers who already know Python, PyTorch, and
+Lightning. It summarizes the public path and links to the pages that own each
+contract. For a runnable build-to-prediction example, use
 [Getting Started](getting-started.qmd).
 
-## Import Style
+## Construct A Schema
 
-Use the package root for normal work:
+Use top-level exports through `import json2vec as jv`:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
+
+import torch
 
 import json2vec as jv
-```
-
-## Build A Model
-
-Top-level records use field names directly. `json2vec` infers request queries from those names.
-
-```{python .marimo}
-#| echo: true
-#| output: true
 
 model = jv.Model(
+    name="order",
     d_model=64,
     n_layers=2,
     n_heads=4,
     batch_size=32,
-    amount=jv.Number,
-    merchant=jv.Category(size=4096),
-    label=jv.Category(target=True, size=2),
-)
-
-model
-```
-
-`target=True` is exact shorthand for `p_prune=1.0`: it withholds `label`
-from the input and trains the decoder to reconstruct it from the remaining
-fields. It is the "always hidden" supervised-target case; use `p_mask` for
-stochastic self-supervised masking with rates lower than `1.0`.
-
-## Add Nested Data
-
-Use `Branch` to group fields that share a repeated context, such as line items.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    d_model=64,
-    n_layers=2,
-    n_heads=4,
+    embed=True,
+    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
+    customer_tier=jv.Category(size=16),
     line_items=jv.Branch(
         length=32,
+        overflow="tail",
         sku=jv.Category(size=2048),
         quantity=jv.Number,
         price=jv.Number,
@@ -70,17 +47,25 @@ model = jv.Model(
 model
 ```
 
-For ordered histories, set `overflow="tail"` on the branch when the newest
-records should be retained after `length` is reached. Use
-`overflow="error"` when truncation should fail.
+The generated root is named `record` unless `name=...` overrides it. A child
+`Branch(length=...)` adds a repeated context. Only leaf tensorfields bind source
+values; branches define model structure and alignment.
 
-This reads records shaped like:
+Configured `topk` values must be integers greater than 1 and strictly less than
+Category `size`; binary categories therefore need no separate top-k list.
+Category capacity counts content labels only—do not reserve an extra slot for
+unavailable content.
+
+## Match The Input Shape
+
+The schema above reads records shaped like:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-{
+record = {
+    "customer_tier": "gold",
     "line_items": [
         {"sku": "ABC-123", "quantity": 2, "price": 19.99},
         {"sku": "XYZ-999", "quantity": 1, "price": 7.50},
@@ -89,226 +74,125 @@ This reads records shaped like:
 }
 ```
 
-## Mask Repeated Windows
+Same-named fields infer queries such as `[*].customer_tier` and
+`[*].line_items[*].sku`. Use an explicit `query=...` for stable source-path
+differences and a `@jv.preprocess` object for Python logic, normalization,
+sorting, or windowing. See [Binding Data](core-concepts/binding-data.qmd) and
+[Advanced Query Paths](core-concepts/querypaths.qmd).
 
-Use `jv.Mask(...)` on a `Branch` when reconstruction should be sampled by
-repeated coordinate instead of independent leaf value.
+## Assign Learning Roles
 
-```{python .marimo}
-#| echo: true
-#| output: true
+| Configuration | Input behavior | Output / learning behavior |
+| --- | --- | --- |
+| plain leaf | visible when present | context only by default |
+| `target=True` | always hidden | supervised decode and loss |
+| `p_mask=x` | sampled positions hidden | reconstruction at selected positions |
+| `p_prune=x` | whole leaf instances sampled and hidden | reconstruction of the pruned field |
+| branch `mask=jv.Mask(...)` | descendant sampling is limited to candidate coordinates/windows | each descendant samples independently within those candidates |
+| `embed=True` | does not hide input | exports an embedding at the address |
+| `active=False` | excluded from execution | remains in the serializable schema |
 
-model = jv.Model(
-    d_model=64,
-    n_layers=2,
-    n_heads=4,
-    embed=True,
-    events=jv.Branch(
-        length=64,
-        overflow="tail",
-        mask=jv.Mask(rate=0.25, window=16),
-        event_type=jv.Category(size=128),
-        amount=jv.Number,
-    ),
-)
+`target=True` is shorthand for `p_prune=1.0`. See
+[Learning Modes & Embeddings](core-concepts/embeddings.qmd) for the canonical
+role definitions and [Dynamic Masking](core-concepts/dynamic-masking.qmd) for
+repeated-window selection.
 
-model
-```
+## Run The Lifecycle
 
-Use [Dynamic Masking](core-concepts/dynamic-masking.qmd) for `rate`, `count`,
-`window`, `offset`, and `exclude` semantics.
+JSON2Vec uses ordinary Lightning loops for training and large-batch prediction:
 
-## Name The Root Context
-
-The generated root branch is named `record` by default. Override it with `name=...`.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    name="event",
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    embed=True,
-    amount=jv.Number,
-)
-
-model
-```
-
-## Train Quickly
-
-Use `PolarsDataModule(...)` for in-memory examples. `jv.Model` is a Lightning
-module, so training uses the normal Lightning `Trainer.fit(...)` loop.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import lightning.pytorch as lit
-import polars as pl
-import torch
-
-records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
-
-model = jv.Model(
-    d_model=16,
-    n_layers=1,
-    n_heads=4,
-    batch_size=8,
-    embed=True,
-    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
-    sepal_length=jv.Number,
-    petal_length=jv.Number,
-    species=jv.Category(target=True, size=4, topk=[2]),
-)
-
+```python
 datamodule = jv.PolarsDataModule(
     model=model,
-    train=records,
-    validate=records,
+    train=train_frame,
+    validate=validate_frame,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
 )
 
-trainer = lit.Trainer(
-    accelerator="cpu",
-    max_epochs=1,
-    logger=False,
-    enable_progress_bar=False,
-    enable_checkpointing=False,
-    enable_model_summary=False,
-    limit_train_batches=1,
-    limit_val_batches=1,
-)
 trainer.fit(model=model, datamodule=datamodule)
-```
+metrics = trainer.validate(model=model, datamodule=datamodule)
 
-For larger file-backed datasets, use
-[Data Modules](guides/data-modules.qmd) to choose `PolarsDataModule` or
-`StreamingDataModule`.
+model.save("model.pt")
+restored = jv.Model.load("model.pt")
 
-## Predict
-
-`model.predict(...)` accepts a list of raw dictionaries. Configured embeddings appear in the same address-keyed output.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-predictions = model.predict(records.to_dicts()[:3])
-
-species = predictions[jv.Address("record", "species")]
-record = predictions[jv.Address("record")]
-```
-
-For batch prediction jobs, use
-[Batch Inference](guides/batch-inference.qmd): configure a `predict` split on a
-data module, attach `jv.Writer(...)` to `Trainer(callbacks=[...])`, and call
-`trainer.predict(...)`.
-
-## Shape Raw Data
-
-Use `query=...` when the source shape is stable but does not match the schema name.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    amount=jv.Number(query='[*].transaction."amount_usd"'),
-    merchant=jv.Category(query="[*].transaction.merchant_name", size=1024),
-    label=jv.Category(query="[*].outcome", target=True, size=2),
+predictions = restored.predict(
+    [{"customer_tier": "gold", "line_items": []}]
 )
-
-model
 ```
 
-Use a preprocessor when the source needs Python logic before querying. The
-decorator returns a `Preprocessor` object that can be passed to data modules,
-deployment configuration, `model.encode(...)`, or `model.predict(...)`.
+Prediction requests normally omit fields configured with `target=True`. Output
+is keyed by `jv.Address`; decoded leaves include `state`, type-specific
+`content`, and `inferred`, while configured nodes can include `embedding`.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Use [Training With Lightning](guides/lightning.qmd) for trainer behavior,
+[Data Modules](guides/data-modules.qmd) for ingestion, and
+[Evaluation And Metrics](guides/evaluation.qmd) for model selection. Use
+[Model Lifecycle](guides/model-lifecycle.qmd) for artifact and resume contracts,
+and [Batch Inference](guides/batch-inference.qmd) for `jv.Writer` and
+rank-partitioned Parquet output.
 
+## Shape The Boundaries
+
+A preprocessor is part of the input contract:
+
+```python
 @jv.preprocess
-def normalize_request(record: dict) -> jv.Observation:
-    return jv.Observation({
-        "amount": float(record["amount_usd"]),
-        "merchant": record["merchant"].strip().lower(),
-        "label": record["label"],
-    })
-```
-
-Then pass it to data modules, `model.encode(...)`, `model.predict(...)`, or
-deployments where supported. See
-[Data Modules](guides/data-modules.qmd#preprocessors) for preprocessor
-execution in train, validate, test, and predict splits.
-
-## Reshape Outputs
-
-Use a [postprocessor](guides/postprocessors.qmd) to turn address-keyed predictions into an API or warehouse shape.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-@jv.postprocess
-def risk_response(predictions):
-    label = {}
-    for address, values in predictions.items():
-        if str(address) == "record/label":
-            label = values.get("content", {})
-            break
-
-    return {
-        "risk": {
-            "prediction": label.get("value"),
-            "scores": label.get("probability"),
+def normalize_order(record: dict) -> jv.Observation:
+    return jv.Observation(
+        {
+            "customer_tier": record["tier"].strip().lower(),
+            "line_items": record["items"],
         }
-    }
+    )
+
+raw_requests = [{"tier": " Gold ", "items": []}]
+predictions = restored.predict(raw_requests, preprocess=normalize_order)
 ```
 
-## Serve
+A postprocessor is part of the application output contract:
 
-Serving helpers are top-level exports when the serving extra is installed.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-deployment = (
-    jv.Deployment(model=model, accelerator="cpu", max_batch_size=16)
-    .postprocess(risk_response)
-    .update(jv.where("name") == "label", topk=[2])
-)
+```python
+@jv.postprocess
+def response(predictions):
+    field = predictions[jv.Address("order", "returned")]
+    return {"returned": field["content"]["value"]}
 ```
 
-Use `model=...` for an already constructed model during local setup, or
-`checkpoint="model.ckpt"` when loading a trained checkpoint. Call
-`deployment.serve()` from an application entry point.
+Pass the same preprocessor through training and inference. Keep the stable,
+address-keyed model output intact until the postprocessor boundary. See
+[Data Flow](core-concepts/data-flow.qmd) and
+[Postprocessors](guides/postprocessors.qmd).
 
-## Rules For Agents
+## Public API Map
 
-- Prefer `import json2vec as jv`.
-- Prefer `Model(...)` and top-level exports.
-- Use `name=...` to name the generated root context.
-- Set `size` on categorical fields where necessary.
-- Only put `Entity` under repeated contexts.
-- Use `embed=True` for embeddings and `target=True` for supervised targets.
-- Use `p_mask` for stochastic self-supervised reconstruction; use `target=True`
-  or `p_prune=1.0` when a field should always be hidden and decoded.
-- Use `jv.Mask(...)` on branches for recency-window or row-level reconstruction.
-- Use Lightning `Trainer` with `PolarsDataModule` or `StreamingDataModule` for
-  training and batch prediction.
-- Use `jv.Writer` for Parquet batch inference output.
+| Need | Public surface | Authoritative page |
+| --- | --- | --- |
+| Root model | `jv.Model(...)` | [Model Tree](core-concepts/model-tree.qmd) |
+| Repeated context | `jv.Branch(...)` | [Branch](data-types/branch.qmd) |
+| Typed leaves | `jv.Number`, `Category`, `Set`, `Entity`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
+| In-memory / streaming input | `jv.PolarsDataModule`, `jv.StreamingDataModule` | [Data Modules](guides/data-modules.qmd) |
+| Interactive prediction | `model.predict(...)` | [Getting Started](getting-started.qmd#interpret-the-prediction) |
+| Prediction contract | address-keyed `state`, `content`, `inferred`, `embedding` | [Prediction Output](guides/prediction-output.qmd) |
+| Batch prediction | `jv.Writer(...)` | [Batch Inference](guides/batch-inference.qmd) |
+| Online prediction | `jv.Deployment(...)` | [Serving](guides/serving.qmd) |
+| Input / output transforms | `@jv.preprocess`, `@jv.postprocess` | [Binding Data](core-concepts/binding-data.qmd), [Postprocessors](guides/postprocessors.qmd) |
+| Schema selection / mutation | `jv.where(...)`, `update`, `extend`, `delete`, `reset`, `override` | [Model Tree](core-concepts/model-tree.qmd#schema-roles-and-mutations) |
 
-Use [Getting Started](getting-started.qmd) and the guide pages for runnable
-patterns.
+## Contract Checklist
+
+- Name the root with `Model(name=...)`; use child `Branch(length=...)` for
+  repeated data.
+- Keep `n_heads` positive and even. For the root, every Branch, and each leaf
+  using `pooling="query"`, require `d_model % n_heads == 0` and
+  `d_model // n_heads >= 2`.
+- Put `Entity` under a repeated context and do not assume its local indices
+  align across observations or sibling leaves.
+- Set bounded capacity for Category and Set fields, then monitor vocabulary
+  growth rather than inventing a missing-value class.
+- Use `overflow="tail"` only when source order places the newest values last.
+- Include targets in train/validation data; omit them from ordinary prediction
+  requests.
+- Preserve the same preprocessing, schema, vocabulary/normalizer state, and
+  weights across evaluation and inference.

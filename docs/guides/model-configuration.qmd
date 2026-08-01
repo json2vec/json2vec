@@ -1,0 +1,202 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Model Configuration
+
+**Example status — excerpt:** constructor blocks isolate configuration choices;
+validate them through the runnable [Getting Started](../getting-started.qmd)
+workflow on the target data and hardware.
+
+JSON2Vec exposes a small set of architecture controls at the root and on each
+`Branch`. Start with the smallest model that can express the schema, measure
+validation quality and throughput, then change one constraint at a time.
+
+This page explains the decisions behind the options. See the individual
+[datatype references](../core-concepts/data-types.qmd) for field-specific
+capacity and objective settings.
+
+## A Conservative Starting Point
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import torch
+
+import json2vec as jv
+
+model = jv.Model(
+    name="order",
+    d_model=64,
+    n_layers=2,
+    n_heads=4,
+    batch_size=64,
+    attention="mha",
+    dropout=0.10,
+    optimizer=lambda module: torch.optim.AdamW(
+        module.parameters(), lr=3e-4, weight_decay=1e-2
+    ),
+    customer_tier=jv.Category(size=16),
+    line_items=jv.Branch(
+        length=32,
+        overflow="head",
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+    ),
+    returned=jv.Category(target=True, size=2),
+)
+
+model
+```
+
+The values above are a starting experiment, not universal defaults. A schema
+with thousands of repeated events, a tiny dataset, or strict latency limits
+will need a different balance.
+
+## Root Architecture Options
+
+| Option | Constraint | What it changes |
+| --- | --- | --- |
+| `d_model` | Positive; for the root, every Branch, and each query-pooled leaf, it must be divisible by `n_heads` with at least two dimensions per head | Width shared by datatype embeddings, branches, and decoders. Increasing it raises parameter memory and compute throughout the tree. |
+| `n_layers` | Positive | Self-attention layers on the generated root branch. More layers increase capacity and sequential compute. |
+| `n_heads` | Positive and even; must divide `d_model` with `d_model / n_heads >= 2` | Query heads on the generated root and its pooling block. More heads do not change total width, but each head becomes narrower. |
+| `attention` | `"mha"`, `"gqa"`, `"mqa"`, or `"none"` | Self-attention mode on the generated root. `"none"` skips root self-attention layers; the learned pooling block still uses attention. |
+| `n_linear` | Positive | Number of learned-query cross-attention pooling blocks; each also contains a feed-forward network. Increase only after measuring an under-capacity signal. |
+| `dropout` | `None` or a rate from `0.0` (inclusive) to `1.0` (exclusive) | Training-time dropout inside branch attention and feed-forward blocks. `None` behaves as zero. |
+| `batch_size` | Positive | The model's expected batch size and the default used by data modules and logging. Larger batches trade memory for throughput and a different optimization regime. |
+| `name` | Non-empty schema-safe string | Generated root name and the first component of every public address. |
+| `description` | Optional string | Human-readable schema metadata; it does not change computation. |
+| `embed` | Boolean | Adds the normalized root representation to prediction output. It does not create a target. |
+| `optimizer` | Optimizer instance or factory | Required before `Trainer.fit(...)`. A factory is easier to reconstruct with a newly loaded or mutated model. |
+| `scheduler` | Scheduler config or factory | Optional Lightning optimizer scheduler configuration. |
+
+The schema validates that `n_heads` is even. Attention construction also
+requires `d_model % n_heads == 0` and `d_model // n_heads >= 2`, because each
+head receives a rotary embedding. Check both conditions for the root, every
+nested Branch override, and every leaf using `pooling="query"`. A leaf using
+`pooling="mean"` constructs no query attention, although its configured
+`n_heads` must still pass the even-positive schema validation.
+
+## Choose An Attention Mode
+
+| Mode | Key/value heads | Use when |
+| --- | ---: | --- |
+| `mha` | Same as query heads | Quality is the first priority or the model is still small. This is the default. |
+| `gqa` | Half the query heads, with a minimum of one | You want smaller key/value projections while retaining several key/value groups. |
+| `mqa` | One | Key/value projection memory matters more than maximum attention capacity. |
+| `none` | No self-attention layers | Children need only learned pooling, or you want a lower-cost ablation. |
+
+Grouped-query and multi-query attention reduce key/value projection width; they
+do not remove the quadratic interaction over positions. Benchmark them on the
+actual branch shapes and device. `attention="none"` disables the stack of
+self-attention layers but does not disable the branch's learned query pooling.
+
+## Configure Nested Branches
+
+Every child `Branch` has its own context budget and can override depth, heads,
+attention mode, pooling depth, and dropout:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+events = jv.Branch(
+    length=256,
+    overflow="tail",
+    attention="gqa",
+    n_layers=1,
+    n_heads=4,
+    n_linear=1,
+    dropout=0.05,
+    event_type=jv.Category(size=128),
+    amount=jv.Number,
+)
+```
+
+`d_model` remains shared across the whole model. Branch `length` is both a data
+contract and a compute budget: shorter inputs are padded and longer inputs are
+handled by `overflow`. Use `"tail"` for histories where the most recent values
+should survive truncation, `"head"` when the earliest values matter, and
+`"error"` when silent truncation would violate the schema contract.
+
+Put more capacity where the structure requires it. A long event branch may
+benefit from local attention while a two-item role branch may need only pooling.
+Root depth does not need to match every child depth.
+
+## Separate Model Width From Vocabulary Capacity
+
+`d_model` controls representation width. Datatype `size` options control
+vocabulary or output capacity. They have different costs:
+
+- increasing `d_model` affects almost every module;
+- increasing `Category.size` or `Set.size` grows that field's content table and
+  scoring work;
+- increasing `Branch.length` grows padded tensors and the number of positions
+  considered locally;
+- increasing `Text.max_length` grows token-level work inside that field.
+
+Choose `Category.size` and `Set.size` from expected distinct values plus
+deliberate headroom. There is no hidden extra class for unavailable values.
+Category emits its populated `vocabulary/size` metric; monitor it alongside the
+upstream unavailable rate. Set does not currently emit the same metric, so
+monitor its distinct-label coverage and capacity upstream. Do not allocate an
+unexplained off-by-one slot to either type.
+
+## Tune In A Stable Order
+
+Use this order so an architecture change is not confused with a data problem:
+
+1. Verify queries, states, split boundaries, and target omission with
+   `model.encode(...)`.
+2. Establish a simple baseline and one primary validation metric.
+3. Tune branch lengths and overflow policies; these determine what evidence is
+   available to the model.
+4. Tune batch size and data-loader throughput for the target hardware.
+5. Increase `d_model` only if train and validation metrics both suggest
+   underfitting.
+6. Increase branch/root depth only when wider representations are insufficient.
+7. Compare `mha`, `gqa`, `mqa`, and `none` on quality, memory, and latency.
+8. Add dropout when the train/validation gap indicates overfitting.
+
+Do not choose a model solely by total loss when the product decision depends on
+a specific target, threshold, or subgroup. Use the [Evaluation and Metrics](evaluation.qmd)
+guide to define the selection rule first.
+
+## Inspect The Cost Before Training
+
+The Rich display shows the bound tree and configuration. Parameter count is
+also available directly:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+parameter_count = sum(parameter.numel() for parameter in model.parameters())
+print(f"{parameter_count:,} parameters")
+```
+
+Parameter count does not capture activation memory, padding, attention cost, or
+input pipeline stalls. Measure a representative training and prediction batch
+with production-like branch lengths.
+
+## Failure Signals
+
+| Signal | Check first | Likely next move |
+| --- | --- | --- |
+| Out of memory on the first batch | Batch size and nested branch shapes | Reduce batch size or branch lengths before shrinking every model dimension. |
+| Train and validation metrics are both flat | Queries, target/trainable masks, optimizer, and baseline | Fix the data contract first; then add width or depth only if the model is genuinely underfitting. |
+| Train improves while validation degrades | Split integrity and train/validation gap | Add dropout, reduce capacity, or improve data—not a larger model. |
+| Runtime rises sharply after one field change | Branch length, Category/Set capacity, or Text `max_length` | Profile that field's activations and scoring work; undo unexplained headroom. |
+| Head/attention construction fails | Even head count, divisibility into `d_model`, and at least two dimensions per head | Choose an even positive head count for which `d_model % n_heads == 0` and `d_model // n_heads >= 2`; check root, Branch, and query-pooled leaf overrides. |
+
+## Where Next
+
+- Use [Performance and Scaling](performance.qmd) to benchmark padding, data
+  loading, distributed execution, and inference.
+- Use [Temporal Validation](temporal-validation.qmd) before tuning histories or
+  recency fields.
+- Use [Branch](../data-types/branch.qmd) for length, overflow, masking, and
+  branch-level output behavior.
+- Use [Troubleshooting](troubleshooting.qmd) for validation and shape errors.

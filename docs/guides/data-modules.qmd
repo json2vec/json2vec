@@ -5,10 +5,14 @@ eval: false
 
 # Data Modules
 
+**Example status — excerpt:** blocks isolate ingestion choices and assume a
+model or records from the surrounding text. The complete in-memory lifecycle is
+tested in [Getting Started](../getting-started.qmd).
+
 `json2vec` data modules are Lightning `LightningDataModule` implementations.
-They load raw records, apply optional preprocessing, batch observations,
-tensorize values from the model schema, apply training-time masking and target
-pruning, and return Lightning batches.
+They load raw records, run an optional JSON2Vec preprocessor, batch observations,
+tensorize values from the model schema, apply configured masking and target
+pruning in non-predict strata, and return Lightning batches.
 
 The data module does not define the model schema. It reads schema state from the
 `model` passed to the constructor.
@@ -16,12 +20,16 @@ The data module does not define the model schema. It reads schema state from the
 The batch path is:
 
 1. Raw records are read from a DataFrame, files, or a user dataset.
-2. An optional preprocessor emits processed observations.
-3. Observations are sampled and shuffled.
+2. An optional `jv.Preprocessor` emits model-facing observations.
+3. Non-predict strata (train, validation, and test) may apply `sample_rate` and
+   observation-buffer shuffling. Prediction always bypasses those two
+   transforms; it remains complete and ordered within its source/sharding path
+   unless replacement is explicitly enabled for the `predict` split.
 4. Observations are grouped into model batches.
 5. Query paths tensorize values from the model schema and resolve branch
    `overflow` policies.
-6. `p_mask` hides selected leaf values for reconstruction.
+6. `p_mask` hides sampled configured leaf positions for reconstruction,
+   including null and padded positions in the current implementation.
 7. `p_prune` and `target=True` hide selected leaf instances for decoding.
 8. The encoded batch is handed to the Lightning loop.
 
@@ -31,12 +39,12 @@ Data modules use the same core ideas:
 
 | Option | Meaning |
 | --- | --- |
-| `model` | Supplies schema schema, `batch_size`, and tensorfield encoding state. |
+| `model` | Supplies the schema, `batch_size`, and tensorfield encoding state. |
 | `preprocessor` | `Preprocessor` object returned by `@jv.preprocess`. |
 | `num_workers` | PyTorch dataloader worker count. |
 | `persistent_workers` | Keeps worker processes alive between epochs when workers are enabled. |
 | `pin_memory` | Enables dataloader pinning when useful for accelerator transfer. |
-| `sample_rate` | Samples observations before batching. |
+| `sample_rate` | Samples observations before batching in train, validation, and test. Prediction bypasses sampling. |
 | `observation_buffer_size` | Approximate per-rank shuffle-buffer budget for processed observations, divided across local workers. |
 | `chunk_batch_size` | Read chunk size for Polars and streaming sources. This is separate from `model.batch_size`. |
 
@@ -211,17 +219,16 @@ For writing outputs to disk, add `jv.Writer`; see
 ## StreamingDataModule
 
 Use `StreamingDataModule` when data lives in files and should not be loaded into
-one in-memory DataFrame. It supports local paths and `s3://...` roots.
+one in-memory DataFrame. Format support depends on the storage location:
 
-Supported suffixes:
+| Location | Supported suffixes |
+| --- | --- |
+| Local paths | `ndjson`, `parquet`, `feather`, `csv`, `orc`, `json` |
+| `s3://...` roots | `parquet`, `feather`, `csv`, `orc`, `json` |
 
-- `ndjson`
-- `parquet`
-- `feather`
-- `avro`
-- `csv`
-- `orc`
-- `json`
+The `ndjson` reader uses local file access, so it cannot read an S3 URI. Avro
+is not supported by the current PyArrow-backed reader; do not select it even
+though the public suffix enum currently accepts the value.
 
 Split arguments are compiled regular expressions matched against discovered
 file paths. Pass either raw regex strings or already compiled `re.Pattern`
@@ -283,7 +290,8 @@ needs to be fine-grained and record-order locality is not important.
 | `observation_buffer_size` | Approximate per-rank shuffle budget, divided across local workers, for processed observations. |
 
 When `replacement=None`, training uses replacement sampling and non-training
-splits do not. Set `replacement` explicitly when you need different behavior.
+splits do not. Setting replacement for prediction can repeat records indefinitely,
+so leave it disabled for finite prediction jobs.
 
 ::: {.callout-note}
 Split patterns are regular expressions, not glob strings. Raw regex strings
@@ -292,14 +300,20 @@ are compiled by `StreamingDataModule`.
 
 ## Preprocessors
 
-Preprocessors are optional. If none is configured, observations pass through
-unchanged. Use a query when the source shape is stable and selection is enough.
-Use a preprocessor when records need Python logic before schema queries run:
-type coercion, renaming, source-specific cleanup, sorting, windowing, session
-splitting, or derived fields.
+Here, **preprocessor** means the public `jv.Preprocessor` object returned by
+`@jv.preprocess`, not any ordinary Python function that happens to transform a
+dictionary. Data modules reject undecorated callables so the input contract and
+pipeline-provided arguments stay explicit.
 
-A transformation preprocessor returns one wrapped observation for each input
-observation:
+Preprocessors are optional. If none is configured, each raw dictionary becomes
+one model-facing observation unchanged. Use a query when the source shape is
+stable and selection is enough. Use a JSON2Vec preprocessor when records need
+Python logic before schema queries run: type coercion, renaming,
+source-specific cleanup, sorting, windowing, session splitting, filtering, or
+derived fields.
+
+A one-to-one preprocessor returns one wrapped `jv.Observation` for each raw
+dictionary:
 
 ```{python .marimo}
 #| echo: true
@@ -314,8 +328,12 @@ def normalize_transaction(record: dict) -> jv.Observation:
     })
 ```
 
-After preprocessing, default queries are inferred against the returned record,
-not the original raw record. The schema remains the model-facing contract.
+Returning a bare dictionary is invalid; the wrapper distinguishes an
+intentional model observation from an accidental intermediate value. Returning
+`None` drops that raw record.
+
+After preprocessing, queries run against the emitted observation, not the
+original raw record. The schema remains the model-facing contract.
 
 All data modules accept the same preprocessor forms:
 
@@ -331,8 +349,8 @@ datamodule = jv.PolarsDataModule(
 ```
 
 Bind user-supplied preprocessor parameters before passing the preprocessor into
-the data module. Pipeline-provided parameters such as `strata`, `schema`, and
-`encoding_context` are matched by name:
+the data module. Pipeline-provided keyword-only parameters named `strata`,
+`schema`, and `encoding_context` are matched by name:
 
 ```{python .marimo}
 #| echo: true
@@ -348,10 +366,10 @@ datamodule = jv.PolarsDataModule(
 )
 ```
 
-A yielding preprocessor expands one raw observation into many processed
-observations. That is useful when one account history should become multiple
-windows, one session log should become multiple examples, or one raw export
-contains many model records:
+A yielding preprocessor expands one raw dictionary into many independent
+model-facing observations. That is useful when one account history should
+become multiple windows, one session log should become multiple examples, or
+one raw export contains many model records:
 
 ```{python .marimo}
 #| echo: true
@@ -367,8 +385,8 @@ def session_windows(account: dict):
         })
 ```
 
-The same callable can be passed directly to `model.encode(...)` or
-`model.predict(...)` for debugging:
+The same decorated preprocessor object can be passed directly to
+`model.encode(...)` or `model.predict(...)` for debugging:
 
 ```{python .marimo}
 #| echo: true
@@ -378,12 +396,52 @@ encoded = model.encode(raw_records[:2], preprocess=normalize_transaction)
 predictions = model.predict(raw_records[:2], preprocess=normalize_transaction)
 ```
 
+Preprocessor code and bound user values are not stored in `model.save(...)`.
+Version them with the checkpoint and reuse them in validation, batch
+prediction, and online serving. A deployment request must emit exactly one
+observation, even though a data-module preprocessor may emit zero or many; see
+[Online Serving](serving.qmd#reuse-the-training-preprocessor).
+
+## Verify The Data Contract
+
+Inspect a small encoded batch before starting a long run:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+batch = next(iter(datamodule.train_dataloader()))
+
+print(batch.keys())
+for address in model.schema.active_requests:
+    assert address in batch
+```
+
+Also run a small validation loop and inspect emitted address metrics. An absent
+target metric usually points to an empty split, a query that resolved no
+trainable positions, or a target/pruning configuration mismatch.
+
 ## Schema Mutation
 
 Data modules keep a reference to the model when possible. If you mutate the
 model schema between Lightning runs, the data module reads the current
 schema from the model. If you detach or replace the model, rebuild the
 data module so it uses the intended schema and tensorfield encoding context.
+
+Shape-changing mutations can invalidate optimizer or checkpoint state. Apply
+them only between complete Lightning runs; see
+[Model Lifecycle](model-lifecycle.qmd#schema-and-artifact-compatibility).
+
+## Common Failures
+
+| Symptom | Likely cause or next check |
+| --- | --- |
+| `preprocessor must be a Preprocessor object` | Decorate the callable with `@jv.preprocess` and return `jv.Observation`. |
+| Query output is unexpectedly empty | Remember queries run against the emitted observation, not the raw source record. |
+| An explicit Lightning loop has no batches | Configure its matching `validate`, `test`, or `predict` split. |
+| Streaming files are not discovered | Split selectors are regular expressions over discovered paths, not glob patterns. |
+| Records duplicate or disappear in distributed input | Check sharding choice, worker-aware behavior in a custom iterable, and replacement sampling. |
+| Validation looks implausibly strong | Check time/entity overlap and target leakage; see [Temporal Validation And Leakage](temporal-validation.qmd) and [Evaluation](evaluation.qmd#design-a-trustworthy-split). |
 
 ## Where Next
 
@@ -394,3 +452,5 @@ data module so it uses the intended schema and tensorfield encoding context.
   transformations.
 - Use [Query Paths](../core-concepts/querypaths.qmd) to map processed records to
   leaf fields.
+- Design and interpret held-out splits with
+  [Evaluation And Metrics](evaluation.qmd).

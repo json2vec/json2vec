@@ -10,10 +10,13 @@ pyproject: |
 
 # Entity
 
-Use `Entity` for local identity matching inside repeated records. It is useful
-when the model should notice that two items in the same observation and
-repeated context share the same identifier, without maintaining a global
-vocabulary for that identifier.
+**Example status — excerpt:** schema blocks isolate observation-local identity;
+use [Getting Started](../getting-started.qmd) for a tested lifecycle.
+
+Use `Entity` when repeated equality inside one observation is useful but the raw
+identifier should not become a persistent global vocabulary. Typical examples
+are a device, account, counterparty, or hostname that may occur several times in
+one history.
 
 ```json
 {
@@ -34,74 +37,98 @@ import json2vec as jv
 transactions = jv.Branch(
     name="transactions",
     length=16,
-    account_id=jv.Entity(topk=[5]),
+    account_id=jv.Entity(p_mask=0.15, topk=[2, 5]),
+    amount=jv.Number,
 )
 
 transactions
 ```
 
-Use `Category` when a value is a bounded stable label learned across training
-and prediction. Use `Entity` when equality inside the current repeated context
-is the useful signal.
+Use `Category` instead when values form a small stable vocabulary whose labels
+must remain meaningful across observations, batches, checkpoints, and
+prediction output. Keep an identifier as metadata when neither global label
+learning nor local equality is useful.
 
 ## Input Values
 
-`Entity` expects hashable scalar values such as strings or integers. `None` is
-encoded as a null state, and missing branch positions are encoded as padded
-state.
+`Entity` accepts hashable scalar values such as strings or integers. `None` has
+state `null`, and a missing branch slot has state `padded`. Lists, dictionaries,
+and other unhashable values are rejected.
 
-Entity IDs are local to the tensorized batch. The same raw value receives the
-same local token within that batch, but token IDs are not stable across batches
-or checkpoints.
+An Entity leaf must have at least two configured positions per observation. The
+normal pattern is to place it under `Branch(length=...)` with `length > 1`.
 
-## Examples
+## Observation-Local Indexing
 
-Common entity fields include:
+Tensorization flattens all configured positions for one Entity leaf within each
+observation. It assigns index `0` to the first distinct valued identifier, index
+`1` to the next, and so on. Repeated occurrences of the same raw value in that
+observation receive the same index.
 
-- Repeated IP addresses, device IDs, hostnames, or user identifiers in one session.
-- Tokenized card fingerprints, account IDs, or payment instruments within one record.
-- Transaction counterparties that may repeat across line items.
-- Supplier, customer, warehouse, or route identifiers that should be matched locally.
+For the example above, `account_id` content is `[0, 0, 1, ...]`. A second
+observation starts again at `0`, even if it contains the same raw string. The
+mapping is therefore:
+
+- local to one observation;
+- local to one Entity leaf;
+- determined by first-seen order; and
+- intentionally not aligned across observations, leaves, batches, or
+  checkpoints.
+
+Separate Entity fields do not share identity. If an identifier must align
+across two source collections, restructure or stack those records so both roles
+are queried into the same repeated Entity leaf. See
+[Field Stacking](../guides/field-stacking.qmd).
 
 ## Configuration
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `topk` | `[]` | Optional top-k identity accuracy metrics. Values must be positive and not `1`. |
+| `topk` | `[]` | Optional top-k local-index accuracy metrics. Every value must be a positive integer other than `1` and less than the leaf's total configured slot count. |
 
-An `Entity` field must have at least two slots per observation. In practice,
-place it under a `Branch(length=...)` greater than `1`.
+The slot count is the product of the branch dimensions in this leaf's shape.
+The learned encoder table and decoder head use that fixed count. They learn
+fixed local-slot representations, not a persistent raw-ID mapping or a codebook
+shared across batches. Shared leaf options are documented in
+[Built-In Data Types](../core-concepts/data-types.qmd).
 
-::: {.callout-note}
-Advanced root shapes can also provide repeated values, but the normal and
-clearest pattern is `Entity` under a `Branch`.
-:::
+## Learning Behavior
 
-## Target Behavior
+The encoder adds the current position's observation-local identity embedding to
+its state embedding. The decoder predicts one of the same fixed local index
+slots. State cross entropy and accuracy use all selected positions. Content
+cross entropy, primary local-index accuracy, and any configured top-k accuracies
+use selected positions whose original state was `valued`.
 
-When an `Entity` is masked or used as a target, the decoder predicts:
+Partially hiding repeated occurrences is usually the meaningful reconstruction
+task. If one `acct_1` occurrence is hidden while another remains visible in the
+same Entity leaf, context can help recover their shared local identity. By
+contrast, `target=True` hides every position of the leaf, removing the visible
+identity occurrences that make local matching useful. It may still learn
+position or contextual regularities, but it cannot emit the original raw ID.
 
-- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
-- `content`: a feature vector scored against the batch-local entity codebook.
-
-Top-k metrics compare the predicted vector against the local codebook. Large
-`topk` values are skipped when the local codebook is smaller than `k`.
+Use `p_mask` or an appropriate branch-mask policy to create partial identity
+reconstruction. Read [Dynamic Masking](../core-concepts/dynamic-masking.qmd)
+before relying on masks to coordinate several sibling leaves: current branch
+mask sampling is performed independently per affected leaf.
 
 ## Prediction Output
 
-`Entity` currently trains and reports losses and accuracies, but it does not
-emit decoded identity labels in `Model.predict(...)`. It is primarily an
-internal representation for learning identity relationships. Configure
-`embed=True` when you want the field address to emit an `embedding` payload.
+`Entity` has no public state or decoded-content writer. In particular,
+`Model.predict(...)` does not return raw identifiers or a batch-local candidate
+list. Losses and accuracies are training diagnostics for the internal local-slot
+task.
 
-## Notes
+Configure `embed=True` only when a normalized representation at the Entity
+address is useful. That exported vector is not a stable identifier and should
+not be used to align different Entity leaves or model artifacts. See
+[Internal And Exported Embeddings](../core-concepts/embeddings.qmd#internal-and-exported-embeddings).
 
-Use `jv.Category` when values should map to a bounded persistent vocabulary and
-be emitted as labels. Use `jv.Entity` when only equality relationships within
-the current repeated context matter, or there are too many unique global values
-to track efficiently.
+## Where Next
 
-Users may also consider defining a "superbloom" style custom extension to maintain a larger set of unique categorical values without the linear memory costs associated with `jv.Category`.
-
-See the [Device Tenure](../case-studies/device-tenure.qmd) case study for an
-applied repeated-device pattern.
+- Use [Category](category.qmd) for persistent bounded labels.
+- Use [Branch](branch.qmd) to configure the repeated observation shape.
+- Use [Field Stacking](../guides/field-stacking.qmd) when semantic roles must
+  share one local identity space.
+- The [Device Tenure](../case-studies/device-tenure.qmd) case study discusses
+  the modeling boundary for repeated device identity.

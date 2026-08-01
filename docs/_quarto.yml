@@ -13,32 +13,66 @@ website:
         text: Home
       - href: getting-started.qmd
         text: Getting Started
-      - text: Core Concepts
+      - text: Modeling
         menu:
+          - href: core-concepts/data-flow.qmd
+            text: Data Flow
           - href: core-concepts/model-tree.qmd
             text: Model Tree
-          - href: core-concepts/querypaths.qmd
-            text: Query Paths
           - href: core-concepts/data-types.qmd
-            text: Data Types
+            text: Data Types & Value State
+          - href: core-concepts/binding-data.qmd
+            text: Binding Data
+          - href: core-concepts/querypaths.qmd
+            text: Advanced Query Paths
           - href: core-concepts/embeddings.qmd
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
-      - text: Guides
+      - text: Train & Evaluate
         menu:
-          - href: guides/lightning.qmd
-            text: Training With Lightning
           - href: guides/data-modules.qmd
             text: Data Modules
+          - href: guides/lightning.qmd
+            text: Training With Lightning
+          - href: guides/evaluation.qmd
+            text: Evaluation & Metrics
+          - href: guides/model-configuration.qmd
+            text: Model Configuration
+          - href: guides/temporal-validation.qmd
+            text: Temporal Validation
+          - href: guides/model-lifecycle.qmd
+            text: Model Lifecycle
+      - text: Predict & Operate
+        menu:
+          - href: guides/prediction-output.qmd
+            text: Prediction Output
           - href: guides/batch-inference.qmd
             text: Batch Inference
+          - href: guides/serving.qmd
+            text: Online Serving
           - href: guides/postprocessors.qmd
             text: Postprocessors
+          - href: guides/performance.qmd
+            text: Performance & Scaling
+      - text: Advanced
+        menu:
+          - href: guides/field-stacking.qmd
+            text: Field Stacking
           - href: guides/field-importance.qmd
             text: Field Importance
+          - href: guides/schema-mutation.qmd
+            text: Schema Mutation
+          - href: guides/custom-tensorfields.qmd
+            text: Experimental Tensorfields
+          - href: guides/troubleshooting.qmd
+            text: Troubleshooting
+          - href: reference/public-api.qmd
+            text: Public API Map
       - text: Case Studies
         menu:
+          - href: case-studies/iris-reproducible.qmd
+            text: Reproducible Iris
           - href: case-studies/device-tenure.qmd
             text: Device Tenure
     right:
@@ -57,14 +91,18 @@ website:
         text: Motivation
       - href: ai-quickstart.qmd
         text: AI / Expert Quickstart
-      - section: Core Concepts
+      - section: Modeling Concepts
         contents:
+          - href: core-concepts/data-flow.qmd
+            text: Data Flow & Mental Model
           - href: core-concepts/model-tree.qmd
             text: Model Tree
-          - href: core-concepts/querypaths.qmd
-            text: Query Paths
           - href: core-concepts/data-types.qmd
-            text: Data Types
+            text: Data Types & Value State
+          - href: core-concepts/binding-data.qmd
+            text: Binding Data
+          - href: core-concepts/querypaths.qmd
+            text: Advanced Query Paths
           - href: core-concepts/embeddings.qmd
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
@@ -89,22 +127,52 @@ website:
             text: Vector
           - href: data-types/text.qmd
             text: Text
-      - section: Guides
+      - section: Train & Evaluate
         contents:
-          - href: guides/lightning.qmd
-            text: Training With Lightning
           - href: guides/data-modules.qmd
             text: Data Modules
+          - href: guides/lightning.qmd
+            text: Training With Lightning
+          - href: guides/evaluation.qmd
+            text: Evaluation & Metrics
+          - href: guides/model-configuration.qmd
+            text: Model Configuration
+          - href: guides/temporal-validation.qmd
+            text: Temporal Validation & Leakage
+          - href: guides/model-lifecycle.qmd
+            text: Model Lifecycle
+      - section: Predict & Operate
+        contents:
+          - href: guides/prediction-output.qmd
+            text: Prediction Output
           - href: guides/batch-inference.qmd
             text: Batch Inference
+          - href: guides/serving.qmd
+            text: Online Serving
           - href: guides/postprocessors.qmd
             text: Postprocessors
+          - href: guides/performance.qmd
+            text: Performance & Scaling
+      - section: Advanced Workflows
+        contents:
           - href: guides/field-stacking.qmd
             text: Field Stacking
           - href: guides/field-importance.qmd
             text: Field Importance
+          - href: guides/schema-mutation.qmd
+            text: Schema Mutation
+          - href: guides/custom-tensorfields.qmd
+            text: Experimental Tensorfields
+          - href: guides/troubleshooting.qmd
+            text: Troubleshooting
+      - section: Reference
+        contents:
+          - href: reference/public-api.qmd
+            text: Public API Map
       - section: Case Studies
         contents:
+          - href: case-studies/iris-reproducible.qmd
+            text: Reproducible Iris Classification
           - href: case-studies/device-tenure.qmd
             text: Device Tenure
   search: true

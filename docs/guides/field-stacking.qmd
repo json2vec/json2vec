@@ -5,6 +5,9 @@ eval: false
 
 # Field Stacking
 
+**Example status — excerpt:** blocks show reusable schema and preprocessor
+patterns; adapt them inside a complete train/evaluate workflow.
+
 Field stacking is a schema and query pattern for repeated semantic roles. It
 maps multiple source fields into one repeated schema field so they share
 datatype parameters, vocabulary, decoder behavior, and embedding behavior.
@@ -112,8 +115,8 @@ global vocabulary.
 ## Preserve Roles When They Matter
 
 Stacking removes role-specific field names. If the role carries important
-meaning, add it back explicitly. A short preprocessor is often clearer than a
-dense query.
+meaning, add it back explicitly. A short JSON2Vec preprocessor is often clearer
+than a dense query.
 
 ```{python .marimo}
 #| echo: true
@@ -122,14 +125,17 @@ dense query.
 import json2vec as jv
 
 
-def stack_parties(record: dict) -> dict:
-    return {
-        **record,
-        "parties": [
-            {"party_id": record["buyer_account_id"], "role": "buyer"},
-            {"party_id": record["seller_account_id"], "role": "seller"},
-        ],
-    }
+@jv.preprocess
+def stack_parties(record):
+    return jv.Observation(
+        {
+            **record,
+            "parties": [
+                {"party_id": record["buyer_account_id"], "role": "buyer"},
+                {"party_id": record["seller_account_id"], "role": "seller"},
+            ],
+        }
+    )
 
 
 model = jv.Model(
@@ -150,6 +156,11 @@ model
 
 This keeps the shared identity representation while letting the model distinguish
 buyer from seller.
+
+Pass `preprocessor=stack_parties` to a data module or
+`preprocess=stack_parties` to `model.predict(...)`. A plain function returning a
+dictionary can be used as an upstream transformation, but it is not the
+JSON2Vec preprocessor contract.
 
 Stacking shares parameters by design, but it also removes the original
 role-specific field names from the address. Add an explicit role field whenever
@@ -224,7 +235,9 @@ would be easier to test and maintain.
 
 ## Where Next
 
-- Use [Query Paths](../core-concepts/querypaths.qmd) for request query conventions.
+- Use [Binding Data](../core-concepts/binding-data.qmd) to choose between
+  defaults, queries, and preprocessors.
+- Use [Query Paths](../core-concepts/querypaths.qmd) for advanced request query conventions.
 - Use [Branch](../data-types/branch.qmd) for repeated context behavior.
 - Use [preprocessors](data-modules.qmd#preprocessors) when role-aware stacking
   needs Python logic.

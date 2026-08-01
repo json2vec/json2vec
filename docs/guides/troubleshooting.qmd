@@ -1,0 +1,167 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Troubleshooting
+
+**Example status — excerpt:** diagnostic blocks assume the model and data from
+the failing workflow.
+
+Most JSON2Vec failures come from one of four contracts: source-to-query shape,
+state/content encoding, schema capacity, or artifact/runtime parity. Inspect the
+smallest raw observation before changing the architecture.
+
+## First Five Checks
+
+1. Print the model and confirm names, addresses, lengths, targets, and active
+   fields.
+2. Run `model.encode([one_record])` and inspect state/content shapes.
+3. Evaluate the exact request query with `jmespath.search(...)` when binding is
+   uncertain.
+4. Verify that training contains targets and prediction requests omit them.
+5. Reproduce on CPU with one observation and no data-loader workers.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import jmespath
+
+import json2vec as jv
+
+record = {
+    "events": [
+        {"kind": "login", "amount": 10.0},
+        {"kind": "purchase", "amount": 20.0},
+    ]
+}
+
+print(jmespath.search("events[*].kind", record))
+print(model.encode([record]))
+```
+
+The snippet is a diagnostic excerpt; use the model from the page where the
+problem occurred.
+
+## Symptom Guide
+
+| Symptom | Likely cause | Check or fix |
+| --- | --- | --- |
+| Field is all null or padded | Inferred/custom query does not match the processed record shape | Evaluate the query against one processed observation; remember the model's internal batch selector is not part of a user-authored single-record query. |
+| Unexpected extra list dimension | Query was written against an already batched shape | Write queries from one processed observation and follow the conventions in Binding Data. |
+| Branch truncates useful events | `length` is too small or `overflow` keeps the wrong side | Measure lengths; choose `head`, `tail`, or `error` from event ordering. |
+| Overflow raises | Branch uses `overflow="error"` and input exceeds `length` | Window upstream, increase length after profiling, or select an intentional truncation policy. |
+| `nullable=False` raises | A query returned `None` or source data contains null | Repair/coerce in a preprocessor or make null part of the contract. Do not replace it silently with a valued default. |
+| Loss is zero / “no trainable fields” | No target, mask, or prune selection is active for the batch | Add a supervised target or reconstruction policy; inspect `trainable` and target state in encoded input. |
+| Prediction has no decoded value | Visible input fields are not decoded by default | Configure `target`, masking, or the supported prediction role. `embed=True` requests an embedding and may also invoke decoding, but it is not a target. |
+| Prediction address is missing | Root/branch name differs, field is inactive, or writer returned no public content | Print the model, use `jv.Address(...)`, and inspect the canonical prediction-output contract. |
+| `topk` validation fails | `1` is redundant or requested `k >= size` | Remove `1`; choose `1 < k < size`. Runtime candidates are capped by the populated vocabulary. |
+| Category vocabulary warning | Training observed more distinct labels than `size` | Confirm cardinality and split roles; increase deliberate capacity or choose another representation. |
+| New Category value is not predicted as “unavailable” | Unavailable is not a prediction class | It remains valued with zero input content. Predictions rank populated known labels; do not treat low confidence as calibrated OOD detection. |
+| Set loses unknown labels | Unknown Set members are not in the fixed multi-hot vocabulary | Increase deliberate capacity or define an upstream unknown policy. There is no extra unavailable slot. |
+| Entity IDs do not match across records or leaves | Entity reindexes independently per observation and leaf | Put repeated roles in one shared field/context, or use Category only when a bounded persistent identity is intended. |
+| Mutation fails during fit/predict | The active Lightning/runtime loop locks the schema | Mutate between complete loops and identically on every distributed rank. |
+| Mutation changed learned behavior | A tensor shape/address changed and its state could not be restored | Inspect the mutated tree, reset/retrain deliberately, and compare state dictionaries/artifacts. |
+| Loaded built-in model has different vocabulary or normalizer behavior | Wrong artifact or unsupported manual reconstruction | Load the saved JSON2Vec/Lightning checkpoint that owns schema state; do not reconstruct it from copied constructor code. Dynamically registered custom request types do not currently support artifact round-trips. |
+| Serving symbol import fails | Optional serving dependencies are absent | Install the `serving` extra in the service environment. |
+| Text construction/import fails | Optional tokenizer/model dependencies are absent | Install the `text` extra and pin the tokenizer/model artifact used in training. |
+| Distributed results duplicate records | Input sharding does not match files/workers/ranks | Check sharding strategy, worker count, file discovery, and output partitions. |
+| Accelerator is idle | Input/query/preprocessor or output serialization is the bottleneck | Benchmark preparation, forward, and writing separately; tune workers and output before scaling ranks. |
+| NaN/unstable loss | Invalid numeric input, aggressive optimizer, precision issue, or empty metric selection | Inspect raw/encoded values, lower learning rate, reproduce at full precision, and identify the exact address/content loss. |
+
+## Understand State Before Content
+
+Each leaf keeps value state separate from content. The shared states are:
+
+- `valued`: a value was present; datatype content may still be unavailable;
+- `null`: an explicit null;
+- `padded`: an unused fixed-shape position;
+- `masked`: content hidden for inference or training;
+- `other`: reserved for datatype-specific extensions.
+
+Pruning is an operation that changes visible input to `masked` while caching
+targets. It is not a separate `pruned` state. See
+[Data Types And Value State](../core-concepts/data-types.qmd) before debugging a
+content value in isolation.
+
+## Debug A Preprocessor
+
+A JSON2Vec preprocessor is an object produced by `@jv.preprocess` and must return
+`jv.Observation`, `None`, or an iterable of those. A plain dictionary helper is
+an upstream transformation, not a pipeline preprocessor.
+
+Call the decorated object directly for a simple function, then exercise it
+through `model.encode` to include runtime-provided values:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+@jv.preprocess
+def rename_amount(observation):
+    return jv.Observation({"amount": observation["raw_amount"]})
+
+
+assert rename_amount({"raw_amount": 12.5}).data == {"amount": 12.5}
+encoded = model.encode(
+    [{"raw_amount": 12.5}],
+    preprocess=rename_amount,
+)
+```
+
+If the preprocessor requests `strata`, `schema`, or `encoding_context`, test it
+through a data module or `model.encode(..., strata=...)` so those providers are
+present. Bind required user parameters with `.partial(...)`.
+
+## Debug Prediction Output
+
+The result is keyed by `jv.Address`, not display strings. Check exact keys:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+predictions = model.predict(records)
+print([str(address) for address in predictions])
+```
+
+Decoded payloads can contain `state`, datatype-specific `content`, `inferred`,
+and optional `embedding`. `inferred` is positional: it marks values that were
+masked in prediction input. Read [Prediction Output](prediction-output.qmd) for
+the full envelope before flattening it in a postprocessor.
+
+## Reduce A Distributed Failure
+
+When a problem occurs only with workers or multiple ranks:
+
+1. reproduce with `devices=1`, `num_workers=0`, and a fixed local data slice;
+2. add workers without adding ranks;
+3. add ranks with one worker each;
+4. confirm each rank receives different input shards;
+5. compare vocabulary snapshots and callback order;
+6. add remote I/O only after the local run agrees.
+
+Do not “fix” a collective hang by disabling synchronization until you know
+which ranks skipped a data-dependent path.
+
+## Report A Reproducible Issue
+
+Include:
+
+- JSON2Vec, Python, PyTorch, Lightning, and accelerator versions;
+- operating system and device;
+- the smallest model schema and one redacted raw observation;
+- split/strata and preprocessor/query involved;
+- full exception and the first failing address;
+- whether it reproduces with CPU, one process, and no workers;
+- model save/checkpoint origin for load or serving failures.
+
+## Where Next
+
+- Use [Binding Data](../core-concepts/binding-data.qmd) and
+  [Query Paths](../core-concepts/querypaths.qmd) for shape problems.
+- Use [Evaluation and Metrics](evaluation.qmd) for unexpected metric names or
+  model-selection behavior.
+- Use [Model Lifecycle](model-lifecycle.qmd) for artifact parity.
+- Use [Performance and Scaling](performance.qmd) for bottleneck isolation.

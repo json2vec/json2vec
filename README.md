@@ -89,7 +89,9 @@ import torch
 
 import json2vec as jv
 
-records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
+records = pl.read_ndjson("docs/data/iris.jsonl").head(36).with_row_index()
+train_records = records.filter((pl.col("index") % 3) != 2).drop("index")
+validate_records = records.filter((pl.col("index") % 3) == 2).drop("index")
 
 model = jv.Model(
     d_model=16,
@@ -100,13 +102,13 @@ model = jv.Model(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
     sepal_length=jv.Number,
     petal_length=jv.Number,
-    species=jv.Category(target=True, size=4, topk=[2]),
+    species=jv.Category(target=True, size=3, topk=[2]),
 )
 
 datamodule = jv.PolarsDataModule(
     model=model,
-    train=records,
-    validate=records,
+    train=train_records,
+    validate=validate_records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
@@ -128,6 +130,9 @@ trainer = lit.Trainer(
 trainer.fit(model=model, datamodule=datamodule)
 ```
 
+This tiny deterministic split is only a wiring example. Use a representative,
+leakage-safe validation design before interpreting the metrics as model quality.
+
 For larger jobs, the same model can run through normal Lightning callbacks,
 checkpointing, precision settings, device placement, and distributed
 strategies. See
@@ -138,7 +143,8 @@ strategies. See
 For small interactive batches, call `model.predict(...)` with raw dictionaries.
 
 ```python
-predictions = model.predict(records.to_dicts()[:3])
+requests = validate_records.drop("species").head(3).to_dicts()
+predictions = model.predict(requests)
 
 species = predictions[jv.Address("record", "species")]
 record = predictions[jv.Address("record")]
@@ -162,13 +168,17 @@ trainer = lit.Trainer(
 
 predict_datamodule = jv.PolarsDataModule(
     model=model,
-    predict=records.drop("species"),
+    predict=validate_records.drop("species"),
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
 )
 
-trainer.predict(model=model, datamodule=predict_datamodule)
+trainer.predict(
+    model=model,
+    datamodule=predict_datamodule,
+    return_predictions=False,
+)
 ```
 
 `Writer` creates rank-partitioned Parquet files such as
@@ -187,19 +197,22 @@ from the input 100% of the time and decoded from the remaining context.
 | --- | --- | --- |
 | plain input | value is visible | no decoded output unless otherwise configured |
 | `target=True` | value is hidden | decoded supervised output |
-| `p_mask` | some observed values are hidden during training | decoded reconstruction |
-| `p_prune` | whole leaf instances are hidden during training | decoded reconstruction |
+| `p_mask` | sampled configured leaf positions are hidden in train, validation, and test | decoded reconstruction |
+| `p_prune` | whole leaf instances are hidden in train, validation, and test | decoded reconstruction |
 | `embed=True` | does not hide the value | embedding at that address |
 
-`target=True` is exact shorthand for `p_prune=1.0`. Use `p_mask` for stochastic
-value-level reconstruction with rates lower than `1.0`. Use `embed=True` when
-you want a representation returned from prediction.
+`target=True` is exact shorthand for `p_prune=1.0`. The current `p_mask`
+implementation samples configured positions, including null and padded
+positions, at rates lower than `1.0`; see
+[Dynamic Masking](https://json2vec.github.io/json2vec/core-concepts/dynamic-masking.html)
+for exact selection behavior. Use `embed=True` when you want a representation
+returned from prediction.
 
 ## Data Modules
 
 Data modules load raw records, apply optional preprocessing, batch
-observations, tensorize values from the model schema, apply training-time
-masking and target pruning, and hand encoded batches to Lightning.
+observations, tensorize values from the model schema, apply configured masking
+and target pruning in non-predict loops, and hand encoded batches to Lightning.
 
 Choose the data module by where the records live:
 
@@ -210,10 +223,11 @@ Choose the data module by where the records live:
 | S3-backed datasets | `StreamingDataModule` |
 | Distributed training or prediction over large inputs | `StreamingDataModule` |
 
-`StreamingDataModule` supports local paths and `s3://...` roots with `ndjson`,
-`parquet`, `feather`, `avro`, `csv`, `orc`, and `json` suffixes. Split
-arguments are compiled regular expressions matched against discovered file
-paths.
+`StreamingDataModule` supports local `ndjson`, `parquet`, `feather`, `csv`,
+`orc`, and `json` inputs. S3 roots use the PyArrow-backed formats—`parquet`,
+`feather`, `csv`, `orc`, and `json`; `ndjson` is local-only. Avro is not
+supported by the current reader. Split arguments are compiled regular
+expressions matched against discovered file paths.
 
 See [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules.html)
 for split configuration, sharding, sampling, buffers, and preprocessors.
@@ -222,16 +236,18 @@ for split configuration, sharding, sampling, buffers, and preprocessors.
 
 - **Hierarchical context encoding:** child records interact locally before
   their representation flows upward.
-- **Extensible datatypes:** each field type owns validation, tensorization,
-  missing-state handling, masking, decoding, loss, metrics, and output writing.
+- **Typed datatype architecture:** each built-in field owns validation,
+  tensorization, missing-state handling, masking, decoding, loss, metrics, and
+  output writing. The external registration surface is experimental and
+  same-process only in the current release.
 - **Unified training roles:** `target=True`, `p_prune`, and `p_mask` all use the
   same reconstruction path.
 - **Embedding trees:** embeddings can come from the root, branches, or selected
   leaves.
 - **Schema evolution:** fields can be added, removed, updated, reset, or
   temporarily overridden after construction.
-- **Production missingness semantics:** `null`, `padded`, `masked`, and
-  `valued` are distinct tensorfield states.
+- **Production missingness semantics:** `valued`, `null`, `padded`, `masked`,
+  and reserved `other` are distinct tensorfield states.
 - **Training-serving parity:** queries, preprocessors, tensorization, model
   execution, prediction writing, and postprocessors stay on the same configured
   path.
@@ -261,15 +277,37 @@ parameters.
 
 ## Install
 
-For local development:
+JSON2Vec requires Python `>=3.12`. The currently documented user installation
+is directly from the GitHub repository:
+
+```bash
+python -m pip install "json2vec @ git+https://github.com/json2vec/json2vec.git"
+```
+
+This follows the repository's default branch. Pin a tag or commit in the Git
+URL for reproducible environments; the published documentation currently
+tracks `main` and does not retain versioned snapshots.
+
+Install optional functionality from the same source:
+
+```bash
+python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git"
+```
+
+Verify the environment:
+
+```bash
+python -c "import importlib.metadata; import json2vec; print(importlib.metadata.version('json2vec'))"
+```
+
+For a contributor checkout, use the locked development environment instead:
 
 ```bash
 uv sync
 ```
 
-The package requires Python `>=3.12`.
-
-Optional extras:
+Contributor extras:
 
 ```bash
 uv sync --extra text
@@ -288,32 +326,47 @@ Start with:
 - [Getting Started](https://json2vec.github.io/json2vec/getting-started.html)
 - [AI / Expert Quickstart](https://json2vec.github.io/json2vec/ai-quickstart.html)
 - [Model Tree](https://json2vec.github.io/json2vec/core-concepts/model-tree.html)
+- [Data Flow](https://json2vec.github.io/json2vec/core-concepts/data-flow.html)
+- [Binding Data](https://json2vec.github.io/json2vec/core-concepts/binding-data.html)
 - [Query Paths](https://json2vec.github.io/json2vec/core-concepts/querypaths.html)
 - [Built-In Data Types](https://json2vec.github.io/json2vec/core-concepts/data-types.html)
 - [Learning Modes & Embeddings](https://json2vec.github.io/json2vec/core-concepts/embeddings.html)
 - [Training With Lightning](https://json2vec.github.io/json2vec/guides/lightning.html)
 - [Data Modules](https://json2vec.github.io/json2vec/guides/data-modules.html)
+- [Evaluation And Metrics](https://json2vec.github.io/json2vec/guides/evaluation.html)
+- [Model Lifecycle](https://json2vec.github.io/json2vec/guides/model-lifecycle.html)
 - [Batch Inference](https://json2vec.github.io/json2vec/guides/batch-inference.html)
+- [Serving](https://json2vec.github.io/json2vec/guides/serving.html)
 
 Tutorials and guides:
 
 - [Postprocessors](https://json2vec.github.io/json2vec/guides/postprocessors.html)
 - [Field Importance](https://json2vec.github.io/json2vec/guides/field-importance.html)
 - [Field Stacking](https://json2vec.github.io/json2vec/guides/field-stacking.html)
+- [Model Configuration](https://json2vec.github.io/json2vec/guides/model-configuration.html)
+- [Performance And Scaling](https://json2vec.github.io/json2vec/guides/performance.html)
+- [Temporal Validation](https://json2vec.github.io/json2vec/guides/temporal-validation.html)
+- [Schema Mutation](https://json2vec.github.io/json2vec/guides/schema-mutation.html)
+- [Troubleshooting](https://json2vec.github.io/json2vec/guides/troubleshooting.html)
+- [Experimental Custom Tensorfields](https://json2vec.github.io/json2vec/guides/custom-tensorfields.html)
+- [Public API Map](https://json2vec.github.io/json2vec/reference/public-api.html)
 - [Branch](https://json2vec.github.io/json2vec/data-types/branch.html)
 - [Number](https://json2vec.github.io/json2vec/data-types/number.html)
+- [Boolean](https://json2vec.github.io/json2vec/data-types/boolean.html)
 - [Category](https://json2vec.github.io/json2vec/data-types/category.html)
 - [Set](https://json2vec.github.io/json2vec/data-types/set.html)
 - [Entity](https://json2vec.github.io/json2vec/data-types/entity.html)
 - [DateParts](https://json2vec.github.io/json2vec/data-types/dateparts.html)
 - [Vector](https://json2vec.github.io/json2vec/data-types/vector.html)
 - [Text](https://json2vec.github.io/json2vec/data-types/text.html)
+- [Reproducible Iris Case Study](https://json2vec.github.io/json2vec/case-studies/iris-reproducible.html)
 - [Device Tenure Case Study](https://json2vec.github.io/json2vec/case-studies/device-tenure.html)
 
 Build the docs locally with:
 
 ```bash
 make render
+uv run pytest tests/examples/test_e2e_examples.py
 ```
 
 ## Repository Layout

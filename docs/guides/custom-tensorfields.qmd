@@ -1,0 +1,326 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Experimental Custom Tensorfields
+
+**Example status — excerpt:** the component blocks are intentionally
+incomplete and cannot be combined into a supported artifact-compatible plugin.
+
+JSON2Vec exposes its tensorfield registry for datatypes that need a source
+contract, tensor representation, input embedding, decoder, loss, or public
+writer beyond the built-ins.
+
+::: {.callout-warning title="Experimental and not artifact-compatible"}
+This is an advanced, runtime-coupled extension surface, not a stable plugin SDK.
+The current schema validator fixes its request union when JSON2Vec is imported,
+so a dynamically registered request cannot round-trip through
+`Model.save(...)` / `Model.load(...)`. Use custom tensorfields only for
+same-process experiments, pin the JSON2Vec version, and do not deploy a saved
+artifact that depends on one.
+:::
+
+Use a preprocessor instead when the problem is only Python-side coercion,
+windowing, or derivation. A custom tensorfield is appropriate when the model
+representation or learning objective itself must change.
+
+## Component Lifecycle
+
+One plugin registers six named components:
+
+| Component | Responsibility |
+| --- | --- |
+| `Request` | Pydantic schema options and validation for the leaf. |
+| `TensorField` | Convert queried values to fixed-shape state/content tensors; implement empty prediction input, hiding, masking, and targeting. |
+| `Embedder` | Convert visible state/content into a `d_model` parcel sent to the parent branch. |
+| `Decoder` | Pool heritage context and produce raw state/content predictions. |
+| `loss` | Compare decoded tensors with cached targets and log address-qualified metrics. |
+| `write` | Convert raw prediction tensors to CPU/JSON-compatible public content, or return no decoded output. |
+
+Callbacks are optional and are registered separately with `plugin.callback(...)`.
+
+The runtime path is:
+
+```text
+queried values
+→ TensorField.new / TensorField.empty
+→ masking and target caching
+→ Embedder.forward → Parcel
+→ parent branch encoders
+→ Decoder.forward / Decoder.decode → Prediction
+→ loss during train, validate, or test
+→ write during prediction
+```
+
+## Create And Import The Plugin
+
+Plugin names contain lowercase letters, numbers, and underscores. Creating a
+duplicate name replaces the registry entry with a warning.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import json2vec as jv
+
+signed_scalar = jv.Plugin(name="signed_scalar")
+```
+
+Registration is an import-time side effect. Import the implementation before
+constructing a same-process model that uses the custom request. Importing it
+before `jv.Model.load(...)` does not currently make serialized custom request
+types valid; durable checkpoint, batch, and serving workflows are unsupported.
+
+## Define The Request
+
+The following blocks are contract excerpts, not a complete datatype. A working
+implementation must supply every method described below and should use a
+built-in tensorfield as its tested starting point.
+
+```python
+from typing import Annotated, Literal
+
+import pydantic
+
+
+@signed_scalar.register
+class Request(jv.RequestBase):
+    type: Literal["signed_scalar"] = "signed_scalar"
+    clip: Annotated[float, pydantic.Field(gt=0.0)] = 10.0
+```
+
+`RequestBase` provides common options such as `name`, `query`, `nullable`,
+`active`, `embed`, `weight`, `p_mask`, `p_prune`, pooling, heads, linear depth,
+and dropout. Add only datatype-specific options and validate combinations in
+Pydantic validators or `post_bind_validate()` when the check requires the bound
+tree shape.
+
+## Define State And Content
+
+Use a tensorclass with the four runtime fields. State shape is the leading
+schema shape; content may add datatype-specific trailing dimensions.
+
+```python
+import torch
+from tensordict import TensorDict, tensorclass
+
+
+@signed_scalar.register
+@tensorclass
+class TensorField(jv.TensorFieldBase):
+    state: torch.Tensor
+    content: torch.Tensor
+    trainable: torch.Tensor
+    targets: TensorDict
+
+    @classmethod
+    def new(
+        cls,
+        values,
+        address,
+        schema,
+        strata,
+        interprocess_encoding_context=None,
+    ):
+        # Parse and pad values to (batch, *schema.shapes[address], ...).
+        # Preserve valued/null/padded/masked/reserved-other state independently
+        # from content.
+        # Use interprocess_encoding_context for field-owned mutable state such
+        # as a vocabulary; stateless tensorfields can omit this parameter.
+        ...
+
+    @classmethod
+    def empty(cls, batch_size, address, schema):
+        # Return masked state, safe zero content, false trainable, empty targets.
+        ...
+
+    def hide(self, selected, *, cache_targets=True, trainable=True):
+        # Cache original state/content once, write masked state and safe content,
+        # then update the trainable mask.
+        ...
+
+    def mask(self, p_mask=0.0, **kwargs):
+        ...
+
+    def target(self, p_prune=1.0):
+        ...
+```
+
+Use the shared `Tokens` values exactly. Do not invent a public state for a
+condition that belongs to content. The built-ins use safe zero content for
+non-valued positions and keep original targets in a `TensorDict` before hiding.
+
+Test `new(...)` with scalar, nested, null, padded, literal-mask, overflow, and
+prediction-missing inputs. Test `empty(...)` separately because it controls
+requests that omit a target.
+
+## Embed Visible Input
+
+The embedder must accept annotated `schema` and `address` parameters. It sends a
+`d_model` payload from the leaf address to its parent:
+
+```python
+from json2vec.structs.packages import Parcel
+
+
+@signed_scalar.register
+class Embedder(jv.EmbedderBase):
+    def __init__(self, schema: jv.Schema, address: jv.Address):
+        super().__init__(schema=schema, address=address)
+        self.origin = address
+        self.destination = schema.requests[address].parent.address
+        self.projection = torch.nn.Linear(1, schema.d_model)
+
+    def forward(self, inputs: TensorField) -> Parcel:
+        # Add/project state and valued content; zero content must not leak into
+        # non-valued states as if it were a real value.
+        payload = ...
+        return Parcel(
+            payload=payload,
+            origin=self.origin,
+            destination=self.destination,
+            batch_size=inputs.batch_size[0],
+        )
+```
+
+Any vocabulary, normalizer, or tokenizer state needed across processes should be
+owned by the embedder and exposed through an `interprocess_encoding_context`
+property. The encoding runtime injects that field-owned state into
+`TensorField.new(...)` only when its signature contains the exact parameter name
+`interprocess_encoding_context`; omit the parameter for a stateless tensorfield.
+Register a synchronization callback when distributed updates require one.
+
+## Decode Heritage
+
+`DecoderBase` provides query or mean pooling across the field's heritage. The
+subclass implements `decode(...)` and returns raw tensors keyed by `TensorKey`:
+
+```python
+@signed_scalar.register
+class Decoder(jv.DecoderBase):
+    def __init__(self, schema: jv.Schema, address: jv.Address):
+        super().__init__(schema=schema, address=address)
+        self.state_head = torch.nn.Linear(schema.d_model, len(jv.Tokens))
+        self.content_head = torch.nn.Linear(schema.d_model, 1)
+
+    def decode(self, pooled):
+        return TensorDict(
+            {
+                jv.TensorKey.state: self.state_head(pooled),
+                jv.TensorKey.content: self.content_head(pooled),
+            },
+            batch_size=pooled.shape[0],
+        )
+```
+
+The decoder should return logits or model-space values. Public conversion belongs
+in `write`, and target comparison belongs in `loss`.
+
+## Define Loss And Output
+
+Registered hook parameter names must match the runtime contract and must be
+annotated:
+
+```python
+from typing import Any
+
+
+@signed_scalar.register
+def loss(
+    module: Any,
+    prediction: Any,
+    batch: Any,
+    strata: jv.Strata,
+):
+    # Select batch.trainable positions; track state and content separately.
+    # Return one scalar tensor for this field. Runtime multiplies it by weight.
+    ...
+
+
+@signed_scalar.register
+def write(module: Any, prediction: Any):
+    # Detach, move to CPU, preserve leading batch/branch shapes, and return a
+    # mapping such as {"state": ..., "content": ...}.
+    ...
+```
+
+Call `module.track((address, strata, metric, component), value=...)` so logs use
+the same address/stage convention as built-ins. Compute content loss only where
+the cached target state makes that content meaningful.
+
+If the datatype intentionally has no decoded public output, omit `write` or
+register `None` explicitly:
+
+```python
+signed_scalar.register(None, component=jv.Component.write)
+```
+
+The runtime adds `inferred` to decoded public output and normalizes configured
+`embedding` output. A writer should not duplicate those envelope fields.
+
+## Register Callbacks
+
+Callbacks are factories or Lightning `Callback` classes. JSON2Vec instantiates
+and orders them consistently with the model's built-in callbacks:
+
+```python
+from lightning.pytorch import Callback
+
+
+class SignedScalarStateCallback(Callback):
+    ...
+
+
+signed_scalar.callback(SignedScalarStateCallback)
+```
+
+Callbacks may participate in distributed work. Every rank must register the
+same callback factories in the same imported plugin version.
+
+## Test The Full Contract
+
+A custom datatype test suite should cover:
+
+1. request validation and schema inspection within the creating process;
+2. scalar and every supported nested shape;
+3. null, padded, masked, unavailable/malformed, and overflow behavior;
+4. `p_mask`, `p_prune`, `target=True`, literal masks, and missing prediction
+   input;
+5. embedder shape, non-valued zero-content invariant, and device movement;
+6. decoder shape for query and mean pooling if both are supported;
+7. finite loss with no valued content and correct metric selection;
+8. complete public output and `inferred` shape;
+9. an explicit guard proving that unsupported save/load is not used by the
+   integration;
+10. Lightning train/validate/test/predict and multi-rank state synchronization;
+11. mutation rebuild/reset behavior for every shape-changing option;
+12. optional dependency error behavior.
+
+Start from the closest built-in implementation and its tests. Boolean is a
+small vocabulary-free scalar; Number demonstrates learned normalization;
+Category and Set demonstrate online vocabularies; DateParts demonstrates
+structured content.
+
+## Packaging And Compatibility
+
+- Do not rely on `Model.save`/`Model.load`, Lightning checkpoint restoration,
+  batch workers, or serving for a schema containing a dynamically registered
+  request in the current release.
+- Keep experimental training and prediction in the process that imported and
+  constructed the plugin.
+- Pin and test the JSON2Vec version because `Parcel`, `Prediction`, and some
+  distributed state contracts are not all top-level SDK objects.
+- Avoid process-global files, sockets, or tokenizers created at import time;
+  data-loader workers and service workers import modules independently.
+- Document whether the plugin can train and predict on CPU, CUDA, MPS, and DDP.
+
+## Where Next
+
+- Read the [public API map](../reference/public-api.qmd) for exported extension
+  bases and enums.
+- Use [Data Types And Value State](../core-concepts/data-types.qmd) for the shared
+  state/content contract.
+- Use [Prediction Output](prediction-output.qmd) for the public writer envelope.
+- Use [Model Lifecycle](model-lifecycle.qmd) for the persistence guarantees that
+  currently apply only to supported built-in schema types.

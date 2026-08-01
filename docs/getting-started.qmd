@@ -5,108 +5,141 @@ eval: false
 
 # Getting Started
 
-This page is the first practical pass through `json2vec`: define the record
-shape, train a tiny model, inspect predictions, then extend the same idea to
-nested branches. The goal is not model quality. It is to make the package's core
-loop concrete.
+**Example status — runnable:** CI executes this build/train/validate/save/load/
+predict contract with `uv run pytest tests/examples/test_e2e_examples.py`.
 
-## Prerequisites
+This runnable walkthrough takes one small model through the complete first-use
+lifecycle: install, define a schema, train, inspect validation metrics, save,
+load, and predict with the target omitted.
 
-These examples assume a repository checkout, Python 3.12 or newer, and the
-bundled example data under `docs/data/`.
+The example is deliberately too small to establish model quality. Its job is to
+verify that every part of the workflow is connected correctly.
+
+## Install
+
+JSON2Vec requires Python 3.12 or newer. The public documentation currently uses
+the GitHub source distribution:
 
 ```bash
-uv sync
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install "json2vec @ git+https://github.com/json2vec/json2vec.git"
 ```
 
-If you are reading the docs outside the repository, replace the
-`pl.read_ndjson("docs/data/...")` calls with your own records.
+That command follows the repository's current default branch. Pin a tag or
+commit after `@` for a reproducible environment, and retain the matching source
+checkout because the published site is not yet versioned.
 
-## Start With The Record Shape
+Verify the installed distribution and import:
 
-`json2vec` models dictionaries and lists of dictionaries directly. For a simple
-record, the schema field names can match the source keys:
+```bash
+python -c 'from importlib.metadata import version; import json2vec; print(version("json2vec"))'
+```
+
+The core install includes PyTorch, Lightning, Polars, and PyArrow. Add `text`
+for Hugging Face text models or `serving` for the FastAPI runtime:
+
+```bash
+python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git"
+```
+
+The walkthrough fixes Lightning to `accelerator="cpu"`; no GPU is required.
+For a contributor checkout, install the locked development environment with
+`uv sync` instead. Do not confuse that repository setup with installation in a
+downstream project.
+
+## Start With Records
+
+The model will predict one of three Iris species from two numeric measurements.
+Training and validation records include `species` because it is the answer used
+to compute loss and metrics.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-{
-    "sepal_length": 5.1,
-    "petal_length": 1.4,
-    "species": "setosa",
-}
-```
-
-This is the contract you want the model to see:
-
-- `sepal_length` and `petal_length` are numeric inputs.
-- `species` is a categorical target.
-- the generated root `record` should emit an embedding during prediction.
-
-Training records usually include target values so losses can be computed. When
-a field has `target=True`, `json2vec` hides that value from model input and
-caches it as the answer. At prediction or serving time, requests may omit the
-target field; the target tensorfield creates a masked slot and the decoder
-writes the prediction.
-
-## Build The Model
-
-Use the package root import. `Model(...)` turns the field
-declarations into a model tree. The root node is named `record` by default.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import json2vec as jv
 import lightning.pytorch as lit
 import polars as pl
 import torch
 
-records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
+import json2vec as jv
+
+train_records = pl.DataFrame(
+    [
+        {"sepal_length": 5.1, "petal_length": 1.4, "species": "setosa"},
+        {"sepal_length": 4.9, "petal_length": 1.4, "species": "setosa"},
+        {"sepal_length": 6.4, "petal_length": 4.5, "species": "versicolor"},
+        {"sepal_length": 6.0, "petal_length": 4.5, "species": "versicolor"},
+        {"sepal_length": 6.3, "petal_length": 6.0, "species": "virginica"},
+        {"sepal_length": 5.8, "petal_length": 5.1, "species": "virginica"},
+    ]
+)
+
+validate_records = pl.DataFrame(
+    [
+        {"sepal_length": 5.0, "petal_length": 1.5, "species": "setosa"},
+        {"sepal_length": 5.9, "petal_length": 4.2, "species": "versicolor"},
+        {"sepal_length": 6.5, "petal_length": 5.2, "species": "virginica"},
+    ]
+)
+```
+
+::: {.callout-warning}
+These are distinct records, but nine hand-selected rows are only a pipeline
+smoke test. Real validation needs a representative held-out split, enough
+examples for stable metrics, and an identity- or time-aware split when records
+are related. Do not report the numbers from this tutorial as model quality.
+:::
+
+## Define The Schema
+
+`Model(...)` turns field declarations into a model tree. Field names match the
+source keys here, so JSON2Vec can infer how to bind the values.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+torch.manual_seed(7)
 
 model = jv.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,
-    batch_size=8,
+    batch_size=3,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
     sepal_length=jv.Number,
     petal_length=jv.Number,
-    species=jv.Category(target=True, size=4, topk=[2]),
+    species=jv.Category(target=True, size=3, topk=[2]),
 )
 
 model
 ```
 
-The Rich display is the fastest way to verify the tree that was built: root branch,
-numeric input leaves, target leaf, inferred queries, and root embedding.
+The schema expresses four decisions:
 
-Schema roles control what the model sees and what prediction can emit:
+- `sepal_length` and `petal_length` are visible numeric inputs;
+- `species` is a bounded category with capacity for exactly the three labels in
+  this example;
+- `target=True` hides `species` from the encoder and trains its decoder from the
+  remaining context;
+- root-level `embed=True` asks prediction to return one `d_model` vector for
+  each record.
 
-| Setting | What the model sees | What prediction can emit |
-| --- | --- | --- |
-| plain input | value is visible | no decoded output unless otherwise configured |
-| `target=True` | value is hidden | decoded supervised output |
-| `p_mask` | some observed values are hidden during training | decoded reconstruction for trainable values |
-| `p_prune` | whole field instances are hidden during training | decoded reconstruction for trainable values |
-| branch `mask=` | repeated coordinates are hidden across descendant leaves | decoded reconstruction for affected trainable leaves |
-| `embed=True` | does not hide the value | embedding at that address |
+`topk=[2]` is valid because 2 is less than the Category capacity of 3. Extra
+Category capacity is not required for an unavailable class; use extra capacity
+only when the vocabulary is expected to grow.
 
-`target=True` is the always-pruned supervised case and is shorthand for
-`p_prune=1.0`. Use `p_mask` for stochastic value-level reconstruction with
-rates lower than `1.0`. Use `embed=True` when you want a representation returned
-from prediction; it does not make a field a target. Use
-[Dynamic Masking](core-concepts/dynamic-masking.qmd) when the masking rule is
-about positions inside a repeated context, such as recent events or selected
-line items.
+The generated root is named `record`, so the target address is
+`record/species`. See [Model Tree](core-concepts/model-tree.qmd) for how to read
+the displayed schema.
 
-## Train One Batch
+## Train And Validate
 
-For small in-memory examples, `PolarsDataModule(...)` ties the configured model
-to sample observations from a Polars dataframe.
+`PolarsDataModule(...)` handles these in-memory frames. JSON2Vec models and data
+modules use the regular Lightning training loop.
 
 ```{python .marimo}
 #| echo: true
@@ -114,12 +147,12 @@ to sample observations from a Polars dataframe.
 
 datamodule = jv.PolarsDataModule(
     model=model,
-    train=records,
-    validate=records,
+    train=train_records,
+    validate=validate_records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    observation_buffer_size=32,
+    observation_buffer_size=8,
     sample_rate=1.0,
 )
 
@@ -135,164 +168,122 @@ trainer = lit.Trainer(
 )
 
 trainer.fit(model=model, datamodule=datamodule)
+metrics = trainer.validate(model=model, datamodule=datamodule, verbose=False)[0]
+
+print(metrics["loss/validate"])
+print(metrics["record:species/validate:accuracy:content"])
 ```
 
-`jv.Model` is a LightningModule, and `jv.PolarsDataModule` is a
-LightningDataModule. This example uses the normal Lightning `Trainer.fit(...)`
-loop. Use [Training With Lightning](guides/lightning.qmd) for callbacks,
-devices, checkpointing, and distributed training, and use
-[Data Modules](guides/data-modules.qmd) when choosing between in-memory and
-streaming inputs.
+`loss/validate` is the weighted total validation loss. The address-qualified
+metric reports content accuracy for `record/species`. A single batch can verify
+that both exist, but it cannot tell you whether this architecture generalizes.
+Use [Training With Lightning](guides/lightning.qmd) for full training loops and
+[Evaluation And Metrics](guides/evaluation.qmd) for denominators, model
+selection, thresholds, and baseline comparisons.
 
-## Inspect Predictions
+## Save And Load The Artifact
 
-`model.predict(...)` accepts a list of raw dictionaries. It returns a dictionary
-keyed by schema address, so decoded targets and embeddings stay attached to the
-part of the schema that produced them.
+`Model.save(...)` writes the schema, batch size, learned tensorfield state, and
+model weights. `Model.load(...)` reconstructs that inference artifact without
+requiring you to repeat the constructor.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-predictions = model.predict(records.to_dicts()[:3])
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+requests = [
+    {"sepal_length": 5.0, "petal_length": 1.5},
+    {"sepal_length": 6.2, "petal_length": 4.8},
+]
+
+with TemporaryDirectory() as directory:
+    artifact = Path(directory) / "iris-json2vec.pt"
+    model.save(artifact)
+    restored = jv.Model.load(artifact)
+    predictions = restored.predict(requests)
+```
+
+Notice that `requests` omit `species`. Target omission is the normal prediction
+contract: the target slot is masked, then decoded from the visible inputs. A
+Lightning training checkpoint may additionally contain optimizer, scheduler,
+and loop state; `Model.save(...)` is the compact JSON2Vec artifact for restoring
+the schema and model state. [Model Lifecycle](guides/model-lifecycle.qmd)
+explains resumable Lightning checkpoints, best-model rollback, compatibility,
+and processor versioning.
+
+## Interpret The Prediction
+
+Prediction is a dictionary keyed by schema address:
+
+```{python .marimo}
+#| echo: true
+#| output: true
 
 species = predictions[jv.Address("record", "species")]
 record = predictions[jv.Address("record")]
 
 print(species["content"]["value"])
 print(species["content"]["probability"])
+print(species["content"]["topk"])
+print(species["inferred"])
 print(record["embedding"])
 ```
 
-For API responses or warehouse rows, keep the model output stable and add a
-[postprocessor](guides/postprocessors.qmd) to reshape the address-keyed
-dictionary.
+For each request:
 
-## Debug Encoding
+- `content.value` is the selected vocabulary label;
+- `content.probability` is that label's model probability;
+- `content.topk` contains the two requested ranked candidates;
+- `inferred` is `true` because `species` was masked and decoded;
+- `record.embedding` is the exported 16-dimensional root representation.
 
-Most users do not need the encoded tensors during a first run. They are useful
-when a query or preprocessor is not producing the shape you expect.
+The target payload also contains a probability distribution over value states.
+Category probabilities rank the learned vocabulary; they are not automatically
+calibrated probabilities and are not an out-of-distribution detector. See
+[Prediction Output](guides/prediction-output.qmd) for the complete shared
+envelope, [Built-In Data Types](core-concepts/data-types.qmd) for state/content
+semantics, and [Postprocessors](guides/postprocessors.qmd) for reshaping the
+address-keyed result.
 
-`model.encode(...)` accepts raw dictionaries and returns nested tensorfield
-inputs. Each tensorfield keeps `content` separate from value `state`, so nulls,
-padded branch slots, and training masks are distinct.
+## Add Structure Next
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-tensors = model.encode(records.to_dicts()[:3])
-
-print(tensors)
-```
-
-For messy data, use a preprocessor when you need Python logic such as type
-coercion, windowing, sorting, or splitting one raw record into multiple
-observations. Data modules pass preprocessors through the same training and
-prediction path; see [Data Modules](guides/data-modules.qmd#preprocessors).
-Use [custom queries](core-concepts/querypaths.qmd) when the source shape is
-stable and selection is enough.
-
-## Add Nested Branches
-
-Flat examples are useful for mechanics, but `json2vec` is designed for
-predictive modeling with hierarchical data where nested structures carry
-signal. Use `Branch` when a record contains a list of child objects:
+The first lifecycle used flat records so each step stayed visible. A nested
+schema adds a `Branch` without changing the train/save/load/predict path:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-{
-    "measurements": [
-        {"name": "mean_radius", "value": 17.99},
-        {"name": "mean_texture", "value": 10.38},
-    ],
-    "diagnosis": "malignant",
-}
-```
-
-The matching schema gives `measurements` its own repeated context encoder:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = jv.Model(
-    d_model=24,
+nested_model = jv.Model(
+    d_model=32,
     n_layers=1,
     n_heads=4,
-    batch_size=8,
-    embed=True,
-    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
-    measurements=jv.Branch(
-        jv.Category("name", size=16),
-        length=8,
-        embed=True,
-        value=jv.Number,
+    line_items=jv.Branch(
+        length=32,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+        price=jv.Number,
     ),
-    diagnosis=jv.Category(target=True, size=2),
+    returned=jv.Category(target=True, size=2),
 )
 
-model
+nested_model
 ```
 
-The inferred child queries are `[*].measurements[*].name` and
-`[*].measurements[*].value`. During prediction, configured embeddings can appear
-at both `record` and `record/measurements`. These queries are inferred from the
-schema, but you may also define [custom queries](core-concepts/querypaths.qmd).
+Continue with:
 
-Run the complete nested example with:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-nested_records = pl.read_ndjson("docs/data/breast-cancer.jsonl").head(32)
-
-nested_datamodule = jv.PolarsDataModule(
-    model=model,
-    train=nested_records,
-    validate=nested_records,
-    num_workers=0,
-    persistent_workers=False,
-    pin_memory=False,
-    observation_buffer_size=32,
-    sample_rate=1.0,
-)
-
-nested_trainer = lit.Trainer(
-    accelerator="cpu",
-    max_epochs=1,
-    logger=False,
-    enable_progress_bar=False,
-    enable_checkpointing=False,
-    enable_model_summary=False,
-    limit_train_batches=1,
-    limit_val_batches=1,
-)
-
-nested_trainer.fit(model=model, datamodule=nested_datamodule)
-nested_predictions = model.predict(nested_records.to_dicts()[:2])
-
-diagnosis = nested_predictions[jv.Address("record", "diagnosis")]
-measurements = nested_predictions[jv.Address("record", "measurements")]
-
-print(diagnosis["content"]["value"])
-print(measurements["embedding"])
-```
-
-## Next Steps
-
-- **Read schemas as model trees:** [Model Tree](core-concepts/model-tree.qmd)
-- **Map source records to schemas:** [Query Paths](core-concepts/querypaths.qmd)
-- **Choose field types:** [Built-In Data Types](core-concepts/data-types.qmd)
-- **Mask repeated windows:** [Dynamic Masking](core-concepts/dynamic-masking.qmd)
-- **Understand the trainer loop:** [Training With Lightning](guides/lightning.qmd)
-- **Choose input loaders:** [Data Modules](guides/data-modules.qmd)
-- **Run offline prediction:** [Batch Inference](guides/batch-inference.qmd)
-- **Train without labels:** [Learning Modes & Embeddings](core-concepts/embeddings.qmd)
-- **Export embeddings:** [Learning Modes & Embeddings](core-concepts/embeddings.qmd)
-- **Ablate input fields:** [Field Importance](guides/field-importance.qmd)
-- **Change schemas after construction:** [Model Tree](core-concepts/model-tree.qmd#roles-and-mutations)
-- **Apply the nested-data pattern:** [Device Tenure](case-studies/device-tenure.qmd)
+- [Data Flow](core-concepts/data-flow.qmd) for the record-to-output mental model;
+- [Model Tree](core-concepts/model-tree.qmd) for branches and addresses;
+- [Built-In Data Types](core-concepts/data-types.qmd) for field choice;
+- [Binding Data](core-concepts/binding-data.qmd) for defaults, queries, and
+  preprocessors;
+- [Data Modules](guides/data-modules.qmd) for in-memory and streaming inputs;
+- [Evaluation And Metrics](guides/evaluation.qmd) for meaningful validation;
+- [Model Lifecycle](guides/model-lifecycle.qmd) for production artifacts;
+- [Prediction Output](guides/prediction-output.qmd) for the shared response
+  contract; and then
+- [Batch Inference](guides/batch-inference.qmd) for large offline jobs or
+  [Online Serving](guides/serving.qmd) for request-time prediction.

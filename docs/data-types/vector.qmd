@@ -10,6 +10,9 @@ pyproject: |
 
 # Vector
 
+**Example status — excerpt:** schema and payload blocks isolate Vector behavior;
+use [Getting Started](../getting-started.qmd) for a tested lifecycle.
+
 Use `Vector` for fixed-width numeric vectors supplied by another system:
 precomputed embeddings, dense descriptors, sensor windows, or model features.
 
@@ -35,7 +38,7 @@ embedding
 ```
 
 Use `Vector` when embeddings or dense features are already present in the input
-record. Use `Text` when `json2vec` should compute embeddings from strings. Use an
+record. Use `Text` when `json2vec` should compute embeddings from strings. Use a
 `Branch` when repeated measurements have item structure.
 
 ## Input Values
@@ -50,6 +53,10 @@ Every valued input must have exactly `n_dim` numeric elements. `None` is encoded
 as a null state, and missing branch positions are encoded as padded state.
 Prepare vector scale and normalization upstream unless a custom tensorfield owns
 that behavior.
+
+Invalid containers, non-1D NumPy/PyTorch values, the wrong vector length, and
+non-numeric elements raise `ValueError`. Accepted valued vectors are stored as
+`float32`; the built-in does not fit or apply a normalizer.
 
 ## Examples
 
@@ -67,23 +74,30 @@ Common vector fields include:
 | `n_dim` | required | Vector width. Must be positive. |
 | `objective` | `"l2"` | Content reconstruction objective: `"l1"` or `"l2"`. |
 
+Increasing `n_dim` grows the input projection, decoder output, activation
+memory, and prediction payload linearly. Prefer the smallest upstream
+representation that preserves the signal you need.
+
 ## Target Behavior
 
 When a `Vector` is masked or used as a target, the decoder predicts:
 
-- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
+- `state`: probabilities for `valued`, `null`, `padded`, `masked`, and
+  reserved `other`.
 - `content`: the reconstructed vector.
 
 For non-valued predicted states, public output uses a zero vector for `content`
 so API consumers get a stable shape without treating zeros as observed values.
 
-Tracked metrics include vector reconstruction loss, mean absolute error, and
-root mean squared error.
+State uses cross entropy and reports state accuracy. Only valued targets
+contribute to vector content loss. The configured `l1` or `l2` objective is
+reported alongside mean absolute error and root mean squared error in the
+source vector's scale.
 
 ## Prediction Output
 
-`Model.predict(...)` returns state probabilities and reconstructed vector
-content:
+`Model.predict(...)` returns state probabilities, reconstructed vector
+content, and the shared inferred mask. This is the complete field envelope:
 
 ```{python .marimo}
 #| echo: true
@@ -91,16 +105,34 @@ content:
 
 {
     "record/embedding": {
-        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "state": {
+            "valued": ...,
+            "null": ...,
+            "padded": ...,
+            "masked": ...,
+            "other": ...,
+        },
         "content": ...,
+        "inferred": ...,
     }
 }
 ```
+
+See [Prediction Output](../guides/prediction-output.qmd) for array shapes and
+the meaning of `inferred`.
 
 ## Notes
 
 Use `Text` when `json2vec` should compute text embeddings from strings. Use
 `Vector` when embeddings or dense features are already present in the input
-record. Specialized vector or media handling can be implemented with
-custom data types; the built-in package does not include
-image, video, or audio tensorfields.
+record. The built-in package does not include image, video, or audio
+tensorfields; the custom tensorfield surface for specialized modalities is
+currently experimental and same-process only.
+
+## Where Next
+
+- Use [Text](text.qmd) when JSON2Vec should compute a frozen text embedding.
+- Use [Number](number.qmd) when each coordinate is an independently meaningful
+  scalar rather than one jointly interpreted vector.
+- Review [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd)
+  only for same-process research on a modality-specific encoder or objective.

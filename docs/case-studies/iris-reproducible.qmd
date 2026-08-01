@@ -1,0 +1,219 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Reproducible Iris Classification
+
+**Example status — runnable:** CI repeats the fixed split, 100-epoch selection,
+held-out accuracy assertion, save/load, and target-omitted prediction with
+`uv run pytest tests/examples/test_e2e_examples.py`.
+
+This case study is a small, fully runnable artifact-lifecycle check. It is not a
+claim that Iris needs a hierarchical model. It provides one maintained example
+with a baseline, fixed split, validation checkpoint, held-out result, save/load,
+and target-omitted prediction.
+
+## Question And Baseline
+
+Predict one of three Iris species from four numeric measurements. With the fixed
+split below, the test set contains ten examples of each species, so the
+train-majority baseline scores `10 / 30 = 33.3%` test accuracy.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import lightning.pytorch as lit
+import polars as pl
+import torch
+
+import json2vec as jv
+
+lit.seed_everything(7, workers=True)
+
+records = pl.read_ndjson("docs/data/iris.jsonl").with_row_index()
+train_records = records.filter((pl.col("index") % 5) < 3).drop("index")
+validate_records = records.filter((pl.col("index") % 5) == 3).drop("index")
+test_records = records.filter((pl.col("index") % 5) == 4).drop("index")
+
+majority_label = train_records["species"].mode()[0]
+majority_accuracy = (
+    test_records["species"] == majority_label
+).mean()
+
+print(len(train_records), len(validate_records), len(test_records))
+print(majority_label, majority_accuracy)
+```
+
+Expected split sizes are 90 train, 30 validation, and 30 test. The modulo rule
+is deterministic and the checked-in data order is part of this example's
+contract.
+
+## Model
+
+Each measurement is a visible `Number`; `species` is always hidden and decoded
+as the supervised target. Capacity is exactly three because unavailable content
+is not an extra class.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model = jv.Model(
+    name="flower",
+    d_model=32,
+    n_layers=2,
+    n_heads=4,
+    batch_size=15,
+    optimizer=lambda module: torch.optim.AdamW(
+        module.parameters(), lr=3e-3
+    ),
+    sepal_length=jv.Number,
+    sepal_width=jv.Number,
+    petal_length=jv.Number,
+    petal_width=jv.Number,
+    species=jv.Category(
+        target=True,
+        size=3,
+        p_unavailable=0.0,
+    ),
+)
+
+model
+```
+
+`p_unavailable=0.0` removes stochastic OOV simulation from this small contract
+test. It is not a general recommendation.
+
+## Train And Select On Validation Loss
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+datamodule = jv.PolarsDataModule(
+    model=model,
+    train=train_records,
+    validate=validate_records,
+    test=test_records,
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+)
+
+checkpoint = jv.RollbackCheckpoint(
+    dirpath="artifacts/iris-checkpoints",
+    filename="best",
+    monitor="loss/validate",
+    mode="min",
+    save_top_k=1,
+)
+
+trainer = lit.Trainer(
+    accelerator="cpu",
+    max_epochs=100,
+    callbacks=[checkpoint],
+    logger=False,
+    enable_progress_bar=False,
+    enable_model_summary=False,
+    deterministic=True,
+)
+
+trainer.fit(model=model, datamodule=datamodule)
+```
+
+`RollbackCheckpoint` restores the best validation checkpoint into `model` at
+fit end. Test data has not selected the checkpoint or a threshold.
+
+## Held-Out Result
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+test_metrics = trainer.test(
+    model=model,
+    datamodule=datamodule,
+    verbose=False,
+)[0]
+
+content_accuracy = test_metrics[
+    "flower:species/test:accuracy:content"
+]
+
+print(content_accuracy)
+```
+
+The measured run described below produced:
+
+| Model | Test accuracy |
+| --- | ---: |
+| Train-majority baseline | 33.3% |
+| JSON2Vec checkpoint | 90.0% |
+
+The state accuracy is not the task metric: every held-out target position is a
+valued label. `accuracy:content` measures which species was selected.
+
+## Save, Load, And Predict Without The Target
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+model.save("artifacts/iris-model.jv")
+loaded = jv.Model.load("artifacts/iris-model.jv")
+
+requests = test_records.drop("species").head(3).to_dicts()
+predictions = loaded.predict(requests)
+species = predictions[jv.Address("flower", "species")]
+
+print(species["content"]["value"])
+print(species["content"]["probability"])
+print(species["inferred"])
+```
+
+The target is omitted from requests. JSON2Vec creates masked target positions,
+decodes them from the four measurements, and returns `inferred=true` for those
+positions. The saved artifact owns schema, weights, Category vocabulary, and
+Number normalization state.
+
+## Reproduction Record
+
+The checked result was produced on 2026-08-01 with:
+
+- JSON2Vec `0.4.11`, source revision `224ff43`;
+- Python 3.12;
+- PyTorch `2.12.0`, Lightning `2.6.4`, Polars `1.41.0`;
+- Apple arm64 CPU, full precision;
+- seed 7, deterministic Lightning execution;
+- 100 maximum epochs and best `loss/validate` rollback;
+- no tuning on the test split.
+
+The run completed in seconds on the recorded machine, but elapsed time and
+throughput are intentionally not presented as portable benchmark results.
+
+## Limitations
+
+- Iris is tiny, clean, flat, and balanced; it does not demonstrate JSON2Vec's
+  main advantage on hierarchical records.
+- The modulo split is convenient and deterministic, not a domain validation
+  design.
+- One seed is a contract check, not a variance estimate.
+- The optimizer and epoch budget were chosen for a small demonstration.
+- Test accuracy should be reproduced after dependency or implementation
+  changes rather than treated as a permanent guarantee.
+
+Use this page to verify the package lifecycle. Use a domain case study with
+time/identity splits, operational costs, and a strong incumbent baseline before
+making a product decision.
+
+## Where Next
+
+- Use [Getting Started](../getting-started.qmd) for the shorter first run.
+- Use [Evaluation and Metrics](../guides/evaluation.qmd) to interpret the logged
+  keys and choose a model-selection rule.
+- Use [Model Lifecycle](../guides/model-lifecycle.qmd) for checkpoint and save
+  semantics.
+- Use [Device Tenure](device-tenure.qmd) for a hierarchical design sketch with
+  explicitly unmeasured hypotheses.

@@ -10,9 +10,11 @@ pyproject: |
 
 # Set
 
-Use `Set` for multi-label discrete values or targets from a bounded, learned
-vocabulary: tags, permissions, flags, detected concepts, applicable categories,
-and similar multi-label fields.
+**Example status — excerpt:** schema and payload blocks isolate Set behavior;
+use [Getting Started](../getting-started.qmd) for a tested lifecycle.
+
+Use `Set` for zero or more unordered labels from a bounded vocabulary: tags,
+permissions, flags, detected concepts, or multi-label targets.
 
 ```json
 {
@@ -36,71 +38,88 @@ tags = jv.Set(
 tags
 ```
 
-The input to a `Set` and a `Branch` of `Category` values can look similar, but
-use `Set("tags")` for unordered labels. An `Branch` of `Category` expects order
-or item-level structure to matter.
+A `Set` and a `Branch` of `Category` values can receive similar source data,
+but they express different structures. Use `Set("tags")` when membership is
+unordered and labels have no attributes. Use a `Branch` when position, order,
+or item-level fields matter.
 
 ## Input Values
 
 `Set` accepts common multi-label shapes:
 
-- `None` becomes a null field state.
-- A string becomes a single-item set.
-- An iterable becomes a multi-item set.
-- A non-iterable scalar becomes a single-item set.
-- An empty iterable becomes a valued field with no active labels.
+- `None` becomes state `null`.
+- A string becomes a one-item valued set.
+- Another iterable becomes a valued multi-item set.
+- A non-iterable scalar becomes a one-item valued set.
+- An empty iterable becomes a valued set with no active labels.
 
-Repeated labels collapse into one active vocabulary entry. The vocabulary is
-learned online from training data and saved with the model.
-
-## Examples
-
-Common set fields include:
-
-- Product tags, content topics, user interests, or applicable policies.
-- Permissions, feature flags, alert codes, or rule hits.
-- Detected entities or concepts from an upstream parser.
-- Multi-label outcomes where more than one class can be true at once.
-
-Use `Branch(tag=Category())` instead when repeated labels need positions,
-attributes, or their own local context.
+Repeated known labels collapse into one active entry. `None` items inside an
+otherwise valued iterable are ignored. A missing repeated branch slot has state
+`padded`.
 
 ## Configuration
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `size` | `10000` | Maximum number of learned labels. One extra internal bucket is reserved for unavailable labels. |
-| `p_unavailable` | `0.01` | During training, randomly routes known labels to the unavailable bucket so the decoder learns that case. |
-| `threshold` | `None` | Optional prediction-time probability threshold. When set, prediction output only includes labels at or above the threshold. |
+| `size` | `10000` | Width and maximum population of the learned vocabulary. Must be positive. There is no extra unavailable slot. |
+| `p_unavailable` | `0.01` | Independent probability of dropping each known positive label from training content. Must be between `0` and `1`. |
+| `threshold` | `None` | Optional prediction-output filter from `0` through `1`. When set, only populated labels at or above the threshold are returned. |
 
-## Shared Preprocessing State
+Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
+described in [Built-In Data Types](../core-concepts/data-types.qmd).
+
+## Vocabulary And Content
 
 `Set` maintains an online vocabulary shared by encoding workers and saved with
-the model. Training data can add new labels until `size` is full.
-Validation, test, and prediction data do not expand the vocabulary.
+the model. Training data can add first-seen labels until `size` is full.
+Validation, test, and prediction data reuse the learned mapping without
+expanding it.
 
-Unknown labels after training are represented internally by a reserved
-unavailable slot at index `size`. Prediction output only includes
-probabilities for labels in the learned vocabulary.
+Content is a `size`-wide multi-hot vector:
 
-`p_unavailable` randomly removes some known training labels from their normal
-vocabulary slots and marks the unavailable slot for that set value. This teaches
-the model that a valued set can contain labels that are not individually known.
+- each known member sets its vocabulary position to `1`;
+- unknown members are omitted rather than routed to a reserved position;
+- non-valued positions use an all-zero content vector;
+- a valued empty set also has an all-zero content vector.
 
-## Target Behavior
+Consequently, a valued empty set, a valued set containing only unknown labels,
+and a valued set whose positive labels were all dropped by `p_unavailable` have
+the same zero content. Their state remains `valued`, which distinguishes them
+from null, padded, or masked positions, but content alone cannot distinguish the
+three valued cases.
 
-When a `Set` is masked or used as a target, the decoder predicts:
+`p_unavailable` is label dropout: during training it independently clears known
+positive bits. It does not set an unavailable bit, create a new state, or add a
+decoder class. This behavior is specific to `Set`; `Category` uses a different
+internal unavailable sentinel because it represents exactly one label.
 
-- `state`: probabilities for `valued`, `null`, `padded`, and `masked`.
-- `content`: independent logits for each learned vocabulary item.
+The encoder averages embeddings for active known labels and adds the separate
+state embedding. Zero set content therefore contributes no label embedding but
+still retains its `valued` state embedding.
 
-Content loss uses binary cross entropy because each label is independently
-present or absent.
+## Loss And Metrics
+
+When a `Set` is masked, pruned, or used as a target, its decoder produces:
+
+- five logits for the shared state vocabulary; and
+- `size` independent content logits.
+
+Content uses binary cross entropy with logits because every label may be present
+or absent independently. Content accuracy applies a fixed `0.5` decision
+boundary across capacity-wide logits. The configurable `threshold` affects only
+the public prediction payload; it does not change loss or the tracked content
+accuracy threshold.
+
+Unknown target labels have no positive content bit, so they cannot contribute a
+positive-label training signal. Choose enough capacity and monitor vocabulary
+coverage when recall for rare labels matters. Both embedding and decoder cost
+grow linearly with `size`.
 
 ## Prediction Output
 
-Without `threshold`, `Model.predict(...)` returns state probabilities
-and one probability array per known label:
+With `threshold=None`, `Model.predict(...)` returns one independent probability
+for each populated vocabulary label. It does not return unused capacity or
+unknown labels:
 
 ```{python .marimo}
 #| echo: true
@@ -108,17 +127,24 @@ and one probability array per known label:
 
 {
     "record/tags": {
-        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
+        "state": {
+            "valued": ...,
+            "null": ...,
+            "padded": ...,
+            "masked": ...,
+            "other": ...,
+        },
         "content": {
             "vip": ...,
             "international": ...,
         },
+        "inferred": ...,
     }
 }
 ```
 
-With `threshold=0.75`, `content` is a nested JSON-like structure that
-only includes labels whose probabilities meet the threshold:
+With `threshold=0.75`, `content` contains only populated labels whose
+probabilities meet the threshold:
 
 ```{python .marimo}
 #| echo: true
@@ -126,15 +152,24 @@ only includes labels whose probabilities meet the threshold:
 
 {
     "record/tags": {
-        "state": {"valued": ..., "null": ..., "padded": ..., "masked": ...},
         "content": {"vip": 0.91},
+        # shared state and inferred members omitted in this excerpt
     }
 }
 ```
 
-## Notes
+The [Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
+explains `state`, `inferred`, shapes, and visible-field decoding. Rendered
+examples use string addresses for readability; Python results are keyed by
+`jv.Address` objects.
 
-Unknown labels at validation, test, or inference time are represented internally
-with the reserved unavailable bucket. Prediction output only includes labels in
-the learned vocabulary. Thresholding is an inference-output filter; it does not
-change training loss.
+Thresholding reduces the response, not model compute, because the decoder still
+scores its full `size`-wide output. Tune the threshold against validation data
+for the precision/recall tradeoff your application needs.
+
+## Where Next
+
+- Use [Category](category.qmd) when exactly one label is valid.
+- Use [Branch](branch.qmd) when repeated labels have order or attributes.
+- Read [Built-In Data Types](../core-concepts/data-types.qmd) for the shared
+  state and output contracts.

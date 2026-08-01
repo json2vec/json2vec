@@ -5,13 +5,22 @@ eval: false
 
 # Postprocessors
 
-Postprocessors are the output-side counterpart to preprocessors. A
-preprocessor shapes raw observations before `json2vec` encodes them. A
-postprocessor shapes decoded predictions and embeddings after the model writes
-them.
+**Example status — excerpt:** functions show individual output transformations
+and assume predictions from a complete interactive, batch, or serving path.
 
-Use a postprocessor when the model output is correct but not in the shape your
-API, batch job, or warehouse table should expose.
+A JSON2Vec postprocessor shapes decoded predictions after model writing. Use one
+when the canonical address-keyed output is correct but an API, batch job, or
+warehouse needs a different external contract.
+
+This is distinct from an arbitrary Python transformation: supported entry
+points require the `jv.Postprocessor` object returned by `@jv.postprocess`.
+The wrapper validates its signature and supplies only the runtime values that
+entry point owns.
+
+## Define The Contract
+
+The first parameter must be named `predictions`. Any additional parameter must
+be keyword-only:
 
 ```{python .marimo}
 #| echo: true
@@ -22,152 +31,164 @@ from typing import Any
 import json2vec as jv
 
 Predictions = dict[jv.Address, dict[str, Any]]
-PostprocessorResult = dict[str | jv.Address, Any] | None
-```
-
-Decorate a postprocessor with `@jv.postprocess`. It is a callable object that
-receives:
-
-- `predictions`: the first positional parameter, keyed by schema address. Each
-  value contains the written payload for that address, such as decoded
-  `content`, `state`, or `embedding`.
-- Named keyword-only parameters for runtime values such as raw input, encoded
-  tensors, metadata, batch indices, and deployment request data.
-
-Return a replacement dictionary when you want to reshape the output. Return
-`None` when you mutated `predictions` in place.
-
-::: {.callout-note}
-The aliases above document the stable model-facing contract. `Model.predict`
-and deployment postprocessors can return compact API dictionaries. Prediction
-writers should keep row-aligned values so the Parquet writer can build a
-table.
-:::
-
-Common runtime provider names include:
-
-| Parameter | Meaning |
-| --- | --- |
-| `batch` | The raw batch passed to prediction or the encoded writer batch. |
-| `observations` | Processed observation metadata from encoding. |
-| `input` | Encoded tensorfield input. |
-| `metadata` | Row-aligned metadata used by writers and joins. |
-| `request` | Original deployment request. |
-| `batch_indices` | Lightning batch indices when provided. |
-| `batch_idx` | Prediction batch index. |
-| `dataloader_idx` | Prediction dataloader index. |
-
-If a runtime cannot provide a requested value, the parameter must be optional.
-In that case, `json2vec` passes `None`.
-
-## Where They Run
-
-| Entry point | How postprocessing is used |
-| --- | --- |
-| `Model.predict(..., postprocess=...)` | Runs after raw predictions are converted with `model.write(...)`. |
-| `jv.Writer(..., postprocessor=...)` | Runs before batch prediction output is written to Parquet. |
-| `jv.Deployment(...).postprocess(...)` | Runs before the serving response is returned. |
-
-Postprocessors should usually be deterministic and side-effect-light. If a
-postprocessor logs or enriches output from another system, keep that dependency
-explicit and handle failures outside the model path.
-
-## Inspect Address-Keyed Output
-
-`Model.predict(...)` returns predictions keyed by schema address:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-predictions = model.predict(records)
-
-label = predictions[jv.Address("record", "label")]
-root = predictions[jv.Address("record")]
-```
-
-The exact payload depends on the datatype and schema settings. A categorical
-target usually writes `state` and `content`; a node configured with `embed=True`
-writes `embedding`.
-
-## Flatten For An API
-
-This pattern is useful when callers should not know the schema address layout.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import lightning.pytorch as lit
-import polars as pl
-import torch
-
-import json2vec as jv
-
-
-def get_payload(predictions, path: str) -> dict:
-    for address, payload in predictions.items():
-        if str(address) == path:
-            return payload
-    return {}
 
 
 @jv.postprocess
-def compact_response(predictions, *, metadata):
-    label = get_payload(predictions, "record/species").get("content", {})
-    root = get_payload(predictions, "record")
+def compact_predictions(predictions, *, metadata):
+    label = predictions.get(
+        jv.Address("record", "fraud"), {}
+    ).get("content", {})
 
     return {
-        "species": label.get("value"),
-        "species_probability": label.get("probability"),
-        "record_embedding": root.get("embedding"),
+        "fraud": label.get("value"),
+        "fraud_probability": label.get("probability"),
         "metadata": metadata,
+    }
+```
+
+Return a mapping to replace the canonical predictions. Return `None` only after
+mutating `predictions` in place. Returning any other value is an error.
+
+The model-facing input is always keyed by `jv.Address`. A postprocessor may
+return string keys when the surrounding runtime supports an application-specific
+shape. After that transformation, the returned mapping—not the default
+JSON2Vec envelope—is the contract you must version and test.
+
+## Where They Run
+
+| Entry point | Invocation |
+| --- | --- |
+| `Model.predict(..., postprocess=processor)` | After `model.write(...)`; returns the processed mapping directly. |
+| `jv.Writer(..., postprocessor=processor)` | Before each prediction batch is converted to a Parquet table. |
+| `jv.Deployment(...).postprocess(processor)` | Once per request, before the HTTP response is denested and serialized. |
+
+The runtimes do not supply the same context. Request only the named providers
+the processor actually needs:
+
+| Provider | Interactive | Writer | Deployment |
+| --- | :---: | :---: | :---: |
+| `batch` | Raw batch passed to `Model.predict` | Encoded tensorfield batch | — |
+| `observations` | Processed model-facing observations | — | Processed model-facing observations |
+| `input` | Encoded tensorfields | Encoded tensorfields | Encoded tensorfields |
+| `metadata` | Processed observation metadata | Row-aligned processed observations | Processed observation metadata |
+| `request` | — | — | Validated request dictionary |
+| `batch_indices` | — | Lightning value when supplied | — |
+| `batch_idx` | — | Prediction batch index | — |
+| `dataloader_idx` | — | Prediction dataloader index | — |
+
+If a requested provider is unavailable and the parameter is required, the
+postprocessor raises an error. Make the parameter optional to share one
+processor across compatible runtimes:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+@jv.postprocess
+def audit_shape(
+    predictions,
+    *,
+    request: dict | None = None,
+    batch_idx: int | None = None,
+):
+    return {
+        "predictions": predictions,
+        "request": request,
+        "batch_idx": batch_idx,
+    }
+```
+
+The runtime supplies `None` for an unavailable optional provider. Avoid a
+single processor with many optional inputs when separate batch and API
+contracts would be clearer.
+
+## Metadata Is Processed Input
+
+`metadata` does not necessarily contain the original source dictionary. It is
+the model-facing observation after the JSON2Vec preprocessor runs. Each batch
+item is represented as a list containing its record; for the common one-to-one
+case, read `observation[0]`:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+def request_ids(metadata):
+    return [
+        observation[0].get("request_id")
+        for observation in metadata
+    ]
+```
+
+Use interactive `batch` or deployment `request` when the unprocessed caller
+input is specifically required. Prefer carrying stable join identifiers into
+the processed observation so batch output remains self-describing.
+
+## Flatten Interactive Output
+
+`Model.predict(...)` preserves the leading input batch dimension. A compact
+postprocessor therefore returns lists for batched values:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+@jv.postprocess
+def compact_interactive(predictions, *, batch):
+    payload = predictions.get(jv.Address("record", "fraud"), {})
+    content = payload.get("content", {})
+
+    return {
+        "fraud": content.get("value"),
+        "probability": content.get("probability"),
+        "input_count": len(batch),
     }
 
 
-records = pl.read_ndjson("docs/data/iris.jsonl").head(36)
-
-model = jv.Model(
-    d_model=16,
-    n_layers=1,
-    n_heads=4,
-    batch_size=8,
-    embed=True,
-    optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
-    sepal_length=jv.Number,
-    petal_length=jv.Number,
-    species=jv.Category(target=True, size=4, topk=[2]),
+response = model.predict(
+    [{"amount": 12.5, "merchant": "books"}],
+    postprocess=compact_interactive,
 )
-
-datamodule = jv.PolarsDataModule(
-    model=model,
-    train=records,
-    validate=records,
-    num_workers=0,
-    persistent_workers=False,
-    pin_memory=False,
-    observation_buffer_size=32,
-    sample_rate=1.0,
-)
-
-trainer = lit.Trainer(
-    accelerator="cpu",
-    max_epochs=1,
-    logger=False,
-    enable_progress_bar=False,
-    enable_checkpointing=False,
-    enable_model_summary=False,
-    limit_train_batches=1,
-    limit_val_batches=1,
-)
-
-trainer.fit(model=model, datamodule=datamodule)
-response = model.predict(records.to_dicts()[:3], postprocess=compact_response)
 ```
 
-## Add Confidence Flags
+For a one-row request, `fraud` and `probability` remain one-element lists. This
+differs from deployment, which denests the one-row response before JSON
+serialization. See [Prediction Output](prediction-output.qmd) before sharing a
+consumer between those transports.
 
-You can add derived fields while keeping the original address-keyed structure.
+## Build An API Response
+
+A deployment postprocessor can hide schema addresses and attach request data:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+@jv.postprocess
+def api_response(predictions, *, request):
+    payload = predictions.get(jv.Address("record", "fraud"), {})
+    content = payload.get("content", {})
+
+    return {
+        "request_id": request.get("request_id"),
+        "fraud": content.get("value"),
+        "probability": content.get("probability"),
+    }
+
+
+deployment = jv.Deployment(
+    checkpoint="artifacts/fraud-model.ckpt"
+).postprocess(api_response)
+```
+
+The serving runtime denests the returned one-row lists. Attach a Pydantic
+response signature with `deployment.forge(response=...)` when this external
+shape should also be validated and published in OpenAPI.
+
+## Add Derived Flags
+
+Derived values should make their policy explicit. Bind user-controlled
+parameters with `.partial(...)`; provider names cannot be user-bound:
 
 ```{python .marimo}
 #| echo: true
@@ -175,60 +196,66 @@ You can add derived fields while keeping the original address-keyed structure.
 
 import copy
 
-import json2vec as jv
-
 
 @jv.postprocess
-def add_confidence_flags(predictions, *, threshold: float = 0.80):
+def add_confidence_flags(predictions, *, threshold: float):
     output = copy.deepcopy(predictions)
-    label = output.get(jv.Address("record", "label"), {})
-    content = label.get("content", {})
-    probability = content.get("probability")
+    payload = output.get(jv.Address("record", "fraud"), {})
+    content = payload.get("content", {})
+    probabilities = content.get("probability")
 
-    if isinstance(probability, list):
+    if isinstance(probabilities, list):
         content["high_confidence"] = [
             score >= threshold if score is not None else None
-            for score in probability
+            for score in probabilities
         ]
-    elif probability is not None:
-        content["high_confidence"] = probability >= threshold
 
     return output
+
+
+production_flags = add_confidence_flags.partial(threshold=0.80)
 ```
 
-This keeps downstream consumers that expect schema addresses working while
-adding an application-specific flag.
+The name `high_confidence` is an application policy, not model calibration.
+Choose thresholds on held-out data and version them with the response contract.
 
-## Attach Input Metadata
+## Create Writer-Compatible Rows
 
-Batch and serving systems often need to join predictions back to original
-requests. Request `metadata` by name instead of reading it from the model
-payload.
+A writer postprocessor must return row-aligned mappings that Polars can convert
+to a stable table:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as jv
-
-
 @jv.postprocess
-def attach_request_ids(predictions, *, metadata):
+def warehouse_rows(predictions, *, metadata):
+    payload = predictions.get(jv.Address("record", "fraud"), {})
+    content = payload.get("content", {})
+
     return {
-        "request_id": [item.get("request_id") for item in metadata],
-        "predictions": predictions,
+        jv.Address("record", "warehouse_row"): {
+            "request_id": request_ids(metadata),
+            "fraud": content.get("value"),
+            "fraud_probability": content.get("probability"),
+        }
     }
+
+
+writer = jv.Writer(
+    "predictions/warehouse-run",
+    postprocessor=warehouse_rows,
+)
 ```
 
-For batch prediction, postprocessors can request encoded tensors, raw batch
-input, metadata, `batch_indices`, `batch_idx`, and `dataloader_idx`. For
-deployments, they can request the original request, preprocessed observations,
-and encoded input.
+Keep every returned list the same length as the prediction batch, with stable
+keys and value types across batches. The first writer batch establishes the
+Arrow schema used by later batches.
 
-## Strip Private Or Large Fields
+## Remove Embeddings Or Sensitive Fields
 
-Embeddings are useful for offline retrieval and clustering, but they may be too
-large or too sensitive for a public response.
+Embeddings can be large or sensitive. Remove them at a public boundary when the
+consumer does not require them:
 
 ```{python .marimo}
 #| echo: true
@@ -247,51 +274,39 @@ def without_embeddings(predictions):
     return output
 ```
 
-Use this at the serving boundary when the same model is used for both internal
-analysis and public responses.
-
-## Warehouse Rows
-
-For batch output, prefer stable column shapes that preserve row alignment.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import json2vec as jv
-
-
-@jv.postprocess
-def warehouse_rows(predictions, *, metadata):
-    label = predictions.get(jv.Address("record", "label"), {}).get("content", {})
-
-    return {
-        jv.Address("record", "warehouse_row"): {
-            "request_id": [item.get("request_id") for item in metadata],
-            "label": label.get("value"),
-            "label_probability": label.get("probability"),
-        }
-    }
-```
-
-Keep the returned lists the same length as the prediction batch. That makes the
-writer output easy to join back to evaluation or production records.
+This changes only written output. It does not disable embedding computation;
+remove `embed=True` from the schema when avoiding that computation is the goal.
 
 ## When Not To Use One
 
-Do not use a postprocessor to fix schema problems. If the model is reading the
-wrong source values, update the schema query or use a
-[preprocessor](data-modules.qmd#preprocessors). If you need a different target
-or embedding, change the schema with `target=True`, `embed=True`, or
-`model.update(...)`.
+Do not use a postprocessor to repair a model input or learning problem.
+
+- If a field reads the wrong source value, fix its query or the JSON2Vec
+  preprocessor.
+- If the wrong thing is trained or embedded, change `target`, `p_mask`,
+  `p_prune`, or `embed` in the schema.
+- If the model is poorly calibrated, evaluate and retrain it; renaming a score
+  does not create confidence.
+- If an external enrichment can fail or block, keep it outside the model path
+  unless the service explicitly owns that dependency and failure policy.
 
 Postprocessors are best for naming, filtering, thresholding, redaction,
-metadata joins, and response formatting.
+metadata joins, and stable response/warehouse shaping.
+
+## Common Failures
+
+| Symptom | Likely cause or next check |
+| --- | --- |
+| Callable is rejected | Decorate it with `@jv.postprocess`; an ordinary transformation is not a processor object. |
+| A provider is unavailable | Use the correct runtime or make that keyword-only parameter optional. |
+| `metadata` items have no `.get` | Each item is a list; read its model-facing record at `observation[0]`. |
+| Writer fails on a later batch | Keys, row counts, or value types changed after the first Arrow schema was established. |
+| Interactive and HTTP shapes differ | Interactive preserves the batch dimension; deployment denests each request. |
+| Processor returns an error | Return a mapping or mutate `predictions` and return `None`. |
 
 ## Where Next
 
-- Use [preprocessors](data-modules.qmd#preprocessors) for input-side Python
-  logic.
-- Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) when reshaping
-  embedding output for retrieval or clustering.
-- Use serving integrations for deployment wiring.
+- Understand the source envelope in [Prediction Output](prediction-output.qmd).
+- Use writer-specific shaping in [Batch Inference](batch-inference.qmd).
+- Wire and validate API responses in [Online Serving](serving.qmd).
+- Use [Data Modules](data-modules.qmd#preprocessors) for input-side processing.

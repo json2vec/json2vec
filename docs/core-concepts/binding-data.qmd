@@ -1,0 +1,311 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Binding Data
+
+**Example status — excerpt:** blocks compare binding choices; use the tested
+[Getting Started](../getting-started.qmd) lifecycle for complete execution.
+
+Binding is the decision between letting schema names read source keys directly,
+writing an explicit JMESPath query, and reshaping the record with a
+preprocessor.
+
+Start with the simplest option that expresses the input contract:
+
+| Source relationship | Use |
+| --- | --- |
+| Field and branch names already match the record | inferred query |
+| The source shape is stable, but a key or path differs | explicit `query=...` |
+| Values require Python logic, sorting, windowing, coercion, or derivation | `@jv.preprocess` |
+| One raw record should produce zero, one, or several model observations | yielding preprocessor |
+
+Queries select values. Preprocessors change observations. Keeping that boundary
+clear makes the input path easier to test and reuse.
+
+## Same Names Need No Configuration
+
+For flat records, a schema leaf reads the same-named source key:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+record = {
+    "amount": 12.50,
+    "merchant": "bookshop",
+    "approved": "true",
+}
+```
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import json2vec as jv
+
+model = jv.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    amount=jv.Number,
+    merchant=jv.Category(size=4096),
+    approved=jv.Category(target=True, size=2),
+)
+```
+
+The inferred bindings are:
+
+| Address | Request-level query |
+| --- | --- |
+| `record/amount` | `[*].amount` |
+| `record/merchant` | `[*].merchant` |
+| `record/approved` | `[*].approved` |
+
+The leading `[*]` selects from one processed observation. Public methods accept
+raw dictionaries and create that observation wrapper automatically.
+
+Changing the root name changes addresses, not source keys:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+named_model = jv.Model(
+    name="transaction",
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    amount=jv.Number,
+)
+```
+
+The address becomes `transaction/amount`; its query remains `[*].amount`.
+
+## Branch Names Infer Repeated Paths
+
+Use `Branch` when sibling fields share positions in a repeated child list:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+order = {
+    "order_source": "web",
+    "line_items": [
+        {"sku": "A12", "quantity": 2, "price": 19.99},
+        {"sku": "B07", "quantity": 1, "price": 45.50},
+    ],
+}
+```
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+order_model = jv.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    order_source=jv.Category(size=32),
+    line_items=jv.Branch(
+        length=32,
+        sku=jv.Category(size=2048),
+        quantity=jv.Number,
+        price=jv.Number,
+    ),
+)
+```
+
+| Address | Request-level query |
+| --- | --- |
+| `record/order_source` | `[*].order_source` |
+| `record/line_items/sku` | `[*].line_items[*].sku` |
+| `record/line_items/quantity` | `[*].line_items[*].quantity` |
+| `record/line_items/price` | `[*].line_items[*].price` |
+
+The child selector preserves the repeated dimension. Against one processed
+observation, `[*].line_items[*].sku` returns `[["A12", "B07"]]`: one root item
+containing two line-item values.
+
+Every additional nested `Branch` contributes another `.<name>[*]` segment.
+Branch overflow is applied after selection, in query-result order. Use
+`overflow="tail"` for histories whose newest items are last, or
+`overflow="error"` when silent truncation would violate the data contract.
+
+## Use A Query For Stable Selection
+
+An explicit query lets a stable schema use a differently shaped source:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+source_record = {
+    "transaction": {
+        "amount_usd": 12.50,
+        "merchant_name": "bookshop",
+    },
+    "outcome": "approved",
+}
+```
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+queried_model = jv.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    amount=jv.Number(query="[*].transaction.amount_usd"),
+    merchant=jv.Category(query="[*].transaction.merchant_name", size=4096),
+    label=jv.Category(query="[*].outcome", target=True, size=2),
+)
+```
+
+Keep these rules in mind:
+
+- write a full request-level query from the processed observation, usually
+  beginning with `[*].`;
+- do not add the outer batch selector—`[*][*].amount` is normally one level too
+  deep;
+- explicit leaf queries are not relative to their parent `Branch`;
+- preserve one result dimension for every branch in the schema path;
+- use JMESPath syntax, not JSONPath syntax.
+
+The schema address remains `record/merchant` even though its value comes from
+`transaction.merchant_name`. Addresses describe the model contract; queries
+describe the source contract.
+
+## Use A Preprocessor For Logic
+
+JMESPath is a selection language. Use a JSON2Vec `Preprocessor` when the
+transformation needs business logic or needs to be unit tested as Python:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+@jv.preprocess
+def normalize_transaction(record: dict) -> jv.Observation:
+    return jv.Observation(
+        {
+            "amount": float(record["amount_usd"]),
+            "merchant": record["merchant"].strip().lower(),
+        }
+    )
+```
+
+Pass the returned `Preprocessor` object to every path that consumes the raw
+shape:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+raw_requests = [{"amount_usd": "12.50", "merchant": " Bookshop "}]
+predictions = model.predict(raw_requests, preprocess=normalize_transaction)
+```
+
+Data modules also accept a preprocessor for training, validation, test, and
+predict splits. The same object should travel with the model workflow; changing
+normalization or time-window rules between splits changes the effective data
+contract.
+
+Use a preprocessor for:
+
+- type coercion and source-version normalization;
+- sorting before head/tail selection;
+- point-in-time or `as_of` filtering;
+- derived values such as elapsed time or recency;
+- coordinated filtering of several sibling fields;
+- yielding multiple model observations or discarding a raw record.
+
+See [Data Modules: Preprocessors](../guides/data-modules.qmd#preprocessors) for
+the return contract, provider arguments, and yielding preprocessors.
+
+## Keep Sibling Fields Aligned
+
+Leaves under one branch describe the same repeated coordinates. If custom
+queries filter siblings differently, the first value in one field may no longer
+describe the same child object as the first value in another.
+
+JSON2Vec uses a direct extractor for simple projection paths such as
+`[*].events[*].amount`. It preserves explicit `None` values when every child
+mapping contains the key. A stacking preprocessor should therefore write each
+nullable sibling key on every child object.
+
+More complex explicit JMESPath expressions—filters, functions, or quoted
+paths—fall back to standard JMESPath evaluation, whose projections can omit
+null results. Preserve positions with `map`:
+
+```python
+device_id=jv.Entity(
+    query="[*].map(&device_id, events[?event_type == 'login'])"
+)
+risk_score=jv.Number(
+    query="[*].map(&risk_score, events[?event_type == 'login'])"
+)
+```
+
+These queries apply the same filter and retain a `None` placeholder when a
+selected login has no risk score.
+
+For sorting, time windows, or multi-step rules, preprocess the child objects as
+one list before leaf queries run. That keeps alignment explicit and testable.
+
+Avoid JMESPath's flattening operator `[]` unless dropping an array dimension is
+intentional. A branch field commonly needs `[*].items[*].sku`, not
+`[*].items[].sku`.
+
+## Verify The Boundary
+
+Test a custom expression against one processed observation:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import jmespath
+
+observation = [source_record]
+assert jmespath.search("[*].transaction.amount_usd", observation) == [12.50]
+```
+
+Then inspect tensorization when a field is still empty or has the wrong shape:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+encoded = queried_model.encode([source_record])
+print(encoded)
+```
+
+`model.encode(...)` is a diagnostic boundary: it confirms what preprocessing
+and queries supplied before architecture behavior is involved.
+
+## Decision Checklist
+
+Before training, verify that:
+
+- every inferred field name exists in representative source records;
+- every explicit query starts at the processed-observation level;
+- query result dimensions match the branch path;
+- sibling queries preserve coordinate alignment;
+- branch length and overflow match ordering semantics;
+- the same preprocessor is used for train, validate, test, batch, and online
+  prediction;
+- target fields are present where loss is computed and may be omitted from
+  prediction requests.
+
+## Where Next
+
+- Use [Advanced Query Paths](querypaths.qmd) for quoted keys, filters, indexes,
+  slices, mutations, and troubleshooting.
+- Use [Data Flow](data-flow.qmd) to place binding in the full model lifecycle.
+- Use [Model Tree](model-tree.qmd) for branch shapes and addresses.
+- Use [Temporal Validation](../guides/temporal-validation.qmd) for point-in-time
+  preprocessing and leakage controls.
