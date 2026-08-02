@@ -222,6 +222,15 @@ def encode(
     if strata != Strata.predict and contains_mask_literal(batch):
         raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata")
 
+    from json2vec.tensorfields.extensions.entity import build_shared_group_vocabs
+
+    entity_group_vocabs = build_shared_group_vocabs(
+        batch=batch,
+        schema=schema,
+        strata=strata,
+        target_addresses=target_addresses,
+    )
+
     for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
@@ -253,6 +262,11 @@ def encode(
         )
         if "interprocess_encoding_context" in inspect.signature(TensorField.new).parameters:
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
+
+        if request.type == "entity":
+            group = getattr(request, "group", None)
+            if group is not None:
+                kwargs["shared_vocab"] = entity_group_vocabs[group]
 
         out[address] = TensorField.new(**kwargs)
         out[address].check_nullable(address=address, schema=schema)

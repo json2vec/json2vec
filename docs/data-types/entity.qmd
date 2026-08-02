@@ -85,6 +85,7 @@ are queried into the same repeated Entity leaf. See
 | Option | Default | Notes |
 | --- | --- | --- |
 | `topk` | `[]` | Optional top-k local-index accuracy metrics. Every value must be a positive integer other than `1` and less than the leaf's total configured slot count. |
+| `group` | `None` | Optional group name that unions this leaf with every other Entity leaf sharing the same name. All group members reindex against one per-observation vocabulary and share a single content embedding table and decoder projection, so an identifier that appears in one member is embedded identically when it appears in another member of the same observation. Group membership is scoped to one observation; ids do not persist across observations or batches. |
 
 The slot count is the product of the branch dimensions in this leaf's shape.
 The learned encoder table and decoder head use that fixed count. They learn

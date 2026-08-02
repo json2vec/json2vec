@@ -61,6 +61,7 @@ from json2vec.tensorfields.extensions.dateparts import Request as DateParts
 from json2vec.tensorfields.extensions.entity import Request as Entity
 from json2vec.tensorfields.extensions.number import Request as Number
 from json2vec.tensorfields.extensions.set import Request as Set
+from json2vec.tensorfields.extensions.staticEntity import Request as StaticEntity
 from json2vec.tensorfields.extensions.text import Request as Text
 from json2vec.tensorfields.extensions.vector import Request as Vector
 from json2vec.tensorfields.shared.vocabulary import VocabularySyncCallback
@@ -157,8 +158,10 @@ __all__ = [
     "SchedulerConfig",
     "SchemaField",
     "ShardingStrategy",
+    "StaticEntity",
     "StreamingDataModule",
     "Strata",
+
     "Suffix",
     "TENSORFIELDS",
     "TensorFieldBase",

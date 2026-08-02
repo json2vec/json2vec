@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import weakref
 from collections.abc import Hashable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -31,12 +32,53 @@ if TYPE_CHECKING:
 
 entity: Plugin = Plugin(name="entity")
 
+_GROUP_STATE: dict[tuple[int, str], dict[str, Any]] = {}
 
-def _local_reindex(data: np.ndarray, states: np.ndarray) -> np.ndarray:
+
+def _group_state(schema: Schema, group: str) -> dict[str, Any]:
+    key = (id(schema), group)
+    cached = _GROUP_STATE.get(key)
+    if cached is not None:
+        return cached
+
+    addresses = sorted(
+        (
+            address
+            for address, request in schema.active_requests.items()
+            if request.type == "entity" and getattr(request, "group", None) == group
+        ),
+        key=str,
+    )
+    if not addresses:
+        raise ValueError(f"no active entity fields configured for group '{group}'")
+
+    max_slots = sum(math.prod(schema.shapes[address]) for address in addresses)
+
+    state: dict[str, Any] = {
+        "addresses": tuple(addresses),
+        "max_slots": max_slots,
+        "canonical": addresses[0],
+        "embedding": None,
+        "projection": None,
+    }
+    _GROUP_STATE[key] = state
+    weakref.finalize(schema, _GROUP_STATE.pop, key, None)
+    return state
+
+
+def _local_reindex(
+    data: np.ndarray,
+    states: np.ndarray,
+    shared_vocab: list[dict[Hashable, int]] | None = None,
+) -> np.ndarray:
     tokens = np.zeros_like(states, dtype=np.int64)
 
     for observation_index in range(data.shape[0]):
-        vocab: dict[Hashable, int] = {}
+        vocab: dict[Hashable, int]
+        if shared_vocab is not None:
+            vocab = shared_vocab[observation_index]
+        else:
+            vocab = {}
         flat_values = data[observation_index].reshape(-1)
         flat_states = states[observation_index].reshape(-1)
         flat_tokens = tokens[observation_index].reshape(-1)
@@ -54,6 +96,86 @@ def _local_reindex(data: np.ndarray, states: np.ndarray) -> np.ndarray:
 
     return tokens
 
+#TODO try providing just the structural map as it's own branch so that the information and graphical traversals aren't lost in the upwards cross-attentions.
+
+def build_shared_group_vocabs(
+    batch: Any,
+    schema: Schema,
+    strata: Strata,
+    target_addresses: set[Address] | frozenset[Address],
+) -> dict[str, list[dict[Hashable, int]]]:
+    """Pre-populate per-observation shared vocabs for every grouped entity.
+
+    Called once per batch by the encode pipeline. Runs the same JMESPath and
+    padding path each grouped ``TensorField.new`` would run, then unions the
+    valued cells per observation into one dict per group.
+    """
+    from json2vec.data.iterables import compile_query_extractor, query as _jmes_query #noqa: I001
+
+    groups: dict[str, list[Address]] = {}
+    for address, request in schema.active_requests.items():
+        if request.type != "entity":
+            continue
+        group = getattr(request, "group", None)
+        if group is None:
+            continue
+        groups.setdefault(group, []).append(address)
+
+    if not groups:
+        return {}
+
+    batch_size = len(batch)
+    result: dict[str, list[dict[Hashable, int]]] = {}
+
+    for group_name, addresses in groups.items():
+        vocabs: list[dict[Hashable, int]] = [{} for _ in range(batch_size)]
+
+        for address in sorted(addresses, key=str):
+            if strata == Strata.predict and address in target_addresses:
+                continue
+
+            request = schema.active_requests[address]
+            expression = request.query
+            if expression is None:
+                raise ValueError(f"request '{address}' must define query")
+
+            extractor = compile_query_extractor(expression)
+            values = extractor(batch) if extractor is not None else _jmes_query(expression).search(batch)
+
+            leading_shape = (batch_size, *schema.shapes[address])
+            cleaned, _ = extract_mask_literals(
+                values,
+                strata=strata,
+                address=address,
+                leaf_depth=len(leading_shape),
+            )
+            data, states = pad(
+                nested=cleaned,
+                shape=leading_shape,
+                dtype=object,
+                pad_value=None,
+                overflows=schema.overflows(address),
+                address=address,
+            )
+
+            for observation_index in range(batch_size):
+                flat_values = data[observation_index].reshape(-1)
+                flat_states = states[observation_index].reshape(-1)
+                vocab = vocabs[observation_index]
+                for index, state in enumerate(flat_states):
+                    if state != Tokens.valued.value:
+                        continue
+                    value = flat_values[index]
+                    if not isinstance(value, Hashable):
+                        raise TypeError(
+                            f"entity values must be hashable, got {type(value).__name__}"
+                        )
+                    vocab.setdefault(value, len(vocab))
+
+        result[group_name] = vocabs
+
+    return result
+
 
 @entity.register
 class Request(RequestBase):
@@ -61,6 +183,7 @@ class Request(RequestBase):
 
     type: Literal["entity"] = "entity"
     topk: list[int] | None = None
+    group: str | None = None
 
     @pydantic.model_validator(mode="after")
     def check_topk(self):
@@ -81,14 +204,14 @@ class Request(RequestBase):
 
     def post_bind_validate(self):
         max_slots: int = math.prod(self.shape)
-        if max_slots <= 1:
+        if self.group is None and max_slots <= 1:
             raise ValueError(
                 f"entity field at '{self.address}' requires at least 2 elements per observation, "
                 f"but configured count is {max_slots}"
             )
 
         for topk in self.topk or []:
-            if topk >= max_slots:
+            if topk >= max_slots and self.group is None:
                 raise ValueError("topk values must be less than the entity slot count")
 
 
@@ -107,6 +230,7 @@ class TensorField(TensorFieldBase):
         address: Address,
         schema: Schema,
         strata: Strata,
+        shared_vocab: list[dict[Hashable, int]] | None = None,
     ) -> TensorFieldBase:
         array_shape: tuple[int, ...] = schema.shapes[address]
         leading_shape: tuple[int, ...] = (len(values), *array_shape)
@@ -135,7 +259,7 @@ class TensorField(TensorFieldBase):
         )
 
         try:
-            tokens = _local_reindex(data=data, states=states)
+            tokens = _local_reindex(data=data, states=states, shared_vocab=shared_vocab)
         except TypeError as error:
             raise ValueError(f"entity field at '{address}' only accepts hashable scalar values") from error
 
@@ -200,9 +324,26 @@ class Embedder(EmbedderBase):
     def __init__(self, schema: Schema, address: Address):
         super().__init__(schema=schema, address=address)
 
-        self.max_slots: int = math.prod(schema.shapes[address])
         self.origin: Address = address
         self.destination: Address = schema.requests[address].parent.address
+
+        group = getattr(schema.requests[address], "group", None)
+        if group is not None:
+            state = _group_state(schema, group)
+            self.max_slots: int = state["max_slots"]
+            if state["embedding"] is None:
+                state["embedding"] = torch.nn.Embedding(
+                    num_embeddings=self.max_slots,
+                    embedding_dim=schema.d_model,
+                )
+            content_embedding: torch.nn.Embedding = state["embedding"]
+        else:
+            self.max_slots = math.prod(schema.shapes[address])
+            content_embedding = torch.nn.Embedding(
+                num_embeddings=self.max_slots,
+                embedding_dim=schema.d_model,
+            )
+
         self.n_embeddings: int = self.max_slots + len(Tokens)
 
         self.embeddings = torch.nn.ModuleDict(
@@ -211,10 +352,7 @@ class Embedder(EmbedderBase):
                     num_embeddings=len(Tokens),
                     embedding_dim=schema.d_model,
                 ),
-                TensorKey.content.name: torch.nn.Embedding(
-                    num_embeddings=self.max_slots,
-                    embedding_dim=schema.d_model,
-                ),
+                TensorKey.content.name: content_embedding,
             }
         )
 
@@ -250,9 +388,22 @@ class Decoder(DecoderBase):
     def __init__(self, schema: Schema, address: Address):
         super().__init__(schema=schema, address=address)
 
-        self.max_slots: int = math.prod(schema.shapes[address])
+        group = getattr(schema.requests[address], "group", None)
+        if group is not None:
+            state = _group_state(schema, group)
+            self.max_slots: int = state["max_slots"]
+            if state["projection"] is None:
+                state["projection"] = torch.nn.Linear(
+                    in_features=schema.d_model,
+                    out_features=self.max_slots,
+                )
+            projection: torch.nn.Linear = state["projection"]
+        else:
+            self.max_slots = math.prod(schema.shapes[address])
+            projection = torch.nn.Linear(in_features=schema.d_model, out_features=self.max_slots)
+
         self.state_linear = torch.nn.Linear(in_features=schema.d_model, out_features=len(Tokens))
-        self.projection = torch.nn.Linear(in_features=schema.d_model, out_features=self.max_slots)
+        self.projection = projection
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
