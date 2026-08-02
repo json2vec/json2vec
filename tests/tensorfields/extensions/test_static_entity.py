@@ -7,9 +7,12 @@ from json2vec.structs.experiment import Schema
 from json2vec.tensorfields.extensions.staticEntity import (
     Decoder,
     Embedder,
+    EpochSaltCallback,
     TensorField,
     _bucketize,
+    _get_epoch_salt,
     _hash_value,
+    _set_epoch_salt,
     _static_hash_content,
 )
 
@@ -560,3 +563,143 @@ def test_static_entity_group_training_step_backpropagates_through_shared_linears
     shared_decoder = model.nodes[address_items].decoder.content_linear.weight
     assert shared_encoder.grad is not None and torch.isfinite(shared_encoder.grad).all()
     assert shared_decoder.grad is not None and torch.isfinite(shared_decoder.grad).all()
+
+
+# --- epoch salt rotation ----------------------------------------------------------
+
+
+def test_hash_value_rotates_with_salt():
+    value = "alice"
+    baseline = _hash_value(value, seed=0)
+    rotated = _hash_value(value, seed=0, salt=1)
+    assert baseline != rotated
+    assert baseline == _hash_value(value, seed=0, salt=0)
+
+
+def test_static_hash_content_rotates_with_salt():
+    import numpy as np
+
+    data = np.array([["alice", "bob"]], dtype=object)
+    states = np.full(data.shape, Tokens.valued.value, dtype=np.int64)
+
+    epoch0 = _static_hash_content(data=data, states=states, n_hashes=4, salt=0)
+    epoch1 = _static_hash_content(data=data, states=states, n_hashes=4, salt=1)
+    assert not np.array_equal(epoch0, epoch1)
+    assert np.array_equal(epoch0, _static_hash_content(data=data, states=states, n_hashes=4, salt=0))
+
+
+def test_tensorfield_content_reflects_current_epoch_salt():
+    schema = Schema.model_validate(_structure_payload(length=2, n_hashes=4))
+    values = [[["alice", "bob"]]]
+
+    try:
+        _set_epoch_salt(schema, 0)
+        field_a = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train)
+        _set_epoch_salt(schema, 1)
+        field_b = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train)
+        _set_epoch_salt(schema, 0)
+        field_c = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train)
+    finally:
+        _set_epoch_salt(schema, 0)
+
+    assert not torch.equal(field_a.content, field_b.content)
+    assert torch.equal(field_a.content, field_c.content)
+
+
+def test_epoch_salt_defaults_to_zero_per_schema():
+    schema = Schema.model_validate(_structure_payload())
+    assert _get_epoch_salt(schema) == 0
+
+
+def test_epoch_salt_isolated_between_schemas():
+    schema_a = Schema.model_validate(_structure_payload())
+    schema_b = Schema.model_validate(_structure_payload())
+
+    _set_epoch_salt(schema_a, 7)
+    assert _get_epoch_salt(schema_a) == 7
+    assert _get_epoch_salt(schema_b) == 0
+
+
+def test_epoch_salt_registry_is_cleaned_up_after_schema_gc():
+    import gc
+
+    from json2vec.tensorfields.extensions import staticEntity as module
+
+    schema = Schema.model_validate(_structure_payload())
+    _set_epoch_salt(schema, 3)
+    key = id(schema)
+    assert key in module._EPOCH_SALT
+
+    del schema
+    gc.collect()
+    assert key not in module._EPOCH_SALT
+
+
+def test_grouped_values_stay_matched_under_rotating_salt():
+    model = _grouped_model()
+    records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
+
+    projections_by_epoch: list[tuple[torch.Tensor, torch.Tensor]] = []
+    try:
+        for salt in (0, 1, 2):
+            _set_epoch_salt(model.schema, salt)
+            inputs = model.encode(records, strata=Strata.train, mask=False)
+            items_projection = model.nodes["record/items/id"].embedder(inputs["record/items/id"]).payload
+            owner_projection = model.nodes["record/owner"].embedder(inputs["record/owner"]).payload
+            projections_by_epoch.append((items_projection[0, 0, 0].detach(), owner_projection[0, 0].detach()))
+    finally:
+        _set_epoch_salt(model.schema, 0)
+
+    # Same value at both addresses matches within each epoch (group sharing preserved under rotation).
+    for items_alice, owner_alice in projections_by_epoch:
+        assert torch.allclose(items_alice, owner_alice)
+
+    # But the alice representation itself rotates across epochs.
+    for later in projections_by_epoch[1:]:
+        assert not torch.allclose(projections_by_epoch[0][0], later[0])
+
+
+def test_epoch_salt_callback_registered_via_plugin():
+    from json2vec.tensorfields.extensions.staticEntity import static_entity
+
+    factories = static_entity.callback_factories
+    assert EpochSaltCallback in factories
+
+
+def test_epoch_salt_callback_hooks_track_lightning_epoch():
+    schema = Schema.model_validate(_structure_payload())
+
+    class _Stub:
+        def __init__(self, schema: Schema, current_epoch: int) -> None:
+            self.schema = schema
+            self.current_epoch = current_epoch
+
+    callback = EpochSaltCallback()
+
+    callback.on_train_epoch_start(trainer=None, pl_module=_Stub(schema, current_epoch=0))
+    assert _get_epoch_salt(schema) == 1
+
+    callback.on_train_epoch_start(trainer=None, pl_module=_Stub(schema, current_epoch=4))
+    assert _get_epoch_salt(schema) == 5
+
+    callback.on_validation_epoch_start(trainer=None, pl_module=_Stub(schema, current_epoch=4))
+    assert _get_epoch_salt(schema) == 5
+
+    callback.on_test_epoch_start(trainer=None, pl_module=_Stub(schema, current_epoch=4))
+    assert _get_epoch_salt(schema) == 0
+
+    callback.on_predict_epoch_start(trainer=None, pl_module=_Stub(schema, current_epoch=4))
+    assert _get_epoch_salt(schema) == 0
+
+
+def test_configure_callbacks_includes_epoch_salt_callback_when_static_entity_active():
+    model = jv.Model(
+        jv.StaticEntity("owner", n_hashes=2, n_buckets=4),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=1,
+    )
+
+    callback_types = {type(cb) for cb in model.configure_callbacks()}
+    assert EpochSaltCallback in callback_types

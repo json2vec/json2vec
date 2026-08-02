@@ -11,6 +11,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from lightning import Callback, Trainer
 from tensordict import TensorDict, tensorclass
 
 from json2vec.data.nested import extract_mask_literals, pad
@@ -36,10 +37,25 @@ static_entity: Plugin = Plugin(name="static_entity")
 
 _HASH_DIGEST_BYTES: int = 8
 _HASH_NORMALIZER: float = float(1 << (_HASH_DIGEST_BYTES * 8 - 1))
+_HASH_KEY_BYTES: int = 8
 
 _GROUP_STATE: dict[tuple[int, str], dict[str, Any]] = {}
 
 _GROUP_CONFIG_FIELDS: tuple[str, ...] = ("n_hashes", "n_bands", "offset", "n_buckets")
+
+_EPOCH_SALT: dict[int, int] = {}
+
+
+def _set_epoch_salt(schema: Schema, salt: int) -> None:
+    """Set the per-schema hash salt used by every `static_entity` field."""
+    key = id(schema)
+    if key not in _EPOCH_SALT:
+        weakref.finalize(schema, _EPOCH_SALT.pop, key, None)
+    _EPOCH_SALT[key] = int(salt)
+
+
+def _get_epoch_salt(schema: Schema) -> int:
+    return _EPOCH_SALT.get(id(schema), 0)
 
 
 def _group_state(schema: Schema, group: str) -> dict[str, Any]:
@@ -94,9 +110,11 @@ def _canonical_bytes(value: Any) -> bytes:
     return repr(value).encode("utf-8")
 
 
-def _hash_value(value: Any, seed: int) -> float:
-    """Deterministic scalar hash in [-1, 1) seeded per hash function."""
-    key = seed.to_bytes(_HASH_DIGEST_BYTES, "big")
+def _hash_value(value: Any, seed: int, *, salt: int = 0) -> float:
+    """Deterministic scalar hash in [-1, 1) seeded per hash function and salt."""
+    key = salt.to_bytes(_HASH_KEY_BYTES, "big", signed=False) + seed.to_bytes(
+        _HASH_KEY_BYTES, "big", signed=False
+    )
     digest = hashlib.blake2b(_canonical_bytes(value), digest_size=_HASH_DIGEST_BYTES, key=key).digest()
     raw = int.from_bytes(digest, "big", signed=False)
     return (raw / _HASH_NORMALIZER) - 1.0
@@ -106,6 +124,8 @@ def _static_hash_content(
     data: np.ndarray,
     states: np.ndarray,
     n_hashes: int,
+    *,
+    salt: int = 0,
 ) -> np.ndarray:
     """Compute per-value hash vectors of shape (*data.shape, n_hashes)."""
     content = np.zeros((*data.shape, n_hashes), dtype=np.float32)
@@ -122,7 +142,7 @@ def _static_hash_content(
             raise TypeError(f"static_entity values must be hashable, got {type(value).__name__}")
 
         for seed in range(n_hashes):
-            flat_content[index, seed] = _hash_value(value, seed)
+            flat_content[index, seed] = _hash_value(value, seed, salt=salt)
 
     return content
 
@@ -153,6 +173,13 @@ class Request(RequestBase):
     group name, so the same input value produces identical embeddings and
     reconstruction targets at every address in the group. All grouped
     addresses must share `n_hashes`, `n_bands`, `offset`, and `n_buckets`.
+
+    During training the hash key is additionally salted by the current
+    Lightning epoch, so vocabulary identities rotate every epoch and the
+    network cannot memorise persistent value-specific representations. Only
+    within-observation relations (equality, co-occurrence, ordering under a
+    fixed epoch) can be learned. Validation reuses the concurrent training
+    epoch salt; test and predict fall back to a fixed default salt of 0.
     """
 
     type: Literal["static_entity"] = "static_entity"
@@ -209,7 +236,12 @@ class TensorField(TensorFieldBase):
         )
 
         try:
-            content_np = _static_hash_content(data=data, states=states, n_hashes=n_hashes)
+            content_np = _static_hash_content(
+                data=data,
+                states=states,
+                n_hashes=n_hashes,
+                salt=_get_epoch_salt(schema),
+            )
         except TypeError as error:
             raise ValueError(f"static_entity field at '{address}' only accepts hashable scalar values") from error
 
@@ -441,3 +473,32 @@ def loss(
 @static_entity.register
 def write(module: Model, prediction: Prediction):
     return None
+
+
+class EpochSaltCallback(Callback):
+    """Rotate the `static_entity` hash salt every Lightning epoch.
+
+    Salting keys hashes to `current_epoch + 1` during train and validation so
+    grouped/matching values stay consistent within an epoch but rotate across
+    epochs. Test and predict run with a fixed salt of 0 so external callers see
+    a stable representation.
+    """
+
+    @staticmethod
+    def _training_salt(pl_module: Model) -> int:
+        return int(pl_module.current_epoch) + 1
+
+    def on_train_epoch_start(self, trainer: Trainer, pl_module: Model) -> None:
+        _set_epoch_salt(pl_module.schema, self._training_salt(pl_module))
+
+    def on_validation_epoch_start(self, trainer: Trainer, pl_module: Model) -> None:
+        _set_epoch_salt(pl_module.schema, self._training_salt(pl_module))
+
+    def on_test_epoch_start(self, trainer: Trainer, pl_module: Model) -> None:
+        _set_epoch_salt(pl_module.schema, 0)
+
+    def on_predict_epoch_start(self, trainer: Trainer, pl_module: Model) -> None:
+        _set_epoch_salt(pl_module.schema, 0)
+
+
+static_entity.callback(EpochSaltCallback)
