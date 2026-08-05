@@ -8,7 +8,7 @@ eval: false
 **Example status — excerpt:** settings are tuning patterns, not portable
 benchmarks or complete training jobs.
 
-JSON2Vec performance is determined by the schema shape as much as by model
+RelFlow performance is determined by the schema shape as much as by model
 width. Fixed branch lengths, datatype capacities, data-loader behavior, and
 prediction output can dominate before raw parameter count does.
 
@@ -27,7 +27,7 @@ Separate four measurements:
 | Write/postprocess | CPU transfer, probability conversion, embeddings, top-k, reshaping | Oversized output contracts and Python serialization. |
 | End-to-end service | Queue, dynamic batching, all stages above, JSON, network | User-visible latency and saturation. |
 
-Lightning runs include JSON2Vec's `throughput/train`, `throughput/validate`,
+Lightning runs include RelFlow's `throughput/train`, `throughput/validate`,
 `throughput/test`, or `throughput/predict` epoch metric. It estimates processed
 observations from completed batches and configured model batch size. Use it for
 comparisons under the same setup, then confirm important results with an
@@ -50,7 +50,7 @@ Before increasing a branch length:
 1. measure the observed length distribution by split;
 2. choose a percentile or business rule, not the maximum outlier;
 3. select `overflow="head"` or `"tail"` from event meaning;
-4. log truncation outside JSON2Vec if losing records matters operationally;
+4. log truncation outside RelFlow if losing records matters operationally;
 5. compare quality and throughput at two or three candidate lengths.
 
 Nested branches multiply shape. A long child inside a long parent can create a
@@ -150,7 +150,7 @@ quality.
 ## Distributed Training
 
 ::: {.callout-warning title="Distributed support level"}
-JSON2Vec provides Lightning-compatible distributed execution, streaming
+RelFlow provides Lightning-compatible distributed execution, streaming
 sharding, vocabulary synchronization, and rank-partitioned output, and these
 paths have focused tests. There is no cross-version distributed compatibility
 guarantee or universal topology recipe. Pin the package, validate record
@@ -158,7 +158,7 @@ ownership and vocabulary state at the intended world size, and treat each
 hardware/data layout as an integration you must benchmark.
 :::
 
-JSON2Vec registers callbacks that synchronize online vocabularies and place
+RelFlow registers callbacks that synchronize online vocabularies and place
 late-created modules on the active device. Distributed runs still require a
 consistent contract:
 
@@ -193,7 +193,7 @@ batch sizes.
 Store at least this metadata with a result:
 
 ```yaml
-json2vec_version: 0.4.11
+relflow_version: 0.4.11
 device: "example: NVIDIA GPU model or CPU model"
 precision: "32-true"
 batch_size: 128

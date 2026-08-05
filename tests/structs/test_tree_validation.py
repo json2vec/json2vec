@@ -1,7 +1,7 @@
 import pydantic
 import pytest
 
-from json2vec.structs.tree import Address, Leaf, Node
+from relflow.structs.tree import Address, Leaf, Node
 
 
 class AddressPayload(pydantic.BaseModel):

@@ -4,17 +4,17 @@ import torch
 from lightning.pytorch.utilities.model_summary.model_summary import summarize
 from loguru import logger
 
-import json2vec as jv
-from json2vec.architecture.checkpoint import CheckpointState
-from json2vec.architecture.graph import ModelGraph
-from json2vec.architecture.mutations import SchemaEditor
-from json2vec.structs import experiment, selectors
+import relflow as rf
+from relflow.architecture.checkpoint import CheckpointState
+from relflow.architecture.graph import ModelGraph
+from relflow.architecture.mutations import SchemaEditor
+from relflow.structs import experiment, selectors
 
 
-def _model() -> jv.Model:
-    return jv.Model(
-        jv.Number(name="amount"),
-        jv.Category(name="label", target=True, size=4),
+def _model() -> rf.Model:
+    return rf.Model(
+        rf.Number(name="amount"),
+        rf.Category(name="label", target=True, size=4),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -24,9 +24,9 @@ def _model() -> jv.Model:
 def test_model_uses_mutation_facade() -> None:
     model = _model()
 
-    assert isinstance(model.schema, jv.Schema)
+    assert isinstance(model.schema, rf.Schema)
     assert isinstance(model._schema_editor, SchemaEditor)
-    assert model.schema.select(jv.where("name") == "amount") == model.select(jv.where("name") == "amount")
+    assert model.schema.select(rf.where("name") == "amount") == model.select(rf.where("name") == "amount")
 
 
 def test_model_mutations_emit_structured_logs() -> None:
@@ -41,14 +41,14 @@ def test_model_mutations_emit_structured_logs() -> None:
     )
 
     try:
-        model.update(jv.where("name") == "amount", weight=2.0)
-        model.update(jv.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-        model.update(jv.where("name") == "amount", target=True)
-        model.extend(jv.where("name") == "record", jv.Category(name="extra", size=4))
-        model.reset(jv.where("name") == "amount")
-        with model.override(jv.where("name") == "amount", weight=3.0):
+        model.update(rf.where("name") == "amount", weight=2.0)
+        model.update(rf.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+        model.update(rf.where("name") == "amount", target=True)
+        model.extend(rf.where("name") == "record", rf.Category(name="extra", size=4))
+        model.reset(rf.where("name") == "amount")
+        with model.override(rf.where("name") == "amount", weight=3.0):
             pass
-        model.delete(jv.where("name") == "extra")
+        model.delete(rf.where("name") == "extra")
     finally:
         logger.remove(sink_id)
 
@@ -91,7 +91,7 @@ def test_model_mutation_logs_include_previous_and_current_address_for_renames() 
     )
 
     try:
-        model.update(jv.where("name") == "amount", name="total")
+        model.update(rf.where("name") == "amount", name="total")
     finally:
         logger.remove(sink_id)
 
@@ -132,7 +132,7 @@ def test_checkpoint_state_round_trip(tmp_path) -> None:
     path = tmp_path / "model.ckpt"
 
     CheckpointState.save(model, path)
-    restored = CheckpointState.load(jv.Model, path)
+    restored = CheckpointState.load(rf.Model, path)
 
     assert restored.schema.model_dump(mode="python") == model.schema.model_dump(mode="python")
     assert restored.batch_size == model.batch_size

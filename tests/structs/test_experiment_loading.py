@@ -1,5 +1,5 @@
-import json2vec.structs.experiment as experiment_module
-from json2vec.structs.experiment import Schema
+import relflow.structs.experiment as experiment_module
+from relflow.structs.experiment import Schema
 
 
 def _structure_payload() -> dict:

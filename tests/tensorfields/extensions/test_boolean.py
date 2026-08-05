@@ -6,10 +6,10 @@ import torch
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
-from json2vec.structs.enums import Metric, Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.boolean import BooleanCounter, Decoder, Embedder, TensorField, loss, write
+from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.structs.packages import Prediction
+from relflow.tensorfields.extensions.boolean import BooleanCounter, Decoder, Embedder, TensorField, loss, write
 
 ADDRESS = "root/groups/items/enabled"
 

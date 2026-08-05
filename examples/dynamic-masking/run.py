@@ -5,8 +5,8 @@ import string
 
 from rich import print
 
-import json2vec as jv
-from json2vec.structs.enums import Strata
+import relflow as rf
+from relflow.structs.enums import Strata
 
 ALPHABET = string.ascii_uppercase
 ADDRESS = "record/words/letters/letter"
@@ -29,16 +29,16 @@ def records(n: int, *, seed: int = 7) -> list[dict[str, list[dict[str, list[dict
 
 
 if __name__ == "__main__":
-    model = jv.Model.from_tree(
+    model = rf.Model.from_tree(
         d_model=16,
         n_layers=1,
         n_heads=4,
-        words=jv.Branch(
+        words=rf.Branch(
             length=3,
-            letters=jv.Branch(
+            letters=rf.Branch(
                 length=8,
-                mask=jv.Mask(count=2, window=2),
-                letter=jv.Category(size=len(ALPHABET), p_unavailable=0.0),
+                mask=rf.Mask(count=2, window=2),
+                letter=rf.Category(size=len(ALPHABET), p_unavailable=0.0),
             ),
         ),
     )

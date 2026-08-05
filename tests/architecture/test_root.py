@@ -6,15 +6,15 @@ from pathlib import Path
 import pytest
 import torch
 
-import json2vec as jv
-from json2vec.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
-from json2vec.data.iterables import encode
-from json2vec.logging.throughput import ThroughputLogger
-from json2vec.structs.enums import AttentionMode, Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.structs.tree import Address
-from json2vec.tensorfields.shared.counter import CounterUpdateCallback
-from json2vec.tensorfields.shared.vocabulary import (
+import relflow as rf
+from relflow.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
+from relflow.data.iterables import encode
+from relflow.logging.throughput import ThroughputLogger
+from relflow.structs.enums import AttentionMode, Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.structs.tree import Address
+from relflow.tensorfields.shared.counter import CounterUpdateCallback
+from relflow.tensorfields.shared.vocabulary import (
     OnlineVocabularyModel,
     VocabularySyncCallback,
 )
@@ -59,7 +59,7 @@ def test_model_rejects_schema_combined_with_tree_configuration() -> None:
 
 def test_model_tree_constructor_requires_architecture_options() -> None:
     with pytest.raises(TypeError, match="requires n_layers, n_heads"):
-        Model(jv.Number("amount"), d_model=8)
+        Model(rf.Number("amount"), d_model=8)
 
 
 def test_on_save_checkpoint_serializes_schema() -> None:
@@ -687,9 +687,9 @@ def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
 
 
 def test_encode_branch_tail_overflow_keeps_last_values() -> None:
-    model = jv.Model(
-        jv.Branch(
-            jv.Number("amount"),
+    model = rf.Model(
+        rf.Branch(
+            rf.Number("amount"),
             name="events",
             length=2,
             overflow="tail",
@@ -716,9 +716,9 @@ def test_encode_branch_tail_overflow_keeps_last_values() -> None:
 
 
 def test_encode_branch_error_overflow_raises() -> None:
-    model = jv.Model(
-        jv.Branch(
-            jv.Number("amount"),
+    model = rf.Model(
+        rf.Branch(
+            rf.Number("amount"),
             name="events",
             length=2,
             overflow="error",
@@ -743,8 +743,8 @@ def test_encode_branch_error_overflow_raises() -> None:
 
 
 def test_encode_allows_null_inputs_by_default() -> None:
-    model = jv.Model(
-        amount=jv.Number,
+    model = rf.Model(
+        amount=rf.Number,
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -758,8 +758,8 @@ def test_encode_allows_null_inputs_by_default() -> None:
 
 
 def test_encode_nullable_false_rejects_null_inputs() -> None:
-    model = jv.Model(
-        amount=jv.Number(nullable=False),
+    model = rf.Model(
+        amount=rf.Number(nullable=False),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -770,9 +770,9 @@ def test_encode_nullable_false_rejects_null_inputs() -> None:
 
 
 def test_encode_accepts_preprocess() -> None:
-    @jv.preprocess
+    @rf.preprocess
     def __root_helper_preprocess(observation: dict):
-        return jv.Observation({"color": observation["hue"]})
+        return rf.Observation({"color": observation["hue"]})
 
     model = _primed_prediction_model()
 
@@ -895,7 +895,7 @@ def test_inference_helpers_accept_postprocess() -> None:
     model = _primed_prediction_model()
     calls = []
 
-    @jv.postprocess
+    @rf.postprocess
     def postprocess(predictions, *, batch, input, metadata):
         calls.append((batch, input, metadata, predictions))
         return {
@@ -920,9 +920,9 @@ def test_inference_helpers_accept_postprocess() -> None:
 
 
 def test_inference_helpers_accept_preprocess() -> None:
-    @jv.preprocess
+    @rf.preprocess
     def __root_helper_preprocess(observation: dict):
-        return jv.Observation({"color": observation["hue"]})
+        return rf.Observation({"color": observation["hue"]})
 
     model = _primed_prediction_model()
 

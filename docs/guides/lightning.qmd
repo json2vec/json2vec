@@ -8,8 +8,8 @@ eval: false
 **Example status — runnable:** the fit/validate/save/load/predict pattern is
 executed by `uv run pytest tests/examples/test_e2e_examples.py`.
 
-`jv.Model` is a Lightning `LightningModule`, and JSON2Vec data modules implement
-Lightning's `LightningDataModule` contract. JSON2Vec owns the schema-generated
+`rf.Model` is a Lightning `LightningModule`, and RelFlow data modules implement
+Lightning's `LightningDataModule` contract. RelFlow owns the schema-generated
 model, typed losses, and prediction writing; Lightning owns execution.
 
 Use this guide when the schema and data splits already exist and you need to
@@ -20,15 +20,15 @@ and [Evaluation And Metrics](evaluation.qmd) for interpreting the result.
 
 | Concern | Owner |
 | --- | --- |
-| Schema, addresses, queries, targets, embeddings | JSON2Vec model |
-| Tensorization, value state, datatype losses and metrics | JSON2Vec model and data module |
-| Optimizer and scheduler factories | `jv.Model` configuration |
+| Schema, addresses, queries, targets, embeddings | RelFlow model |
+| Tensorization, value state, datatype losses and metrics | RelFlow model and data module |
+| Optimizer and scheduler factories | `rf.Model` configuration |
 | Epochs, devices, precision, callbacks, loggers, checkpoints | Lightning `Trainer` |
-| Data loading, workers, preprocessing, masking, sharding | JSON2Vec data module |
-| Batch prediction files | `Trainer.predict(...)` with `jv.Writer` |
+| Data loading, workers, preprocessing, masking, sharding | RelFlow data module |
+| Batch prediction files | `Trainer.predict(...)` with `rf.Writer` |
 
 Normal Lightning callbacks, loggers, device placement, precision modes, and
-distributed strategies apply. JSON2Vec also installs the internal callbacks
+distributed strategies apply. RelFlow also installs the internal callbacks
 needed by active tensorfields and runtime contracts.
 
 ## Minimal Training Loop
@@ -45,7 +45,7 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 
-import json2vec as jv
+import relflow as rf
 
 records = pl.DataFrame(
     {
@@ -55,7 +55,7 @@ records = pl.DataFrame(
     }
 )
 
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
@@ -64,12 +64,12 @@ model = jv.Model(
         module.parameters(),
         lr=1e-3,
     ),
-    amount=jv.Number,
-    merchant=jv.Category(size=3),
-    fraud=jv.Category(target=True, size=2),
+    amount=rf.Number,
+    merchant=rf.Category(size=3),
+    fraud=rf.Category(target=True, size=2),
 )
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -100,9 +100,9 @@ scheduler configuration can also be supplied directly.
 
 ## Configure The Matching Loop And Split
 
-Lightning calls the corresponding JSON2Vec step for each stage:
+Lightning calls the corresponding RelFlow step for each stage:
 
-| Trainer entry point | Data-module split | JSON2Vec stage |
+| Trainer entry point | Data-module split | RelFlow stage |
 | --- | --- | --- |
 | `trainer.fit(...)` | `train`, optionally `validate` | `train`, `validate` |
 | `trainer.validate(...)` | `validate` | `validate` |
@@ -119,7 +119,7 @@ prediction path: use the intended split so those semantics remain explicit.
 
 ## Log And Inspect Metrics
 
-JSON2Vec logs epoch-level metrics through Lightning. The weighted total losses
+RelFlow logs epoch-level metrics through Lightning. The weighted total losses
 are `loss/train`, `loss/validate`, and `loss/test`; individual leaves emit
 address-specific state and content metrics. Throughput is measured for every
 stage. Train, validation, and test throughput use normal module metrics;
@@ -160,14 +160,14 @@ checkpoint = lit.callbacks.ModelCheckpoint(
 trainer = lit.Trainer(callbacks=[checkpoint])
 ```
 
-Use `jv.RollbackCheckpoint` with the same arguments when the in-memory `model`
+Use `rf.RollbackCheckpoint` with the same arguments when the in-memory `model`
 should be restored to the best full checkpoint at the end of `fit`:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-checkpoint = jv.RollbackCheckpoint(
+checkpoint = rf.RollbackCheckpoint(
     dirpath="checkpoints",
     monitor="loss/validate",
     mode="min",
@@ -203,7 +203,7 @@ replacement for a data module and `trainer.predict(...)` in a large job. See
 
 ## Mutation And Active Loops
 
-JSON2Vec blocks schema mutation while Lightning owns a training, validation,
+RelFlow blocks schema mutation while Lightning owns a training, validation,
 test, or prediction loop.
 
 ::: {.callout-warning}

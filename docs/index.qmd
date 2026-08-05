@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -14,32 +14,32 @@ pyproject: |
 surface; continue to [Getting Started](getting-started.qmd) for the tested
 artifact lifecycle.
 
-`json2vec` builds PyTorch/Lightning models for records that are not naturally
+`relflow` builds PyTorch/Lightning models for records that are not naturally
 flat. An order can contain line items, a customer can have several histories,
 and a session can contain events. You describe those fields and relationships
-as a schema; `json2vec` uses the schema as both the input contract and the model
+as a schema; `relflow` uses the schema as both the input contract and the model
 blueprint.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="order",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
-    customer_tier=jv.Category(size=16),
-    line_items=jv.Branch(
+    customer_tier=rf.Category(size=16),
+    line_items=rf.Branch(
         length=32,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
+        price=rf.Number,
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 
 model
@@ -57,7 +57,7 @@ also discard ordering and local relationships, force every history into the
 same window, and move important modeling decisions into a separate feature
 pipeline.
 
-`json2vec` is useful when those relationships are part of the signal:
+`relflow` is useful when those relationships are part of the signal:
 
 - orders with line items;
 - accounts with transactions and statements;
@@ -81,7 +81,7 @@ of the approach.
 - Field names and optional queries bind raw record values to stable schema
   addresses.
 
-Lightning owns the training, validation, test, and prediction loops. JSON2Vec
+Lightning owns the training, validation, test, and prediction loops. RelFlow
 owns the schema-derived model, typed tensors, losses, and output contract.
 
 ## Choose Your Route
@@ -131,5 +131,5 @@ production workload.
 
 ## Community
 
-Join the [`json2vec` Discord](https://discord.gg/DVyZUkvTFA) for questions,
+Join the [`relflow` Discord](https://discord.gg/DVyZUkvTFA) for questions,
 design discussion, and release notes.

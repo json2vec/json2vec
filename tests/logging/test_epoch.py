@@ -2,9 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import json2vec.logging.epoch as epoch
-from json2vec.logging.epoch import EpochLifecycleLogger
-from json2vec.structs.enums import Strata
+import relflow.logging.epoch as epoch
+from relflow.logging.epoch import EpochLifecycleLogger
+from relflow.structs.enums import Strata
 
 
 class _BoundLogger:

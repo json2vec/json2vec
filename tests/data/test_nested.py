@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from json2vec.data.nested import apply, contains_mask_literal, extract_mask_literals, pad
-from json2vec.structs.enums import Overflow, Strata, Tokens
-from json2vec.structs.tree import Address
+from relflow.data.nested import apply, contains_mask_literal, extract_mask_literals, pad
+from relflow.structs.enums import Overflow, Strata, Tokens
+from relflow.structs.tree import Address
 
 
 def test_pad_tracks_null_and_padding():

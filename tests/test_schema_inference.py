@@ -1,11 +1,11 @@
-"""Tests for schema inference (`json2vec.helpers.infer_schema`)."""
+"""Tests for schema inference (`relflow.helpers.infer_schema`)."""
 
 import warnings
 
 import pytest
 
-import json2vec as jv
-from json2vec.helpers import InferenceConfig, infer_schema
+import relflow as rf
+from relflow.helpers import InferenceConfig, infer_schema
 
 
 def _by_name(fields):
@@ -18,13 +18,13 @@ def _by_name(fields):
 
 
 def test_inference_helpers_exported_from_helpers_namespace():
-    assert jv.helpers.infer_schema is infer_schema
-    assert jv.helpers.InferenceConfig is InferenceConfig
-    assert not hasattr(jv, "infer_schema")
-    assert not hasattr(jv, "create_model_from_records")
-    assert not hasattr(jv, "InferenceConfig")
-    assert not hasattr(jv.Model, "from_records")
-    assert not hasattr(jv.helpers, "create_model_from_records")
+    assert rf.helpers.infer_schema is infer_schema
+    assert rf.helpers.InferenceConfig is InferenceConfig
+    assert not hasattr(rf, "infer_schema")
+    assert not hasattr(rf, "create_model_from_records")
+    assert not hasattr(rf, "InferenceConfig")
+    assert not hasattr(rf.Model, "from_records")
+    assert not hasattr(rf.helpers, "create_model_from_records")
 
 
 def test_empty_input_raises():
@@ -301,8 +301,8 @@ def test_inferred_schema_builds_a_working_model():
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        fields = jv.helpers.infer_schema(records, target="returned")
-        model = jv.Model(
+        fields = rf.helpers.infer_schema(records, target="returned")
+        model = rf.Model(
             *fields,
             d_model=16,
             n_layers=1,
@@ -312,7 +312,7 @@ def test_inferred_schema_builds_a_working_model():
     requests = model.schema.requests
 
     # The `returned` field is a supervised target.
-    returned = requests[jv.Address("record", "returned")]
+    returned = requests[rf.Address("record", "returned")]
     assert returned.target is True
 
     # Invariant: a leaf's [*] selectors equal its Branch-ancestor count + 1 (root).
@@ -322,5 +322,5 @@ def test_inferred_schema_builds_a_working_model():
 
     # The model predicts the withheld target end to end.
     predictions = model.predict([{k: v for k, v in records[0].items() if k != "returned"}])
-    decoded = predictions[jv.Address("record", "returned")]
+    decoded = predictions[rf.Address("record", "returned")]
     assert decoded["content"]["value"] is not None

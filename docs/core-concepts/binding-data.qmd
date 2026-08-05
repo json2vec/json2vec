@@ -18,7 +18,7 @@ Start with the simplest option that expresses the input contract:
 | --- | --- |
 | Field and branch names already match the record | inferred query |
 | The source shape is stable, but a key or path differs | explicit `query=...` |
-| Values require Python logic, sorting, windowing, coercion, or derivation | `@jv.preprocess` |
+| Values require Python logic, sorting, windowing, coercion, or derivation | `@rf.preprocess` |
 | One raw record should produce zero, one, or several model observations | yielding preprocessor |
 
 Queries select values. Preprocessors change observations. Keeping that boundary
@@ -43,15 +43,15 @@ record = {
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    amount=jv.Number,
-    merchant=jv.Category(size=4096),
-    approved=jv.Category(target=True, size=2),
+    amount=rf.Number,
+    merchant=rf.Category(size=4096),
+    approved=rf.Category(target=True, size=2),
 )
 ```
 
@@ -72,12 +72,12 @@ Changing the root name changes addresses, not source keys:
 #| echo: true
 #| output: true
 
-named_model = jv.Model(
+named_model = rf.Model(
     name="transaction",
     d_model=32,
     n_layers=1,
     n_heads=4,
-    amount=jv.Number,
+    amount=rf.Number,
 )
 ```
 
@@ -104,16 +104,16 @@ order = {
 #| echo: true
 #| output: true
 
-order_model = jv.Model(
+order_model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    order_source=jv.Category(size=32),
-    line_items=jv.Branch(
+    order_source=rf.Category(size=32),
+    line_items=rf.Branch(
         length=32,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
+        price=rf.Number,
     ),
 )
 ```
@@ -155,13 +155,13 @@ source_record = {
 #| echo: true
 #| output: true
 
-queried_model = jv.Model(
+queried_model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    amount=jv.Number(query="[*].transaction.amount_usd"),
-    merchant=jv.Category(query="[*].transaction.merchant_name", size=4096),
-    label=jv.Category(query="[*].outcome", target=True, size=2),
+    amount=rf.Number(query="[*].transaction.amount_usd"),
+    merchant=rf.Category(query="[*].transaction.merchant_name", size=4096),
+    label=rf.Category(query="[*].outcome", target=True, size=2),
 )
 ```
 
@@ -181,16 +181,16 @@ describe the source contract.
 
 ## Use A Preprocessor For Logic
 
-JMESPath is a selection language. Use a JSON2Vec `Preprocessor` when the
+JMESPath is a selection language. Use a RelFlow `Preprocessor` when the
 transformation needs business logic or needs to be unit tested as Python:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-@jv.preprocess
-def normalize_transaction(record: dict) -> jv.Observation:
-    return jv.Observation(
+@rf.preprocess
+def normalize_transaction(record: dict) -> rf.Observation:
+    return rf.Observation(
         {
             "amount": float(record["amount_usd"]),
             "merchant": record["merchant"].strip().lower(),
@@ -232,7 +232,7 @@ Leaves under one branch describe the same repeated coordinates. If custom
 queries filter siblings differently, the first value in one field may no longer
 describe the same child object as the first value in another.
 
-JSON2Vec uses a direct extractor for simple projection paths such as
+RelFlow uses a direct extractor for simple projection paths such as
 `[*].events[*].amount`. It preserves explicit `None` values when every child
 mapping contains the key. A stacking preprocessor should therefore write each
 nullable sibling key on every child object.
@@ -242,10 +242,10 @@ paths—fall back to standard JMESPath evaluation, whose projections can omit
 null results. Preserve positions with `map`:
 
 ```python
-device_id=jv.Entity(
+device_id=rf.Entity(
     query="[*].map(&device_id, events[?event_type == 'login'])"
 )
-risk_score=jv.Number(
+risk_score=rf.Number(
     query="[*].map(&risk_score, events[?event_type == 'login'])"
 )
 ```

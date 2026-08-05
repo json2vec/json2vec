@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[text] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[text] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -14,7 +14,7 @@ pyproject: |
 model integration excerpt requires an external Hugging Face download.
 
 Use `Text` for string fields encoded by a frozen Hugging Face model. The text
-encoder produces a dense representation that `json2vec` projects into the model
+encoder produces a dense representation that `relflow` projects into the model
 dimension.
 
 ```json
@@ -27,9 +27,9 @@ dimension.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-body = jv.Text(
+body = rf.Text(
     "body",
     max_length=128,
     encoder_pooling="mean",
@@ -47,12 +47,12 @@ the desired signal.
 The text tensorfield requires the optional `transformers` dependency.
 
 ```bash
-python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.git"
 ```
 
 In a contributor checkout, use `uv sync --extra text` instead.
 
-Without that extra, using `type: text` raises an import error when `json2vec`
+Without that extra, using `type: text` raises an import error when `relflow`
 tries to load the tokenizer or encoder.
 
 Hugging Face may download model assets the first time a model is used. Use a
@@ -88,11 +88,11 @@ Text can be nested like any other leaf:
 #| echo: true
 #| output: true
 
-ticket_events = jv.Branch(
+ticket_events = rf.Branch(
     name="ticket_events",
     length=32,
-    message=jv.Text(max_length=128),
-    event_type=jv.Category(size=64),
+    message=rf.Text(max_length=128),
+    event_type=rf.Category(size=64),
 )
 
 ticket_events
@@ -101,26 +101,26 @@ ticket_events
 ### Tiny BERT Integration Excerpt
 
 This excerpt becomes a local integration check after the optional model assets
-are available. Keep the `json2vec` model shallow and use the default small BERT
+are available. Keep the `relflow` model shallow and use the default small BERT
 miniature. The first run downloads the Hugging Face model into the local cache;
 later `Text` fields with the same `model` reuse the same frozen encoder module
 inside the process. It is not executed by the core docs suite because it
 requires that external download.
 
 ```bash
-python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.git"
 ```
 
 ```python
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
     batch_size=2,
     embed=True,
-    message=jv.Text(
+    message=rf.Text(
         max_length=32,
         encoder_batch_size=4,
         encoder_pooling="mean",
@@ -133,7 +133,7 @@ records = [
 ]
 
 predictions = model.predict(records)
-record_embedding = predictions[jv.Address("record")]["embedding"]
+record_embedding = predictions[rf.Address("record")]["embedding"]
 
 print(len(record_embedding), len(record_embedding[0]))
 ```
@@ -180,7 +180,7 @@ embedding-reconstruction target, not as a generated-text output. Configure
 
 ## Persistence And Deployment
 
-`Model.save(...)` preserves the Text request configuration, JSON2Vec projection,
+`Model.save(...)` preserves the Text request configuration, RelFlow projection,
 schema, and trained weights. It does not bundle the Hugging Face tokenizer or
 encoder assets named by `model`. The same model identifier must remain
 downloadable, or the referenced local path and its assets must be present in
@@ -188,13 +188,13 @@ every process that calls `Model.load(...)`, predicts, or serves the artifact.
 
 For offline or reproducible deployment, pin the external model revision,
 materialize it at a stable local path, and ship that directory alongside the
-JSON2Vec artifact. See [Prediction Output](../guides/prediction-output.qmd) for
+RelFlow artifact. See [Prediction Output](../guides/prediction-output.qmd) for
 the separate contract of the embeddings returned to callers.
 
 ## Notes
 
 The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
-by `json2vec`. Use `encoder_batch_size` to manage memory when many text values are
+by `relflow`. Use `encoder_batch_size` to manage memory when many text values are
 flattened from nested branches.
 
 ## Where Next
@@ -204,5 +204,5 @@ flattened from nested branches.
 - Use [Category](category.qmd) for bounded string labels whose exact identity
   matters more than semantic similarity.
 - Use [Learning Modes & Embeddings](../core-concepts/embeddings.qmd) to
-  distinguish frozen text content, JSON2Vec's internal projection, and public
+  distinguish frozen text content, RelFlow's internal projection, and public
   `embed=True` output.

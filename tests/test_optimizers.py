@@ -3,7 +3,7 @@ from collections.abc import Iterable
 
 import torch
 
-from json2vec.helpers.optimizers import adamw
+from relflow.helpers.optimizers import adamw
 
 
 def _module() -> torch.nn.Module:

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
+from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularySyncCallback
 
 
 def test_vocabulary_sync_callback_gathers_rank_proposals(monkeypatch):
@@ -27,13 +27,13 @@ def test_vocabulary_sync_callback_gathers_rank_proposals(monkeypatch):
         },
     )
 
-    monkeypatch.setattr("json2vec.tensorfields.shared.vocabulary.is_distributed", lambda: True)
-    monkeypatch.setattr("json2vec.tensorfields.shared.vocabulary.is_rank_zero", lambda: True)
+    monkeypatch.setattr("relflow.tensorfields.shared.vocabulary.is_distributed", lambda: True)
+    monkeypatch.setattr("relflow.tensorfields.shared.vocabulary.is_rank_zero", lambda: True)
     monkeypatch.setattr(
-        "json2vec.tensorfields.shared.vocabulary.all_gather_object",
+        "relflow.tensorfields.shared.vocabulary.all_gather_object",
         lambda local: events.append("vocabulary") or [local, {"root/category": ["GAMMA"]}],
     )
-    monkeypatch.setattr("json2vec.tensorfields.shared.vocabulary.broadcast_object", lambda payload, src: payload)
+    monkeypatch.setattr("relflow.tensorfields.shared.vocabulary.broadcast_object", lambda payload, src: payload)
 
     VocabularySyncCallback().on_train_epoch_end(trainer=trainer, pl_module=module)
 

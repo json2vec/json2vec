@@ -1,6 +1,6 @@
 import torch
 
-from json2vec.tensorfields.extensions.number import jitter
+from relflow.tensorfields.extensions.number import jitter
 
 
 def test_jitter():

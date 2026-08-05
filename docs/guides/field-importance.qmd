@@ -32,24 +32,24 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 
-import json2vec as jv
+import relflow as rf
 
 records = pl.read_ndjson("docs/data/iris.jsonl").with_row_index()
 train_records = records.filter((pl.col("index") % 5) < 3).drop("index")
 validate_records = records.filter((pl.col("index") % 5) == 3).drop("index")
 test_records = records.filter((pl.col("index") % 5) == 4).drop("index")
 
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=2,
     n_heads=4,
     batch_size=32,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
-    sepal_length=jv.Number(p_prune=0.20),
-    sepal_width=jv.Number(p_prune=0.20),
-    petal_length=jv.Number(p_prune=0.20),
-    petal_width=jv.Number(p_prune=0.20),
-    species=jv.Category(target=True, size=3, topk=[2]),
+    sepal_length=rf.Number(p_prune=0.20),
+    sepal_width=rf.Number(p_prune=0.20),
+    petal_length=rf.Number(p_prune=0.20),
+    petal_width=rf.Number(p_prune=0.20),
+    species=rf.Category(target=True, size=3, topk=[2]),
 )
 
 train_records.head(3)
@@ -63,7 +63,7 @@ visible to `trainer.test(...)`.
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
@@ -102,13 +102,13 @@ temporarily set `active=False` on one leaf for a single test run. The
 #| echo: true
 #| output: true
 
-model.update(jv.where("type") == "number", p_prune=0.0)
+model.update(rf.where("type") == "number", p_prune=0.0)
 
 baseline = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
 print(f"baseline: {baseline['loss/test']:.4f}")
 
-for leaf in model.select(jv.where("type") == "number"):
-    with model.override(jv.where("address") == leaf.address, active=False):
+for leaf in model.select(rf.where("type") == "number"):
+    with model.override(rf.where("address") == leaf.address, active=False):
         result = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
         print(f"{leaf.name}: {result['loss/test']:.4f}")
 ```
@@ -123,8 +123,8 @@ view:
 rows = []
 baseline_loss = baseline["loss/test"]
 
-for leaf in model.select(jv.where("type") == "number"):
-    with model.override(jv.where("address") == leaf.address, active=False):
+for leaf in model.select(rf.where("type") == "number"):
+    with model.override(rf.where("address") == leaf.address, active=False):
         loss = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]["loss/test"]
     rows.append(
         {

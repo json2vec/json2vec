@@ -12,16 +12,16 @@ import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from torch.utils.data import IterableDataset
 
-import json2vec as jv
-from json2vec.data import iterables
-from json2vec.data.datasets import base, custom, polars, streaming
-from json2vec.data.datasets.base import _is_assigned_to_worker, _worker_identity, sha256
-from json2vec.data.datasets.custom import CustomBatchDataset, CustomDataModule
-from json2vec.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
-from json2vec.data.datasets.streaming import BatchDataset, StreamingDataModule
-from json2vec.structs.enums import ShardingStrategy, Strata, Suffix
-from json2vec.structs.experiment import Schema
-from json2vec.structs.tree import Address
+import relflow as rf
+from relflow.data import iterables
+from relflow.data.datasets import base, custom, polars, streaming
+from relflow.data.datasets.base import _is_assigned_to_worker, _worker_identity, sha256
+from relflow.data.datasets.custom import CustomBatchDataset, CustomDataModule
+from relflow.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
+from relflow.data.datasets.streaming import BatchDataset, StreamingDataModule
+from relflow.structs.enums import ShardingStrategy, Strata, Suffix
+from relflow.structs.experiment import Schema
+from relflow.structs.tree import Address
 
 
 def _datamodule_schema():
@@ -39,8 +39,8 @@ def _datamodule_schema():
 
 
 def _datamodule_model(batch_size: int = 2):
-    return jv.Model(
-        jv.Category("id", size=16),
+    return rf.Model(
+        rf.Category("id", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -48,7 +48,7 @@ def _datamodule_model(batch_size: int = 2):
     )
 
 
-def _checkpoint_payload(model: jv.Model) -> dict:
+def _checkpoint_payload(model: rf.Model) -> dict:
     return {
         "state_dict": model.state_dict(),
         "schema": model.schema.model_dump(mode="python"),
@@ -442,9 +442,9 @@ def test_read_unsupported_suffix_raises_value_error():
 
 
 def test_process_transformation_preprocessor_wraps_observation_output():
-    @jv.preprocess
+    @rf.preprocess
     def transformation(observation: dict):
-        return jv.Observation({"id": observation["id"]})
+        return rf.Observation({"id": observation["id"]})
 
     output = list(
         iterables.process.__wrapped__(
@@ -459,9 +459,9 @@ def test_process_transformation_preprocessor_wraps_observation_output():
 
 
 def test_process_generator_preprocessor_wraps_list_outputs():
-    @jv.preprocess
+    @rf.preprocess
     def generator(observation: dict):
-        return [jv.Observation({"id": observation["id"]}), jv.Observation({"id": observation["id"] + 100})]
+        return [rf.Observation({"id": observation["id"]}), rf.Observation({"id": observation["id"] + 100})]
 
     output = list(
         iterables.process.__wrapped__(
@@ -476,9 +476,9 @@ def test_process_generator_preprocessor_wraps_list_outputs():
 
 
 def test_process_generator_preprocessor_receives_named_runtime_providers():
-    @jv.preprocess
+    @rf.preprocess
     def generator(observation: dict, *, strata, encoding_context):
-        yield jv.Observation({"id": observation["id"], "strata": strata, "marker": encoding_context["marker"]})
+        yield rf.Observation({"id": observation["id"], "strata": strata, "marker": encoding_context["marker"]})
 
     output = list(
         iterables.process.__wrapped__(
@@ -493,7 +493,7 @@ def test_process_generator_preprocessor_receives_named_runtime_providers():
 
 
 def test_process_transformation_preprocessor_rejects_plain_dict_output():
-    @jv.preprocess
+    @rf.preprocess
     def transformation(observation: dict):
         return {"id": observation["id"]}
 
@@ -610,7 +610,7 @@ def test_jmespath_resolution_monitor_accepts_nested_observed_value():
 def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
     module = StreamingDataModule(
         model=_datamodule_model(),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         train=re.compile(r".*\.ndjson$"),
         num_workers={Strata.train: 0},
@@ -641,7 +641,7 @@ def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():
 def test_streaming_datamodule_rejects_invalid_loader_configuration():
     kwargs = {
         "model": _datamodule_model(),
-        "root": "/tmp/json2vec-test",
+        "root": "/tmp/relflow-test",
         "suffix": Suffix.ndjson,
         "train": re.compile(r".*\.ndjson$"),
     }
@@ -656,7 +656,7 @@ def test_streaming_datamodule_rejects_invalid_loader_configuration():
 def test_streaming_datamodule_defaults_to_file_sharding():
     module = StreamingDataModule(
         model=_datamodule_model(),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         train=re.compile(r".*\.ndjson$"),
     )
@@ -668,7 +668,7 @@ def test_streaming_datamodule_defaults_to_file_sharding():
 def test_streaming_datamodule_accepts_raw_regex_string_patterns():
     module = StreamingDataModule(
         model=_datamodule_model(),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         train=r"/train/.*\.ndjson$",
         validate=r"/validate/.*\.ndjson$",
@@ -728,7 +728,7 @@ def test_streaming_datamodule_regex_patterns_keep_strata_disjoint(
 def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
     module = StreamingDataModule(
         model=_datamodule_model(),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         train=re.compile(r".*\.ndjson$"),
         replacement={Strata.train: False, Strata.validate: True},
@@ -740,8 +740,8 @@ def test_streaming_datamodule_accepts_replacement_configuration_per_strata():
 
 
 def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp_path: Path):
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -754,8 +754,8 @@ def test_streaming_datamodule_refreshes_model_state_after_checkpoint_restore(tmp
         train=re.compile(r".*\.ndjson$"),
         num_workers=0,
     )
-    restored = jv.Model(
-        jv.Number("risk_score"),
+    restored = rf.Model(
+        rf.Number("risk_score"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -857,8 +857,8 @@ def test_custom_datamodule_accepts_partial_dataset_mapping_until_loader_requeste
 
 
 def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -869,8 +869,8 @@ def test_custom_datamodule_refreshes_model_state_after_checkpoint_restore():
         train=RecordsDataset([{"amount": 1.0, "risk_score": 2.0}]),
         num_workers=0,
     )
-    restored = jv.Model(
-        jv.Number("risk_score"),
+    restored = rf.Model(
+        rf.Number("risk_score"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -973,8 +973,8 @@ def test_polars_datamodule_accepts_named_splits():
 
 
 def test_polars_datamodule_refreshes_context_after_model_reset():
-    model = jv.Model(
-        jv.Category("code", size=16),
+    model = rf.Model(
+        rf.Category("code", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -987,7 +987,7 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
     )
     before = module.interprocess_encoding_context["record/code"]
 
-    model.reset(jv.where("name") == "code")
+    model.reset(rf.where("name") == "code")
 
     after = module.interprocess_encoding_context["record/code"]
     current = model.interprocess_encoding_context["record/code"]
@@ -997,8 +997,8 @@ def test_polars_datamodule_refreshes_context_after_model_reset():
 
 
 def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
-    model = jv.Model(
-        jv.Category("code", size=16),
+    model = rf.Model(
+        rf.Category("code", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -1031,8 +1031,8 @@ def test_polars_datamodule_shares_vocabulary_only_for_train_workers():
 
 
 def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -1043,8 +1043,8 @@ def test_polars_datamodule_refreshes_model_state_after_checkpoint_restore():
         train=pl.DataFrame({"amount": [1.0], "risk_score": [2.0]}),
         num_workers=0,
     )
-    restored = jv.Model(
-        jv.Number("risk_score"),
+    restored = rf.Model(
+        rf.Number("risk_score"),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -1184,7 +1184,7 @@ def test_batch_dataset_passes_sample_rate_into_pipeline(monkeypatch: pytest.Monk
 
     batch_dataset = BatchDataset(
         schema=SimpleNamespace(requests={}),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         pattern=re.compile(r".*\.ndjson$"),
         preprocessor=None,
@@ -1240,7 +1240,7 @@ def test_batch_dataset_configures_distributed_state(monkeypatch: pytest.MonkeyPa
 
     batch_dataset = BatchDataset(
         schema=SimpleNamespace(requests={}),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         pattern=re.compile(r".*\.ndjson$"),
         preprocessor=None,

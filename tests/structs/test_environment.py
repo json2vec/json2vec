@@ -1,30 +1,30 @@
 import pytest
 from pydantic import ValidationError
 
-from json2vec.inference.deployment import Accelerator, Deployment, JSONBackend
+from relflow.inference.deployment import Accelerator, Deployment, JSONBackend
 
 ENV_VARS = (
-    "JSON2VEC_CHECKPOINT",
+    "RELFLOW_CHECKPOINT",
     "CHECKPOINT",
-    "JSON2VEC_MAX_BATCH_SIZE",
+    "RELFLOW_MAX_BATCH_SIZE",
     "MAX_BATCH_SIZE",
-    "JSON2VEC_BATCH_TIMEOUT",
+    "RELFLOW_BATCH_TIMEOUT",
     "BATCH_TIMEOUT",
-    "JSON2VEC_WORKERS",
+    "RELFLOW_WORKERS",
     "WORKERS",
-    "JSON2VEC_ACCELERATOR",
+    "RELFLOW_ACCELERATOR",
     "ACCELERATOR",
-    "JSON2VEC_HOST",
+    "RELFLOW_HOST",
     "HOST",
-    "JSON2VEC_PORT",
+    "RELFLOW_PORT",
     "PORT",
-    "JSON2VEC_LOG_LEVEL",
+    "RELFLOW_LOG_LEVEL",
     "LOG_LEVEL",
-    "JSON2VEC_MONITOR_QUERIES",
+    "RELFLOW_MONITOR_QUERIES",
     "MONITOR_QUERIES",
-    "JSON2VEC_QUERY_MONITOR_EVERY",
+    "RELFLOW_QUERY_MONITOR_EVERY",
     "QUERY_MONITOR_EVERY",
-    "JSON2VEC_JSON_BACKEND",
+    "RELFLOW_JSON_BACKEND",
     "JSON_BACKEND",
 )
 
@@ -36,33 +36,33 @@ def clear_data_env(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_deployment_environment_from_env_accepts_s3_checkpoint(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("JSON2VEC_CHECKPOINT", "s3://bucket/models/model.ckpt")
+    monkeypatch.setenv("RELFLOW_CHECKPOINT", "s3://bucket/models/model.ckpt")
 
     env = Deployment()
     assert env.checkpoint == "s3://bucket/models/model.ckpt"
 
 
 def test_deployment_environment_invalid_accelerator_raises(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("JSON2VEC_CHECKPOINT", "s3://bucket/models/model.ckpt")
-    monkeypatch.setenv("JSON2VEC_ACCELERATOR", "tpu")
+    monkeypatch.setenv("RELFLOW_CHECKPOINT", "s3://bucket/models/model.ckpt")
+    monkeypatch.setenv("RELFLOW_ACCELERATOR", "tpu")
 
-    with pytest.raises(ValidationError, match="JSON2VEC_ACCELERATOR"):
+    with pytest.raises(ValidationError, match="RELFLOW_ACCELERATOR"):
         Deployment()
 
 
 def test_deployment_environment_normalizes_accelerator(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("JSON2VEC_CHECKPOINT", "s3://bucket/models/model.ckpt")
-    monkeypatch.setenv("JSON2VEC_ACCELERATOR", " CPU ")
+    monkeypatch.setenv("RELFLOW_CHECKPOINT", "s3://bucket/models/model.ckpt")
+    monkeypatch.setenv("RELFLOW_ACCELERATOR", " CPU ")
 
     assert Deployment().accelerator is Accelerator.cpu
 
 
 def test_deployment_environment_accepts_realtime_serving_knobs(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("JSON2VEC_CHECKPOINT", "s3://bucket/models/model.ckpt")
-    monkeypatch.setenv("JSON2VEC_WORKERS", "2")
-    monkeypatch.setenv("JSON2VEC_MONITOR_QUERIES", "true")
-    monkeypatch.setenv("JSON2VEC_QUERY_MONITOR_EVERY", "7")
-    monkeypatch.setenv("JSON2VEC_JSON_BACKEND", "stdlib")
+    monkeypatch.setenv("RELFLOW_CHECKPOINT", "s3://bucket/models/model.ckpt")
+    monkeypatch.setenv("RELFLOW_WORKERS", "2")
+    monkeypatch.setenv("RELFLOW_MONITOR_QUERIES", "true")
+    monkeypatch.setenv("RELFLOW_QUERY_MONITOR_EVERY", "7")
+    monkeypatch.setenv("RELFLOW_JSON_BACKEND", "stdlib")
 
     env = Deployment()
 

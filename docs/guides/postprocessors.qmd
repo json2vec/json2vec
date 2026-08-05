@@ -8,12 +8,12 @@ eval: false
 **Example status — excerpt:** functions show individual output transformations
 and assume predictions from a complete interactive, batch, or serving path.
 
-A JSON2Vec postprocessor shapes decoded predictions after model writing. Use one
+A RelFlow postprocessor shapes decoded predictions after model writing. Use one
 when the canonical address-keyed output is correct but an API, batch job, or
 warehouse needs a different external contract.
 
 This is distinct from an arbitrary Python transformation: supported entry
-points require the `jv.Postprocessor` object returned by `@jv.postprocess`.
+points require the `rf.Postprocessor` object returned by `@rf.postprocess`.
 The wrapper validates its signature and supplies only the runtime values that
 entry point owns.
 
@@ -28,15 +28,15 @@ be keyword-only:
 
 from typing import Any
 
-import json2vec as jv
+import relflow as rf
 
-Predictions = dict[jv.Address, dict[str, Any]]
+Predictions = dict[rf.Address, dict[str, Any]]
 
 
-@jv.postprocess
+@rf.postprocess
 def compact_predictions(predictions, *, metadata):
     label = predictions.get(
-        jv.Address("record", "fraud"), {}
+        rf.Address("record", "fraud"), {}
     ).get("content", {})
 
     return {
@@ -49,18 +49,18 @@ def compact_predictions(predictions, *, metadata):
 Return a mapping to replace the canonical predictions. Return `None` only after
 mutating `predictions` in place. Returning any other value is an error.
 
-The model-facing input is always keyed by `jv.Address`. A postprocessor may
+The model-facing input is always keyed by `rf.Address`. A postprocessor may
 return string keys when the surrounding runtime supports an application-specific
 shape. After that transformation, the returned mapping—not the default
-JSON2Vec envelope—is the contract you must version and test.
+RelFlow envelope—is the contract you must version and test.
 
 ## Where They Run
 
 | Entry point | Invocation |
 | --- | --- |
 | `Model.predict(..., postprocess=processor)` | After `model.write(...)`; returns the processed mapping directly. |
-| `jv.Writer(..., postprocessor=processor)` | Before each prediction batch is converted to a Parquet table. |
-| `jv.Deployment(...).postprocess(processor)` | Once per request, before the HTTP response is denested and serialized. |
+| `rf.Writer(..., postprocessor=processor)` | Before each prediction batch is converted to a Parquet table. |
+| `rf.Deployment(...).postprocess(processor)` | Once per request, before the HTTP response is denested and serialized. |
 
 The runtimes do not supply the same context. Request only the named providers
 the processor actually needs:
@@ -84,7 +84,7 @@ processor across compatible runtimes:
 #| echo: true
 #| output: true
 
-@jv.postprocess
+@rf.postprocess
 def audit_shape(
     predictions,
     *,
@@ -105,7 +105,7 @@ contracts would be clearer.
 ## Metadata Is Processed Input
 
 `metadata` does not necessarily contain the original source dictionary. It is
-the model-facing observation after the JSON2Vec preprocessor runs. Each batch
+the model-facing observation after the RelFlow preprocessor runs. Each batch
 item is represented as a list containing its record; for the common one-to-one
 case, read `observation[0]`:
 
@@ -133,9 +133,9 @@ postprocessor therefore returns lists for batched values:
 #| echo: true
 #| output: true
 
-@jv.postprocess
+@rf.postprocess
 def compact_interactive(predictions, *, batch):
-    payload = predictions.get(jv.Address("record", "fraud"), {})
+    payload = predictions.get(rf.Address("record", "fraud"), {})
     content = payload.get("content", {})
 
     return {
@@ -164,9 +164,9 @@ A deployment postprocessor can hide schema addresses and attach request data:
 #| echo: true
 #| output: true
 
-@jv.postprocess
+@rf.postprocess
 def api_response(predictions, *, request):
-    payload = predictions.get(jv.Address("record", "fraud"), {})
+    payload = predictions.get(rf.Address("record", "fraud"), {})
     content = payload.get("content", {})
 
     return {
@@ -176,7 +176,7 @@ def api_response(predictions, *, request):
     }
 
 
-deployment = jv.Deployment(
+deployment = rf.Deployment(
     checkpoint="artifacts/fraud-model.ckpt"
 ).postprocess(api_response)
 ```
@@ -197,10 +197,10 @@ parameters with `.partial(...)`; provider names cannot be user-bound:
 import copy
 
 
-@jv.postprocess
+@rf.postprocess
 def add_confidence_flags(predictions, *, threshold: float):
     output = copy.deepcopy(predictions)
-    payload = output.get(jv.Address("record", "fraud"), {})
+    payload = output.get(rf.Address("record", "fraud"), {})
     content = payload.get("content", {})
     probabilities = content.get("probability")
 
@@ -228,13 +228,13 @@ to a stable table:
 #| echo: true
 #| output: true
 
-@jv.postprocess
+@rf.postprocess
 def warehouse_rows(predictions, *, metadata):
-    payload = predictions.get(jv.Address("record", "fraud"), {})
+    payload = predictions.get(rf.Address("record", "fraud"), {})
     content = payload.get("content", {})
 
     return {
-        jv.Address("record", "warehouse_row"): {
+        rf.Address("record", "warehouse_row"): {
             "request_id": request_ids(metadata),
             "fraud": content.get("value"),
             "fraud_probability": content.get("probability"),
@@ -242,7 +242,7 @@ def warehouse_rows(predictions, *, metadata):
     }
 
 
-writer = jv.Writer(
+writer = rf.Writer(
     "predictions/warehouse-run",
     postprocessor=warehouse_rows,
 )
@@ -264,7 +264,7 @@ consumer does not require them:
 import copy
 
 
-@jv.postprocess
+@rf.postprocess
 def without_embeddings(predictions):
     output = copy.deepcopy(predictions)
 
@@ -281,7 +281,7 @@ remove `embed=True` from the schema when avoiding that computation is the goal.
 
 Do not use a postprocessor to repair a model input or learning problem.
 
-- If a field reads the wrong source value, fix its query or the JSON2Vec
+- If a field reads the wrong source value, fix its query or the RelFlow
   preprocessor.
 - If the wrong thing is trained or embedded, change `target`, `p_mask`,
   `p_prune`, or `embed` in the schema.
@@ -297,7 +297,7 @@ metadata joins, and stable response/warehouse shaping.
 
 | Symptom | Likely cause or next check |
 | --- | --- |
-| Callable is rejected | Decorate it with `@jv.postprocess`; an ordinary transformation is not a processor object. |
+| Callable is rejected | Decorate it with `@rf.postprocess`; an ordinary transformation is not a processor object. |
 | A provider is unavailable | Use the correct runtime or make that keyword-only parameter optional. |
 | `metadata` items have no `.get` | Each item is a list; read its model-facing record at `observation[0]`. |
 | Writer fails on a later batch | Keys, row counts, or value types changed after the first Arrow schema was established. |

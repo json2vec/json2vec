@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -32,13 +32,13 @@ one history.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-transactions = jv.Branch(
+transactions = rf.Branch(
     name="transactions",
     length=16,
-    account_id=jv.Entity(p_mask=0.15, topk=[2, 5]),
-    amount=jv.Number,
+    account_id=rf.Entity(p_mask=0.15, topk=[2, 5]),
+    amount=rf.Number,
 )
 
 transactions

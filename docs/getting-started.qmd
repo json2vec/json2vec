@@ -17,13 +17,13 @@ verify that every part of the workflow is connected correctly.
 
 ## Install
 
-JSON2Vec requires Python 3.12 or newer. The public documentation currently uses
+RelFlow requires Python 3.12 or newer. The public documentation currently uses
 the GitHub source distribution:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install "json2vec @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "relflow @ git+https://github.com/relflow/relflow.git"
 ```
 
 That command follows the repository's current default branch. Pin a tag or
@@ -33,15 +33,15 @@ checkout because the published site is not yet versioned.
 Verify the installed distribution and import:
 
 ```bash
-python -c 'from importlib.metadata import version; import json2vec; print(version("json2vec"))'
+python -c 'from importlib.metadata import version; import relflow; print(version("relflow"))'
 ```
 
 The core install includes PyTorch, Lightning, Polars, and PyArrow. Add `text`
 for Hugging Face text models or `serving` for the FastAPI runtime:
 
 ```bash
-python -m pip install "json2vec[text] @ git+https://github.com/json2vec/json2vec.git"
-python -m pip install "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.git"
+python -m pip install "relflow[serving] @ git+https://github.com/relflow/relflow.git"
 ```
 
 The walkthrough fixes Lightning to `accelerator="cpu"`; no GPU is required.
@@ -63,7 +63,7 @@ import lightning.pytorch as lit
 import polars as pl
 import torch
 
-import json2vec as jv
+import relflow as rf
 
 train_records = pl.DataFrame(
     [
@@ -95,7 +95,7 @@ are related. Do not report the numbers from this tutorial as model quality.
 ## Define The Schema
 
 `Model(...)` turns field declarations into a model tree. Field names match the
-source keys here, so JSON2Vec can infer how to bind the values.
+source keys here, so RelFlow can infer how to bind the values.
 
 ```{python .marimo}
 #| echo: true
@@ -103,16 +103,16 @@ source keys here, so JSON2Vec can infer how to bind the values.
 
 torch.manual_seed(7)
 
-model = jv.Model(
+model = rf.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,
     batch_size=3,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
-    sepal_length=jv.Number,
-    petal_length=jv.Number,
-    species=jv.Category(target=True, size=3, topk=[2]),
+    sepal_length=rf.Number,
+    petal_length=rf.Number,
+    species=rf.Category(target=True, size=3, topk=[2]),
 )
 
 model
@@ -138,14 +138,14 @@ the displayed schema.
 
 ## Train And Validate
 
-`PolarsDataModule(...)` handles these in-memory frames. JSON2Vec models and data
+`PolarsDataModule(...)` handles these in-memory frames. RelFlow models and data
 modules use the regular Lightning training loop.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
@@ -200,16 +200,16 @@ requests = [
 ]
 
 with TemporaryDirectory() as directory:
-    artifact = Path(directory) / "iris-json2vec.pt"
+    artifact = Path(directory) / "iris-relflow.pt"
     model.save(artifact)
-    restored = jv.Model.load(artifact)
+    restored = rf.Model.load(artifact)
     predictions = restored.predict(requests)
 ```
 
 Notice that `requests` omit `species`. Target omission is the normal prediction
 contract: the target slot is masked, then decoded from the visible inputs. A
 Lightning training checkpoint may additionally contain optimizer, scheduler,
-and loop state; `Model.save(...)` is the compact JSON2Vec artifact for restoring
+and loop state; `Model.save(...)` is the compact RelFlow artifact for restoring
 the schema and model state. [Model Lifecycle](guides/model-lifecycle.qmd)
 explains resumable Lightning checkpoints, best-model rollback, compatibility,
 and processor versioning.
@@ -222,8 +222,8 @@ Prediction is a dictionary keyed by schema address:
 #| echo: true
 #| output: true
 
-species = predictions[jv.Address("record", "species")]
-record = predictions[jv.Address("record")]
+species = predictions[rf.Address("record", "species")]
+record = predictions[rf.Address("record")]
 
 print(species["content"]["value"])
 print(species["content"]["probability"])
@@ -257,17 +257,17 @@ schema adds a `Branch` without changing the train/save/load/predict path:
 #| echo: true
 #| output: true
 
-nested_model = jv.Model(
+nested_model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    line_items=jv.Branch(
+    line_items=rf.Branch(
         length=32,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
+        price=rf.Number,
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 
 nested_model

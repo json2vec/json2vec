@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -27,9 +27,9 @@ scores, datetime durations, and other numeric features.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-amount = jv.Number(
+amount = rf.Number(
     "amount",
     jitter=0.02,
     objective="huber",
@@ -112,7 +112,7 @@ The content loss is computed in normalized units, while tracked `mae` and
 ## Prediction Output
 
 Rendered examples use string paths for readability. The Python dictionary
-returned by `Model.predict(...)` is keyed by `jv.Address` objects.
+returned by `Model.predict(...)` is keyed by `rf.Address` objects.
 
 `Model.predict(...)` returns a state probability map, numeric content, and the
 shared `inferred` mask. This is the complete field envelope:

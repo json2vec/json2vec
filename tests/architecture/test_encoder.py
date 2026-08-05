@@ -1,11 +1,11 @@
 import torch
 
-from json2vec.architecture.encoder import BranchEncoder
-from json2vec.architecture.pool import MeanPool
-from json2vec.architecture.root import Model
-from json2vec.structs.enums import TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.structs.packages import Parcel
+from relflow.architecture.encoder import BranchEncoder
+from relflow.architecture.pool import MeanPool
+from relflow.architecture.root import Model
+from relflow.structs.enums import TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.structs.packages import Parcel
 
 
 def _payload(*, attention: str = "mha", pooling: str = "query") -> dict:

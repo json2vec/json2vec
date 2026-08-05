@@ -1,4 +1,4 @@
-from json2vec.structs.enums import AttentionMode, ShardingStrategy, Strata
+from relflow.structs.enums import AttentionMode, ShardingStrategy, Strata
 
 
 def test_strata_normalizes_strings():

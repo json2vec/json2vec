@@ -12,14 +12,14 @@ so it is preferable to `Category(size=2)` when the source contract is genuinely
 Boolean.
 
 ```python
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,
-    events=jv.Branch(length=8, succeeded=jv.Boolean),
-    converted=jv.Boolean(target=True),
+    events=rf.Branch(length=8, succeeded=rf.Boolean),
+    converted=rf.Boolean(target=True),
 )
 ```
 

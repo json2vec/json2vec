@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -26,9 +26,9 @@ code, product family, customer tier, or similarly discrete value.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-merchant_category = jv.Category(
+merchant_category = rf.Category(
     "merchant_category",
     size=128,
     topk=[3, 10],
@@ -81,7 +81,7 @@ described in [Built-In Data Types](../core-concepts/data-types.qmd) and
 #| echo: true
 #| output: true
 
-fraud = jv.Category("fraud", target=True, size=2)
+fraud = rf.Category("fraud", target=True, size=2)
 
 fraud
 ```
@@ -191,7 +191,7 @@ emitted. There is no separate availability probability: use upstream
 vocabulary monitoring when availability itself matters.
 
 Rendered examples use string addresses for readability. The dictionary returned
-by `Model.predict(...)` is keyed by `jv.Address` objects.
+by `Model.predict(...)` is keyed by `rf.Address` objects.
 
 ## Capacity And Compute
 

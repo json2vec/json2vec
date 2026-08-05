@@ -9,7 +9,7 @@ eval: false
 while trainer-dependent blocks are explicitly linked to the complete Lightning
 workflow.
 
-A JSON2Vec schema is live model state. Mutation methods update the schema and
+A RelFlow schema is live model state. Mutation methods update the schema and
 keep compatible runtime modules, parameters, vocabularies, and normalizers
 attached where their address and tensor shape still match.
 
@@ -23,16 +23,16 @@ and save the artifact you intend to operate.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="order",
     d_model=32,
     n_layers=1,
     n_heads=4,
-    amount=jv.Number,
-    channel=jv.Category(size=8),
-    returned=jv.Category(target=True, size=2),
+    amount=rf.Number,
+    channel=rf.Category(size=8),
+    returned=rf.Category(target=True, size=2),
 )
 
 model
@@ -46,15 +46,15 @@ model
 #| echo: true
 #| output: true
 
-numbers = model.select(jv.where("type") == "number")
-target = model.select(jv.where("name") == "returned")
+numbers = model.select(rf.where("type") == "number")
+target = model.select(rf.where("name") == "returned")
 
 print([str(node.address) for node in numbers])
 print([str(node.address) for node in target])
 ```
 
 Prefer stable attributes such as `address`, `name`, and `type`. A callable is
-available for conditions that cannot be expressed with `jv.where(...)`:
+available for conditions that cannot be expressed with `rf.where(...)`:
 
 ```{python .marimo}
 #| echo: true
@@ -75,12 +75,12 @@ then rebuilds the runtime graph:
 #| echo: true
 #| output: true
 
-model.update(jv.where("type") == "number", p_mask=0.10)
-model.update(jv.where("name") == "returned", weight=2.0, topk=[])
+model.update(rf.where("type") == "number", p_mask=0.10)
+model.update(rf.where("name") == "returned", weight=2.0, topk=[])
 ```
 
 Updates are strict by default. If a selector matches mixed node types and one
-does not support the option, JSON2Vec raises instead of silently applying a
+does not support the option, RelFlow raises instead of silently applying a
 partial change. Narrow the predicate or use `strict=False` only when partial
 application is intentional.
 
@@ -97,9 +97,9 @@ fields:
 #| output: true
 
 model.extend(
-    jv.where("name") == "order",
-    jv.Boolean("expedited"),
-    jv.Category("region", size=32),
+    rf.where("name") == "order",
+    rf.Boolean("expedited"),
+    rf.Category("region", size=32),
 )
 
 model
@@ -117,7 +117,7 @@ branches fail validation.
 #| echo: true
 #| output: true
 
-model.delete(jv.where("name") == "expedited")
+model.delete(rf.where("name") == "expedited")
 ```
 
 Deletion cannot remove the generated root, every request, or leave a branch
@@ -132,7 +132,7 @@ without any request descendants. There is no automatic undo; use
 #| echo: true
 #| output: true
 
-model.reset(jv.where("name") == "channel")
+model.reset(rf.where("name") == "channel")
 ```
 
 For a stateful field, this discards learned weights and field-owned state such
@@ -155,7 +155,7 @@ state exists when the context exits:
 #| echo: true
 #| output: true
 
-with model.override(jv.where("name") == "amount", active=False):
+with model.override(rf.where("name") == "amount", active=False):
     ablated_predictions = model.predict(
         [{"channel": "web"}]
     )
@@ -173,7 +173,7 @@ not rolled back automatically.
 
 ## Mutation Boundaries
 
-Schema mutation cannot run while JSON2Vec is inside an active `forward`,
+Schema mutation cannot run while RelFlow is inside an active `forward`,
 interactive inference call, or Lightning train/validate/test/predict loop.
 Mutate between complete loops:
 
@@ -183,7 +183,7 @@ Mutate between complete loops:
 
 trainer.fit(model=model, datamodule=datamodule)
 
-model.update(jv.where("name") == "amount", p_mask=0.0)
+model.update(rf.where("name") == "amount", p_mask=0.0)
 
 trainer.test(model=model, datamodule=datamodule)
 ```
@@ -203,8 +203,8 @@ After a permanent mutation and its evaluation, save a new artifact:
 #| echo: true
 #| output: true
 
-model.save("artifacts/order-v2.jv")
-loaded = jv.Model.load("artifacts/order-v2.jv")
+model.save("artifacts/order-v2.rf")
+loaded = rf.Model.load("artifacts/order-v2.rf")
 ```
 
 Record the old and new schema, the predicate and values used, validation

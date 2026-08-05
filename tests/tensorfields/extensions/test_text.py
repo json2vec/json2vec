@@ -6,10 +6,10 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.text import (
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.structs.packages import Prediction
+from relflow.tensorfields.extensions.text import (
     ATTENTION_MASK,
     DEFAULT_TEXT_MODEL,
     INPUT_IDS,
@@ -190,7 +190,7 @@ def test_text_raises_when_transformers_is_missing(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    with pytest.raises(ImportError, match="json2vec\\[text\\]"):
+    with pytest.raises(ImportError, match="relflow\\[text\\]"):
         CachedModel.get_model("bert-base-uncased")
 
 

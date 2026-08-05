@@ -3,9 +3,9 @@ import uuid
 import pytest
 from lightning.pytorch import Callback
 
-from json2vec.structs.enums import Component, Strata
-from json2vec.structs.tree import Node
-from json2vec.tensorfields.base import (
+from relflow.structs.enums import Component, Strata
+from relflow.structs.tree import Node
+from relflow.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
     EmbedderBase,

@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -26,9 +26,9 @@ hour of day, day of week, month of year, or related cyclical coordinates.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-created_at = jv.DateParts(
+created_at = rf.DateParts(
     "created_at",
     dateparts=["day of week", "HourOfDay", "second_of_minute"],
     pattern="%Y-%m-%dT%H:%M:%S",

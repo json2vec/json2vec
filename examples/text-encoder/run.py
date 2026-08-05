@@ -5,7 +5,7 @@ from typing import Any
 
 from rich import print
 
-import json2vec as jv
+import relflow as rf
 
 
 def records() -> list[dict[str, str]]:
@@ -15,14 +15,14 @@ def records() -> list[dict[str, str]]:
     ]
 
 
-def build_model(*, text_model: str) -> jv.Model:
-    return jv.Model.from_tree(
+def build_model(*, text_model: str) -> rf.Model:
+    return rf.Model.from_tree(
         d_model=32,
         n_layers=1,
         n_heads=4,
         batch_size=2,
         embed=True,
-        message=jv.Text(
+        message=rf.Text(
             model=text_model,
             max_length=32,
             encoder_batch_size=4,
@@ -40,7 +40,7 @@ def payload(predictions: dict[Any, dict[str, Any]], path: str) -> dict[str, Any]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a tiny BERT text-encoder json2vec example.")
+    parser = argparse.ArgumentParser(description="Run a tiny BERT text-encoder relflow example.")
     parser.add_argument(
         "--model",
         default="google/bert_uncased_L-2_H-128_A-2",

@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -28,23 +28,23 @@ prediction output are still unfamiliar.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="order",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
-    source_channel=jv.Category(active=False, size=16),
-    line_items=jv.Branch(
+    source_channel=rf.Category(active=False, size=16),
+    line_items=rf.Branch(
         length=32,
         embed=True,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number(p_mask=0.15),
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
+        price=rf.Number(p_mask=0.15),
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 
 model
@@ -83,14 +83,14 @@ it does not run a branch-level source query. See
 
 ## Addresses Are Stable Locations
 
-Every node has a slash-delimited `jv.Address` derived from its schema path:
+Every node has a slash-delimited `rf.Address` derived from its schema path:
 
 | Node | Address object | String form |
 | --- | --- | --- |
-| root | `jv.Address("order")` | `order` |
-| line-items branch | `jv.Address("order", "line_items")` | `order/line_items` |
-| price leaf | `jv.Address("order", "line_items", "price")` | `order/line_items/price` |
-| target leaf | `jv.Address("order", "returned")` | `order/returned` |
+| root | `rf.Address("order")` | `order` |
+| line-items branch | `rf.Address("order", "line_items")` | `order/line_items` |
+| price leaf | `rf.Address("order", "line_items", "price")` | `order/line_items/price` |
+| target leaf | `rf.Address("order", "returned")` | `order/returned` |
 
 Addresses identify nodes in displays, metric names, mutation predicates, and
 prediction dictionaries. They describe the model contract. A leaf's query can
@@ -133,7 +133,7 @@ Node settings change how a schema participates in learning and prediction:
 | `p_mask=0.15` | Hides sampled leaf positions for reconstruction. |
 | `p_prune=0.15` | Hides sampled whole leaf instances for reconstruction. |
 | `target=True` | Always hides a leaf and learns it as a supervised target; shorthand for `p_prune=1.0`. |
-| `mask=jv.Mask(...)` | Selects candidate branch coordinates/windows; descendant leaves sample independently inside them. |
+| `mask=rf.Mask(...)` | Selects candidate branch coordinates/windows; descendant leaves sample independently inside them. |
 | `embed=True` | Emits an embedding at a root, branch, or leaf address during prediction. |
 | `active=False` | Retains a node in the schema while excluding it from execution. |
 
@@ -152,8 +152,8 @@ The tree is also the selection surface for explicit schema changes:
 | `model.reset(predicate)` | Reinitialize selected runtime modules while keeping schema values. |
 | `model.override(predicate, **values)` | Apply temporary changes inside a context manager. |
 
-Use predicates such as `jv.where("name") == "price"`,
-`jv.where("type") == "number"`, or an exact address to select nodes. Mutations
+Use predicates such as `rf.where("name") == "price"`,
+`rf.where("type") == "number"`, or an exact address to select nodes. Mutations
 rebuild the runtime graph and reuse state whose names and shapes remain
 compatible. They are blocked while Lightning owns an active train, validation,
 test, or prediction loop.

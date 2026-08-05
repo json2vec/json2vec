@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -38,15 +38,15 @@ then pooling rolls the branch representation up to its parent.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-measurements = jv.Branch(
-    jv.Category("name", size=32),
+measurements = rf.Branch(
+    rf.Category("name", size=32),
     name="measurements",
     length=8,
     overflow="tail",
     n_layers=2,
-    value=jv.Number,
+    value=rf.Number,
 )
 
 measurements
@@ -92,12 +92,12 @@ most recent records should be retained:
 #| echo: true
 #| output: true
 
-events = jv.Branch(
+events = rf.Branch(
     name="events",
     length=128,
     overflow="tail",
-    event_type=jv.Category(size=128),
-    amount=jv.Number,
+    event_type=rf.Category(size=128),
+    amount=rf.Number,
 )
 
 events
@@ -112,26 +112,26 @@ For a top-level schema like:
 #| echo: true
 #| output: true
 
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    measurements=jv.Branch(
-        jv.Category("name", size=32),
+    measurements=rf.Branch(
+        rf.Category("name", size=32),
         length=8,
-        value=jv.Number,
+        value=rf.Number,
     ),
 )
 
 model
 ```
 
-`json2vec` infers child queries like `[*].measurements[*].name` and
+`relflow` infers child queries like `[*].measurements[*].name` and
 `[*].measurements[*].value`.
 
 ::: {.callout-note}
 Field `name` controls the public schema name. `query` controls where values
-are read. When omitted, `json2vec` infers the request query from the field and
+are read. When omitted, `relflow` infers the request query from the field and
 parent branch names. `Branch` itself does not read a value with `query`; its
 child leaves do.
 :::
@@ -142,11 +142,11 @@ Use explicit queries when the source keys do not match the public schema names:
 #| echo: true
 #| output: true
 
-items = jv.Branch(
+items = rf.Branch(
     name="items",
     length=32,
-    sku=jv.Category(query="[*].line_items[*].product_sku", size=2048),
-    quantity=jv.Number(query="[*].line_items[*].qty"),
+    sku=rf.Category(query="[*].line_items[*].product_sku", size=2048),
+    quantity=rf.Number(query="[*].line_items[*].qty"),
 )
 
 items
@@ -178,8 +178,8 @@ Common branch contexts include:
 | `n_heads` | `4` | Attention heads for this branch. Must be positive and even, divide the model's `d_model`, and leave at least two dimensions per head. |
 | `n_linear` | `1` | Number of learned-query cross-attention pooling blocks. Each block contains cross-attention and a feed-forward network. |
 | `dropout` | `None` | Optional dropout rate. |
-| `mask` | `None` | One `jv.Mask(...)` policy for selecting repeated coordinates in train, validation, and test; prediction bypasses configured masks. |
-| `masks` | `[]` | Multiple named or unnamed `jv.Mask(...)` policies for the same branch. |
+| `mask` | `None` | One `rf.Mask(...)` policy for selecting repeated coordinates in train, validation, and test; prediction bypasses configured masks. |
+| `masks` | `[]` | Multiple named or unnamed `rf.Mask(...)` policies for the same branch. |
 | `embed` | `False` | Includes this branch node in `Model.predict(...)` outputs under `embedding`. See [Learning Modes & Embeddings](../core-concepts/embeddings.qmd). |
 | `description` | `None` | Optional schema metadata. |
 
@@ -212,12 +212,12 @@ shape.
 #| echo: true
 #| output: true
 
-session = jv.Branch(
+session = rf.Branch(
     name="sessions",
     length=4,
-    transactions=jv.Branch(
+    transactions=rf.Branch(
         length=32,
-        amount=jv.Number,
+        amount=rf.Number,
     ),
 )
 

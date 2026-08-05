@@ -7,12 +7,12 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-import json2vec as jv
-import json2vec.inference.deployment as deployment_module
-from json2vec import Model, Number, where
-from json2vec.inference.deployment import Deployment, ErrorItem, RequestItem
-from json2vec.structs.enums import Strata, TensorKey
-from json2vec.structs.packages import Prediction
+import relflow as rf
+import relflow.inference.deployment as deployment_module
+from relflow import Model, Number, where
+from relflow.inference.deployment import Deployment, ErrorItem, RequestItem
+from relflow.structs.enums import Strata, TensorKey
+from relflow.structs.packages import Prediction
 
 
 class _DummyModel:
@@ -133,11 +133,11 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
 
 
 def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_once(monkeypatch):
-    @jv.preprocess
+    @rf.preprocess
     def __deployment_preprocess(observation: dict):
         if observation["hue"] == "bad":
             raise ValueError("bad hue")
-        return jv.Observation({"color": observation["hue"]})
+        return rf.Observation({"color": observation["hue"]})
 
     captured = {"calls": 0}
 
@@ -178,7 +178,7 @@ def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
-    @jv.postprocess
+    @rf.postprocess
     def processor(predictions, *, request, observations, input):
         seen["request"] = request
         seen["observations"] = observations
@@ -213,7 +213,7 @@ def test_fastapi_runtime_postprocess_receives_device_moved_input(monkeypatch):
     def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
-    @jv.postprocess
+    @rf.postprocess
     def processor(predictions, *, input):
         seen["input_device"] = input["dummy"].device
         return predictions
@@ -254,10 +254,10 @@ def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch)
 
 
 def test_fastapi_runtime_decode_rejects_multiple_preprocessor_outputs():
-    @jv.preprocess
+    @rf.preprocess
     def __deployment_generator(observation: dict):
-        yield jv.Observation({"color": observation["hue"]})
-        yield jv.Observation({"color": observation["hue"] + "2"})
+        yield rf.Observation({"color": observation["hue"]})
+        yield rf.Observation({"color": observation["hue"] + "2"})
 
     runtime = _runtime(preprocessor=__deployment_generator)
     context = {}
@@ -273,9 +273,9 @@ def test_fastapi_runtime_decode_validates_pydantic_request_model():
     class Request(pydantic.BaseModel):
         hue: str
 
-    @jv.preprocess
+    @rf.preprocess
     def __deployment_preprocess(observation: dict):
-        return jv.Observation({"color": observation["hue"]})
+        return rf.Observation({"color": observation["hue"]})
 
     runtime = _runtime(
         request_signature=Request,
@@ -391,7 +391,7 @@ def test_deployment_launcher_configures_worker_import_string(monkeypatch):
     Deployment(checkpoint="model.ckpt", workers=2, accelerator="cpu", port=8765).serve()
 
     assert captured == {
-        "app": "json2vec.inference.deployment:create_app",
+        "app": "relflow.inference.deployment:create_app",
         "factory": True,
         "workers": 2,
         "host": "0.0.0.0",
@@ -500,9 +500,9 @@ def test_fastapi_runtime_setup_uses_model_instance(monkeypatch):
 
 
 def test_deployment_uses_bound_preprocessor_object():
-    @jv.preprocess
+    @rf.preprocess
     def __deployment_preprocess(observation: dict, *, suffix: str):
-        return jv.Observation({"color": observation["hue"] + suffix})
+        return rf.Observation({"color": observation["hue"] + suffix})
 
     deployment = Deployment(checkpoint="unused").preprocess(__deployment_preprocess.partial(suffix="!"))
     runtime = deployment_module.FastAPIRuntime(

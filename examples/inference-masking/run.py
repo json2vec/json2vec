@@ -4,8 +4,8 @@ import string
 
 from rich import print
 
-import json2vec as jv
-from json2vec.structs.enums import Strata
+import relflow as rf
+from relflow.structs.enums import Strata
 
 ALPHABET = string.ascii_uppercase
 ADDRESS = "record/letters/letter"
@@ -17,13 +17,13 @@ def letter_record(values: str) -> dict[str, list[dict[str, str]]]:
 
 
 if __name__ == "__main__":
-    model = jv.Model.from_tree(
+    model = rf.Model.from_tree(
         d_model=16,
         n_layers=1,
         n_heads=4,
-        letters=jv.Branch(
+        letters=rf.Branch(
             length=8,
-            letter=jv.Category(
+            letter=rf.Category(
                 size=len(ALPHABET),
                 p_unavailable=0.0,
                 topk=[3],

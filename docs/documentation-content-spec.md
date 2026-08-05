@@ -69,7 +69,7 @@ The docs should explicitly support these readers:
 
 | Reader | Job the docs must help complete |
 | --- | --- |
-| Evaluator | Understand what problem JSON2Vec solves, where it differs from a flat model, its maturity, and its constraints. |
+| Evaluator | Understand what problem RelFlow solves, where it differs from a flat model, its maturity, and its constraints. |
 | First-time builder | Install the package, build a small model, train it, inspect metrics, save it, load it, and predict. |
 | Model designer | Map nested records to branches and datatypes, choose context sizes, avoid leakage, and configure learning roles. |
 | Training practitioner | Choose data modules and model/trainer settings, interpret metrics, checkpoint safely, and diagnose failures. |
@@ -85,7 +85,7 @@ A reader should be able to move through this sequence without an unexplained
 jump:
 
 1. **Why:** hierarchical business records lose useful structure when flattened.
-2. **What:** a JSON2Vec schema is both a data contract and a model blueprint.
+2. **What:** a RelFlow schema is both a data contract and a model blueprint.
 3. **How data moves:** raw record to preprocessing, querying, state/content
    tensors, model tree, decoder/loss, and prediction writer.
 4. **First result:** build, train, evaluate, save, load, and predict a tiny model.
@@ -152,7 +152,7 @@ The following material is required for the main reader journey:
 | End-to-end first model | One small runnable path through build, train, validation metric, save, load, and prediction. Explain what successful output looks like and keep nested modeling as the next step rather than a second competing quickstart. |
 | Data-flow mental model | One canonical record-to-output walkthrough: raw record → preprocessor → query → state/content tensorfield → model tree → decoder/loss → writer/postprocessor. Define user-facing terms before `parcel`, `heritage`, or other internals. |
 | Evaluation and metrics | Metric naming by schema address and stage, weighted total-loss composition, state versus content metrics, class imbalance, thresholds/top-k, selecting checkpoint monitors, validation leakage, and how to tell whether the model learned anything useful. |
-| Model lifecycle | `save`, `load`, checkpoint restoration, resuming, vocabulary/normalizer preservation, schema compatibility, `RollbackCheckpoint`, and train/serve artifact parity. Clarify lightweight JSON2Vec persistence versus Lightning checkpoints with optimizer/training state. |
+| Model lifecycle | `save`, `load`, checkpoint restoration, resuming, vocabulary/normalizer preservation, schema compatibility, `RollbackCheckpoint`, and train/serve artifact parity. Clarify lightweight RelFlow persistence versus Lightning checkpoints with optimizer/training state. |
 | Online serving | A dedicated supported path for `Deployment`, request/response contracts, batching, accelerator/backend choices, preprocessors/postprocessors, concurrency, failure behavior, and production caveats. If serving is experimental, mark it prominently. |
 
 ### P1: Make Design And Operation Deliberate
@@ -177,7 +177,7 @@ The following material is required for the main reader journey:
 - Add a lightweight troubleshooting index that can grow from recurring issues.
 - Correct smaller contract language during page revisions: Number jitter is the
   difference of two uniforms (triangular noise), not uniform noise; ordinary
-  dictionary transformation helpers should not be called JSON2Vec
+  dictionary transformation helpers should not be called RelFlow
   preprocessors unless they implement the public processor contract; remove
   copy errors such as “Supplies schema schema.”
 

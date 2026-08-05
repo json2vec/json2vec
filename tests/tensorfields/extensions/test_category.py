@@ -4,17 +4,17 @@ import polars as pl
 import torch
 from tensordict import TensorDict
 
-from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.category import (
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.structs.packages import Prediction
+from relflow.tensorfields.extensions.category import (
     Decoder,
     Embedder,
     TensorField,
     loss,
     write,
 )
-from json2vec.tensorfields.shared.vocabulary import OnlineVocabularyModel
+from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
 
 ADDRESS = "root/items/category"
 

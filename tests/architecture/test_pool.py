@@ -1,7 +1,7 @@
 import torch
 from torch.utils.module_tracker import ModuleTracker
 
-from json2vec.architecture.pool import LearnedQueryCrossAttention
+from relflow.architecture.pool import LearnedQueryCrossAttention
 
 
 def test_pool():

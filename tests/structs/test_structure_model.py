@@ -1,9 +1,9 @@
 import pytest
 
-from json2vec.structs.enums import Overflow
-from json2vec.structs.experiment import Schema
-from json2vec.structs.structure import Branch
-from json2vec.tensorfields.extensions.category import Request as Category
+from relflow.structs.enums import Overflow
+from relflow.structs.experiment import Schema
+from relflow.structs.structure import Branch
+from relflow.tensorfields.extensions.category import Request as Category
 
 
 def _payload() -> dict:

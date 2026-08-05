@@ -41,7 +41,7 @@ or joining but should not be learned as raw inputs.
 ## Build Windows In One Preprocessor
 
 Use the public preprocessor contract when raw histories need sorting, filtering,
-or feature derivation. Return `jv.Observation`, not a plain dictionary:
+or feature derivation. Return `rf.Observation`, not a plain dictionary:
 
 ```{python .marimo}
 #| echo: true
@@ -49,10 +49,10 @@ or feature derivation. Return `jv.Observation`, not a plain dictionary:
 
 from datetime import datetime, timezone
 
-import json2vec as jv
+import relflow as rf
 
 
-@jv.preprocess
+@rf.preprocess
 def trailing_history(observation, *, strata, cutoffs):
     as_of = datetime.fromisoformat(cutoffs[str(strata)].replace("Z", "+00:00"))
     events = []
@@ -72,7 +72,7 @@ def trailing_history(observation, *, strata, cutoffs):
             )
 
     events.sort(key=lambda event: event["days_since_event"], reverse=True)
-    return jv.Observation(
+    return rf.Observation(
         {
             "events": events,
             "outcome_in_next_7_days": observation.get("outcome_in_next_7_days"),
@@ -100,7 +100,7 @@ Pass the same preprocessor to data modules and interactive or online inference:
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
@@ -142,7 +142,7 @@ Audit more than timestamps:
 - data availability lag, where an event occurred before `as_of` but was not yet
   visible to the production system.
 
-JSON2Vec learns numeric normalization and Category/Set vocabulary during the
+RelFlow learns numeric normalization and Category/Set vocabulary during the
 training split. Validation, test, and prediction reuse that state. Keep split
 roles correct so future labels do not expand training vocabulary.
 

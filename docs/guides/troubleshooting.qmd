@@ -8,7 +8,7 @@ eval: false
 **Example status — excerpt:** diagnostic blocks assume the model and data from
 the failing workflow.
 
-Most JSON2Vec failures come from one of four contracts: source-to-query shape,
+Most RelFlow failures come from one of four contracts: source-to-query shape,
 state/content encoding, schema capacity, or artifact/runtime parity. Inspect the
 smallest raw observation before changing the architecture.
 
@@ -28,7 +28,7 @@ smallest raw observation before changing the architecture.
 
 import jmespath
 
-import json2vec as jv
+import relflow as rf
 
 record = {
     "events": [
@@ -55,7 +55,7 @@ problem occurred.
 | `nullable=False` raises | A query returned `None` or source data contains null | Repair/coerce in a preprocessor or make null part of the contract. Do not replace it silently with a valued default. |
 | Loss is zero / “no trainable fields” | No target, mask, or prune selection is active for the batch | Add a supervised target or reconstruction policy; inspect `trainable` and target state in encoded input. |
 | Prediction has no decoded value | Visible input fields are not decoded by default | Configure `target`, masking, or the supported prediction role. `embed=True` requests an embedding and may also invoke decoding, but it is not a target. |
-| Prediction address is missing | Root/branch name differs, field is inactive, or writer returned no public content | Print the model, use `jv.Address(...)`, and inspect the canonical prediction-output contract. |
+| Prediction address is missing | Root/branch name differs, field is inactive, or writer returned no public content | Print the model, use `rf.Address(...)`, and inspect the canonical prediction-output contract. |
 | `topk` validation fails | `1` is redundant or requested `k >= size` | Remove `1`; choose `1 < k < size`. Runtime candidates are capped by the populated vocabulary. |
 | Category vocabulary warning | Training observed more distinct labels than `size` | Confirm cardinality and split roles; increase deliberate capacity or choose another representation. |
 | New Category value is not predicted as “unavailable” | Unavailable is not a prediction class | It remains valued with zero input content. Predictions rank populated known labels; do not treat low confidence as calibrated OOD detection. |
@@ -63,7 +63,7 @@ problem occurred.
 | Entity IDs do not match across records or leaves | Entity reindexes independently per observation and leaf | Put repeated roles in one shared field/context, or use Category only when a bounded persistent identity is intended. |
 | Mutation fails during fit/predict | The active Lightning/runtime loop locks the schema | Mutate between complete loops and identically on every distributed rank. |
 | Mutation changed learned behavior | A tensor shape/address changed and its state could not be restored | Inspect the mutated tree, reset/retrain deliberately, and compare state dictionaries/artifacts. |
-| Loaded built-in model has different vocabulary or normalizer behavior | Wrong artifact or unsupported manual reconstruction | Load the saved JSON2Vec/Lightning checkpoint that owns schema state; do not reconstruct it from copied constructor code. Dynamically registered custom request types do not currently support artifact round-trips. |
+| Loaded built-in model has different vocabulary or normalizer behavior | Wrong artifact or unsupported manual reconstruction | Load the saved RelFlow/Lightning checkpoint that owns schema state; do not reconstruct it from copied constructor code. Dynamically registered custom request types do not currently support artifact round-trips. |
 | Serving symbol import fails | Optional serving dependencies are absent | Install the `serving` extra in the service environment. |
 | Text construction/import fails | Optional tokenizer/model dependencies are absent | Install the `text` extra and pin the tokenizer/model artifact used in training. |
 | Distributed results duplicate records | Input sharding does not match files/workers/ranks | Check sharding strategy, worker count, file discovery, and output partitions. |
@@ -87,8 +87,8 @@ content value in isolation.
 
 ## Debug A Preprocessor
 
-A JSON2Vec preprocessor is an object produced by `@jv.preprocess` and must return
-`jv.Observation`, `None`, or an iterable of those. A plain dictionary helper is
+A RelFlow preprocessor is an object produced by `@rf.preprocess` and must return
+`rf.Observation`, `None`, or an iterable of those. A plain dictionary helper is
 an upstream transformation, not a pipeline preprocessor.
 
 Call the decorated object directly for a simple function, then exercise it
@@ -98,9 +98,9 @@ through `model.encode` to include runtime-provided values:
 #| echo: true
 #| output: true
 
-@jv.preprocess
+@rf.preprocess
 def rename_amount(observation):
-    return jv.Observation({"amount": observation["raw_amount"]})
+    return rf.Observation({"amount": observation["raw_amount"]})
 
 
 assert rename_amount({"raw_amount": 12.5}).data == {"amount": 12.5}
@@ -116,7 +116,7 @@ present. Bind required user parameters with `.partial(...)`.
 
 ## Debug Prediction Output
 
-The result is keyed by `jv.Address`, not display strings. Check exact keys:
+The result is keyed by `rf.Address`, not display strings. Check exact keys:
 
 ```{python .marimo}
 #| echo: true
@@ -149,7 +149,7 @@ which ranks skipped a data-dependent path.
 
 Include:
 
-- JSON2Vec, Python, PyTorch, Lightning, and accelerator versions;
+- RelFlow, Python, PyTorch, Lightning, and accelerator versions;
 - operating system and device;
 - the smallest model schema and one redacted raw observation;
 - split/strata and preprocessor/query involved;

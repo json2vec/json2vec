@@ -9,13 +9,13 @@ eval: false
 Use the CI-backed [Iris case study](../case-studies/iris-reproducible.qmd) for a
 complete baseline, split, checkpoint, and held-out result.
 
-Evaluation answers two different questions: whether JSON2Vec is learning its
+Evaluation answers two different questions: whether RelFlow is learning its
 typed reconstruction objectives, and whether the resulting model helps the
 business task that motivated it. The logged metrics answer the first question.
 You still need an honest validation split and, where appropriate, a downstream
 baseline to answer the second.
 
-This guide assumes you have a trained `jv.Model` and a data module with a
+This guide assumes you have a trained `rf.Model` and a data module with a
 `validate` split. See [Training With Lightning](lightning.qmd) for the training
 loop and [Data Modules](data-modules.qmd) for split construction.
 
@@ -42,7 +42,7 @@ subsample it accidentally:
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=validate_frame,
@@ -52,7 +52,7 @@ datamodule = jv.PolarsDataModule(
 
 ## Read Metric Names
 
-JSON2Vec reports metrics once per epoch. Global metrics use:
+RelFlow reports metrics once per epoch. Global metrics use:
 
 ```text
 <metric>/<stage>
@@ -115,7 +115,7 @@ hide a regression on the one target the application cares about. Track that
 target's content metric and a business-facing metric alongside it.
 
 ::: {.callout-note}
-If a batch contains no trainable fields, JSON2Vec returns a differentiable zero
+If a batch contains no trainable fields, RelFlow returns a differentiable zero
 loss and logs a warning. Repeated warnings usually mean the queries, targets,
 masking rates, or split contents are not producing learning examples.
 :::
@@ -151,7 +151,7 @@ false negatives rather than assuming `0.5` is optimal.
 
 For bounded categorical targets, ordinary accuracy can obscure rare classes.
 Use configured top-k accuracy only when returning several candidates is useful
-to the application. Also inspect per-class performance outside JSON2Vec when
+to the application. Also inspect per-class performance outside RelFlow when
 class imbalance matters; the built-in scalar metrics are not a confusion
 matrix or calibration report.
 
@@ -167,7 +167,7 @@ Choose a monitor that matches the decision you are making:
 #| echo: true
 #| output: true
 
-checkpoint = jv.RollbackCheckpoint(
+checkpoint = rf.RollbackCheckpoint(
     dirpath="checkpoints",
     filename="best-{epoch:02d}",
     monitor="loss/validate",
@@ -207,7 +207,7 @@ A validation metric is useful only when the split represents future use.
 - Fit vocabularies and numeric normalization from training observations. Do not
   send validation records through the training dataloader merely to populate
   preprocessing state.
-- Apply the same JSON2Vec preprocessor code and bound parameters to every
+- Apply the same RelFlow preprocessor code and bound parameters to every
   split, while allowing stage-aware behavior only when it is intentional.
 - Keep labels and post-outcome events out of visible nested context.
 

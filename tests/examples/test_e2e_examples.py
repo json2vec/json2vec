@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 import torch
 
-import json2vec as jv
+import relflow as rf
 
 
 def _repo_root() -> Path:
@@ -83,9 +83,9 @@ def test_quarto_docs_use_current_public_api_style() -> None:
     root = _repo_root()
     sources = "\n".join(path.read_text() for path in sorted((root / "docs").rglob("*.qmd")))
 
-    assert "jv.Model(" in sources
-    assert "jv.Model.from_tree(" not in sources
-    assert "jv.Branch(" in sources
+    assert "rf.Model(" in sources
+    assert "rf.Model.from_tree(" not in sources
+    assert "rf.Branch(" in sources
     assert "Struct(" not in sources
     assert not re.search(r"Model\.from_tree\([^)]*\broot\s*=", sources, re.DOTALL)
 
@@ -132,17 +132,17 @@ def test_documented_contracts_match_public_enums_and_requests() -> None:
         path.read_text() for path in docs.rglob("*.qmd") if path.name != "documentation-content-spec.md"
     )
 
-    assert {token.name for token in jv.Tokens} == {"valued", "null", "padded", "masked", "other"}
-    assert all(f"`{token.name}`" in data_types for token in jv.Tokens)
-    assert all(mode.value in branch for mode in jv.AttentionMode)
+    assert {token.name for token in rf.Tokens} == {"valued", "null", "padded", "masked", "other"}
+    assert all(f"`{token.name}`" in data_types for token in rf.Tokens)
+    assert all(mode.value in branch for mode in rf.AttentionMode)
     assert "`second_of_minute`" in dateparts
     assert "One extra internal bucket is reserved" not in published
     assert "reserved unavailable bucket" not in published
     assert "Pruning is an operation" in data_types
 
-    common_fields = set(jv.RequestBase.model_fields)
+    common_fields = set(rf.RequestBase.model_fields)
     for name in ("Number", "Boolean", "Category", "Set", "Entity", "DateParts", "Vector", "Text"):
-        request = getattr(jv, name)
+        request = getattr(rf, name)
         reference = (docs / f"data-types/{name.lower()}.qmd").read_text()
         for field_name, field in request.model_fields.items():
             if field_name in common_fields:
@@ -188,14 +188,14 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
         "n_linear",
     }
     pages = {
-        jv.Boolean: docs / "boolean.qmd",
-        jv.Category: docs / "category.qmd",
-        jv.DateParts: docs / "dateparts.qmd",
-        jv.Entity: docs / "entity.qmd",
-        jv.Number: docs / "number.qmd",
-        jv.Set: docs / "set.qmd",
-        jv.Text: docs / "text.qmd",
-        jv.Vector: docs / "vector.qmd",
+        rf.Boolean: docs / "boolean.qmd",
+        rf.Category: docs / "category.qmd",
+        rf.DateParts: docs / "dateparts.qmd",
+        rf.Entity: docs / "entity.qmd",
+        rf.Number: docs / "number.qmd",
+        rf.Set: docs / "set.qmd",
+        rf.Text: docs / "text.qmd",
+        rf.Vector: docs / "vector.qmd",
     }
 
     missing: list[tuple[str, str]] = []
@@ -227,19 +227,19 @@ def test_documented_sparse_stacking_and_map_queries_preserve_coordinates() -> No
     assert jmespath.search("[*].map(&ip_country, events)", observation) == [["US", None, "CA"]]
     assert jmespath.search("[*].map(&amount, events)", observation) == [[None, 950.0, None]]
 
-    model = jv.Model(
+    model = rf.Model(
         d_model=8,
         n_layers=1,
         n_heads=2,
-        events=jv.Branch(
+        events=rf.Branch(
             length=3,
-            ip_country=jv.Category(size=4),
-            amount=jv.Number,
+            ip_country=rf.Category(size=4),
+            amount=rf.Number,
         ),
     )
     encoded = model.encode(observation)
-    assert encoded[jv.Address("record", "events", "ip_country")].state.tolist() == [[[0, 1, 0]]]
-    assert encoded[jv.Address("record", "events", "amount")].state.tolist() == [[[1, 0, 1]]]
+    assert encoded[rf.Address("record", "events", "ip_country")].state.tolist() == [[[0, 1, 0]]]
+    assert encoded[rf.Address("record", "events", "amount")].state.tolist() == [[[1, 0, 1]]]
 
     filtered = [
         {
@@ -256,14 +256,14 @@ def test_documented_sparse_stacking_and_map_queries_preserve_coordinates() -> No
 
 
 def test_documented_prediction_envelope_is_executable() -> None:
-    model = jv.Model(
+    model = rf.Model(
         d_model=8,
         n_layers=1,
         n_heads=2,
         batch_size=1,
         embed=True,
-        amount=jv.Number,
-        label=jv.Category(target=True, size=2, p_unavailable=0.0),
+        amount=rf.Number,
+        label=rf.Category(target=True, size=2, p_unavailable=0.0),
     )
     model.encode(
         [
@@ -274,11 +274,11 @@ def test_documented_prediction_envelope_is_executable() -> None:
     )
 
     output = model.predict([{"amount": 1.5}])
-    target = output[jv.Address("record", "label")]
-    root = output[jv.Address("record")]
+    target = output[rf.Address("record", "label")]
+    root = output[rf.Address("record")]
 
     assert set(target) == {"state", "content", "inferred"}
-    assert set(target["state"]) == {token.name for token in jv.Tokens}
+    assert set(target["state"]) == {token.name for token in rf.Tokens}
     assert set(target["content"]) == {"value", "probability", "topk"}
     assert target["inferred"] == [True]
     assert torch.linalg.vector_norm(torch.tensor(root["embedding"][0])).item() == pytest.approx(1.0)
@@ -303,18 +303,18 @@ def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
             {"sepal_length": 6.5, "petal_length": 5.2, "species": "virginica"},
         ]
     )
-    model = jv.Model(
+    model = rf.Model(
         d_model=16,
         n_layers=1,
         n_heads=4,
         batch_size=3,
         embed=True,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
-        sepal_length=jv.Number,
-        petal_length=jv.Number,
-        species=jv.Category(target=True, size=3, topk=[2]),
+        sepal_length=rf.Number,
+        petal_length=rf.Number,
+        species=rf.Category(target=True, size=3, topk=[2]),
     )
-    datamodule = jv.PolarsDataModule(
+    datamodule = rf.PolarsDataModule(
         model=model,
         train=train_records,
         validate=validate_records,
@@ -340,12 +340,12 @@ def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
     assert "loss/validate" in metrics
     assert "record:species/validate:accuracy:content" in metrics
 
-    artifact = tmp_path / "getting-started.jv"
+    artifact = tmp_path / "getting-started.rf"
     model.save(artifact)
-    restored = jv.Model.load(artifact)
+    restored = rf.Model.load(artifact)
     predictions = restored.predict([{"sepal_length": 5.0, "petal_length": 1.5}])
-    assert predictions[jv.Address("record", "species")]["inferred"] == [True]
-    assert len(predictions[jv.Address("record")]["embedding"][0]) == 16
+    assert predictions[rf.Address("record", "species")]["inferred"] == [True]
+    assert len(predictions[rf.Address("record")]["embedding"][0]) == 16
 
 
 def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
@@ -355,20 +355,20 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
     validate_records = records.filter((pl.col("index") % 5) == 3).drop("index")
     test_records = records.filter((pl.col("index") % 5) == 4).drop("index")
 
-    model = jv.Model(
+    model = rf.Model(
         name="flower",
         d_model=32,
         n_layers=2,
         n_heads=4,
         batch_size=15,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=3e-3),
-        sepal_length=jv.Number,
-        sepal_width=jv.Number,
-        petal_length=jv.Number,
-        petal_width=jv.Number,
-        species=jv.Category(target=True, size=3, p_unavailable=0.0),
+        sepal_length=rf.Number,
+        sepal_width=rf.Number,
+        petal_length=rf.Number,
+        petal_width=rf.Number,
+        species=rf.Category(target=True, size=3, p_unavailable=0.0),
     )
-    datamodule = jv.PolarsDataModule(
+    datamodule = rf.PolarsDataModule(
         model=model,
         train=train_records,
         validate=validate_records,
@@ -377,7 +377,7 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
         persistent_workers=False,
         pin_memory=False,
     )
-    checkpoint = jv.RollbackCheckpoint(
+    checkpoint = rf.RollbackCheckpoint(
         dirpath=tmp_path / "iris-checkpoints",
         filename="best",
         monitor="loss/validate",
@@ -398,12 +398,12 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
     metrics = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
     assert metrics["flower:species/test:accuracy:content"] == pytest.approx(0.9)
 
-    artifact = tmp_path / "iris-model.jv"
+    artifact = tmp_path / "iris-model.rf"
     model.save(artifact)
-    restored = jv.Model.load(artifact)
+    restored = rf.Model.load(artifact)
     requests = test_records.drop("species").head(3).to_dicts()
     predictions = restored.predict(requests)
-    assert predictions[jv.Address("flower", "species")]["inferred"] == [True, True, True]
+    assert predictions[rf.Address("flower", "species")]["inferred"] == [True, True, True]
 
 
 def test_only_allowed_standalone_examples_are_present() -> None:

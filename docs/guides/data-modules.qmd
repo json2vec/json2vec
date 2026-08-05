@@ -9,8 +9,8 @@ eval: false
 model or records from the surrounding text. The complete in-memory lifecycle is
 tested in [Getting Started](../getting-started.qmd).
 
-`json2vec` data modules are Lightning `LightningDataModule` implementations.
-They load raw records, run an optional JSON2Vec preprocessor, batch observations,
+`relflow` data modules are Lightning `LightningDataModule` implementations.
+They load raw records, run an optional RelFlow preprocessor, batch observations,
 tensorize values from the model schema, apply configured masking and target
 pruning in non-predict strata, and return Lightning batches.
 
@@ -20,7 +20,7 @@ The data module does not define the model schema. It reads schema state from the
 The batch path is:
 
 1. Raw records are read from a DataFrame, files, or a user dataset.
-2. An optional `jv.Preprocessor` emits model-facing observations.
+2. An optional `rf.Preprocessor` emits model-facing observations.
 3. Non-predict strata (train, validation, and test) may apply `sample_rate` and
    observation-buffer shuffling. Prediction always bypasses those two
    transforms; it remains complete and ordered within its source/sharding path
@@ -40,7 +40,7 @@ Data modules use the same core ideas:
 | Option | Meaning |
 | --- | --- |
 | `model` | Supplies the schema, `batch_size`, and tensorfield encoding state. |
-| `preprocessor` | `Preprocessor` object returned by `@jv.preprocess`. |
+| `preprocessor` | `Preprocessor` object returned by `@rf.preprocess`. |
 | `num_workers` | PyTorch dataloader worker count. |
 | `persistent_workers` | Keeps worker processes alive between epochs when workers are enabled. |
 | `pin_memory` | Enables dataloader pinning when useful for accelerator transfer. |
@@ -55,7 +55,7 @@ Most execution options accept either one value or a mapping keyed by
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=valid_frame,
@@ -81,7 +81,7 @@ datamodule = jv.PolarsDataModule(
 
 Use `CustomDataModule` when you already have a PyTorch `IterableDataset` that
 yields raw observation dictionaries. The dataset owns the upstream feed.
-`json2vec` owns preprocessing, batching, tensorization, masking, and target
+`relflow` owns preprocessing, batching, tensorization, masking, and target
 pruning.
 
 ```{python .marimo}
@@ -90,7 +90,7 @@ pruning.
 
 from torch.utils.data import IterableDataset
 
-import json2vec as jv
+import relflow as rf
 
 
 class Records(IterableDataset):
@@ -101,7 +101,7 @@ class Records(IterableDataset):
         yield from self.records
 
 
-datamodule = jv.CustomDataModule(
+datamodule = rf.CustomDataModule(
     model=model,
     train=Records([
         {"amount": 10.5, "merchant": "bookstore", "label": "ok"},
@@ -122,7 +122,7 @@ You may pass named splits or one split mapping:
 #| echo: true
 #| output: true
 
-datamodule = jv.CustomDataModule(
+datamodule = rf.CustomDataModule(
     model=model,
     datasets={
         "train": train_dataset,
@@ -148,12 +148,12 @@ for examples, notebooks, tests, and small-to-medium local workflows.
 
 import polars as pl
 
-import json2vec as jv
+import relflow as rf
 
 train = pl.read_ndjson("docs/data/iris.jsonl")
 valid = train.head(16)
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train,
     validate=valid,
@@ -169,7 +169,7 @@ You may pass named splits:
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=valid_frame,
@@ -184,7 +184,7 @@ Or pass one split mapping:
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     dataframe={
         "train": train_frame,
@@ -205,7 +205,7 @@ Configure a `predict` split before using the Lightning prediction loop:
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     predict=predict_frame,
 )
@@ -213,7 +213,7 @@ datamodule = jv.PolarsDataModule(
 trainer.predict(model=model, datamodule=datamodule)
 ```
 
-For writing outputs to disk, add `jv.Writer`; see
+For writing outputs to disk, add `rf.Writer`; see
 [Batch Inference](batch-inference.qmd).
 
 ## StreamingDataModule
@@ -238,9 +238,9 @@ objects.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-datamodule = jv.StreamingDataModule(
+datamodule = rf.StreamingDataModule(
     model=model,
     root="data/events",
     suffix="ndjson",
@@ -257,7 +257,7 @@ For S3:
 #| echo: true
 #| output: true
 
-datamodule = jv.StreamingDataModule(
+datamodule = rf.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
@@ -300,28 +300,28 @@ are compiled by `StreamingDataModule`.
 
 ## Preprocessors
 
-Here, **preprocessor** means the public `jv.Preprocessor` object returned by
-`@jv.preprocess`, not any ordinary Python function that happens to transform a
+Here, **preprocessor** means the public `rf.Preprocessor` object returned by
+`@rf.preprocess`, not any ordinary Python function that happens to transform a
 dictionary. Data modules reject undecorated callables so the input contract and
 pipeline-provided arguments stay explicit.
 
 Preprocessors are optional. If none is configured, each raw dictionary becomes
 one model-facing observation unchanged. Use a query when the source shape is
-stable and selection is enough. Use a JSON2Vec preprocessor when records need
+stable and selection is enough. Use a RelFlow preprocessor when records need
 Python logic before schema queries run: type coercion, renaming,
 source-specific cleanup, sorting, windowing, session splitting, filtering, or
 derived fields.
 
-A one-to-one preprocessor returns one wrapped `jv.Observation` for each raw
+A one-to-one preprocessor returns one wrapped `rf.Observation` for each raw
 dictionary:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-@jv.preprocess
-def normalize_transaction(record: dict) -> jv.Observation:
-    return jv.Observation({
+@rf.preprocess
+def normalize_transaction(record: dict) -> rf.Observation:
+    return rf.Observation({
         "amount": float(record["transaction"]["amount_usd"]),
         "merchant": record["transaction"]["merchant_name"].strip().lower(),
         "label": record["outcome"],
@@ -341,7 +341,7 @@ All data modules accept the same preprocessor forms:
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=records,
     preprocessor=my_preprocessor,
@@ -356,7 +356,7 @@ the data module. Pipeline-provided keyword-only parameters named `strata`,
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=records,
     preprocessor=build_windows.partial(
@@ -375,10 +375,10 @@ one raw export contains many model records:
 #| echo: true
 #| output: true
 
-@jv.preprocess
+@rf.preprocess
 def session_windows(account: dict):
     for session in account["sessions"]:
-        yield jv.Observation({
+        yield rf.Observation({
             "account_id": account["account_id"],
             "events": session["events"],
             "label": session.get("label"),
@@ -436,7 +436,7 @@ them only between complete Lightning runs; see
 
 | Symptom | Likely cause or next check |
 | --- | --- |
-| `preprocessor must be a Preprocessor object` | Decorate the callable with `@jv.preprocess` and return `jv.Observation`. |
+| `preprocessor must be a Preprocessor object` | Decorate the callable with `@rf.preprocess` and return `rf.Observation`. |
 | Query output is unexpectedly empty | Remember queries run against the emitted observation, not the raw source record. |
 | An explicit Lightning loop has no batches | Configure its matching `validate`, `test`, or `predict` split. |
 | Streaming files are not discovered | Split selectors are regular expressions over discovered paths, not glob patterns. |
@@ -447,7 +447,7 @@ them only between complete Lightning runs; see
 
 - Use [Training With Lightning](lightning.qmd) for the execution model.
 - Use [Batch Inference](batch-inference.qmd) for `trainer.predict(...)` and
-  `jv.Writer`.
+  `rf.Writer`.
 - Use this page's [preprocessor section](#preprocessors) for input-side
   transformations.
 - Use [Query Paths](../core-concepts/querypaths.qmd) to map processed records to

@@ -9,7 +9,7 @@ eval: false
 the surrounding workflow. The compact save/load path is exercised by the docs
 contract tests.
 
-A deployable JSON2Vec artifact must keep the schema, learned tensorfield state,
+A deployable RelFlow artifact must keep the schema, learned tensorfield state,
 and neural weights together. `Model.save(...)` and `Model.load(...)` provide
 that compact inference contract. Lightning checkpoints additionally preserve
 the trainer state needed to resume a run.
@@ -23,7 +23,7 @@ After fitting, save the model that you actually intend to use:
 #| output: true
 
 artifact = model.save("artifacts/fraud-model.ckpt")
-restored = jv.Model.load(artifact)
+restored = rf.Model.load(artifact)
 
 predictions = restored.predict(
     [
@@ -33,9 +33,9 @@ predictions = restored.predict(
 )
 ```
 
-`jv.Model.from_checkpoint(...)` is an alias of `jv.Model.load(...)`.
+`rf.Model.from_checkpoint(...)` is an alias of `rf.Model.load(...)`.
 Loading occurs on CPU; move the restored model to another device explicitly or
-let `jv.Deployment` select its serving device.
+let `rf.Deployment` select its serving device.
 
 The saved artifact contains:
 
@@ -57,7 +57,7 @@ trust.
 
 ## Compact Artifact Versus Lightning Checkpoint
 
-Both kinds of file can be loaded for inference with `jv.Model.load(...)`, but
+Both kinds of file can be loaded for inference with `rf.Model.load(...)`, but
 they serve different purposes.
 
 | Capability | `model.save(path)` | Lightning `ModelCheckpoint` |
@@ -68,7 +68,7 @@ they serve different purposes.
 | Logger or dataset contents | No | No |
 | Primary use | Inference and handoff | Recovery, model selection, and resuming |
 
-`model.save(...)` writes a compact JSON2Vec checkpoint directly and creates
+`model.save(...)` writes a compact RelFlow checkpoint directly and creates
 missing parent directories. Treat its path as an output target: saving to the
 same pathname replaces the previous file.
 
@@ -97,15 +97,15 @@ or a resumable checkpoint.
 ## Finish With The Best Model In Memory
 
 An ordinary Lightning `ModelCheckpoint` records `best_model_path`, but the
-`model` object remains at its final training weights. JSON2Vec provides
-`jv.RollbackCheckpoint` when subsequent code should use the selected best
+`model` object remains at its final training weights. RelFlow provides
+`rf.RollbackCheckpoint` when subsequent code should use the selected best
 weights automatically:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-checkpoint = jv.RollbackCheckpoint(
+checkpoint = rf.RollbackCheckpoint(
     dirpath="checkpoints",
     monitor="loss/validate",
     mode="min",
@@ -120,7 +120,7 @@ model.save("artifacts/fraud-model.ckpt")
 ```
 
 `RollbackCheckpoint` requires a full checkpoint and at least one saved
-candidate. At fit end it reloads the complete JSON2Vec state, including the
+candidate. At fit end it reloads the complete RelFlow state, including the
 schema and tensorfield resources, and synchronizes distributed ranks around
 the restore.
 
@@ -139,13 +139,13 @@ import torch
 
 checkpoint_path = "checkpoints/last.ckpt"
 
-model = jv.Model.load(checkpoint_path)
+model = rf.Model.load(checkpoint_path)
 model.optimizer = lambda module: torch.optim.AdamW(
     module.parameters(),
     lr=1e-3,
 )
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=validate_frame,
@@ -161,7 +161,7 @@ trainer.fit(
 ```
 
 Lightning restores optimizer, scheduler, loop, and callback state from the
-checkpoint. `weights_only=False` is required because a full JSON2Vec checkpoint
+checkpoint. `weights_only=False` is required because a full RelFlow checkpoint
 contains schema objects as well as tensor weights; use it only with a trusted
 artifact. The optimizer factory still needs to be present so Lightning can
 construct the optimizer before applying that saved state. Use the same optimizer
@@ -173,14 +173,14 @@ The schema determines parameter shapes and tensorfield state. Treat it as part
 of the model version, not as independent request metadata.
 
 - Do not reconstruct a "similar" schema and load weights into it. Load the
-  checkpoint so JSON2Vec rebuilds the exact saved schema.
+  checkpoint so RelFlow rebuilds the exact saved schema.
 - Do not mutate a model before resuming a Lightning checkpoint. Shape-changing
   mutations can make saved optimizer and callback state incompatible.
 - If you intentionally mutate a loaded model for a new inference contract,
   validate the result and save it as a new artifact with a new version.
 - `batch_size` is persisted, but it may be changed deliberately after loading.
   Rebuild or keep a model-linked data module so it reads the current value.
-- Loading a checkpoint produced by another JSON2Vec version is not guaranteed
+- Loading a checkpoint produced by another RelFlow version is not guaranteed
   to migrate its schema. Test compatibility before replacing a production
   runtime.
 
@@ -195,7 +195,7 @@ together:
 
 | Artifact | Why it must stay aligned |
 | --- | --- |
-| JSON2Vec checkpoint | Owns schema, tensorfield state, and weights. |
+| RelFlow checkpoint | Owns schema, tensorfield state, and weights. |
 | Preprocessor code and bound values | Produces the model-facing observation shape. |
 | Postprocessor code | Defines the external response or warehouse schema. |
 | Package and Python versions | Determine checkpoint and runtime compatibility. |
@@ -212,14 +212,14 @@ address keys, shapes, and postprocessed fields as well as numerical tolerances.
 #| echo: true
 #| output: true
 
-loaded = jv.Model.load("artifacts/fraud-model.ckpt")
+loaded = rf.Model.load("artifacts/fraud-model.ckpt")
 
 assert loaded.schema.model_dump(mode="python") == model.schema.model_dump(
     mode="python"
 )
 
 smoke = loaded.predict([{"amount": 12.5, "merchant": "books"}])
-assert jv.Address("record", "fraud") in smoke
+assert rf.Address("record", "fraud") in smoke
 ```
 
 For a stronger release check, keep fixed representative inputs and assert the
@@ -230,12 +230,12 @@ hardware unless deterministic equivalence is a requirement.
 
 | Symptom | Likely cause or next check |
 | --- | --- |
-| `missing schema in checkpoint` | The file is a generic or weights-only PyTorch checkpoint, not a full JSON2Vec artifact. |
+| `missing schema in checkpoint` | The file is a generic or weights-only PyTorch checkpoint, not a full RelFlow artifact. |
 | Missing or unexpected state-dict keys | The runtime schema or package version differs from the saved artifact. |
 | A loaded model cannot fit | `Model.load` does not restore the optimizer factory; configure it before training. |
 | Predictions change after handoff | Pre/postprocessor code, thresholds, package version, or startup mutations differ. |
 | Resume starts at epoch zero | A compact artifact was used, or the path was not passed as Lightning's `ckpt_path`. |
-| Lightning reports a weights-only unpickling error | Pass `weights_only=False` for a trusted full JSON2Vec checkpoint. |
+| Lightning reports a weights-only unpickling error | Pass `weights_only=False` for a trusted full RelFlow checkpoint. |
 | Best checkpoint exists but final predictions are worse | Load `best_model_path` explicitly or use `RollbackCheckpoint`. |
 
 ## Where Next

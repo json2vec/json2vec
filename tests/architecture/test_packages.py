@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from tensordict import TensorDict
 
-from json2vec.structs.enums import TensorKey
-from json2vec.structs.packages import Parcel, Prediction
+from relflow.structs.enums import TensorKey
+from relflow.structs.packages import Parcel, Prediction
 
 
 def test_parcel():
