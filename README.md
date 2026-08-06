@@ -1,7 +1,5 @@
 <h1 align="center"><code>relflow</code></h1>
 
-<p align="center"><strong>Relationship Flow</strong></p>
-
 <p align="center">
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&amp;logoColor=white" />
   <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-2E8B57" /></a>
@@ -11,7 +9,7 @@
   <!-- discord-invite:end -->
 </p>
 
-RelFlow (Relationship Flow) builds PyTorch/Lightning models directly from
+RelFlow builds PyTorch/Lightning models directly from
 JSON-like schemas.
 It is meant for predictive modeling on records that are not naturally flat:
 customers with transactions, orders with line items, sessions with clickstream
