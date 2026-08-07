@@ -16,6 +16,7 @@ from relflow.data.datasets.base import (
 from relflow.data.datasets.custom import CustomBatchDataset, CustomDataModule, DatasetMap, custom_dataloader
 from relflow.data.datasets.polars import DataFrameMap, PolarsBatchDataset, PolarsDataModule, polars_dataloader
 from relflow.data.datasets.streaming import BatchDataset, StreamingDataModule, dataloader
+from relflow.data.datasets.synthetic import SyntheticDataModule
 
 __all__ = [
     "BatchDataset",
@@ -35,6 +36,7 @@ __all__ = [
     "SampleRate",
     "StrataMap",
     "StreamingDataModule",
+    "SyntheticDataModule",
     "custom_dataloader",
     "dataloader",
     "polars_dataloader",
