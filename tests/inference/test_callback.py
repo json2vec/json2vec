@@ -7,8 +7,8 @@ import polars as pl
 import torch
 from tensordict import TensorDict
 
-import json2vec as jv
-from json2vec.inference.callback import Writer
+import relflow as rf
+from relflow.inference.callback import Writer
 
 
 class _DummyModule:
@@ -19,7 +19,7 @@ class _DummyModule:
 def test_writer_postprocess_receives_batch_context(tmp_path):
     seen = {}
 
-    @jv.postprocess
+    @rf.postprocess
     def processor(
         predictions,
         *,
@@ -68,13 +68,13 @@ def test_writer_postprocess_receives_batch_context(tmp_path):
 
 
 def test_writer_completes_real_prediction_loop_with_throughput_callback(tmp_path):
-    model = jv.Model(
+    model = rf.Model(
         d_model=8,
         n_layers=1,
         n_heads=2,
         batch_size=2,
-        amount=jv.Number,
-        label=jv.Category(target=True, size=2, p_unavailable=0.0),
+        amount=rf.Number,
+        label=rf.Category(target=True, size=2, p_unavailable=0.0),
     )
     model.encode(
         [
@@ -84,7 +84,7 @@ def test_writer_completes_real_prediction_loop_with_throughput_callback(tmp_path
         strata="train",
     )
 
-    datamodule = jv.PolarsDataModule(
+    datamodule = rf.PolarsDataModule(
         model=model,
         predict=pl.DataFrame({"amount": [1.5, 2.5]}),
         num_workers=0,
@@ -94,7 +94,7 @@ def test_writer_completes_real_prediction_loop_with_throughput_callback(tmp_path
     output = tmp_path / "predictions"
     trainer = lit.Trainer(
         accelerator="cpu",
-        callbacks=[jv.Writer(output)],
+        callbacks=[rf.Writer(output)],
         logger=False,
         enable_progress_bar=False,
         enable_model_summary=False,

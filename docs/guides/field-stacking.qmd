@@ -24,15 +24,15 @@ Without stacking, two locations become two separate categorical fields:
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="itinerary",
     d_model=64,
     n_layers=2,
     n_heads=4,
-    origin=jv.Category(size=4096),
-    destination=jv.Category(size=4096),
+    origin=rf.Category(size=4096),
+    destination=rf.Category(size=4096),
 )
 
 model
@@ -47,14 +47,14 @@ With stacking, the source fields become repeated values under one schema field:
 #| echo: true
 #| output: true
 
-model = jv.Model(
+model = rf.Model(
     name="itinerary",
     d_model=64,
     n_layers=2,
     n_heads=4,
-    locations=jv.Branch(
+    locations=rf.Branch(
         length=2,
-        location=jv.Category(query="[*].[origin, destination]", size=4096),
+        location=rf.Category(query="[*].[origin, destination]", size=4096),
     ),
 )
 
@@ -92,16 +92,16 @@ Stacking also works for repeated identity roles.
 #| echo: true
 #| output: true
 
-model = jv.Model(
+model = rf.Model(
     name="payment",
     d_model=64,
     n_layers=2,
     n_heads=4,
-    parties=jv.Branch(
+    parties=rf.Branch(
         length=2,
-        account_id=jv.Entity(query="[*].[buyer_account_id, seller_account_id]"),
+        account_id=rf.Entity(query="[*].[buyer_account_id, seller_account_id]"),
     ),
-    amount=jv.Number,
+    amount=rf.Number,
 )
 
 model
@@ -115,19 +115,19 @@ global vocabulary.
 ## Preserve Roles When They Matter
 
 Stacking removes role-specific field names. If the role carries important
-meaning, add it back explicitly. A short JSON2Vec preprocessor is often clearer
+meaning, add it back explicitly. A short RelFlow preprocessor is often clearer
 than a dense query.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
 
-@jv.preprocess
+@rf.preprocess
 def stack_parties(record):
-    return jv.Observation(
+    return rf.Observation(
         {
             **record,
             "parties": [
@@ -138,17 +138,17 @@ def stack_parties(record):
     )
 
 
-model = jv.Model(
+model = rf.Model(
     name="payment",
     d_model=64,
     n_layers=2,
     n_heads=4,
-    parties=jv.Branch(
+    parties=rf.Branch(
         length=2,
-        party_id=jv.Entity,
-        role=jv.Category(size=8),
+        party_id=rf.Entity,
+        role=rf.Category(size=8),
     ),
-    amount=jv.Number,
+    amount=rf.Number,
 )
 
 model
@@ -160,7 +160,7 @@ buyer from seller.
 Pass `preprocessor=stack_parties` to a data module or
 `preprocess=stack_parties` to `model.predict(...)`. A plain function returning a
 dictionary can be used as an upstream transformation, but it is not the
-JSON2Vec preprocessor contract.
+RelFlow preprocessor contract.
 
 Stacking shares parameters by design, but it also removes the original
 role-specific field names from the address. Add an explicit role field whenever
@@ -175,14 +175,14 @@ Stacking can represent state changes:
 #| echo: true
 #| output: true
 
-model = jv.Model(
+model = rf.Model(
     name="profile_change",
     d_model=32,
     n_layers=1,
     n_heads=4,
-    status_values=jv.Branch(
+    status_values=rf.Branch(
         length=2,
-        status=jv.Category(query="[*].[previous_status, new_status]", size=64),
+        status=rf.Category(query="[*].[previous_status, new_status]", size=64),
     ),
 )
 

@@ -1,16 +1,16 @@
-# JSON2Vec Agent Guide
+# RelFlow Agent Guide
 
 This file is the high-signal context for AI coding agents working in this repo. Prefer it over rediscovering package conventions from scattered tests.
 
 ## Package Mental Model
 
-JSON2Vec builds PyTorch/Lightning models from JSON-like schemas. Users normally import the package as:
+RelFlow builds PyTorch/Lightning models from JSON-like schemas. Users normally import the package as:
 
 ```python
-import json2vec as jv
+import relflow as rf
 ```
 
-The public surface should stay usable from `json2vec` directly: `Model`, `Branch`, built-in tensorfields, data modules, preprocessors, inference writers, deployment helpers, mutation predicates, and extension base classes.
+The public surface should stay usable from `relflow` directly: `Model`, `Branch`, built-in tensorfields, data modules, preprocessors, inference writers, deployment helpers, mutation predicates, and extension base classes.
 
 The schema is the architecture. `Model(...)` receives field constructors and branch nodes, then builds the root branch, tensorfield embedders, context encoders, decoders, losses, and prediction outputs.
 
@@ -19,29 +19,29 @@ The schema is the architecture. `Model(...)` receives field constructors and bra
 Minimal supervised model:
 
 ```python
-model = jv.Model(
+model = rf.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
-    amount=jv.Number,
-    merchant=jv.Category(size=4096),
-    label=jv.Category(target=True, size=2),
+    amount=rf.Number,
+    merchant=rf.Category(size=4096),
+    label=rf.Category(target=True, size=2),
 )
 ```
 
 Nested repeated context:
 
 ```python
-model = jv.Model(
+model = rf.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
-    line_items=jv.Branch(
+    line_items=rf.Branch(
         length=32,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 ```
 
@@ -50,13 +50,13 @@ generated root branch is always a singleton; use child `Branch(length=...)`
 for repeated data.
 
 ```python
-model = jv.Model(
+model = rf.Model(
     name="event",
     d_model=32,
     n_layers=1,
     n_heads=4,
     embed=True,
-    amount=jv.Number,
+    amount=rf.Number,
 )
 ```
 
@@ -79,7 +79,7 @@ model = jv.Model(
 Use `PolarsDataModule(...)` for in-memory examples and docs. Keep examples tiny:
 
 ```python
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=records,
     validate=records,
@@ -97,16 +97,16 @@ For quick examples, train with `max_epochs=1`, `limit_train_batches=1`, and `lim
 
 Top-level inference exports:
 
-- `jv.Writer` writes batch prediction output.
-- `jv.Postprocessor` is the postprocess callable type.
-- `jv.Deployment`, `jv.API`, `jv.Accelerator`, and related serving types are lazy exports that require `json2vec[serving]`.
+- `rf.Writer` writes batch prediction output.
+- `rf.Postprocessor` is the postprocess callable type.
+- `rf.Deployment`, `rf.API`, `rf.Accelerator`, and related serving types are lazy exports that require `relflow[serving]`.
 
 ## Useful Commands
 
 ```bash
 uv run pytest
 uv run pytest tests/test_public_api.py
-uv run ty check src/json2vec --output-format concise
+uv run ty check src/relflow --output-format concise
 make render
 ```
 

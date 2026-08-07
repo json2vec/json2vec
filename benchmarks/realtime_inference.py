@@ -15,15 +15,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from json2vec.architecture.root import Model
-from json2vec.data.iterables import encode
-from json2vec.structs.enums import Strata
-from json2vec.structs.experiment import Hyperparameters
+from relflow.architecture.root import Model
+from relflow.data.iterables import encode
+from relflow.structs.enums import Strata
+from relflow.structs.experiment import Hyperparameters
 
 SERVER_SCRIPT = """
 import sys
 
-from json2vec.inference.deployment import Deployment
+from relflow.inference.deployment import Deployment
 
 checkpoint = sys.argv[1]
 port = int(sys.argv[2])
@@ -270,7 +270,7 @@ def _markdown(result: dict[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark json2vec realtime deployment throughput.")
+    parser = argparse.ArgumentParser(description="Benchmark relflow realtime deployment throughput.")
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--requests", type=int, default=512)
     parser.add_argument("--warmup-requests", type=int, default=64)
@@ -285,7 +285,7 @@ def main() -> None:
     parser.add_argument("--markdown", action="store_true")
     args = parser.parse_args()
 
-    with tempfile.TemporaryDirectory(prefix="json2vec-rt-bench-") as directory:
+    with tempfile.TemporaryDirectory(prefix="relflow-rt-bench-") as directory:
         tmp = Path(directory)
         checkpoint = _build_checkpoint(tmp, args.payload_kind)
         port = _free_port()

@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import torch
 
-from json2vec.logging.throughput import ThroughputLogger
-from json2vec.structs.enums import Metric, Strata
+from relflow.logging.throughput import ThroughputLogger
+from relflow.structs.enums import Metric, Strata
 
 
 def test_throughput_logger_tracks_once_per_epoch():

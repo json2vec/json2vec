@@ -1,6 +1,6 @@
 import pytest
 
-from json2vec.structs.experiment import Schema
+from relflow.structs.experiment import Schema
 
 
 def _structure_payload() -> dict:

@@ -8,18 +8,18 @@ eval: false
 **Example status — excerpt:** inspection blocks illustrate discovery APIs and
 assume a model where stated.
 
-Normal applications should import JSON2Vec from the package root:
+Normal applications should import RelFlow from the package root:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 ```
 
 This page maps the intended top-level surface to its conceptual documentation.
 It is a discovery reference, not a replacement for signatures or the workflow
-guides. Objects not exported from `json2vec` may still be necessary for advanced
+guides. Objects not exported from `relflow` may still be necessary for advanced
 extension internals and should be treated as more version-coupled.
 
 ## Modeling
@@ -76,6 +76,7 @@ type, then use its individual reference for options and limitations.
 
 | Export | Purpose | Guide |
 | --- | --- | --- |
+| `SyntheticDataModule` | Define synthetic data splits with generator functions. | [Data Modules](../guides/data-modules.qmd) |
 | `PolarsDataModule` | In-memory Polars-backed train/validate/test/predict data. | [Data Modules](../guides/data-modules.qmd) |
 | `StreamingDataModule` | Local/S3 file streaming, sharding, buffering, and sampling. | [Data Modules](../guides/data-modules.qmd) |
 | `CustomDataModule` | Integrate custom iterable sources with the shared encoding path. | [Data Modules](../guides/data-modules.qmd) |
@@ -91,7 +92,7 @@ providers by their documented parameter names rather than reading these enums.
 
 ### Schema inference helper
 
-`jv.helpers.infer_schema(...)` profiles sample records and returns field
+`rf.helpers.infer_schema(...)` profiles sample records and returns field
 constructors ready to pass positionally to `Model`. Its guesses are a starting
 point, not a substitute for reviewing semantics, target leakage, category
 capacity, branch lengths, and overflow behavior.
@@ -102,13 +103,13 @@ records = [
     {"amount": 8.0, "merchant": "B", "label": "review"},
 ]
 
-fields = jv.helpers.infer_schema(
+fields = rf.helpers.infer_schema(
     records,
-    config=jv.helpers.InferenceConfig(target="label"),
+    config=rf.helpers.InferenceConfig(target="label"),
     explain=True,
 )
 
-model = jv.Model(*fields, d_model=32, n_layers=1, n_heads=4)
+model = rf.Model(*fields, d_model=32, n_layers=1, n_heads=4)
 ```
 
 Pass either an `InferenceConfig` or its fields as keyword overrides, not both.
@@ -125,7 +126,7 @@ training-only sample and inspect every returned request before training.
 | `JSONBackend` | Serving JSON implementation selection. | [Serving](../guides/serving.qmd) |
 | `Input`, `ModelSource`, `UpdateOperation` | Type aliases for advanced deployment integrations. | [Serving](../guides/serving.qmd) |
 
-Serving exports are loaded lazily. Importing core `json2vec` does not require the
+Serving exports are loaded lazily. Importing core `relflow` does not require the
 serving dependencies; accessing these symbols without the extra raises an
 installation error with the required command.
 
@@ -177,7 +178,7 @@ for detecting defaults at the installed version:
 #| echo: true
 #| output: true
 
-category_schema = jv.Category.model_json_schema()
+category_schema = rf.Category.model_json_schema()
 print(category_schema["properties"].keys())
 ```
 
@@ -203,7 +204,7 @@ version, processor code, and dependency environment with every artifact:
 
 ```bash
 python -m pip install \
-  "json2vec @ git+https://github.com/json2vec/json2vec.git@<commit>"
+  "relflow @ git+https://github.com/relflow/relflow.git@<commit>"
 ```
 
 Use documentation from the matching source checkout for an older artifact.

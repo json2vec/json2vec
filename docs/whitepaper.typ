@@ -40,7 +40,7 @@
 #align(center)[
   #text(weight: "bold")[Grantham Taylor] \
   #link("mailto:granthamtaylor@icloud.com")[granthamtaylor\@icloud.com] \
-  #link("https://github.com/json2vec/json2vec")[github.com/json2vec/json2vec]
+  #link("https://github.com/relflow/relflow")[github.com/relflow/relflow]
 ]
 
 #v(12pt)
@@ -82,9 +82,9 @@ However, these implementations are often rigid, proprietary, or inaccessible to 
 5. *Explainability*: Business models often operate on sensitive decisions, so developers need ways to inspect model behavior beyond a single opaque prediction. See @sec:explainability[Explainability].
 6. *Integrated querying and transformation*: Source data arrives in inconsistent shapes and formats, so developers need flexible querying and transformation without maintaining a separate feature pipeline. See @sec:integration[Integrated Querying, Wrangling, and Logging].
 
-`json2vec` is a modeling framework I have been developing for several years to address all of these gaps. At a high level, `json2vec` is built around one idea: complex business data should be modeled in its natural shape, and model developers should only need to describe a data schema to instantiate a model that can encode it and make predictions from it.
+`relflow` is a modeling framework I have been developing for several years to address all of these gaps. At a high level, `relflow` is built around one idea: complex business data should be modeled in its natural shape, and model developers should only need to describe a data schema to instantiate a model that can encode it and make predictions from it.
 
-Instead of flattening nested records into handcrafted feature tables or a single, flattened context window with discrete tokens, `json2vec` enables developers to describe the structure of the data directly. The same schema defines what the model sees, what it can predict, how it can be adapted, and where its intermediate representations live.
+Instead of flattening nested records into handcrafted feature tables or a single, flattened context window with discrete tokens, `relflow` enables developers to describe the structure of the data directly. The same schema defines what the model sees, what it can predict, how it can be adapted, and where its intermediate representations live.
 
 The model architecture is constructed dynamically from this schema, including all necessary parameters and the control flow for data streaming, pretraining, finetuning, and both real-time and batch inference.
 
@@ -100,7 +100,7 @@ benchmark tasks. A stable external datatype SDK remains future work.
 The goal is not that every organization uses the same model.
 The goal is that they can use the same modeling language and benchmark surface. If the architecture, data contracts, and evaluation tools are open-source, the community can make measurable progress on structured business-data modeling instead of fragmenting into incompatible internal systems.
 
-The rest of this document describes how `json2vec` fulfills these requirements and gives organizations a shared way to instantiate, pretrain, finetune, and deploy structured-data encoders.
+The rest of this document describes how `relflow` fulfills these requirements and gives organizations a shared way to instantiate, pretrain, finetune, and deploy structured-data encoders.
 
 = Requirements
 
@@ -115,18 +115,18 @@ guarantees that the current experimental registry does not yet provide.
 
 However, architecture flexibility alone is not enough. An organization's foundation model is only practical across many use cases if its schema can evolve. Teams need to add and remove fields as their use cases change. An _overloaded_ foundation model is pretrained on every available data field; it may be slow, expensive, unwieldy, and inappropriate for sensitive use cases, such as credit decisioning with personal information. An _underloaded_ foundation model is trained only on universally relevant fields; it may underperform task-specific models that use handcrafted features for the task at hand. Without use-case-specific information, such as device identifiers or biometrics for fraud, a foundation model may supplement model development but cannot act as a standalone implementation.
 
-Schema mutation provides a middle ground. Organizations can create and maintain foundation models with an appropriate set of general fields, then adapt them into child foundation models or task-specific models that add relevant fields and remove unnecessary ones. Developers can also explore the impact of removing fields at inference time with @sec:pruning[integrated ablations], one of several *explainability* techniques that `json2vec` prioritizes.
+Schema mutation provides a middle ground. Organizations can create and maintain foundation models with an appropriate set of general fields, then adapt them into child foundation models or task-specific models that add relevant fields and remove unnecessary ones. Developers can also explore the impact of removing fields at inference time with @sec:pruning[integrated ablations], one of several *explainability* techniques that `relflow` prioritizes.
 
-Finally, even a powerful, flexible, and mutable architecture is not enough if batch data processes still dominate the model-development lifecycle. `json2vec` therefore supports configuration-based data querying and registered user-defined functions that transform raw data inside the training and inference paths, reducing the need for separate batch feature pipelines. These techniques are described in more detail in @sec:integration.
+Finally, even a powerful, flexible, and mutable architecture is not enough if batch data processes still dominate the model-development lifecycle. `relflow` therefore supports configuration-based data querying and registered user-defined functions that transform raw data inside the training and inference paths, reducing the need for separate batch feature pipelines. These techniques are described in more detail in @sec:integration.
 
 == Dynamic Model Architecture Instantiation <sec:schema>
 
-As mentioned previously, the schema is the basis of modeling with `json2vec`.
+As mentioned previously, the schema is the basis of modeling with `relflow`.
 
 A schema defines the contexts, fields, and datatype-specific settings that determine the model architecture.
 
 #sidenote[
-  For simplicity, I use `yaml` to illustrate schemas. The examples in this document are conceptual schema snippets, not complete runnable configuration files. Full experiment configs include additional project, session, dataset, trainer, and deployment settings. Under the hood, `json2vec` loads schemas as `pydantic` models backed by an `AnyTree` structure, then uses them to initialize the model.
+  For simplicity, I use `yaml` to illustrate schemas. The examples in this document are conceptual schema snippets, not complete runnable configuration files. Full experiment configs include additional project, session, dataset, trainer, and deployment settings. Under the hood, `relflow` loads schemas as `pydantic` models backed by an `AnyTree` structure, then uses them to initialize the model.
   Every context is modeled as a sequence, including the root context, which is always a list of one. That is why field queries start with `[*]` even when the sample input looks like a single record.
 ]
 
@@ -137,12 +137,12 @@ In language models, those items are usually tokens in a sentence. Each token is 
 
 The core mechanism is self-attention. Each item produces a query, key, and value vector. Attention compares queries to keys to decide which items are relevant, then mixes the corresponding values into a new contextual representation. Repeating this across multiple heads, feed-forward layers, and stacked blocks allows the model to learn different kinds of relationships at the same time.
 
-`json2vec` applies the same general idea to structured business data.
+`relflow` applies the same general idea to structured business data.
 Instead of assuming that the only meaningful sequence is a sentence, the schema defines the contexts that should be modeled: transactions in an account, statements in a customer history, login sessions for a user, clickstream events inside a login session, pieces on a chess board, or characters inside a product code.
 
 Each field is first converted into an embedding. A context encoder then allows the child embeddings inside that context to exchange information through attention. Finally, a pooling step compresses the context into one or more vectors that can be passed upward to the parent context.
 
-`json2vec` instantiates a hierarchy of transformer encoders. Leaf fields become vectors, child contexts become summarized vectors, parent contexts consume those summaries, and the root representation is informed by every level below it. The shift is that the model is no longer limited to one flat row or one flat sequence; it can encode nested `json`-like structures directly.
+`relflow` instantiates a hierarchy of transformer encoders. Leaf fields become vectors, child contexts become summarized vectors, parent contexts consume those summaries, and the root representation is informed by every level below it. The shift is that the model is no longer limited to one flat row or one flat sequence; it can encode nested `json`-like structures directly.
 
 That hierarchy is what makes the architecture different from a standard tabular model. A transaction can be modeled alongside other transactions in the same statement. The statement can then be summarized alongside other statements in the customer history. The model learns at each level before passing information upward, rather than forcing every raw value to compete inside one very wide feature vector.
 
@@ -150,7 +150,7 @@ This is why the schema matters so much. It tells the model which values should a
 
 === Hello World Example
 
-With `json2vec`, one can easily define a basic tabular model with a schema like so:
+With `relflow`, one can easily define a basic tabular model with a schema like so:
 
 ```yaml
 name: record
@@ -222,11 +222,11 @@ Sample input:
 
 #querynote()
 
-This model architecture is functionally similar to BERT. Encoding text like this is more of a thought exercise in nested contexts because, in practice, developers can use the dedicated `text` datatype in `json2vec`, which uses pretrained (BERT) models from Hugging Face.
+This model architecture is functionally similar to BERT. Encoding text like this is more of a thought exercise in nested contexts because, in practice, developers can use the dedicated `text` datatype in `relflow`, which uses pretrained (BERT) models from Hugging Face.
 
 During pretraining, the model randomly masks tokens and imputes the masked wordpieces from the surrounding context.
 
-Additionally, the input requires a list of wordpiece values. A developer implementing a BERT-like model with `json2vec` could use a pre-built wordpiece auto-tokenizer inside custom transformation functions, discussed further in @sec:integration.
+Additionally, the input requires a list of wordpiece values. A developer implementing a BERT-like model with `relflow` could use a pre-built wordpiece auto-tokenizer inside custom transformation functions, discussed further in @sec:integration.
 
 The schema can also include fields beyond wordpiece tokens:
 
@@ -274,7 +274,7 @@ Sample input:
 
 #querynote()
 
-This illustrates an important point: `json2vec` can create a family of models, including BERT-like models.
+This illustrates an important point: `relflow` can create a family of models, including BERT-like models.
 
 However, the architectures instantiated from the pipeline are flexible. Inputs and outputs are defined in the same schema. Developers can mark any field as an output target that the other fields must reconstruct.
 
@@ -283,8 +283,8 @@ then make `sentiment` and `part_of_speech` supervised targets while keeping
 `tokens` visible:
 
 ```python
-model.update(jv.where("name") == "sentiment", target=True)
-model.update(jv.where("name") == "part_of_speech", target=True)
+model.update(rf.where("name") == "sentiment", target=True)
+model.update(rf.where("name") == "part_of_speech", target=True)
 ```
 
 `target=True` is the public shorthand for `p_prune=1.0`: the selected leaf is
@@ -300,7 +300,7 @@ intentional stochastic reconstruction objectives.
 
 === Basic Chess Encoding
 
-In the same way `json2vec` can build tabular models, or a superset of `BERT` models with arbitrary outputs, it can also model chess positions.
+In the same way `relflow` can build tabular models, or a superset of `BERT` models with arbitrary outputs, it can also model chess positions.
 
 It can do this by representing each board as a fixed-size context and pairing it with the score of the position at that point in time. By training on observed games, the model can learn to estimate an evaluation from the current board snapshot rather than replaying the full history of the game.
 
@@ -373,7 +373,7 @@ The same flexibility can support related targets. For example, the model could t
 
 Many architectures already support tabular inputs or a single sequence-like context.
 
-`json2vec` supports multiple contexts, each of which may have its own child contexts. I refer to this as hierarchical context encoding.
+`relflow` supports multiple contexts, each of which may have its own child contexts. I refer to this as hierarchical context encoding.
 The implementation details of how information moves through this tree are described in @sec:forward-pass.
 
 Hierarchical context encoding is not just a technical detail. It is useful in practical settings. For example:
@@ -675,7 +675,7 @@ Custom preprocessing functions defined in @sec:preprocessors provide another mit
 
 == Transfer Learning with Schema Evolution <sec:mutability>
 
-The schema is the basis of modeling with `json2vec`. The schema is meant to be flexible and adaptable to accommodate changes to upstream data.
+The schema is the basis of modeling with `relflow`. The schema is meant to be flexible and adaptable to accommodate changes to upstream data.
 
 `Model.load(...)` reconstructs the schema saved in the artifact; it does not
 accept a replacement schema. After loading, the public mutation methods can
@@ -710,7 +710,7 @@ A field's `type` is not only a validation hint. It selects a small bundle of com
 - Compute losses for masked or pruned targets
 - Serialize predictions for inference and evaluation
 
-This is the key abstraction that allows `json2vec` to model categories, numbers, timestamps, text, embeddings, and entities with the same high-level training loop.
+This is the key abstraction that allows `relflow` to model categories, numbers, timestamps, text, embeddings, and entities with the same high-level training loop.
 The context encoder does not need to know whether a field started as a string category, a floating-point value, a timestamp, or a pretrained text embedding. By the time the value enters the architecture, the plugin has converted it into a parcel of vectors. By the time the model produces a prediction, the plugin owns how to score and write that prediction.
 
 Conceptually, a datatype plugin for `foo` looks like this:
@@ -765,7 +765,7 @@ The `category` datatype handles this with an online vocabulary tokenizer. During
 
 The model will never learn vocabulary observed outside of training, which could lead to unexpected behavior.
 
-When a category appears outside the learned vocabulary, `json2vec` does not treat the field as missing. Its state remains `valued`, while tensorization uses an internal unavailable sentinel. The sentinel is not an embedding-table row or output class: unavailable categorical content contributes a zero content vector, leaving the separate `valued` state embedding to record that a source value was present. A transaction with a new merchant category is therefore different from a transaction with no merchant category at all.
+When a category appears outside the learned vocabulary, `relflow` does not treat the field as missing. Its state remains `valued`, while tensorization uses an internal unavailable sentinel. The sentinel is not an embedding-table row or output class: unavailable categorical content contributes a zero content vector, leaving the separate `valued` state embedding to record that a source value was present. A transaction with a new merchant category is therefore different from a transaction with no merchant category at all.
 
 Training can deliberately replace a small fraction of known category content with the same unavailable condition through `p_unavailable`. If such content becomes a reconstruction target, it uses a uniform objective over the real classes and is excluded from categorical content accuracy. The decoder still scores exactly `size` real labels; unavailable is never emitted as a predicted label.
 
@@ -781,13 +781,13 @@ For example:
 ```
 #querynote()
 
-This field learns up to 5000 real labels and can optionally report top-k alternatives from the populated training vocabulary during prediction. Validation, test, and prediction inputs never expand that vocabulary. See the current #link("https://json2vec.github.io/json2vec/data-types/category.html")[Category reference] for the complete runtime, metric, and output contract.
+This field learns up to 5000 real labels and can optionally report top-k alternatives from the populated training vocabulary during prediction. Validation, test, and prediction inputs never expand that vocabulary. See the current #link("https://relflow.github.io/relflow/data-types/category.html")[Category reference] for the complete runtime, metric, and output contract.
 
 === Unified Enumerable State Management
 
 Every datatype needs to represent more than content. It also needs to represent whether the content exists, whether it was padded, or whether it was deliberately hidden.
 
-`json2vec` handles this with a shared state vocabulary:
+`relflow` handles this with a shared state vocabulary:
 - `valued`: a source value exists, even if vocabulary-backed content is unavailable
 - `null`: the source value is explicitly absent (`None`)
 - `padded`: the value was introduced only to fill a fixed context shape
@@ -803,7 +803,7 @@ Each `TensorField` therefore carries four pieces of information:
 This is what makes the training and finetuning path the same path.
 Pretraining masks sampled positions; pruning and `target=True` hide whole leaf instances. The current runtime applies configured masking and pruning in train, validation, and test; prediction bypasses those stochastic policies while supervised targets are still supplied as hidden inputs. All hiding operations set the selected _input_ state to `masked`, cache the original target, and mark trainable positions. Pruning is an operation, not a sixth state token. During prediction, a separate public `inferred` mask says which decoded positions were masked in the request.
 
-Because this state system is shared, new datatypes get masking, pruning, padding, and missing-value behavior without inventing their own control flow. The datatype still decides what its `content` tensor means, which selected states contribute to content loss, and how to write decoded predictions. See the current #link("https://json2vec.github.io/json2vec/core-concepts/data-types.html")[Data Types reference] for the canonical state and prediction-envelope contract.
+Because this state system is shared, new datatypes get masking, pruning, padding, and missing-value behavior without inventing their own control flow. The datatype still decides what its `content` tensor means, which selected states contribute to content loss, and how to write decoded predictions. See the current #link("https://relflow.github.io/relflow/core-concepts/data-types.html")[Data Types reference] for the canonical state and prediction-envelope contract.
 
 === Built-In Entity Encoding
 
@@ -863,7 +863,7 @@ For example, a fraud model may need to know that a cardholder usually transacts 
 
 === Via Pruning <sec:pruning>
 
-`json2vec` treats pruning as a first-class modeling operation, not as an external ablation script.
+`relflow` treats pruning as a first-class modeling operation, not as an external ablation script.
 
 This matters because the same mechanism used for supervised learning can also be used for explanation.
 When a field is pruned, its observed value is removed from the model input and cached as a target. The model must reconstruct that value from the remaining context. This makes a pruned field a natural question:
@@ -914,7 +914,7 @@ The model also exposes a Rich representation that follows the same tree, so diag
 
 === Via "What Ifs"
 
-Because `json2vec` works directly from raw, structured observations, counterfactual analysis can be expressed in human terms.
+Because `relflow` works directly from raw, structured observations, counterfactual analysis can be expressed in human terms.
 Instead of asking which derived feature changed, a practitioner can ask:
 
 - What if this transaction amount had been \$500 instead of \$50?
@@ -928,7 +928,7 @@ The workflow is straightforward: copy the raw observation, edit the part of the 
 That is much harder in a traditional tabular feature pipeline.
 If the upstream data is hierarchical, one human-level change can affect many downstream features at once: counts, sums, rolling averages, recency features, velocity features, distinct-device counts, session aggregates, merchant summaries, and dozens of other hand-authored transformations. To simulate a simple question like "what if this login event did not happen?", the practitioner has to know every feature that would have changed as a consequence.
 
-In `json2vec`, the source-of-truth object remains the object being modeled. A login event can be removed from `login_sessions`; a clickstream event can be inserted into `clickstream_events`; a transaction can be edited in `transactions`; a statement can be added to `statements`. The model pipeline then recomputes the representation from the changed observation.
+In `relflow`, the source-of-truth object remains the object being modeled. A login event can be removed from `login_sessions`; a clickstream event can be inserted into `clickstream_events`; a transaction can be edited in `transactions`; a statement can be added to `statements`. The model pipeline then recomputes the representation from the changed observation.
 
 This does not make the result causal by itself. It is still a model-behavior diagnostic. But it makes counterfactual probing far more ergonomic because the question can be stated in the same language as the business event.
 
@@ -946,7 +946,7 @@ If the predicted risk or relevant embeddings change sharply across these variant
 
 The data path is designed so that raw observations, schema-defined extraction, optional wrangling, tensorization, training, inference, and output writing all share one execution path.
 
-This is important operationally. In many production ML systems, training data is prepared by one feature pipeline and real-time inference is prepared by a different service. That separation creates training-serving skew. `json2vec` avoids this by putting extraction and transformation directly into the model pipeline.
+This is important operationally. In many production ML systems, training data is prepared by one feature pipeline and real-time inference is prepared by a different service. That separation creates training-serving skew. `relflow` avoids this by putting extraction and transformation directly into the model pipeline.
 
 === Querying with JMESPath <sec:jmespath>
 
@@ -998,18 +998,18 @@ The implementation validates queries when schemas are loaded and compiles them f
 
 Some data transformations are too domain-specific for a declarative query. Examples include parsing vendor-specific payloads, sampling time windows from a customer history, deriving auxiliary labels, normalizing inconsistent field names, or splitting one raw record into multiple training observations.
 
-For this, `json2vec` supports optional dataset preprocessors. A preprocessor runs before tensorization and receives the raw observation plus explicit named runtime values such as `strata`, `schema`, and `encoding_context`. A preprocessor returns `jv.Observation | None`, or yields zero or more `jv.Observation | None` values from one input.
+For this, `relflow` supports optional dataset preprocessors. A preprocessor runs before tensorization and receives the raw observation plus explicit named runtime values such as `strata`, `schema`, and `encoding_context`. A preprocessor returns `rf.Observation | None`, or yields zero or more `rf.Observation | None` values from one input.
 
 When no preprocessor is configured, observations pass through unchanged. A custom preprocessor can sit between a messy source system and a clean modeling schema:
 
 ```python
-import json2vec as jv
+import relflow as rf
 
 
-@jv.preprocess
+@rf.preprocess
 def customer_windows(customer, *, window_days: int):
     for window in sample_windows(customer, days=window_days):
-        yield jv.Observation({
+        yield rf.Observation({
             "transactions": window["transactions"],
             "statements": window["statements"],
             "login_sessions": window["login_sessions"],
@@ -1055,31 +1055,31 @@ The difference is that masking happens value-by-value according to the masking r
 This means that the control flow is the same for pretraining and finetuning. The difference between pretraining and finetuning is configuration, not a separate model architecture.
 
 ```python
-import json2vec as jv
+import relflow as rf
 
 
-model = jv.Model(
+model = rf.Model(
     d_model=128,
     n_layers=4,
     n_heads=4,
     batch_size=256,
-    amount=jv.Number,
-    merchant=jv.Category(size=4096),
-    is_fraud=jv.Category(size=2),
+    amount=rf.Number,
+    merchant=rf.Category(size=4096),
+    is_fraud=rf.Category(size=2),
 )
-model.update(jv.where("type") == "number", p_mask=0.15)
-model.update(jv.where("type") == "category", p_mask=0.05)
+model.update(rf.where("type") == "number", p_mask=0.15)
+model.update(rf.where("type") == "category", p_mask=0.05)
 ```
 
 ```python
-model = jv.Model(
+model = rf.Model(
     d_model=128,
     n_layers=4,
     n_heads=4,
     batch_size=256,
-    amount=jv.Number,
-    merchant=jv.Category(size=4096),
-    is_fraud=jv.Category(target=True, size=2),
+    amount=rf.Number,
+    merchant=rf.Category(size=4096),
+    is_fraud=rf.Category(target=True, size=2),
 )
 ```
 
@@ -1132,42 +1132,42 @@ When a field is pruned, its own input parcel is omitted from the upward pass, pr
 
 = Future Improvements
 
-There are several important capabilities that are intentionally not yet included in `json2vec`.
+There are several important capabilities that are intentionally not yet included in `relflow`.
 The current implementation is focused on proving the schema-driven modeling abstraction first. The next layer of work is about making the architecture more configurable, more efficient, and easier to operate at larger scale.
 
 == Model Architecture
 
 === Pretrained Encoders for Recommendation Systems
 
-There is also a clear opportunity to use `json2vec` as a pretraining layer for recommendation systems.
+There is also a clear opportunity to use `relflow` as a pretraining layer for recommendation systems.
 The goal is not necessarily to replace the recommender model itself. The goal is to create strong user and item encoders that produce pretrained embeddings, then pass those embeddings into a recommender system in the same pipeline.
 
 This is a natural fit because recommender data is highly structured.
 Users have sessions, sessions have impressions, impressions have items, items have catalog metadata, and outcomes may include clicks, purchases, ratings, dwell time, skips, saves, or churn. Items also have their own structure: text descriptions, images, prices, availability, categories, sellers, brands, reviews, and historical interaction patterns.
 
-`json2vec` could pretrain a user encoder from raw behavioral history and an item encoder from raw catalog and interaction history. Those encoders could then emit embeddings at stable schema addresses, such as `user`, `user/sessions`, `item`, or `item/reviews`. A downstream recommender could consume those embeddings as dense inputs alongside its existing retrieval, ranking, or reranking features.
+`relflow` could pretrain a user encoder from raw behavioral history and an item encoder from raw catalog and interaction history. Those encoders could then emit embeddings at stable schema addresses, such as `user`, `user/sessions`, `item`, or `item/reviews`. A downstream recommender could consume those embeddings as dense inputs alongside its existing retrieval, ranking, or reranking features.
 
 The workflow would look roughly like this:
-1. Pretrain `json2vec` encoders on structured user and item observations.
+1. Pretrain `relflow` encoders on structured user and item observations.
 2. Export or stream the resulting user and item embeddings into the recommender pipeline.
 3. Train the recommender model using those embeddings as pretrained representations.
-4. Optionally finetune the `json2vec` encoders and recommender model together for a task-specific objective.
+4. Optionally finetune the `relflow` encoders and recommender model together for a task-specific objective.
 
 This would require integration points rather than a full recommender-system rewrite:
 - Stable embedding outputs for user, item, session, and catalog contexts.
 - A serving path that can compute or refresh embeddings for users and items.
-- Adapters that pass `json2vec` embeddings into existing retrieval or ranking models.
+- Adapters that pass `relflow` embeddings into existing retrieval or ranking models.
 - Checkpoint loading that supports freezing, partial finetuning, or end-to-end finetuning.
 - Benchmarks that measure whether pretrained structured embeddings improve recommender quality.
 
 The benefit is that recommendation systems could reuse the same structured representation-learning layer as other business-data models.
-A team could pretrain encoders over user behavior, item metadata, inventory constraints, geography, price, time, and eligibility rules, then let the recommender model decide how to use those embeddings. This also creates a natural benchmark surface for open-source collaboration: public recommendation datasets can be expressed as `json2vec` schemas, making it easier to compare pretrained encoders without each project inventing a new feature pipeline.
+A team could pretrain encoders over user behavior, item metadata, inventory constraints, geography, price, time, and eligibility rules, then let the recommender model decide how to use those embeddings. This also creates a natural benchmark surface for open-source collaboration: public recommendation datasets can be expressed as `relflow` schemas, making it easier to compare pretrained encoders without each project inventing a new feature pipeline.
 
 == Datatypes and Data Pipeline
 
 === Media Datatypes
 
-`json2vec` does not currently support image, audio, or video datatypes.
+`relflow` does not currently support image, audio, or video datatypes.
 This is not because they are conceptually incompatible with the framework. A media datatype could follow the same plugin contract as any other datatype: load content, convert it into tensors or embeddings, decode outputs where appropriate, and contribute losses or predictions.
 
 The difficulty is operational.
@@ -1188,7 +1188,7 @@ There are two related plugin boundaries to add:
 This separation matters because source and format are independent.
 A parquet file might live locally, in S3, or behind an internal data platform. A streaming record might arrive from a queue but still decode into the same observation shape used during batch training.
 
-A more general data pipeline would make it easier to preserve the central promise of `json2vec`: the same schema, preprocessor, tokenizer state, and model path should be used for training, batch inference, and real-time inference.
+A more general data pipeline would make it easier to preserve the central promise of `relflow`: the same schema, preprocessor, tokenizer state, and model path should be used for training, batch inference, and real-time inference.
 
 
 = Appendix
@@ -1205,12 +1205,12 @@ If the customer was transacting from a device first seen two years earlier, that
 The idea was simple, but the implementation was not.
 To serve the feature in real time, the system needed a large low-latency store of customer-device pairs, with the earliest observed timestamp for each pair. The scale was enormous: more than a billion unique customer-device combinations. Many of those combinations were created by VPNs and other network conditions that made the same underlying customer behavior appear as many distinct device or access patterns. Every new login or transaction could introduce a new pair, so the store had to be continuously updated while remaining available to the model-serving path.
 
-With `json2vec`, the problem can be expressed differently.
+With `relflow`, the problem can be expressed differently.
 Instead of materializing one handcrafted tenure feature, the raw observation can include a history of login sessions or transactions with device identifiers and timestamps. The `entity` datatype can show the model which events used the same device, while the timestamp fields preserve when those events occurred.
 
 That gives the model access to more raw context than a single tenure number.
 The hypothesis is that it may learn recurrence, frequency, and interactions with
 other behavior without materializing the handcrafted pair-store feature. This
 has not been established by the current documentation; the
-#link("https://json2vec.github.io/json2vec/case-studies/device-tenure.html")[Device Tenure case study]
+#link("https://relflow.github.io/relflow/case-studies/device-tenure.html")[Device Tenure case study]
 is explicitly an unevaluated schema sketch, not a measured replacement.

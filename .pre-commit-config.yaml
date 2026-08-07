@@ -19,7 +19,7 @@ repos:
 
       - id: ty-check
         name: Run Ty
-        entry: uv run ty check src/json2vec --output-format concise
+        entry: uv run ty check src/relflow --output-format concise
         language: system
         pass_filenames: false
         always_run: true

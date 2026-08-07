@@ -1,10 +1,10 @@
 import pytest
 import torch
 
-import json2vec as jv
-from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.tensorfields.extensions.staticEntity import (
+import relflow as rf
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.tensorfields.extensions.static_entity import (
     Decoder,
     Embedder,
     EpochSaltCallback,
@@ -303,8 +303,8 @@ def test_static_entity_bucketize_range_is_valid():
 
 
 def test_static_entity_embedder_has_no_learned_embedding_tables():
-    model = jv.Model(
-        jv.Branch(jv.StaticEntity("id", n_hashes=4, n_bands=4, offset=2), name="items", length=2),
+    model = rf.Model(
+        rf.Branch(rf.StaticEntity("id", n_hashes=4, n_bands=4, offset=2), name="items", length=2),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -320,8 +320,8 @@ def test_static_entity_embedder_has_no_learned_embedding_tables():
 
 
 def test_static_entity_embedder_forward_produces_finite_projections():
-    model = jv.Model(
-        jv.Branch(jv.StaticEntity("id", n_hashes=4), name="items", length=3),
+    model = rf.Model(
+        rf.Branch(rf.StaticEntity("id", n_hashes=4), name="items", length=3),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -346,9 +346,9 @@ def test_static_entity_training_loss_covers_state_and_content_heads():
     torch.manual_seed(0)
     n_hashes = 4
     n_buckets = 4
-    model = jv.Model(
-        jv.Branch(
-            jv.StaticEntity("id", n_hashes=n_hashes, n_buckets=n_buckets),
+    model = rf.Model(
+        rf.Branch(
+            rf.StaticEntity("id", n_hashes=n_hashes, n_buckets=n_buckets),
             name="items",
             length=3,
         ),
@@ -426,14 +426,14 @@ def test_static_entity_embedder_projection_input_width_matches_features():
 # --- group parameter sharing ------------------------------------------------------
 
 
-def _grouped_model(group: str | None = "user", **kwargs) -> "jv.Model":
-    return jv.Model(
-        jv.Branch(
-            jv.StaticEntity("id", n_hashes=4, n_buckets=4, group=group, **kwargs),
+def _grouped_model(group: str | None = "user", **kwargs) -> "rf.Model":
+    return rf.Model(
+        rf.Branch(
+            rf.StaticEntity("id", n_hashes=4, n_buckets=4, group=group, **kwargs),
             name="items",
             length=2,
         ),
-        jv.StaticEntity("owner", n_hashes=4, n_buckets=4, group=group, **kwargs),
+        rf.StaticEntity("owner", n_hashes=4, n_buckets=4, group=group, **kwargs),
         d_model=16,
         n_layers=1,
         n_heads=2,
@@ -483,13 +483,13 @@ def test_static_entity_group_gives_same_input_value_identical_projections():
 
 def test_static_entity_group_rejects_inconsistent_config():
     with pytest.raises(ValueError, match="inconsistent"):
-        jv.Model(
-            jv.Branch(
-                jv.StaticEntity("id", n_hashes=4, n_buckets=4, group="user"),
+        rf.Model(
+            rf.Branch(
+                rf.StaticEntity("id", n_hashes=4, n_buckets=4, group="user"),
                 name="items",
                 length=2,
             ),
-            jv.StaticEntity("owner", n_hashes=8, n_buckets=4, group="user"),
+            rf.StaticEntity("owner", n_hashes=8, n_buckets=4, group="user"),
             d_model=16,
             n_layers=1,
             n_heads=2,
@@ -497,13 +497,13 @@ def test_static_entity_group_rejects_inconsistent_config():
         )
 
     with pytest.raises(ValueError, match="inconsistent"):
-        jv.Model(
-            jv.Branch(
-                jv.StaticEntity("id", n_hashes=4, n_buckets=4, group="user"),
+        rf.Model(
+            rf.Branch(
+                rf.StaticEntity("id", n_hashes=4, n_buckets=4, group="user"),
                 name="items",
                 length=2,
             ),
-            jv.StaticEntity("owner", n_hashes=4, n_buckets=8, group="user"),
+            rf.StaticEntity("owner", n_hashes=4, n_buckets=8, group="user"),
             d_model=16,
             n_layers=1,
             n_heads=2,
@@ -623,7 +623,7 @@ def test_epoch_salt_isolated_between_schemas():
 def test_epoch_salt_registry_is_cleaned_up_after_schema_gc():
     import gc
 
-    from json2vec.tensorfields.extensions import staticEntity as module
+    from relflow.tensorfields.extensions import static_entity as module
 
     schema = Schema.model_validate(_structure_payload())
     _set_epoch_salt(schema, 3)
@@ -660,7 +660,7 @@ def test_grouped_values_stay_matched_under_rotating_salt():
 
 
 def test_epoch_salt_callback_registered_via_plugin():
-    from json2vec.tensorfields.extensions.staticEntity import static_entity
+    from relflow.tensorfields.extensions.static_entity import static_entity
 
     factories = static_entity.callback_factories
     assert EpochSaltCallback in factories
@@ -693,8 +693,8 @@ def test_epoch_salt_callback_hooks_track_lightning_epoch():
 
 
 def test_configure_callbacks_includes_epoch_salt_callback_when_static_entity_active():
-    model = jv.Model(
-        jv.StaticEntity("owner", n_hashes=2, n_buckets=4),
+    model = rf.Model(
+        rf.StaticEntity("owner", n_hashes=2, n_buckets=4),
         d_model=8,
         n_layers=1,
         n_heads=2,

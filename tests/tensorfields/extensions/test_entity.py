@@ -1,10 +1,10 @@
 import pytest
 import torch
 
-import json2vec as jv
-from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.tensorfields.extensions.entity import TensorField
+import relflow as rf
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.tensorfields.extensions.entity import TensorField
 
 ADDRESS = "root/items/identifier"
 
@@ -165,8 +165,8 @@ def test_entity_mask_preserves_targets_before_replacement():
 
 
 def test_entity_embedder_accepts_independent_observation_local_ids():
-    model = jv.Model(
-        jv.Branch(jv.Entity("id"), name="items", length=2),
+    model = rf.Model(
+        rf.Branch(rf.Entity("id"), name="items", length=2),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -196,8 +196,8 @@ def test_entity_embedder_accepts_independent_observation_local_ids():
 
 
 def test_entity_training_loss_consumes_decoder_slot_logits_directly():
-    model = jv.Model(
-        jv.Branch(jv.Entity("id"), name="items", length=3),
+    model = rf.Model(
+        rf.Branch(rf.Entity("id"), name="items", length=3),
         d_model=8,
         n_layers=1,
         n_heads=2,

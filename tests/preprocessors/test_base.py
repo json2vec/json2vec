@@ -2,16 +2,16 @@ from enum import StrEnum
 
 import pytest
 
-import json2vec as jv
-from json2vec.data import processors
-from json2vec.structs.enums import Strata
+import relflow as rf
+from relflow.data import processors
+from relflow.structs.enums import Strata
 
 
 def test_processor_providers_are_string_enums():
-    assert issubclass(jv.PreprocessorProvider, StrEnum)
-    assert issubclass(jv.PostprocessorProvider, StrEnum)
-    assert jv.PreprocessorProvider.strata == "strata"
-    assert jv.PostprocessorProvider.metadata == "metadata"
+    assert issubclass(rf.PreprocessorProvider, StrEnum)
+    assert issubclass(rf.PostprocessorProvider, StrEnum)
+    assert rf.PreprocessorProvider.strata == "strata"
+    assert rf.PostprocessorProvider.metadata == "metadata"
 
 
 def test_preprocess_returns_callable_processor_object():
@@ -130,14 +130,14 @@ def test_preprocessor_rejects_binding_pipeline_provider():
 
 def test_preprocessor_normalize_rejects_raw_callable():
     def raw(observation: dict):
-        return jv.Observation(observation)
+        return rf.Observation(observation)
 
     with pytest.raises(TypeError, match="preprocessor must be a Preprocessor object or None"):
         processors.Preprocessor.normalize(raw)
 
 
 def test_postprocess_optional_unavailable_provider_receives_none():
-    @jv.postprocess
+    @rf.postprocess
     def add_batch_index(predictions: dict, *, batch_idx: int | None = None):
         return {"predictions": predictions, "batch_idx": batch_idx}
 
@@ -145,7 +145,7 @@ def test_postprocess_optional_unavailable_provider_receives_none():
 
 
 def test_postprocess_required_unavailable_provider_errors():
-    @jv.postprocess
+    @rf.postprocess
     def needs_batch_index(predictions: dict, *, batch_idx: int):
         return {"predictions": predictions, "batch_idx": batch_idx}
 
@@ -158,13 +158,13 @@ def test_postprocessor_normalize_rejects_raw_callable():
         return predictions
 
     with pytest.raises(TypeError, match="postprocessor must be a Postprocessor object or None"):
-        jv.Postprocessor.normalize(raw)
+        rf.Postprocessor.normalize(raw)
 
 
 def test_postprocess_rejects_context_dict_signature():
     with pytest.raises(TypeError, match="first parameter must be 'predictions'"):
 
-        @jv.postprocess
+        @rf.postprocess
         def legacy_context(context: dict, predictions: dict):
             return predictions
 

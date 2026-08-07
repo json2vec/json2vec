@@ -9,7 +9,7 @@ import polars as pl
 import pydantic
 import torch
 
-import json2vec as jv
+import relflow as rf
 
 
 class TransactionRequest(pydantic.BaseModel):
@@ -50,20 +50,20 @@ def records() -> pl.DataFrame:
     )
 
 
-def build_model() -> jv.Model:
-    model = jv.Model.from_tree(
+def build_model() -> rf.Model:
+    model = rf.Model.from_tree(
         d_model=16,
         n_layers=1,
         n_heads=4,
         batch_size=4,
         embed=True,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
-        amount=jv.Number,
-        merchant=jv.Category(size=16),
-        risk=jv.Category(target=True, size=4, topk=[2]),
+        amount=rf.Number,
+        merchant=rf.Category(size=16),
+        risk=rf.Category(target=True, size=4, topk=[2]),
     )
 
-    datamodule = jv.PolarsDataModule(
+    datamodule = rf.PolarsDataModule(
         model=model,
         train=records(),
         validate=records(),
@@ -110,13 +110,13 @@ def risk_response(context: dict[str, Any], predictions: dict[Any, dict[str, Any]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train and serve a tiny json2vec realtime model.")
-    parser.add_argument("--host", default=os.environ.get("JSON2VEC_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("JSON2VEC_PORT", "8000")))
-    parser.add_argument("--log-level", default=os.environ.get("JSON2VEC_LOG_LEVEL", "info"))
+    parser = argparse.ArgumentParser(description="Train and serve a tiny relflow realtime model.")
+    parser.add_argument("--host", default=os.environ.get("RELFLOW_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("RELFLOW_PORT", "8000")))
+    parser.add_argument("--log-level", default=os.environ.get("RELFLOW_LOG_LEVEL", "info"))
     args = parser.parse_args()
 
-    deployment = jv.Deployment(
+    deployment = rf.Deployment(
         model=build_model(),
         accelerator="cpu",
         max_batch_size=8,

@@ -23,7 +23,7 @@ runnable.
 
 ## The Request-Level Contract
 
-JSON2Vec runs each leaf query against one processed observation. One ordinary
+RelFlow runs each leaf query against one processed observation. One ordinary
 raw record is wrapped as a one-item observation:
 
 ```python
@@ -38,7 +38,7 @@ The request query for `amount` is:
 request_query = "[*].amount"
 ```
 
-During batch encoding, JSON2Vec adds the outer batch selector internally. Do
+During batch encoding, RelFlow adds the outer batch selector internally. Do
 not include it in the configured request:
 
 ```text
@@ -74,18 +74,18 @@ The full request-level rules are:
 A stable schema may read a versioned or nested source path:
 
 ```python
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    amount=jv.Number(query="[*].transaction.amount_usd"),
-    merchant=jv.Category(
+    amount=rf.Number(query="[*].transaction.amount_usd"),
+    merchant=rf.Category(
         query="[*].transaction.merchant_name",
         size=4096,
     ),
-    label=jv.Category(query="[*].outcome", target=True, size=2),
+    label=rf.Category(query="[*].outcome", target=True, size=2),
 )
 ```
 
@@ -110,12 +110,12 @@ Use quoted JMESPath members when keys contain spaces, punctuation, or characters
 that are not valid bare identifiers:
 
 ```python
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    job_code=jv.Category(query='[*]."job code"', size=128),
-    amount=jv.Number(query='[*].transaction."amount-usd"'),
+    job_code=rf.Category(query='[*]."job code"', size=128),
+    amount=rf.Number(query='[*].transaction."amount-usd"'),
 )
 ```
 
@@ -139,17 +139,17 @@ record = {
     }
 }
 
-model = jv.Model(
+model = rf.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
-    line_items=jv.Branch(
+    line_items=rf.Branch(
         length=32,
-        sku=jv.Category(
+        sku=rf.Category(
             query="[*].payload.items[*].product.sku",
             size=2048,
         ),
-        quantity=jv.Number(query="[*].payload.items[*].qty"),
+        quantity=rf.Number(query="[*].payload.items[*].qty"),
     ),
 )
 ```
@@ -169,16 +169,16 @@ source query of their own.
 JMESPath filters can select a subset of child objects:
 
 ```python
-model = jv.Model(
+model = rf.Model(
     d_model=64,
     n_layers=2,
     n_heads=4,
-    login_events=jv.Branch(
+    login_events=rf.Branch(
         length=16,
-        device_id=jv.Entity(
+        device_id=rf.Entity(
             query="[*].map(&device_id, events[?event_type == 'login'])"
         ),
-        risk_score=jv.Number(
+        risk_score=rf.Number(
             query="[*].map(&risk_score, events[?event_type == 'login'])"
         ),
     ),
@@ -201,17 +201,17 @@ that should be tested on child objects as a unit.
 Indexes read a fixed position; slices retain a bounded portion of an array:
 
 ```python
-model = jv.Model(
+model = rf.Model(
     d_model=32,
     n_layers=1,
     n_heads=4,
-    first_origin=jv.Category(
+    first_origin=rf.Category(
         query="[*].legs[0].origin_airport",
         size=512,
     ),
-    recent_events=jv.Branch(
+    recent_events=rf.Branch(
         length=10,
-        amount=jv.Number(query="[*].events[-10:].amount"),
+        amount=rf.Number(query="[*].events[-10:].amount"),
     ),
 )
 ```
@@ -232,7 +232,7 @@ the schema identity remains valid:
 
 ```python
 model.update(
-    jv.where("address") == "record/amount",
+    rf.where("address") == "record/amount",
     query="[*].transaction.amount_usd",
 )
 ```
@@ -242,7 +242,7 @@ the original schema afterward:
 
 ```python
 with model.override(
-    jv.where("address") == "record/amount",
+    rf.where("address") == "record/amount",
     query="[*].fallback.amount",
 ):
     predictions = model.predict(records)

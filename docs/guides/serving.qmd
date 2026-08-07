@@ -8,7 +8,7 @@ eval: false
 **Example status — excerpt:** commands define the supported HTTP/runtime
 contract but require a trained artifact and a service-specific process setup.
 
-`jv.Deployment` exposes a saved JSON2Vec model through a FastAPI application.
+`rf.Deployment` exposes a saved RelFlow model through a FastAPI application.
 It loads one checkpoint, batches concurrent requests, runs prediction, and
 returns an HTTP-safe form of the canonical address-keyed output.
 
@@ -25,12 +25,12 @@ actual model and payloads before production use.
 FastAPI, Uvicorn, and the JSON backends are optional dependencies:
 
 ```bash
-python -m pip install "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git"
+python -m pip install "relflow[serving] @ git+https://github.com/relflow/relflow.git"
 ```
 
 This matches the current source-distribution installation documented in
 [Getting Started](../getting-started.qmd). Without the extra, accessing
-`jv.Deployment` raises an installation error.
+`rf.Deployment` raises an installation error.
 
 ## Start A Server
 
@@ -41,9 +41,9 @@ mounted filesystem path:
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-deployment = jv.Deployment(
+deployment = rf.Deployment(
     checkpoint="artifacts/fraud-model.ckpt",
     accelerator="auto",
     host="0.0.0.0",
@@ -139,25 +139,25 @@ non-string-key behavior if you switch backends.
 
 ## Reuse The Training Preprocessor
 
-Attach the same decorated JSON2Vec preprocessor and bound arguments used by the
+Attach the same decorated RelFlow preprocessor and bound arguments used by the
 training data module:
 
 The excerpt assumes `normalize_transaction` and `compact_response` are
-decorated with `@jv.preprocess` and `@jv.postprocess`, respectively.
+decorated with `@rf.preprocess` and `@rf.postprocess`, respectively.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
 deployment = (
-    jv.Deployment(checkpoint="artifacts/fraud-model.ckpt")
+    rf.Deployment(checkpoint="artifacts/fraud-model.ckpt")
     .preprocess(normalize_transaction)
     .postprocess(compact_response)
 )
 ```
 
 In online serving, each HTTP object must produce exactly one
-`jv.Observation`. A preprocessor that drops the request or yields several
+`rf.Observation`. A preprocessor that drops the request or yields several
 observations produces an error envelope whose internal `status_code` is `422`.
 For an otherwise valid object/array request, the current `/predict` transport
 still returns HTTP `200`; clients must inspect the envelope. Data-module
@@ -191,7 +191,7 @@ class FraudRequest(BaseModel):
     merchant: str
 
 
-deployment = jv.Deployment(
+deployment = rf.Deployment(
     checkpoint="artifacts/fraud-model.ckpt"
 ).forge(request=FraudRequest)
 ```
@@ -215,10 +215,10 @@ versioning. Add those at the surrounding service or gateway.
 #| echo: true
 #| output: true
 
-deployment = jv.Deployment(
+deployment = rf.Deployment(
     checkpoint="artifacts/fraud-model.ckpt"
 ).update(
-    jv.where("name") == "fraud",
+    rf.where("name") == "fraud",
     target=False,
 )
 ```
@@ -248,22 +248,22 @@ the same visible GPU.
 
 ## Environment Configuration
 
-`Deployment()` reads case-insensitive settings from JSON2Vec-prefixed or short
+`Deployment()` reads case-insensitive settings from RelFlow-prefixed or short
 environment variables:
 
 | Constructor field | Environment variables |
 | --- | --- |
-| `checkpoint` | `JSON2VEC_CHECKPOINT`, `CHECKPOINT` |
-| `max_batch_size` | `JSON2VEC_MAX_BATCH_SIZE`, `MAX_BATCH_SIZE` |
-| `batch_timeout` | `JSON2VEC_BATCH_TIMEOUT`, `BATCH_TIMEOUT` |
-| `workers` | `JSON2VEC_WORKERS`, `WORKERS` |
-| `accelerator` | `JSON2VEC_ACCELERATOR`, `ACCELERATOR` |
-| `host` | `JSON2VEC_HOST`, `HOST` |
-| `port` | `JSON2VEC_PORT`, `PORT` |
-| `log_level` | `JSON2VEC_LOG_LEVEL`, `LOG_LEVEL` |
-| `monitor_queries` | `JSON2VEC_MONITOR_QUERIES`, `MONITOR_QUERIES` |
-| `query_monitor_every` | `JSON2VEC_QUERY_MONITOR_EVERY`, `QUERY_MONITOR_EVERY` |
-| `json_backend` | `JSON2VEC_JSON_BACKEND`, `JSON_BACKEND` |
+| `checkpoint` | `RELFLOW_CHECKPOINT`, `CHECKPOINT` |
+| `max_batch_size` | `RELFLOW_MAX_BATCH_SIZE`, `MAX_BATCH_SIZE` |
+| `batch_timeout` | `RELFLOW_BATCH_TIMEOUT`, `BATCH_TIMEOUT` |
+| `workers` | `RELFLOW_WORKERS`, `WORKERS` |
+| `accelerator` | `RELFLOW_ACCELERATOR`, `ACCELERATOR` |
+| `host` | `RELFLOW_HOST`, `HOST` |
+| `port` | `RELFLOW_PORT`, `PORT` |
+| `log_level` | `RELFLOW_LOG_LEVEL`, `LOG_LEVEL` |
+| `monitor_queries` | `RELFLOW_MONITOR_QUERIES`, `MONITOR_QUERIES` |
+| `query_monitor_every` | `RELFLOW_QUERY_MONITOR_EVERY`, `QUERY_MONITOR_EVERY` |
+| `json_backend` | `RELFLOW_JSON_BACKEND`, `JSON_BACKEND` |
 
 `monitor_queries=True` periodically checks for schema queries that resolve only
 to empty or null-like results and raises a diagnostic error. It is useful while

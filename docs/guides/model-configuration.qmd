@@ -9,7 +9,7 @@ eval: false
 validate them through the runnable [Getting Started](../getting-started.qmd)
 workflow on the target data and hardware.
 
-JSON2Vec exposes a small set of architecture controls at the root and on each
+RelFlow exposes a small set of architecture controls at the root and on each
 `Branch`. Start with the smallest model that can express the schema, measure
 validation quality and throughput, then change one constraint at a time.
 
@@ -25,9 +25,9 @@ capacity and objective settings.
 
 import torch
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="order",
     d_model=64,
     n_layers=2,
@@ -38,14 +38,14 @@ model = jv.Model(
     optimizer=lambda module: torch.optim.AdamW(
         module.parameters(), lr=3e-4, weight_decay=1e-2
     ),
-    customer_tier=jv.Category(size=16),
-    line_items=jv.Branch(
+    customer_tier=rf.Category(size=16),
+    line_items=rf.Branch(
         length=32,
         overflow="head",
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 
 model
@@ -102,7 +102,7 @@ attention mode, pooling depth, and dropout:
 #| echo: true
 #| output: true
 
-events = jv.Branch(
+events = rf.Branch(
     length=256,
     overflow="tail",
     attention="gqa",
@@ -110,8 +110,8 @@ events = jv.Branch(
     n_heads=4,
     n_linear=1,
     dropout=0.05,
-    event_type=jv.Category(size=128),
-    amount=jv.Number,
+    event_type=rf.Category(size=128),
+    amount=rf.Number,
 )
 ```
 

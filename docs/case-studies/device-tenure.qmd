@@ -85,27 +85,27 @@ different from padding: the event exists, while one field has no value.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="customer",
     d_model=128,
     n_layers=2,
     n_heads=4,
     embed=True,
-    events=jv.Branch(
+    events=rf.Branch(
         length=160,
         overflow="tail",
         embed=True,
-        device_id=jv.Entity(p_mask=0.15, embed=True),
-        source=jv.Category(size=2),
-        event_type=jv.Category(size=128),
-        days_since_event=jv.Number,
-        ip_country=jv.Category(size=256),
-        amount=jv.Number,
-        merchant_category=jv.Category(size=1024),
+        device_id=rf.Entity(p_mask=0.15, embed=True),
+        source=rf.Category(size=2),
+        event_type=rf.Category(size=128),
+        days_since_event=rf.Number,
+        ip_country=rf.Category(size=256),
+        amount=rf.Number,
+        merchant_category=rf.Category(size=1024),
     ),
-    account_takeover=jv.Category(target=True, size=2),
+    account_takeover=rf.Category(target=True, size=2),
 )
 
 model
@@ -116,7 +116,7 @@ the same observation-local mapping. Repeated device IDs therefore share a local
 content token across login and transaction positions. `source` keeps those
 roles distinguishable after stacking.
 
-The preprocessor below writes every sparse key on every event. JSON2Vec's direct
+The preprocessor below writes every sparse key on every event. RelFlow's direct
 extractor for these simple inferred paths preserves the explicit `None`
 placeholders, so login-only and transaction-only fields stay on the same event
 coordinates.
@@ -139,7 +139,7 @@ recurrence matters.
 
 Real histories need one deterministic event-time contract. This public
 preprocessor example stacks both sources, filters events after `as_of`, derives
-recency, and returns a `jv.Observation`:
+recency, and returns a `rf.Observation`:
 
 ```{python .marimo}
 #| echo: true
@@ -147,14 +147,14 @@ recency, and returns a `jv.Observation`:
 
 from datetime import datetime
 
-import json2vec as jv
+import relflow as rf
 
 
 def parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-@jv.preprocess
+@rf.preprocess
 def customer_window(customer):
     as_of = parse_timestamp(customer["as_of"])
     events = []
@@ -196,7 +196,7 @@ def customer_window(customer):
     events.sort(key=lambda event: event["timestamp"])
     for event in events:
         event.pop("timestamp")
-    return jv.Observation(
+    return rf.Observation(
         {
             "customer_id": customer["customer_id"],
             "as_of": customer["as_of"],
@@ -217,7 +217,7 @@ actual data-availability lag.
 #| echo: true
 #| output: true
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
@@ -251,9 +251,9 @@ path:
 
 predictions = model.predict(customer_requests, preprocess=customer_window)
 
-risk = predictions[jv.Address("customer", "account_takeover")]
-customer_embedding = predictions[jv.Address("customer")]["embedding"]
-event_embedding = predictions[jv.Address("customer", "events")]["embedding"]
+risk = predictions[rf.Address("customer", "account_takeover")]
+customer_embedding = predictions[rf.Address("customer")]["embedding"]
+event_embedding = predictions[rf.Address("customer", "events")]["embedding"]
 ```
 
 This is an inference excerpt using trained `model` and raw `customer_requests`.

@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -13,7 +13,7 @@ pyproject: |
 **Example status — sketch:** schemas on this page motivate modeling choices;
 they are not evaluated benchmark results.
 
-The central bet behind `json2vec` is narrow: when relationships inside a record
+The central bet behind `relflow` is narrow: when relationships inside a record
 carry signal, the model should be able to see those relationships before they
 are reduced to handcrafted features.
 
@@ -50,7 +50,7 @@ implemented in data-pipeline code.
 
 ## When Preserving Structure Helps
 
-Use `json2vec` when the relationships themselves are plausible signal:
+Use `relflow` when the relationships themselves are plausible signal:
 
 - line-item combinations inside an order;
 - behavior within a login session;
@@ -71,7 +71,7 @@ explicit by restructuring or preprocessing the observation.
 
 ## Schema As Model Blueprint
 
-JSON2Vec makes the record schema executable:
+RelFlow makes the record schema executable:
 
 - leaf declarations choose datatype-specific validation, tensorization,
   embedding, loss, metrics, and prediction behavior;
@@ -85,22 +85,22 @@ JSON2Vec makes the record schema executable:
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="account",
     d_model=64,
     n_layers=2,
     n_heads=4,
     embed=True,
-    customer_tier=jv.Category(size=16),
-    transactions=jv.Branch(
+    customer_tier=rf.Category(size=16),
+    transactions=rf.Branch(
         length=128,
         overflow="tail",
-        merchant_category=jv.Category(size=256),
-        amount=jv.Number,
+        merchant_category=rf.Category(size=256),
+        amount=rf.Number,
     ),
-    is_fraud=jv.Category(target=True, size=2),
+    is_fraud=rf.Category(target=True, size=2),
 )
 
 model
@@ -133,7 +133,7 @@ case-study sketch, not an evaluated benchmark.
 ## Typed Fields Share One Training Loop
 
 Numbers, bounded categories, sets, local identities, timestamps, text, and
-vectors do not have the same representation or learning objective. JSON2Vec
+vectors do not have the same representation or learning objective. RelFlow
 uses tensorfields so each type owns those details while every field participates
 in the same tree traversal and Lightning loop.
 
@@ -166,7 +166,7 @@ of signal in neighboring fields remain empirical decisions. See
 
 ## Evolving A Schema
 
-Real data contracts and modeling goals change. JSON2Vec exposes the schema tree
+Real data contracts and modeling goals change. RelFlow exposes the schema tree
 so a workflow can select nodes and update, extend, delete, reset, or temporarily
 override them.
 
@@ -219,7 +219,7 @@ number.
 ## One Configured Path
 
 Training-serving skew often appears when offline and online systems implement
-the same transformation twice. JSON2Vec keeps queries, optional preprocessing,
+the same transformation twice. RelFlow keeps queries, optional preprocessing,
 tensorization, model execution, prediction writing, and optional
 postprocessing on one configured path.
 

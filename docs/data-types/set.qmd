@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -26,9 +26,9 @@ permissions, flags, detected concepts, or multi-label targets.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-tags = jv.Set(
+tags = rf.Set(
     "tags",
     size=2048,
     p_unavailable=0.02,
@@ -161,7 +161,7 @@ probabilities meet the threshold:
 The [Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
 explains `state`, `inferred`, shapes, and visible-field decoding. Rendered
 examples use string addresses for readability; Python results are keyed by
-`jv.Address` objects.
+`rf.Address` objects.
 
 Thresholding reduces the response, not model compute, because the decoder still
 scores its full `size`-wide output. Tune the threshold against validation data

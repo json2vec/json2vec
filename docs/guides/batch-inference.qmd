@@ -10,7 +10,7 @@ trained artifact and application paths. Use the contract-tested
 [Getting Started](../getting-started.qmd) lifecycle first.
 
 Use `model.predict([...])` to inspect a small list in memory. Use a prediction
-data module, Lightning's `trainer.predict(...)`, and `jv.Writer` when results
+data module, Lightning's `trainer.predict(...)`, and `rf.Writer` when results
 should stream to Parquet without accumulating the whole job in Python memory.
 
 This guide assumes a saved, selected model and input records that match its
@@ -30,9 +30,9 @@ frame with your own:
 import lightning.pytorch as lit
 import polars as pl
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model.load("artifacts/fraud-model.ckpt")
+model = rf.Model.load("artifacts/fraud-model.ckpt")
 
 predict_frame = pl.DataFrame(
     {
@@ -42,7 +42,7 @@ predict_frame = pl.DataFrame(
     }
 )
 
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     predict=predict_frame,
     preprocessor=training_preprocessor,
@@ -51,7 +51,7 @@ datamodule = jv.PolarsDataModule(
     pin_memory=False,
 )
 
-writer = jv.Writer("predictions/run-2026-08-01")
+writer = rf.Writer("predictions/run-2026-08-01")
 
 trainer = lit.Trainer(
     accelerator="cpu",
@@ -111,13 +111,13 @@ On node-local filesystems, collect every node's rank files downstream.
 | --- | --- |
 | `path` | Local or mounted output directory for rank-partitioned Parquet files. |
 | `flush_every_n_batches` | Optional best-effort flush interval when the active PyArrow writer exposes `flush`. |
-| `postprocessor` | Optional decorated `jv.Postprocessor` that reshapes a prediction batch before writing. |
+| `postprocessor` | Optional decorated `rf.Postprocessor` that reshapes a prediction batch before writing. |
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-writer = jv.Writer(
+writer = rf.Writer(
     "predictions/run-2026-08-01",
     flush_every_n_batches=100,
 )
@@ -141,17 +141,17 @@ as a list containing the model-facing record, so a one-to-one preprocessor uses
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
 
-@jv.postprocess
+@rf.postprocess
 def compact_rows(predictions, *, metadata):
     label = predictions.get(
-        jv.Address("record", "fraud"), {}
+        rf.Address("record", "fraud"), {}
     ).get("content", {})
 
     return {
-        jv.Address("record", "warehouse_row"): {
+        rf.Address("record", "warehouse_row"): {
             "request_id": [
                 observation[0].get("request_id")
                 for observation in metadata
@@ -162,7 +162,7 @@ def compact_rows(predictions, *, metadata):
     }
 
 
-writer = jv.Writer(
+writer = rf.Writer(
     "predictions/warehouse-run",
     postprocessor=compact_rows,
 )
@@ -196,7 +196,7 @@ chunks:
 #| echo: true
 #| output: true
 
-datamodule = jv.StreamingDataModule(
+datamodule = rf.StreamingDataModule(
     model=model,
     root="s3://my-bucket/events",
     suffix="parquet",
@@ -208,7 +208,7 @@ datamodule = jv.StreamingDataModule(
 trainer = lit.Trainer(
     accelerator="gpu",
     devices=1,
-    callbacks=[jv.Writer("predictions/streaming-run")],
+    callbacks=[rf.Writer("predictions/streaming-run")],
 )
 
 trainer.predict(
@@ -232,9 +232,9 @@ rules and buffer options.
 | --- | --- |
 | Inspect one request shape | `model.predict([...])` |
 | Notebook or artifact smoke test | `model.predict([...])` |
-| DataFrame-to-Parquet job | `PolarsDataModule(..., predict=...)` with `jv.Writer` |
-| File/S3-to-Parquet job | `StreamingDataModule(..., predict=...)` with `jv.Writer` |
-| Latency-bound HTTP requests | [`jv.Deployment`](serving.qmd) |
+| DataFrame-to-Parquet job | `PolarsDataModule(..., predict=...)` with `rf.Writer` |
+| File/S3-to-Parquet job | `StreamingDataModule(..., predict=...)` with `rf.Writer` |
+| Latency-bound HTTP requests | [`rf.Deployment`](serving.qmd) |
 
 Batch and online paths solve different operational problems. Do not loop over
 `model.predict([record])` for a large batch job, and do not introduce an HTTP
@@ -252,7 +252,7 @@ At minimum:
 5. load representative outputs in the downstream system before publishing the
    run as complete.
 
-JSON2Vec reports `throughput/predict` directly to an attached Lightning logger
+RelFlow reports `throughput/predict` directly to an attached Lightning logger
 on the global-zero rank. Prediction hooks cannot use Lightning module metrics,
 so this value is not expected in `trainer.callback_metrics`; the installed
 throughput callback also retains the measurement for programmatic integrations.
@@ -265,7 +265,7 @@ throughput callback also retains the measurement for programmatic integrations.
 | Rows cannot join to inputs | Preserve an identifier in processed observation metadata and keep postprocessor columns aligned. |
 | Only part of a distributed job appears | Read every node/rank file and check for local-rank path collisions. |
 | A later batch fails Arrow schema casting | Keep postprocessor keys and value types stable across all batches. |
-| Production values differ from validation | Reuse the same checkpoint and JSON2Vec preprocessor code/bindings. |
+| Production values differ from validation | Reuse the same checkpoint and RelFlow preprocessor code/bindings. |
 | S3 output is missing | `Writer` does not upload; publish its local/mounted files separately. |
 
 ## Where Next

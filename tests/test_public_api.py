@@ -1,43 +1,44 @@
-import json2vec
+import relflow
 
 
 def test_common_resources_are_available_from_package_root():
-    assert json2vec.Model.__name__ == "Model"
-    assert json2vec.AttentionMode.mha == "mha"
-    assert not hasattr(json2vec, "Dataset")
-    assert json2vec.CustomDataModule.__name__ == "CustomDataModule"
-    assert json2vec.PolarsDataModule.__name__ == "PolarsDataModule"
-    assert json2vec.StreamingDataModule.__name__ == "StreamingDataModule"
-    assert json2vec.Schema.__name__ == "Schema"
-    assert json2vec.Address("root", "label") == "root/label"
-    assert json2vec.Branch.__name__ == "Branch"
-    assert json2vec.where("type").name == "type"
-    assert json2vec.preprocess.__name__ == "preprocess"
-    assert json2vec.postprocess.__name__ == "postprocess"
-    assert json2vec.Preprocessor.__name__ == "Preprocessor"
-    assert json2vec.PreprocessorProvider.strata == "strata"
-    assert json2vec.Observation.__name__ == "Observation"
-    assert json2vec.Observation({"id": 1}).data == {"id": 1}
-    assert not hasattr(json2vec, "observe")
-    assert json2vec.OptimizerConfig is not None
-    assert json2vec.SchedulerConfig is not None
-    assert json2vec.RollbackCheckpoint.__name__ == "RollbackCheckpoint"
-    assert json2vec.Writer.__name__ == "Writer"
-    assert json2vec.Postprocessor is not None
-    assert json2vec.PostprocessorProvider.metadata == "metadata"
-    assert json2vec.Deployment.__name__ == "Deployment"
-    assert json2vec.Accelerator.cpu == "cpu"
-    assert json2vec.JSONBackend.orjson == "orjson"
-    assert json2vec.Input is not None
-    assert json2vec.ModelSource is not None
-    assert json2vec.UpdateOperation is not None
-    assert json2vec.SchemaField is not None
-    assert json2vec.Category.model_fields["type"].default == "category"
-    assert json2vec.Boolean.model_fields["type"].default == "boolean"
-    assert json2vec.Number.model_fields["type"].default == "number"
-    assert json2vec.Set.model_fields["type"].default == "set"
-    assert json2vec.Overflow.tail == "tail"
-    assert json2vec.VocabularySyncCallback.__name__ == "VocabularySyncCallback"
-    assert "number" in json2vec.TENSORFIELDS
-    assert "boolean" in json2vec.TENSORFIELDS
-    assert "set" in json2vec.TENSORFIELDS
+    assert relflow.Model.__name__ == "Model"
+    assert relflow.AttentionMode.mha == "mha"
+    assert not hasattr(relflow, "Dataset")
+    assert relflow.CustomDataModule.__name__ == "CustomDataModule"
+    assert relflow.PolarsDataModule.__name__ == "PolarsDataModule"
+    assert relflow.StreamingDataModule.__name__ == "StreamingDataModule"
+    assert relflow.SyntheticDataModule.__name__ == "SyntheticDataModule"
+    assert relflow.Schema.__name__ == "Schema"
+    assert relflow.Address("root", "label") == "root/label"
+    assert relflow.Branch.__name__ == "Branch"
+    assert relflow.where("type").name == "type"
+    assert relflow.preprocess.__name__ == "preprocess"
+    assert relflow.postprocess.__name__ == "postprocess"
+    assert relflow.Preprocessor.__name__ == "Preprocessor"
+    assert relflow.PreprocessorProvider.strata == "strata"
+    assert relflow.Observation.__name__ == "Observation"
+    assert relflow.Observation({"id": 1}).data == {"id": 1}
+    assert not hasattr(relflow, "observe")
+    assert relflow.OptimizerConfig is not None
+    assert relflow.SchedulerConfig is not None
+    assert relflow.RollbackCheckpoint.__name__ == "RollbackCheckpoint"
+    assert relflow.Writer.__name__ == "Writer"
+    assert relflow.Postprocessor is not None
+    assert relflow.PostprocessorProvider.metadata == "metadata"
+    assert relflow.Deployment.__name__ == "Deployment"
+    assert relflow.Accelerator.cpu == "cpu"
+    assert relflow.JSONBackend.orjson == "orjson"
+    assert relflow.Input is not None
+    assert relflow.ModelSource is not None
+    assert relflow.UpdateOperation is not None
+    assert relflow.SchemaField is not None
+    assert relflow.Category.model_fields["type"].default == "category"
+    assert relflow.Boolean.model_fields["type"].default == "boolean"
+    assert relflow.Number.model_fields["type"].default == "number"
+    assert relflow.Set.model_fields["type"].default == "set"
+    assert relflow.Overflow.tail == "tail"
+    assert relflow.VocabularySyncCallback.__name__ == "VocabularySyncCallback"
+    assert "number" in relflow.TENSORFIELDS
+    assert "boolean" in relflow.TENSORFIELDS
+    assert "set" in relflow.TENSORFIELDS

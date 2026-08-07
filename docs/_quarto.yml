@@ -6,7 +6,7 @@ project:
     - "**/*.qmd"
 
 website:
-  title: "json2vec"
+  title: "RelFlow"
   navbar:
     left:
       - href: index.qmd
@@ -77,7 +77,7 @@ website:
             text: Device Tenure
     right:
       - icon: github
-        href: https://github.com/json2vec/json2vec
+        href: https://github.com/relflow/relflow
         aria-label: GitHub
   sidebar:
     style: docked

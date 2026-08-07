@@ -1,20 +1,20 @@
 import pytest
 
-import json2vec as jv
-from json2vec.structs.enums import TensorKey
+import relflow as rf
+from relflow.structs.enums import TensorKey
 
 
 def test_model_constructor_builds_record_branch_and_infers_queries():
-    model = jv.Model(
-        jv.Category(
+    model = rf.Model(
+        rf.Category(
             "job_code",
             query='[*]."job code"',
             description="job code",
             size=128,
             source="openml",
         ),
-        jv.Number("amount"),
-        jv.Category("label", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
+        rf.Number("amount"),
+        rf.Category("label", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
         d_model=32,
         n_layers=2,
         n_heads=4,
@@ -53,17 +53,17 @@ def test_model_constructor_builds_record_branch_and_infers_queries():
 
 
 def test_model_from_tree_remains_a_compatibility_wrapper():
-    direct = jv.Model(jv.Number("amount"), d_model=16, n_layers=1, n_heads=4)
-    compatible = jv.Model.from_tree(jv.Number("amount"), d_model=16, n_layers=1, n_heads=4)
+    direct = rf.Model(rf.Number("amount"), d_model=16, n_layers=1, n_heads=4)
+    compatible = rf.Model.from_tree(rf.Number("amount"), d_model=16, n_layers=1, n_heads=4)
 
     assert compatible.schema.model_dump(mode="python") == direct.schema.model_dump(mode="python")
 
 
 def test_model_constructor_rejects_duplicate_sources():
     with pytest.raises(ValueError, match="duplicate schema source field"):
-        jv.Model(
-            jv.Number("amount"),
-            jv.Number("amount"),
+        rf.Model(
+            rf.Number("amount"),
+            rf.Number("amount"),
             d_model=16,
             n_layers=1,
             n_heads=4,
@@ -71,10 +71,10 @@ def test_model_constructor_rejects_duplicate_sources():
 
 
 def test_model_constructor_accepts_branch_nodes_and_infers_nested_queries():
-    model = jv.Model(
-        jv.Branch(
-            jv.Number("amount"),
-            jv.Category(
+    model = rf.Model(
+        rf.Branch(
+            rf.Number("amount"),
+            rf.Category(
                 "merchant_code",
                 query='[*].transactions[*]."merchant code"',
                 description="merchant code",
@@ -105,24 +105,24 @@ def test_model_constructor_accepts_branch_nodes_and_infers_nested_queries():
 
 
 def test_branch_mask_shorthand_normalizes_and_exports_public_api():
-    policy = jv.Mask(name="recent", count=1, window=2)
-    branch = jv.Branch(
-        jv.Number("amount"),
+    policy = rf.Mask(name="recent", count=1, window=2)
+    branch = rf.Branch(
+        rf.Number("amount"),
         name="transactions",
         length=4,
         mask=policy,
     )
-    model = jv.Model(branch, d_model=16, n_layers=1, n_heads=4)
+    model = rf.Model(branch, d_model=16, n_layers=1, n_heads=4)
 
     bound = model.schema.branches["record/transactions"]
     assert bound.masks == [policy]
-    assert jv.MASK_LITERAL == "<MASK>"
-    assert jv.MaskLiteral is not None
+    assert rf.MASK_LITERAL == "<MASK>"
+    assert rf.MaskLiteral is not None
 
 
 def test_branch_mask_validation_rejects_invalid_bound_configs():
     with pytest.raises(ValueError, match="root branch"):
-        jv.Schema.model_validate(
+        rf.Schema.model_validate(
             {
                 "d_model": 16,
                 "fields": {
@@ -136,12 +136,12 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="offset must be less than length=2"):
-        jv.Model(
-            jv.Branch(
-                jv.Number("amount"),
+        rf.Model(
+            rf.Branch(
+                rf.Number("amount"),
                 name="transactions",
                 length=2,
-                masks=[jv.Mask(count=1, offset=2)],
+                masks=[rf.Mask(count=1, offset=2)],
             ),
             d_model=16,
             n_layers=1,
@@ -149,12 +149,12 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="duplicate mask name"):
-        jv.Model(
-            jv.Branch(
-                jv.Number("amount"),
+        rf.Model(
+            rf.Branch(
+                rf.Number("amount"),
                 name="transactions",
                 length=2,
-                masks=[jv.Mask(name="same", count=1), jv.Mask(name="same", rate=0.5)],
+                masks=[rf.Mask(name="same", count=1), rf.Mask(name="same", rate=0.5)],
             ),
             d_model=16,
             n_layers=1,
@@ -162,12 +162,12 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
         )
 
     with pytest.raises(ValueError, match="excludes every active descendant leaf"):
-        jv.Model(
-            jv.Branch(
-                jv.Number("amount"),
+        rf.Model(
+            rf.Branch(
+                rf.Number("amount"),
                 name="transactions",
                 length=2,
-                masks=[jv.Mask(count=1, exclude=jv.where("type") == "number")],
+                masks=[rf.Mask(count=1, exclude=rf.where("type") == "number")],
             ),
             d_model=16,
             n_layers=1,
@@ -176,8 +176,8 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
 
 
 def test_model_constructor_accepts_root_branch_options():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=2,
         n_heads=4,
@@ -204,8 +204,8 @@ def test_model_constructor_accepts_root_branch_options():
 
 def test_model_constructor_rejects_root_length_argument():
     with pytest.raises(TypeError, match="tree field 'length'"):
-        jv.Model(
-            jv.Number("amount"),
+        rf.Model(
+            rf.Number("amount"),
             d_model=16,
             n_layers=2,
             n_heads=4,
@@ -215,8 +215,8 @@ def test_model_constructor_rejects_root_length_argument():
 
 def test_model_constructor_rejects_root_branch_mask_options():
     with pytest.raises(TypeError, match="tree field 'p_mask'"):
-        jv.Model(
-            jv.Number("amount"),
+        rf.Model(
+            rf.Number("amount"),
             d_model=16,
             n_layers=2,
             n_heads=4,
@@ -225,81 +225,81 @@ def test_model_constructor_rejects_root_branch_mask_options():
 
 
 def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
-    model = jv.Model(
-        jv.Number("amount"),
-        jv.Category("label", target=True, embed=False),
+    model = rf.Model(
+        rf.Number("amount"),
+        rf.Category("label", target=True, embed=False),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     params = model.schema
 
-    numeric = jv.where("type") == "number"
-    assert model.select(numeric) == model.select(jv.where("type") == "number")
+    numeric = rf.where("type") == "number"
+    assert model.select(numeric) == model.select(rf.where("type") == "number")
 
     model.update(numeric, weight=2.0)
     assert params.requests["record/amount"].weight == 2.0
 
-    model.update(jv.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-    assert model.select(jv.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
+    model.update(rf.where("name") == "amount", benchmark="schema_api", allow_extra=True)
+    assert model.select(rf.where("benchmark") == "schema_api") == [params.requests["record/amount"]]
 
-    target = jv.where("target")
+    target = rf.where("target")
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
-    model.update(jv.where("name") == "amount", target=True)
+    model.update(rf.where("name") == "amount", target=True)
     assert params.requests["record/amount"].p_prune == 1.0
     assert model.select(target, include_root=False) == [
         params.requests["record/amount"],
         params.requests["record/label"],
     ]
 
-    model.update(jv.where("name") == "amount", target=False)
+    model.update(rf.where("name") == "amount", target=False)
     assert params.requests["record/amount"].p_prune == 0.0
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
-    model.update(jv.where("name") == "amount", p_prune=0.25)
+    model.update(rf.where("name") == "amount", p_prune=0.25)
     assert params.requests["record/amount"].p_prune == 0.25
     assert model.select(target, include_root=False) == [params.requests["record/label"]]
 
 
 def test_schema_helper_classmethods_back_public_dsl():
-    predicate = jv.NodePredicate.from_callable("amount-name", lambda node: node.name == "amount")
-    attribute = jv.NodeAttribute.named("name")
+    predicate = rf.NodePredicate.from_callable("amount-name", lambda node: node.name == "amount")
+    attribute = rf.NodeAttribute.named("name")
 
-    assert jv.predicate("amount-name", lambda node: node.name == "amount").key == predicate.key
-    assert jv.where("name") == attribute
-    assert jv.Schema.update_values({"target": True}) == {"target": True}
+    assert rf.predicate("amount-name", lambda node: node.name == "amount").key == predicate.key
+    assert rf.where("name") == attribute
+    assert rf.Schema.update_values({"target": True}) == {"target": True}
 
 
 def test_schema_select_returns_nodes_and_accepts_boolean_predicates():
-    model = jv.Model(
-        jv.Number("amount"),
-        jv.Number("memo", active=False),
+    model = rf.Model(
+        rf.Number("amount"),
+        rf.Number("memo", active=False),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     params = model.schema
 
-    active = params.select(jv.where("active"), include_root=False)
-    inactive = params.select(~jv.where("active"), include_root=False)
+    active = params.select(rf.where("active"), include_root=False)
+    inactive = params.select(~rf.where("active"), include_root=False)
 
     assert isinstance(active, list)
     assert active == [params.requests["record/amount"]]
     assert inactive == [params.requests["record/memo"]]
 
-    model.update(jv.where("name") == "memo", target=True)
+    model.update(rf.where("name") == "memo", target=True)
     assert params.requests["record/memo"].p_prune == 1.0
-    assert params.select(jv.where("target"), include_root=False) == []
+    assert params.select(rf.where("target"), include_root=False) == []
 
     with pytest.raises(TypeError, match="Python 'not where"):
-        not jv.where("active")
+        not rf.where("active")
 
 
 def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
-    model = jv.Model(
-        jv.Number("amount"),
-        jv.Number("memo", active=False, p_mask=0.5, embed=True),
+    model = rf.Model(
+        rf.Number("amount"),
+        rf.Number("memo", active=False, p_mask=0.5, embed=True),
         d_model=16,
         n_layers=1,
         n_heads=4,
@@ -313,7 +313,7 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
     inactive = model.select(lambda node: getattr(node, "active", True) is False)
     assert inactive[0].address == "record/memo"
 
-    model.update(jv.where("name") == "memo", active=True)
+    model.update(rf.where("name") == "memo", active=True)
 
     assert "record/memo" in params.requests
     assert "record/memo" in params.active_requests
@@ -322,8 +322,8 @@ def test_model_update_can_deactivate_and_reactivate_leaf_nodes():
 
 
 def test_model_update_applies_validated_values_before_rebuilding_modules():
-    model = jv.Model(
-        jv.Category("label", size=8, topk=[2]),
+    model = rf.Model(
+        rf.Category("label", size=8, topk=[2]),
         d_model=16,
         n_layers=1,
         n_heads=4,
@@ -331,7 +331,7 @@ def test_model_update_applies_validated_values_before_rebuilding_modules():
     address = "record/label"
     before = model.nodes[address]
 
-    model.update(jv.where("name") == "label", size=16, topk=[3, 2])
+    model.update(rf.where("name") == "label", size=16, topk=[3, 2])
 
     request = model.schema.requests[address]
     assert request.size == 16
@@ -342,13 +342,13 @@ def test_model_update_applies_validated_values_before_rebuilding_modules():
 
 
 def test_model_update_uses_current_schema_when_selection_cache_is_stale():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    predicate = jv.where("name") == "amount"
+    predicate = rf.where("name") == "amount"
 
     assert model.select(predicate) == [model.schema.requests["record/amount"]]
 
@@ -365,9 +365,9 @@ def test_model_update_uses_current_schema_when_selection_cache_is_stale():
 
 
 def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modules():
-    model = jv.Model(
-        jv.Branch(
-            jv.Number("amount"),
+    model = rf.Model(
+        rf.Branch(
+            rf.Number("amount"),
             name="transactions",
             length=4,
         ),
@@ -377,7 +377,7 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
     )
     params = model.schema
 
-    model.extend(jv.where("address") == "record/transactions", jv.Number("risk_score"))
+    model.extend(rf.where("address") == "record/transactions", rf.Number("risk_score"))
 
     assert "record/transactions/risk_score" in params.requests
     assert "record/transactions/risk_score" in model.nodes
@@ -385,8 +385,8 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
 
 
 def test_model_extend_appends_category_field_and_preserves_existing_vocabulary():
-    model = jv.Model(
-        jv.Category("label", size=10),
+    model = rf.Model(
+        rf.Category("label", size=10),
         d_model=16,
         n_layers=1,
         n_heads=4,
@@ -395,7 +395,7 @@ def test_model_extend_appends_category_field_and_preserves_existing_vocabulary()
     label_vocab = model.nodes["record/label"].embedder.vocab
     label_vocab.extend(["alpha", "beta"])
 
-    model.extend(jv.where("name") == "record", jv.Category("caretaker", size=10))
+    model.extend(rf.where("name") == "record", rf.Category("caretaker", size=10))
 
     assert "record/caretaker" in model.schema.requests
     assert "record/caretaker" in model.nodes
@@ -405,72 +405,72 @@ def test_model_extend_appends_category_field_and_preserves_existing_vocabulary()
 
 
 def test_model_extend_defaults_to_root_when_only_one_array_matches():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
 
-    model.extend(jv.Number("risk_score"))
+    model.extend(rf.Number("risk_score"))
 
     assert "record/risk_score" in model.schema.requests
     assert "record/risk_score" in model.nodes
 
 
 def test_model_delete_removes_nodes_permanently_and_rebuilds_modules():
-    model = jv.Model(
-        jv.Number("amount"),
-        jv.Number("risk_score"),
+    model = rf.Model(
+        rf.Number("amount"),
+        rf.Number("risk_score"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     params = model.schema
 
-    model.delete(jv.where("name") == "risk_score")
+    model.delete(rf.where("name") == "risk_score")
 
     assert "record/risk_score" not in params.requests
     assert "record/risk_score" not in model.nodes
 
 
 def test_model_delete_rejects_removing_the_final_request():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
 
     with pytest.raises(ValueError, match="every request"):
-        model.delete(jv.where("name") == "amount")
+        model.delete(rf.where("name") == "amount")
 
 
 def test_model_reset_reinitializes_runtime_node_without_changing_schema():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     before = model.nodes["record/amount"]
 
-    model.reset(jv.where("name") == "amount")
+    model.reset(rf.where("name") == "amount")
 
     assert model.nodes["record/amount"] is not before
     assert "record/amount" in model.schema.requests
 
 
 def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     before = model.nodes["record/amount"]
 
-    with model.override(jv.where("name") == "amount", active=False):
+    with model.override(rf.where("name") == "amount", active=False):
         assert "record/amount" not in model.schema.active_requests
         assert model.nodes["record/amount"] is not before
 
@@ -478,15 +478,15 @@ def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
 
 
 def test_model_override_target_restores_original_prune_rate():
-    model = jv.Model(
-        jv.Number(name="amount", p_prune=0.25),
+    model = rf.Model(
+        rf.Number(name="amount", p_prune=0.25),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
     request = model.schema.requests["record/amount"]
 
-    with model.override(jv.where("name") == "amount", target=True):
+    with model.override(rf.where("name") == "amount", target=True):
         assert request.p_prune == 1.0
         assert request.target is True
 
@@ -495,20 +495,20 @@ def test_model_override_target_restores_original_prune_rate():
 
 
 def test_model_mutations_are_blocked_inside_training_loop_lock():
-    model = jv.Model(
-        jv.Number("amount"),
+    model = rf.Model(
+        rf.Number("amount"),
         d_model=16,
         n_layers=1,
         n_heads=4,
     )
-    lock = jv.MutationLockCallback()
+    lock = rf.MutationLockCallback()
 
     lock.on_train_start(trainer=None, pl_module=model)
     try:
         with pytest.raises(RuntimeError, match="active loop: train"):
-            model.update(jv.where("name") == "amount", weight=2.0)
+            model.update(rf.where("name") == "amount", weight=2.0)
     finally:
         lock.on_train_end(trainer=None, pl_module=model)
 
-    model.update(jv.where("name") == "amount", weight=2.0)
+    model.update(rf.where("name") == "amount", weight=2.0)
     assert model.schema.requests["record/amount"].weight == 2.0

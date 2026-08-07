@@ -8,16 +8,16 @@ eval: false
 **Example status — excerpt:** the component blocks are intentionally
 incomplete and cannot be combined into a supported artifact-compatible plugin.
 
-JSON2Vec exposes its tensorfield registry for datatypes that need a source
+RelFlow exposes its tensorfield registry for datatypes that need a source
 contract, tensor representation, input embedding, decoder, loss, or public
 writer beyond the built-ins.
 
 ::: {.callout-warning title="Experimental and not artifact-compatible"}
 This is an advanced, runtime-coupled extension surface, not a stable plugin SDK.
-The current schema validator fixes its request union when JSON2Vec is imported,
+The current schema validator fixes its request union when RelFlow is imported,
 so a dynamically registered request cannot round-trip through
 `Model.save(...)` / `Model.load(...)`. Use custom tensorfields only for
-same-process experiments, pin the JSON2Vec version, and do not deploy a saved
+same-process experiments, pin the RelFlow version, and do not deploy a saved
 artifact that depends on one.
 :::
 
@@ -62,14 +62,14 @@ duplicate name replaces the registry entry with a warning.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-signed_scalar = jv.Plugin(name="signed_scalar")
+signed_scalar = rf.Plugin(name="signed_scalar")
 ```
 
 Registration is an import-time side effect. Import the implementation before
 constructing a same-process model that uses the custom request. Importing it
-before `jv.Model.load(...)` does not currently make serialized custom request
+before `rf.Model.load(...)` does not currently make serialized custom request
 types valid; durable checkpoint, batch, and serving workflows are unsupported.
 
 ## Define The Request
@@ -85,7 +85,7 @@ import pydantic
 
 
 @signed_scalar.register
-class Request(jv.RequestBase):
+class Request(rf.RequestBase):
     type: Literal["signed_scalar"] = "signed_scalar"
     clip: Annotated[float, pydantic.Field(gt=0.0)] = 10.0
 ```
@@ -108,7 +108,7 @@ from tensordict import TensorDict, tensorclass
 
 @signed_scalar.register
 @tensorclass
-class TensorField(jv.TensorFieldBase):
+class TensorField(rf.TensorFieldBase):
     state: torch.Tensor
     content: torch.Tensor
     trainable: torch.Tensor
@@ -161,12 +161,12 @@ The embedder must accept annotated `schema` and `address` parameters. It sends a
 `d_model` payload from the leaf address to its parent:
 
 ```python
-from json2vec.structs.packages import Parcel
+from relflow.structs.packages import Parcel
 
 
 @signed_scalar.register
-class Embedder(jv.EmbedderBase):
-    def __init__(self, schema: jv.Schema, address: jv.Address):
+class Embedder(rf.EmbedderBase):
+    def __init__(self, schema: rf.Schema, address: rf.Address):
         super().__init__(schema=schema, address=address)
         self.origin = address
         self.destination = schema.requests[address].parent.address
@@ -198,17 +198,17 @@ subclass implements `decode(...)` and returns raw tensors keyed by `TensorKey`:
 
 ```python
 @signed_scalar.register
-class Decoder(jv.DecoderBase):
-    def __init__(self, schema: jv.Schema, address: jv.Address):
+class Decoder(rf.DecoderBase):
+    def __init__(self, schema: rf.Schema, address: rf.Address):
         super().__init__(schema=schema, address=address)
-        self.state_head = torch.nn.Linear(schema.d_model, len(jv.Tokens))
+        self.state_head = torch.nn.Linear(schema.d_model, len(rf.Tokens))
         self.content_head = torch.nn.Linear(schema.d_model, 1)
 
     def decode(self, pooled):
         return TensorDict(
             {
-                jv.TensorKey.state: self.state_head(pooled),
-                jv.TensorKey.content: self.content_head(pooled),
+                rf.TensorKey.state: self.state_head(pooled),
+                rf.TensorKey.content: self.content_head(pooled),
             },
             batch_size=pooled.shape[0],
         )
@@ -231,7 +231,7 @@ def loss(
     module: Any,
     prediction: Any,
     batch: Any,
-    strata: jv.Strata,
+    strata: rf.Strata,
 ):
     # Select batch.trainable positions; track state and content separately.
     # Return one scalar tensor for this field. Runtime multiplies it by weight.
@@ -253,7 +253,7 @@ If the datatype intentionally has no decoded public output, omit `write` or
 register `None` explicitly:
 
 ```python
-signed_scalar.register(None, component=jv.Component.write)
+signed_scalar.register(None, component=rf.Component.write)
 ```
 
 The runtime adds `inferred` to decoded public output and normalizes configured
@@ -261,7 +261,7 @@ The runtime adds `inferred` to decoded public output and normalizes configured
 
 ## Register Callbacks
 
-Callbacks are factories or Lightning `Callback` classes. JSON2Vec instantiates
+Callbacks are factories or Lightning `Callback` classes. RelFlow instantiates
 and orders them consistently with the model's built-in callbacks:
 
 ```python
@@ -309,7 +309,7 @@ structured content.
   request in the current release.
 - Keep experimental training and prediction in the process that imported and
   constructed the plugin.
-- Pin and test the JSON2Vec version because `Parcel`, `Prediction`, and some
+- Pin and test the RelFlow version because `Parcel`, `Prediction`, and some
   distributed state contracts are not all top-level SDK objects.
 - Avoid process-global files, sockets, or tokenizers created at import time;
   data-loader workers and service workers import modules independently.

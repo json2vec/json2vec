@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from json2vec.architecture.attention import RotaryMultiheadAttention
+from relflow.architecture.attention import RotaryMultiheadAttention
 
 
 @pytest.mark.parametrize("n_kv_heads", [1, 2, 4])
@@ -33,7 +33,7 @@ def test_rotary_attention_passes_grouped_heads_to_sdpa(monkeypatch: pytest.Monke
         seen["enable_gqa"] = enable_gqa
         return torch.zeros_like(query)
 
-    monkeypatch.setattr("json2vec.architecture.attention.F.scaled_dot_product_attention", sdpa)
+    monkeypatch.setattr("relflow.architecture.attention.F.scaled_dot_product_attention", sdpa)
     attention = RotaryMultiheadAttention(d_model=16, nhead=4, n_kv_heads=1, dropout=0.2)
     inputs = torch.randn(3, 5, 16)
 
@@ -56,7 +56,7 @@ def test_rotary_attention_padding_mask_uses_sdpa_keep_mask(monkeypatch: pytest.M
         seen["attn_mask"] = attn_mask
         return torch.zeros_like(query)
 
-    monkeypatch.setattr("json2vec.architecture.attention.F.scaled_dot_product_attention", sdpa)
+    monkeypatch.setattr("relflow.architecture.attention.F.scaled_dot_product_attention", sdpa)
     attention = RotaryMultiheadAttention(d_model=16, nhead=4, dropout=0.0)
     inputs = torch.randn(2, 3, 16)
 

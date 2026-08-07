@@ -9,7 +9,7 @@ eval: false
 five-state envelope and `inferred` behavior are exercised by the docs contract
 tests.
 
-JSON2Vec's canonical prediction is an address-keyed mapping. Each key identifies
+RelFlow's canonical prediction is an address-keyed mapping. Each key identifies
 a node in the schema tree; each value contains the outputs configured for that
 node. Interactive prediction, the Parquet writer, and online serving preserve
 this information while wrapping or serializing it differently.
@@ -31,10 +31,10 @@ predictions = model.predict(
     ]
 )
 
-fraud = predictions[jv.Address("record", "fraud")]
+fraud = predictions[rf.Address("record", "fraud")]
 ```
 
-Python keys are `jv.Address` objects, which are string subclasses. Use an
+Python keys are `rf.Address` objects, which are string subclasses. Use an
 `Address` when reading them in application code and `str(address)` when
 serializing them yourself.
 
@@ -49,10 +49,10 @@ are representative, not fixed values:
 #| output: true
 
 {
-    jv.Address("record"): {
+    rf.Address("record"): {
         "embedding": [[0.31, -0.18, 0.42, ...]],
     },
-    jv.Address("record", "fraud"): {
+    rf.Address("record", "fraud"): {
         "state": {
             "valued": [0.91],
             "null": [0.02],
@@ -94,7 +94,7 @@ input state is `masked`.
 
 - A `target=True` field is hidden at prediction time, so its output normally
   has `inferred=true`.
-- A caller can explicitly mask an input position using JSON2Vec's prediction
+- A caller can explicitly mask an input position using RelFlow's prediction
   mask literal; the decoded position is also inferred.
 - A visible field configured only with `embed=True` can be decoded and embedded
   while retaining `inferred=false`.
@@ -104,7 +104,7 @@ was absent. It describes the model input contract for that output position.
 
 ## Which Addresses Appear
 
-JSON2Vec does not echo every visible field. An address appears when prediction
+RelFlow does not echo every visible field. An address appears when prediction
 produces something worth writing, including:
 
 - a supervised target whose datatype has decoded public output;
@@ -143,7 +143,7 @@ The same model-facing information crosses three different transport contracts:
 | Path | Outer contract | Address keys | Batch dimension |
 | --- | --- | --- | --- |
 | `model.predict(records)` | Prediction mapping | `Address` objects in Python | Preserved in payload lists. |
-| `jv.Writer` | Parquet rows with `inputs` and `predictions` columns | Nested struct field names | One input observation per row. |
+| `rf.Writer` | Parquet rows with `inputs` and `predictions` columns | Nested struct field names | One input observation per row. |
 | `POST /predict` | `{"predictions": {...}}` | JSON strings such as `record/fraud` | A single request is denested; a request array returns an array of responses. |
 
 A single HTTP response therefore looks like:
@@ -176,14 +176,14 @@ does not combine their address payloads into one batched mapping.
 
 ## Preprocessors And Postprocessors
 
-A JSON2Vec preprocessor runs before queries and encoding. Its emitted
+A RelFlow preprocessor runs before queries and encoding. Its emitted
 observation—not necessarily the raw request—is the input represented in writer
 metadata. Use the identical preprocessor and bound parameters at training and
 prediction time.
 
 A postprocessor replaces or mutates the canonical address mapping. Once a
 postprocessor returns an application-specific shape, that shape becomes the
-contract for that entry point. Do not describe it as canonical JSON2Vec output;
+contract for that entry point. Do not describe it as canonical RelFlow output;
 version and test it as an application response or warehouse schema.
 
 See [Postprocessors](postprocessors.qmd) for the runtime values available to
@@ -198,7 +198,7 @@ Prefer structural checks over hard-coded model scores:
 #| output: true
 
 output = model.predict([{"amount": 12.5, "merchant": "books"}])
-payload = output[jv.Address("record", "fraud")]
+payload = output[rf.Address("record", "fraud")]
 
 assert set(payload) >= {"state", "content", "inferred"}
 assert set(payload["state"]) == {

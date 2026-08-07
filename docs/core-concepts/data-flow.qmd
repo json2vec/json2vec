@@ -8,7 +8,7 @@ eval: false
 **Example status — excerpt:** the record and schema blocks form a conceptual
 walkthrough, not a training job.
 
-A JSON2Vec schema sits in the middle of the complete modeling path. It tells the
+A RelFlow schema sits in the middle of the complete modeling path. It tells the
 input pipeline where values come from, tells tensorfields how to represent them,
 and tells the model which contexts and predictions to build.
 
@@ -51,22 +51,22 @@ record = {
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="order",
     d_model=32,
     n_layers=1,
     n_heads=4,
     embed=True,
-    customer_tier=jv.Category(size=16),
-    line_items=jv.Branch(
+    customer_tier=rf.Category(size=16),
+    line_items=rf.Branch(
         length=8,
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
+        price=rf.Number,
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 ```
 
@@ -86,9 +86,9 @@ not enough—for example, to coerce inconsistent types, sort events, apply an
 model observations.
 
 The result is a **processed observation**: one model-facing mapping wrapped in
-`jv.Observation`. A preprocessor may yield several observations from one raw
+`rf.Observation`. A preprocessor may yield several observations from one raw
 record, but each output is an independent example with its own singleton root.
-Internally, JSON2Vec wraps each observation as a one-record list so inferred
+Internally, RelFlow wraps each observation as a one-record list so inferred
 queries can start with `[*]`; that list does not create multiple root items.
 
 ::: {.callout-important}
@@ -183,7 +183,7 @@ request = {
 }
 ```
 
-JSON2Vec creates the masked target position and decodes it. Other learning roles
+RelFlow creates the masked target position and decodes it. Other learning roles
 use the same path: `p_mask` hides sampled positions, `p_prune` hides whole leaf
 instances, and branch masking limits descendant sampling to candidate repeated
 coordinates or windows. Descendant leaves sample independently inside those
@@ -238,7 +238,7 @@ not prevent data leakage.
 | Root | The singleton context representing one processed observation. Named `record` by default. |
 | Branch | A bounded child context, usually corresponding to a repeated list of objects. |
 | Leaf / tensorfield | A typed field that binds source values, tensorizes them, embeds visible input, and optionally decodes predictions. |
-| Request | The configuration object created by `jv.Number`, `jv.Category(...)`, and the other leaf constructors. |
+| Request | The configuration object created by `rf.Number`, `rf.Category(...)`, and the other leaf constructors. |
 | Query | A JMESPath expression that selects one leaf's values from a processed observation. |
 | Address | A stable slash-delimited location in the schema and prediction output. |
 | State | The value condition at a position, separate from type-specific content. |

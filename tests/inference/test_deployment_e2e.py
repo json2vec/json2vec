@@ -12,15 +12,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from json2vec.architecture.root import Model
-from json2vec.data.iterables import encode
-from json2vec.structs.enums import Strata
-from json2vec.structs.experiment import Schema
+from relflow.architecture.root import Model
+from relflow.data.iterables import encode
+from relflow.structs.enums import Strata
+from relflow.structs.experiment import Schema
 
 SERVER_SCRIPT = """
 import sys
 
-from json2vec.inference.deployment import Deployment
+from relflow.inference.deployment import Deployment
 
 checkpoint = sys.argv[1]
 port = int(sys.argv[2])

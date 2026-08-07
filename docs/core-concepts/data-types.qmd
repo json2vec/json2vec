@@ -7,7 +7,7 @@ marimo-static-output: true
 **Example status — excerpt:** source and payload fragments illustrate shared
 contracts; individual datatype references own their complete behavior.
 
-Data types are the structural and typed nodes in a `json2vec` schema. `Branch`
+Data types are the structural and typed nodes in a `relflow` schema. `Branch`
 names a shared context for child fields, usually a repeated collection such as
 transactions or sessions. Tensorfields are typed leaves that read values,
 encode state and content, hide selected positions, and decode targets.
@@ -34,7 +34,7 @@ query -> validate -> tensorize state/content -> embed visible input
 | Repeated objects | [`Branch`](../data-types/branch.qmd) | Repetition is only an upstream storage artifact; preprocess or flatten. |
 | Timestamp/calendar value | [`DateParts`](../data-types/dateparts.qmd) | Elapsed time or recency matters; derive a `Number`. |
 | Observation-local repeated identity | [`Entity`](../data-types/entity.qmd) | The ID is intentionally a small, stable, globally learned label; use `Category`. |
-| Precomputed dense vector | [`Vector`](../data-types/vector.qmd) | `json2vec` should compute embeddings from strings; use `Text`. |
+| Precomputed dense vector | [`Vector`](../data-types/vector.qmd) | `relflow` should compute embeddings from strings; use `Text`. |
 | Free-form text | [`Text`](../data-types/text.qmd) | The string is a bounded label; use `Category` or `Set`. |
 
 The same raw shape can have different meaning:
@@ -106,7 +106,7 @@ children instead of reading one leaf value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `name` | `None`; inferred when bound | Public schema name. The normal `Model(..., amount=jv.Number)` or `Branch(..., amount=jv.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. If `query` is omitted, the bound name is also the inferred source key. |
+| `name` | `None`; inferred when bound | Public schema name. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. If `query` is omitted, the bound name is also the inferred source key. |
 | `query` | inferred | JMESPath expression for the source value. See [Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields remain in the schema but are ignored by encoding, loss, and prediction. |
@@ -181,7 +181,7 @@ inference from an auxiliary visible-field decode.
 Root and branch embedding-only outputs do not have this decoded-leaf envelope.
 They contain `embedding`; datatype pages explicitly say when their leaf writer
 does not expose state or content. Rendered examples often use string paths for
-readability, while the Python dictionary is keyed by `jv.Address` objects.
+readability, while the Python dictionary is keyed by `rf.Address` objects.
 
 The public `embedding` is also distinct from tensorized content and the
 datatype's internal input embedding. See

@@ -2,9 +2,9 @@ from types import SimpleNamespace
 
 import torch
 
-from json2vec.structs.tree import Address
-from json2vec.tensorfields.base import TENSORFIELDS
-from json2vec.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.structs.tree import Address
+from relflow.tensorfields.base import TENSORFIELDS
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 
 def test_counter():
@@ -39,7 +39,7 @@ def test_counter_forward_does_not_call_distributed_collective(monkeypatch):
     def fail_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
         raise AssertionError("Counter.forward must not call all_reduce_sum")
 
-    monkeypatch.setattr("json2vec.tensorfields.shared.counter.all_reduce_sum", fail_all_reduce)
+    monkeypatch.setattr("relflow.tensorfields.shared.counter.all_reduce_sum", fail_all_reduce)
     counter = Counter(address=Address("local"), size=3)
 
     counter(torch.tensor([0, 1, 1], dtype=torch.int64))
@@ -64,7 +64,7 @@ def test_counter_sync_reduces_pending_delta_only(monkeypatch):
         reduced.append(tensor.clone())
         return torch.tensor([2, 0, 3], dtype=tensor.dtype)
 
-    monkeypatch.setattr("json2vec.tensorfields.shared.counter.all_reduce_sum", fake_all_reduce)
+    monkeypatch.setattr("relflow.tensorfields.shared.counter.all_reduce_sum", fake_all_reduce)
     counter = Counter(address=Address("sync"), size=3)
     counter(torch.tensor([0, 2, 2], dtype=torch.int64))
 
@@ -84,7 +84,7 @@ def test_counter_sync_still_calls_collective_for_empty_pending(monkeypatch):
         reduced.append(tensor.clone())
         return tensor
 
-    monkeypatch.setattr("json2vec.tensorfields.shared.counter.all_reduce_sum", fake_all_reduce)
+    monkeypatch.setattr("relflow.tensorfields.shared.counter.all_reduce_sum", fake_all_reduce)
     counter = Counter(address=Address("empty"), size=2)
 
     counter.sync()
@@ -128,6 +128,31 @@ def test_counter_update_callback_syncs_counters_in_deterministic_order(monkeypat
     CounterUpdateCallback().on_train_epoch_end(trainer=None, pl_module=module)
 
     assert calls == ["root/a/content", "root/a/state", "root/z/counter"]
+
+
+def test_counter_update_callback_finishes_epoch_metrics_before_distributed_sync(monkeypatch):
+    events = []
+    counter = Counter(address=Address("root/value"), size=2)
+    module = SimpleNamespace(
+        nodes={
+            Address("root", "value"): SimpleNamespace(
+                embedder=SimpleNamespace(counter=counter),
+            ),
+        }
+    )
+
+    class TrainerStub:
+        @property
+        def callback_metrics(self):
+            events.append("metrics")
+            return {}
+
+    monkeypatch.setattr("relflow.tensorfields.shared.counter.is_distributed", lambda: True)
+    monkeypatch.setattr(Counter, "sync", lambda self: events.append("counter"))
+
+    CounterUpdateCallback().on_train_epoch_end(trainer=TrainerStub(), pl_module=module)
+
+    assert events == ["metrics", "counter"]
 
 
 def test_counter_str_exposes_details():

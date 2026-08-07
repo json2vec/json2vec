@@ -4,10 +4,10 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 
-from json2vec.structs.enums import Strata, TensorKey, Tokens
-from json2vec.structs.experiment import Schema
-from json2vec.structs.packages import Prediction
-from json2vec.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.experiment import Schema
+from relflow.structs.packages import Prediction
+from relflow.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
 
 ADDRESS = "root/items/amount"
 

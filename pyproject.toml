@@ -1,7 +1,7 @@
 [project]
-name = "json2vec"
-version = "0.4.11"
-description = "Schema-first PyTorch models for hierarchical / nested / sequence data structures"
+name = "relflow"
+version = "0.1.1"
+description = "Relationship Flow: schema-first PyTorch models for hierarchical, nested, and sequence data"
 readme = "README.md"
 authors = [{ name = "Grantham Taylor" }]
 license = "Apache-2.0"
@@ -63,7 +63,7 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["json2vec*"]
+include = ["relflow*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

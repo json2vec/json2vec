@@ -15,7 +15,7 @@ contract. For a runnable build-to-prediction example, use
 
 ## Construct A Schema
 
-Use top-level exports through `import json2vec as jv`:
+Use top-level exports through `import relflow as rf`:
 
 ```{python .marimo}
 #| echo: true
@@ -23,9 +23,9 @@ Use top-level exports through `import json2vec as jv`:
 
 import torch
 
-import json2vec as jv
+import relflow as rf
 
-model = jv.Model(
+model = rf.Model(
     name="order",
     d_model=64,
     n_layers=2,
@@ -33,15 +33,15 @@ model = jv.Model(
     batch_size=32,
     embed=True,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
-    customer_tier=jv.Category(size=16),
-    line_items=jv.Branch(
+    customer_tier=rf.Category(size=16),
+    line_items=rf.Branch(
         length=32,
         overflow="tail",
-        sku=jv.Category(size=2048),
-        quantity=jv.Number,
-        price=jv.Number,
+        sku=rf.Category(size=2048),
+        quantity=rf.Number,
+        price=rf.Number,
     ),
-    returned=jv.Category(target=True, size=2),
+    returned=rf.Category(target=True, size=2),
 )
 
 model
@@ -76,7 +76,7 @@ record = {
 
 Same-named fields infer queries such as `[*].customer_tier` and
 `[*].line_items[*].sku`. Use an explicit `query=...` for stable source-path
-differences and a `@jv.preprocess` object for Python logic, normalization,
+differences and a `@rf.preprocess` object for Python logic, normalization,
 sorting, or windowing. See [Binding Data](core-concepts/binding-data.qmd) and
 [Advanced Query Paths](core-concepts/querypaths.qmd).
 
@@ -88,7 +88,7 @@ sorting, or windowing. See [Binding Data](core-concepts/binding-data.qmd) and
 | `target=True` | always hidden | supervised decode and loss |
 | `p_mask=x` | sampled positions hidden | reconstruction at selected positions |
 | `p_prune=x` | whole leaf instances sampled and hidden | reconstruction of the pruned field |
-| branch `mask=jv.Mask(...)` | descendant sampling is limited to candidate coordinates/windows | each descendant samples independently within those candidates |
+| branch `mask=rf.Mask(...)` | descendant sampling is limited to candidate coordinates/windows | each descendant samples independently within those candidates |
 | `embed=True` | does not hide input | exports an embedding at the address |
 | `active=False` | excluded from execution | remains in the serializable schema |
 
@@ -99,10 +99,10 @@ repeated-window selection.
 
 ## Run The Lifecycle
 
-JSON2Vec uses ordinary Lightning loops for training and large-batch prediction:
+RelFlow uses ordinary Lightning loops for training and large-batch prediction:
 
 ```python
-datamodule = jv.PolarsDataModule(
+datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=validate_frame,
@@ -115,7 +115,7 @@ trainer.fit(model=model, datamodule=datamodule)
 metrics = trainer.validate(model=model, datamodule=datamodule)
 
 model.save("model.pt")
-restored = jv.Model.load("model.pt")
+restored = rf.Model.load("model.pt")
 
 predictions = restored.predict(
     [{"customer_tier": "gold", "line_items": []}]
@@ -123,14 +123,14 @@ predictions = restored.predict(
 ```
 
 Prediction requests normally omit fields configured with `target=True`. Output
-is keyed by `jv.Address`; decoded leaves include `state`, type-specific
+is keyed by `rf.Address`; decoded leaves include `state`, type-specific
 `content`, and `inferred`, while configured nodes can include `embedding`.
 
 Use [Training With Lightning](guides/lightning.qmd) for trainer behavior,
 [Data Modules](guides/data-modules.qmd) for ingestion, and
 [Evaluation And Metrics](guides/evaluation.qmd) for model selection. Use
 [Model Lifecycle](guides/model-lifecycle.qmd) for artifact and resume contracts,
-and [Batch Inference](guides/batch-inference.qmd) for `jv.Writer` and
+and [Batch Inference](guides/batch-inference.qmd) for `rf.Writer` and
 rank-partitioned Parquet output.
 
 ## Shape The Boundaries
@@ -138,9 +138,9 @@ rank-partitioned Parquet output.
 A preprocessor is part of the input contract:
 
 ```python
-@jv.preprocess
-def normalize_order(record: dict) -> jv.Observation:
-    return jv.Observation(
+@rf.preprocess
+def normalize_order(record: dict) -> rf.Observation:
+    return rf.Observation(
         {
             "customer_tier": record["tier"].strip().lower(),
             "line_items": record["items"],
@@ -154,9 +154,9 @@ predictions = restored.predict(raw_requests, preprocess=normalize_order)
 A postprocessor is part of the application output contract:
 
 ```python
-@jv.postprocess
+@rf.postprocess
 def response(predictions):
-    field = predictions[jv.Address("order", "returned")]
+    field = predictions[rf.Address("order", "returned")]
     return {"returned": field["content"]["value"]}
 ```
 
@@ -169,16 +169,16 @@ address-keyed model output intact until the postprocessor boundary. See
 
 | Need | Public surface | Authoritative page |
 | --- | --- | --- |
-| Root model | `jv.Model(...)` | [Model Tree](core-concepts/model-tree.qmd) |
-| Repeated context | `jv.Branch(...)` | [Branch](data-types/branch.qmd) |
-| Typed leaves | `jv.Number`, `Category`, `Set`, `Entity`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
-| In-memory / streaming input | `jv.PolarsDataModule`, `jv.StreamingDataModule` | [Data Modules](guides/data-modules.qmd) |
+| Root model | `rf.Model(...)` | [Model Tree](core-concepts/model-tree.qmd) |
+| Repeated context | `rf.Branch(...)` | [Branch](data-types/branch.qmd) |
+| Typed leaves | `rf.Number`, `Category`, `Set`, `Entity`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
+| In-memory / streaming input | `rf.PolarsDataModule`, `rf.StreamingDataModule` | [Data Modules](guides/data-modules.qmd) |
 | Interactive prediction | `model.predict(...)` | [Getting Started](getting-started.qmd#interpret-the-prediction) |
 | Prediction contract | address-keyed `state`, `content`, `inferred`, `embedding` | [Prediction Output](guides/prediction-output.qmd) |
-| Batch prediction | `jv.Writer(...)` | [Batch Inference](guides/batch-inference.qmd) |
-| Online prediction | `jv.Deployment(...)` | [Serving](guides/serving.qmd) |
-| Input / output transforms | `@jv.preprocess`, `@jv.postprocess` | [Binding Data](core-concepts/binding-data.qmd), [Postprocessors](guides/postprocessors.qmd) |
-| Schema selection / mutation | `jv.where(...)`, `update`, `extend`, `delete`, `reset`, `override` | [Model Tree](core-concepts/model-tree.qmd#schema-roles-and-mutations) |
+| Batch prediction | `rf.Writer(...)` | [Batch Inference](guides/batch-inference.qmd) |
+| Online prediction | `rf.Deployment(...)` | [Serving](guides/serving.qmd) |
+| Input / output transforms | `@rf.preprocess`, `@rf.postprocess` | [Binding Data](core-concepts/binding-data.qmd), [Postprocessors](guides/postprocessors.qmd) |
+| Schema selection / mutation | `rf.where(...)`, `update`, `extend`, `delete`, `reset`, `override` | [Model Tree](core-concepts/model-tree.qmd#schema-roles-and-mutations) |
 
 ## Contract Checklist
 

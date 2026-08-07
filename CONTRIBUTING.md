@@ -1,6 +1,6 @@
 # Contributing
 
-JSON2Vec is a schema-driven model factory with extension points for datatypes,
+RelFlow is a schema-driven model factory with extension points for datatypes,
 preprocessors, data readers, and serving. Contributions should keep the core
 graph generic and move domain-specific behavior to the type or plugin that owns
 it.
@@ -45,7 +45,7 @@ small value-bearing types over repeated string/dict checks.
 
 Tensorfield behavior belongs in tensorfield plugins.
 
-Define tensorfield extensions with `json2vec.tensorfields.base.Plugin` and
+Define tensorfield extensions with `relflow.tensorfields.base.Plugin` and
 register the extension components with `@plugin.register`:
 
 - `Request`: schema/request model for the datatype.
@@ -63,7 +63,7 @@ a specific tensorfield type.
 Technical requirements for a tensorfield also belong to the extension layer:
 
 - Register Lightning callbacks with `plugin.callback(...)`.
-- Put shared extension utilities under `json2vec.tensorfields.shared`.
+- Put shared extension utilities under `relflow.tensorfields.shared`.
 - Expose worker/process encoding state through an embedder
   `interprocess_encoding_context` property when needed.
 - Keep distributed synchronization, vocabulary updates, counters, cache
@@ -121,7 +121,7 @@ stay synchronized with hyperparameters and mutation locks are respected.
 
 ## Public API
 
-Expose stable user-facing types from `json2vec.__init__` only when they are part
+Expose stable user-facing types from `relflow.__init__` only when they are part
 of the supported API. Internal helpers should remain close to the subsystem that
 owns them.
 

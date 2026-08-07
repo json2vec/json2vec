@@ -4,7 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "marimo>=0.23.8",
-    "json2vec[serving] @ git+https://github.com/json2vec/json2vec.git",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
 ---
 
@@ -26,9 +26,9 @@ precomputed embeddings, dense descriptors, sensor windows, or model features.
 #| echo: true
 #| output: true
 
-import json2vec as jv
+import relflow as rf
 
-embedding = jv.Vector(
+embedding = rf.Vector(
     "embedding",
     n_dim=4,
     objective="l2",
@@ -38,7 +38,7 @@ embedding
 ```
 
 Use `Vector` when embeddings or dense features are already present in the input
-record. Use `Text` when `json2vec` should compute embeddings from strings. Use a
+record. Use `Text` when `relflow` should compute embeddings from strings. Use a
 `Branch` when repeated measurements have item structure.
 
 ## Input Values
@@ -123,7 +123,7 @@ the meaning of `inferred`.
 
 ## Notes
 
-Use `Text` when `json2vec` should compute text embeddings from strings. Use
+Use `Text` when `relflow` should compute text embeddings from strings. Use
 `Vector` when embeddings or dense features are already present in the input
 record. The built-in package does not include image, video, or audio
 tensorfields; the custom tensorfield surface for specialized modalities is
@@ -131,7 +131,7 @@ currently experimental and same-process only.
 
 ## Where Next
 
-- Use [Text](text.qmd) when JSON2Vec should compute a frozen text embedding.
+- Use [Text](text.qmd) when RelFlow should compute a frozen text embedding.
 - Use [Number](number.qmd) when each coordinate is an independently meaningful
   scalar rather than one jointly interpreted vector.
 - Review [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd)

@@ -78,7 +78,7 @@ jobs:
               sys.exit(0)
 
           try:
-              url = f"https://pypi.org/pypi/json2vec/{current_version}/json"
+              url = f"https://pypi.org/pypi/relflow/{current_version}/json"
               with urlopen(url, timeout=10) as response:
                   already_published = response.status == 200
           except HTTPError as error:
@@ -88,11 +88,11 @@ jobs:
 
           if already_published:
               set_output("should_publish", "false")
-              print(f"json2vec {current_version} already exists on PyPI")
+              print(f"relflow {current_version} already exists on PyPI")
               sys.exit(0)
 
           set_output("should_publish", "true")
-          print(f"json2vec {current_version} is new and will be published")
+          print(f"relflow {current_version} is new and will be published")
 
   build:
     needs: detect_version
@@ -148,7 +148,7 @@ jobs:
           else
             gh release create "v${VERSION}" dist/* \
               --target "${GITHUB_SHA}" \
-              --title "json2vec ${VERSION}" \
+              --title "relflow ${VERSION}" \
               --generate-notes
           fi
 
@@ -161,7 +161,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/json2vec
+      url: https://pypi.org/p/relflow
     permissions:
       contents: read
       id-token: write

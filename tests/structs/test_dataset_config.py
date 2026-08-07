@@ -1,10 +1,10 @@
 import pytest
 
-import json2vec as jv
-from json2vec.data.datasets.base import PreprocessorConfig
-from json2vec.data.datasets.streaming import StreamingDataModule
-from json2vec.structs.enums import Suffix
-from json2vec.structs.experiment import Schema
+import relflow as rf
+from relflow.data.datasets.base import PreprocessorConfig
+from relflow.data.datasets.streaming import StreamingDataModule
+from relflow.structs.enums import Suffix
+from relflow.structs.experiment import Schema
 
 
 def _schema():
@@ -22,8 +22,8 @@ def _schema():
 
 
 def _model():
-    return jv.Model(
-        jv.Category("id", size=16),
+    return rf.Model(
+        rf.Category("id", size=16),
         d_model=8,
         n_layers=1,
         n_heads=4,
@@ -37,9 +37,9 @@ def test_preprocessor_normalization_rejects_string_names():
 
 
 def test_preprocessor_normalization_accepts_processor_object():
-    @jv.preprocess
+    @rf.preprocess
     def _dataset_callable_preprocessor(observation: dict):
-        return jv.Observation(observation)
+        return rf.Observation(observation)
 
     assert PreprocessorConfig.normalize(_dataset_callable_preprocessor) is _dataset_callable_preprocessor
 
@@ -59,7 +59,7 @@ def test_preprocessor_normalization_is_optional():
 def test_streaming_datamodule_accepts_raw_split_pattern():
     module = StreamingDataModule(
         model=_model(),
-        root="/tmp/json2vec-test",
+        root="/tmp/relflow-test",
         suffix=Suffix.ndjson,
         train=r".*",
     )
