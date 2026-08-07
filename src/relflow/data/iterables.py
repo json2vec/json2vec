@@ -219,17 +219,10 @@ def encode(
     out: dict[Address, TensorFieldBase] = {}
     target_addresses = set(schema.target)
 
+    hash_salt = random.getrandbits(64) if strata in {Strata.train, Strata.validate} else 0
+
     if strata != Strata.predict and contains_mask_literal(batch):
         raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata")
-
-    from relflow.tensorfields.extensions.entity import build_shared_group_vocabs
-
-    entity_group_vocabs = build_shared_group_vocabs(
-        batch=batch,
-        schema=schema,
-        strata=strata,
-        target_addresses=target_addresses,
-    )
 
     for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
@@ -260,13 +253,12 @@ def encode(
             schema=schema,
             strata=strata,
         )
-        if "interprocess_encoding_context" in inspect.signature(TensorField.new).parameters:
+        parameters = inspect.signature(TensorField.new).parameters
+        if "interprocess_encoding_context" in parameters:
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
 
-        if request.type == "entity":
-            group = getattr(request, "group", None)
-            if group is not None:
-                kwargs["shared_vocab"] = entity_group_vocabs[group]
+        if "salt" in parameters:
+            kwargs["salt"] = hash_salt
 
         out[address] = TensorField.new(**kwargs)
         out[address].check_nullable(address=address, schema=schema)

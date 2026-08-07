@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -42,7 +43,7 @@ amount
 Use `Number` only when numeric distance is meaningful. Numeric-looking labels
 such as zip codes, bounded product codes, and class labels are usually
 `Category` or `Set`. Large identifiers such as customer IDs, account IDs, and
-device IDs should usually stay as metadata or use `Entity` when local repeated
+device IDs should usually stay as metadata or use `Hash` when repeated
 equality is the useful signal.
 
 ## Input Values

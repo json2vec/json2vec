@@ -128,7 +128,7 @@ The envelope is shared, but `content` is not:
 | `Set` | Per-label probabilities or a thresholded label-to-score mapping. |
 | `DateParts` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
 | `Vector` | Reconstructed vector values. |
-| `Entity` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
+| `Hash` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
 | `Text` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
 
 The relevant [datatype page](../core-concepts/data-types.qmd) is authoritative

@@ -69,7 +69,7 @@ model = rf.Model(
 - `Branch(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root branch uses internal `Overflow.error`.
 - `target=True` is shorthand for `p_prune=1.0`; the field is hidden from input and decoded as a supervised target.
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
-- `Entity` is for local repeated-identity matching and requires more than one value per observation, usually under a `Branch(length>1)`.
+- `Hash` represents large identifiers with batch-salted hashes, preserving equality across fields in one encoded batch without learning a persistent vocabulary.
 - `DateParts` is for calendar parts. If elapsed time or recency matters, derive a `Number`.
 - Preprocessors run before tensorization. Use them for Python logic, windowing, normalization, or splitting one raw record into multiple observations.
 - Postprocessors run after prediction writing. Use them to reshape address-keyed outputs for APIs or warehouses.

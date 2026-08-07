@@ -99,7 +99,7 @@ model = rf.Model(
     n_heads=4,
     parties=rf.Branch(
         length=2,
-        account_id=rf.Entity(query="[*].[buyer_account_id, seller_account_id]"),
+        account_id=rf.Hash(query="[*].[buyer_account_id, seller_account_id]"),
     ),
     amount=rf.Number,
 )
@@ -107,7 +107,7 @@ model = rf.Model(
 model
 ```
 
-Use `Entity` when the useful signal is local equality inside the observation,
+Use `Hash` when the useful signal is local equality inside the observation,
 for example whether the same account appears in multiple roles or events. Use
 `Category` for bounded labels or codes that should be learned as a persistent
 global vocabulary.
@@ -145,7 +145,7 @@ model = rf.Model(
     n_heads=4,
     parties=rf.Branch(
         length=2,
-        party_id=rf.Entity,
+        party_id=rf.Hash,
         role=rf.Category(size=8),
     ),
     amount=rf.Number,

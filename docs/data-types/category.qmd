@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -38,14 +39,14 @@ merchant_category = rf.Category(
 merchant_category
 ```
 
-Use `Set` when several labels may be present at once. Use `Entity` when only
+Use `Set` when several labels may be present at once. Use `Hash` when only
 repeated equality inside one observation matters. Use `Text` when the words or
 subwords inside a string carry the signal.
 
 Avoid using `Category` for effectively unique customer, account, session, or
 device IDs. Their embedding and decoder tables grow linearly with `size`, and a
 global ID vocabulary usually generalizes poorly. Keep unique IDs as metadata,
-or use `Entity` for observation-local equality.
+or use `Hash` for equality without a learned vocabulary.
 
 ## Input Values
 
@@ -204,7 +205,7 @@ input rate, step time, and memory together when choosing headroom.
 ## Where Next
 
 - Use [Set](set.qmd) for unordered multi-label values.
-- Use [Entity](entity.qmd) for equality within one observation and one leaf.
+- Use [Hash](hash.qmd) for large identifiers whose equality matters.
 - Use [Text](text.qmd) when subword meaning matters.
 - Read [Built-In Data Types](../core-concepts/data-types.qmd) for shared state,
   training, and prediction semantics.

@@ -23,7 +23,7 @@ the schema becomes the model.
 
 A `relflow` schema is both a data contract and an architecture blueprint.
 
-- Leaf fields such as `Number`, `Category`, `Set`, `Entity`, `Text`, and
+- Leaf fields such as `Number`, `Category`, `Set`, `Hash`, `Text`, and
   `Vector` become datatype-specific tensorfields.
 - `Branch` nodes define shared contexts for child fields, with optional local
   attention and pooling before the representation flows upward.
@@ -356,7 +356,7 @@ Tutorials and guides:
 - [Boolean](https://relflow.github.io/relflow/data-types/boolean.html)
 - [Category](https://relflow.github.io/relflow/data-types/category.html)
 - [Set](https://relflow.github.io/relflow/data-types/set.html)
-- [Entity](https://relflow.github.io/relflow/data-types/entity.html)
+- [Hash](https://relflow.github.io/relflow/data-types/hash.html)
 - [DateParts](https://relflow.github.io/relflow/data-types/dateparts.html)
 - [Vector](https://relflow.github.io/relflow/data-types/vector.html)
 - [Text](https://relflow.github.io/relflow/data-types/text.html)

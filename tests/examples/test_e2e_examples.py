@@ -49,7 +49,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/data-types/branch.qmd",
         "docs/data-types/category.qmd",
         "docs/data-types/dateparts.qmd",
-        "docs/data-types/entity.qmd",
+        "docs/data-types/hash.qmd",
         "docs/data-types/number.qmd",
         "docs/data-types/set.qmd",
         "docs/data-types/text.qmd",
@@ -141,7 +141,7 @@ def test_documented_contracts_match_public_enums_and_requests() -> None:
     assert "Pruning is an operation" in data_types
 
     common_fields = set(rf.RequestBase.model_fields)
-    for name in ("Number", "Boolean", "Category", "Set", "Entity", "DateParts", "Vector", "Text"):
+    for name in ("Number", "Boolean", "Category", "Set", "Hash", "DateParts", "Vector", "Text"):
         request = getattr(rf, name)
         reference = (docs / f"data-types/{name.lower()}.qmd").read_text()
         for field_name, field in request.model_fields.items():
@@ -191,7 +191,7 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
         rf.Boolean: docs / "boolean.qmd",
         rf.Category: docs / "category.qmd",
         rf.DateParts: docs / "dateparts.qmd",
-        rf.Entity: docs / "entity.qmd",
+        rf.Hash: docs / "hash.qmd",
         rf.Number: docs / "number.qmd",
         rf.Set: docs / "set.qmd",
         rf.Text: docs / "text.qmd",

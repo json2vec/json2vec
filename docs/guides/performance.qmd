@@ -96,7 +96,7 @@ not make a large vocabulary free.
   headroom;
 - monitor Category `vocabulary:size` by address;
 - investigate capacity warnings rather than silently increasing every field;
-- use `Entity` when only observation-local equality matters;
+- use `Hash` when identifier equality matters without a learned vocabulary;
 - keep high-cardinality join identifiers as metadata when they are not a model
   feature;
 - avoid large `topk` output unless consumers use it.

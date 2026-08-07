@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -71,7 +72,7 @@ its own representation before the order is represented at the root.
 | --- | --- | --- |
 | Root | `Model(..., name=...)` | Singleton context for one processed observation. |
 | Branch | `Branch(..., length=...)` | Bounded child context whose aligned values can interact before pooling to its parent. |
-| Leaf tensorfield | `Number`, `Category`, `Set`, `Entity`, `DateParts`, `Text`, `Vector`, `Boolean` | Binds and represents a typed source value; optionally decodes a prediction. |
+| Leaf tensorfield | `Number`, `Category`, `Set`, `Hash`, `DateParts`, `Text`, `Vector`, `Boolean` | Binds and represents a typed source value; optionally decodes a prediction. |
 
 The generated root is named `record` by default. `Model(name="order", ...)`
 renames it, but it remains a singleton with internal length 1. Repeated root

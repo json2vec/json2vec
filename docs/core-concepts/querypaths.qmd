@@ -175,7 +175,7 @@ model = rf.Model(
     n_heads=4,
     login_events=rf.Branch(
         length=16,
-        device_id=rf.Entity(
+        device_id=rf.Hash(
             query="[*].map(&device_id, events[?event_type == 'login'])"
         ),
         risk_score=rf.Number(
