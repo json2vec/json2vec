@@ -76,6 +76,7 @@ type, then use its individual reference for options and limitations.
 
 | Export | Purpose | Guide |
 | --- | --- | --- |
+| `SyntheticDataModule` | Define synthetic data splits with generator functions. | [Data Modules](../guides/data-modules.qmd) |
 | `PolarsDataModule` | In-memory Polars-backed train/validate/test/predict data. | [Data Modules](../guides/data-modules.qmd) |
 | `StreamingDataModule` | Local/S3 file streaming, sharding, buffering, and sampling. | [Data Modules](../guides/data-modules.qmd) |
 | `CustomDataModule` | Integrate custom iterable sources with the shared encoding path. | [Data Modules](../guides/data-modules.qmd) |

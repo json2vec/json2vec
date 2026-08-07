@@ -72,6 +72,7 @@ datamodule = rf.PolarsDataModule(
 | Unit test or tiny local sample | `PolarsDataModule` |
 | Data already in memory as a Polars DataFrame | `PolarsDataModule` |
 | Data already exposed as a PyTorch `IterableDataset` | `CustomDataModule` |
+| Synthetic observations | `SyntheticDataModule` |
 | SQL, API, queue, or custom SDK feed | User `IterableDataset` plus `CustomDataModule` |
 | Many local files | `StreamingDataModule` |
 | S3-backed data | `StreamingDataModule` |
@@ -83,6 +84,39 @@ Use `CustomDataModule` when you already have a PyTorch `IterableDataset` that
 yields raw observation dictionaries. The dataset owns the upstream feed.
 `relflow` owns preprocessing, batching, tensorization, masking, and target
 pruning.
+
+For synthetic data, pass zero-argument generator functions directly to
+`SyntheticDataModule`:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import random
+
+import relflow as rf
+
+
+def synthetic_records():
+    for _ in range(100):
+        yield {
+            "amount": random.random() * 100,
+            "merchant": random.choice(["bookstore", "grocery"]),
+            "label": random.choice(["ok", "review"]),
+        }
+
+
+datamodule = rf.SyntheticDataModule(
+    model=model,
+    train=synthetic_records,
+    num_workers=0,
+)
+```
+
+The function is called again for every iteration, so it may yield a finite or
+infinite stream. With multiple data-loader workers, each worker calls the
+function independently; seed or shard inside the function when workers must
+produce distinct observations.
 
 ```{python .marimo}
 #| echo: true

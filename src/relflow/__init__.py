@@ -16,7 +16,7 @@ from relflow.architecture.root import (
     OptimizerConfig,
     SchedulerConfig,
 )
-from relflow.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule
+from relflow.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule, SyntheticDataModule
 from relflow.data.nested import MASK_LITERAL, MaskLiteral
 from relflow.data.processors import (
     Metadata,
@@ -158,6 +158,7 @@ __all__ = [
     "SchemaField",
     "ShardingStrategy",
     "StreamingDataModule",
+    "SyntheticDataModule",
     "Strata",
     "Suffix",
     "TENSORFIELDS",

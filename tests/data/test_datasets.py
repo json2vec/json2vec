@@ -19,6 +19,7 @@ from relflow.data.datasets.base import _is_assigned_to_worker, _worker_identity,
 from relflow.data.datasets.custom import CustomBatchDataset, CustomDataModule
 from relflow.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
 from relflow.data.datasets.streaming import BatchDataset, StreamingDataModule
+from relflow.data.datasets.synthetic import SyntheticDataModule
 from relflow.structs.enums import ShardingStrategy, Strata, Suffix
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
@@ -62,6 +63,26 @@ class RecordsDataset(IterableDataset):
 
     def __iter__(self):
         yield from self.records
+
+
+def test_synthetic_datamodule_calls_generator_for_each_iteration():
+    calls = 0
+
+    def generate():
+        nonlocal calls
+        calls += 1
+        yield {"id": calls}
+
+    module = SyntheticDataModule(model=_datamodule_model(), train=generate, num_workers=0)
+    dataset = module.datasets[Strata.train]
+
+    assert list(dataset) == [{"id": 1}]
+    assert list(dataset) == [{"id": 2}]
+
+
+def test_synthetic_datamodule_rejects_non_callable_generator():
+    with pytest.raises(TypeError, match="generator must be callable"):
+        SyntheticDataModule(model=_datamodule_model(), train=[{"id": 1}])
 
 
 def test_sha256():
