@@ -11,11 +11,11 @@ from relflow.tensorfields.extensions import vector as vector
 __all__ = [
     "boolean",
     "category",
+    "cluster",
     "dateparts",
     "entity",
     "number",
     "set",
     "text",
     "vector",
-    "cluster",
 ]
