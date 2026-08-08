@@ -53,6 +53,7 @@ class Suffix(enum.StrEnum):
 class TensorKey(enum.StrEnum):
     value = "value"
     content = "content"
+    cluster = "cluster"
     state = "state"
     trainable = "trainable"
     targets = "targets"
