@@ -48,21 +48,31 @@ class Request(RequestBase):
     ] = 1024
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
 
+    balance_epsilon: Annotated[float, pydantic.Field(gt=0.0, default=0.05)] = 0.05
+    balance_iters: Annotated[int, pydantic.Field(gt=0, default=3)] = 3
+    sparsity_weight: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
+    ema_decay: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.99)] = 0.99
+    gumbel_tau: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
+
     n_clusters: Annotated[
-        int | tuple[int, int],
-        pydantic.Field(alias="bounds", serialization_alias="bounds", description="Either a single size (int) or a tuple (lower_bound, upper_bound)")
+        tuple[int, int],
+        pydantic.Field(
+            alias="bounds",
+            serialization_alias="bounds",
+            description="(lower_bound, upper_bound) for the number of clusters. A single int is broadcast to (K, K) to specify an exact number of clusters.",
+        ),
     ]
+
+    @pydantic.field_validator("n_clusters", mode="before")
+    @classmethod
+    def _broadcast_n_clusters(cls, value: Any) -> Any:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return (value, value)
+        return value
 
     @property
     def size(self) -> int:
-        if isinstance(self.n_clusters, tuple):
-            return self.n_clusters[-1]
-        return self.n_clusters
-
-    @size.setter
-    def size(self, value: int) -> None:
-        self.n_clusters = value
-        self.model_fields_set.add("n_clusters")
+        return self.n_clusters[-1]
 
     @pydantic.model_validator(mode="before")
     @classmethod
@@ -74,20 +84,13 @@ class Request(RequestBase):
 
     @pydantic.model_validator(mode="after")
     def check_n_clusters(self):
-        if isinstance(self.n_clusters, tuple):
-            if len(self.n_clusters) != 2:
-                raise ValueError("n_clusters tuple must have exactly 2 elements (lower_bound, upper_bound)")
-            lower, upper = self.n_clusters
-            if lower <= 0:
-                raise ValueError("n_clusters lower bound must be greater than 0")
-            if lower > upper:
-                raise ValueError("n_clusters lower bound must be less than or equal to upper bound")
-        elif isinstance(self.n_clusters, int):
-            if self.n_clusters <= 0:
-                raise ValueError("n_clusters must be greater than 0")
-        else:
-            raise ValueError("n_clusters must be an int or a tuple of two ints")
-        
+        if len(self.n_clusters) != 2:
+            raise ValueError("n_clusters tuple must have exactly 2 elements (lower_bound, upper_bound)")
+        lower, upper = self.n_clusters
+        if lower <= 0:
+            raise ValueError("n_clusters lower bound must be greater than 0")
+        if lower > upper:
+            raise ValueError("n_clusters lower bound must be less than or equal to upper bound")
         return self
 
 @cluster.register
@@ -149,7 +152,7 @@ class TensorField(TensorFieldBase):
         content = content.masked_fill(literal_mask_tensor, 0)
         if strata == Strata.train:
             p_unavailable: float = schema.requests[address].p_unavailable
-            unavailable_index: int = schema.requests[address].size
+            unavailable_index: int = schema.requests[address].capacity
 
             if p_unavailable > 0.0:
                 # Unavailable content never appears naturally during training, because the
@@ -217,6 +220,9 @@ class TensorField(TensorFieldBase):
 
 @cluster.register
 class Embedder(EmbedderBase):
+    usage_ema: torch.Tensor
+    committed: torch.Tensor
+
     def __init__(self, schema: Schema, address: Address):
         super().__init__(schema=schema, address=address)
 
@@ -224,10 +230,8 @@ class Embedder(EmbedderBase):
         self.origin: Address = address
         self.destination: Address = request.parent.address
         self.capacity: int = request.capacity
-        if isinstance(request.size, tuple):
-            self.size: int = request.size[-1] #TODO consider whether to leave this as a tuple or instead a typed dictionary
-        else: 
-            self.size: int = request.size
+        self.size: int = request.size
+        self.gumbel_tau: float = request.gumbel_tau
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=self.capacity)
 
@@ -238,8 +242,8 @@ class Embedder(EmbedderBase):
                     embedding_dim=schema.d_model,
                 ),
                 TensorKey.cluster.name: torch.nn.Embedding(
-                    num_embeddings=self.capacity, 
-                    embedding_dim=self.size
+                    num_embeddings=self.capacity + 1,
+                    embedding_dim=self.size,
                 ),
                 TensorKey.content.name: torch.nn.Linear(
                     in_features=self.size,
@@ -250,9 +254,12 @@ class Embedder(EmbedderBase):
         self.counters = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: Counter(address=address, size=len(Tokens)),
-                TensorKey.cluster.name: Counter(address=address, size=request.size),
             }
         )
+
+        # slow-moving usage tracker + committed set for Sinkhorn balance in loss
+        self.register_buffer("usage_ema", torch.full((self.size,), 1.0 / self.size))
+        self.register_buffer("committed", torch.ones(self.size, dtype=torch.bool))
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -264,12 +271,24 @@ class Embedder(EmbedderBase):
         content = inputs.content.reshape(-1)
         valued = state.eq(Tokens.valued.value)
 
-        if valued.any() and (content.masked_select(valued) > self.capacity).any().item():
-            raise ValueError(f"Token in address {self.origin} exceeds vocabulary size of {self.capacity}")
+        if valued.any():
+            valid_content = content.masked_select(valued)
+            if ((valid_content < 0) | (valid_content > self.capacity)).any().item():
+                raise ValueError(
+                    f"Token in address {self.origin} outside [0, {self.capacity}]"
+                )
 
-        known = valued & content.lt(self.capacity)
-        safe_content = content.masked_fill(~known, 0)
-        cluster_assignments = torch.softmax(self.embeddings[TensorKey.cluster.name](safe_content), dim=-1) * known.unsqueeze(-1) 
+        safe_content = content.masked_fill(~valued, 0)
+        assign_logits = self.embeddings[TensorKey.cluster.name](safe_content)
+        if self.training:
+            cluster_assignments = torch.nn.functional.gumbel_softmax(
+                assign_logits, tau=self.gumbel_tau, hard=True, dim=-1
+            )
+        else:
+            hard = torch.zeros_like(assign_logits)
+            hard.scatter_(-1, assign_logits.argmax(dim=-1, keepdim=True), 1.0)
+            cluster_assignments = hard
+        cluster_assignments = cluster_assignments * valued.unsqueeze(-1)
         cluster_embeddings = self.embeddings[TensorKey.content.name](cluster_assignments)
 
         embeddings: torch.Tensor = (self.embeddings[TensorKey.state.name](state) + cluster_embeddings).reshape(
@@ -294,11 +313,7 @@ class Decoder(DecoderBase):
         super().__init__(schema=schema, address=address)
 
         request: Request = schema.requests[address]
-
-        if isinstance(request.size, tuple):
-            n_clusters: int = request.size[-1]
-        else: 
-            n_clusters: int = request.size
+        n_clusters: int = request.size
 
         self.linears = torch.nn.ModuleDict(
             {
@@ -308,7 +323,8 @@ class Decoder(DecoderBase):
                 ),
                 TensorKey.cluster.name: torch.nn.Linear(
                     in_features=schema.d_model,
-                    out_features=n_clusters
+                    out_features=n_clusters,
+                    bias=False
                 )
             }
         )
@@ -330,24 +346,8 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-    """
-    The loss function should:
-    1. Encourage content (the input categories) to be moved into a cluster of best fit
-    2. Encourage the cluster to be embedded as a meaningful representation into latent space
-
-    (1) In order to encourage the content to be moved into a cluster of best fit, we choose to enforce that the embedding table outputs cluster assignments in probability space via softmax. However, as this probability space is used to then feed a content embedding of dim-model, we must enforce that we only feed-forward the arg-max of the probability space--we only feed-forward the cluster assignment itself. This, in itself as a requirement, then raises some concerning questions:
-        - If we use a linear map from a vector with only one (1) non-zero value, and a non-zero value of value 1 explicitly, how is this different from two stacked embedding tables? I suppose differentiability is the primary difference, but I also wonder how the arg-max function will operate under differentiation--perhaps this will be implemented as a value translation followed by ReLU. 
-            - We should use the torch.nn.functional.gumbel_softmax function in order to implement differentiable arg-max as an operation. 
-        - Do we want a hard cluster, or soft clusters? Soft clusters aren't really clusters as much as they are information condensed embeddings
-            - We must use hard-cluster definitions for downstream mapping. This is tied to the above--only use the single most predicted cluster assignment from the cluster mapping
-        - How shall we enforce cluster sparsity in the case of `isinstance(request.size, tuple)`
-            - We must implement a form of Lasso regression in order to enforce cluster sparsity (and we must now define and expose a new hyper-parameter which toggles the weight with which we penalize for sparsity)
-        - How will OOV work?
-            - It seems that the appropriate solution would be either the mode or the average cluster assignment as selected from the embedding table itself... perhaps I will consult with Grantham on this... 
-
-    (2) In order to encourage that each input is moved into a cluster of best fit, we should seek to recreate the cluster from the d_model embedding given by the encoders' ultimate linear map. This is just a matter of building the decoder correctly, and ensuring that as information gets pooled via cross-attention up through the root and through decoder trees, that all information from the tree agrees with the cluster assignment. This is, in most part, given by cross-entropy of the cluster assignment much the same way that the `Category` data-type operates.
-    """
     embedder: Embedder = module.nodes[prediction.address].embedder
+    request: Request = cast(Request, module.schema.requests[prediction.address])
     N: int = batch.targets[TensorKey.state].numel()
     trainable = batch.trainable.reshape(N)
 
@@ -381,52 +381,97 @@ def loss(
     if not valued.any():
         return loss
 
-    cluster_inputs = prediction.payload[TensorKey.cluster].reshape(N, -1)
-    cluster_targets = batch.targets[TensorKey.cluster].reshape(N)
+    cluster_logits: torch.Tensor = prediction.payload[TensorKey.cluster].reshape(N, -1)
+    K: int = cluster_logits.shape[-1]
+    content_targets = batch.targets[TensorKey.content].reshape(N)
 
-    cluster_inputs 
+    assign_weight: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
+    cluster_probs = torch.log_softmax(cluster_logits, dim=-1).exp()
+    vocab_logits = cluster_probs @ assign_weight.T
 
-    n_content_tokens = cluster_inputs.shape[-1]
-    invalid = valued & cluster_targets.gt(n_content_tokens)
-    if invalid.any():
-        raise ValueError(f"Token in address {prediction.address} exceeds vocabulary size")
-
-    known = valued & cluster_targets.lt(n_content_tokens)
-    unavailable = valued & cluster_targets.eq(n_content_tokens)
-
-    cluster_loss_sum: torch.Tensor = cluster_inputs.new_zeros(())
+    known = valued & content_targets.lt(embedder.capacity)
     if known.any():
-        known_losses = torch.nn.functional.cross_entropy(
-            input=cluster_inputs[known],
-            target=cluster_targets[known],
-            weight=cast(Counter, embedder.counters[TensorKey.cluster.name]).weight,
-            reduction="none",
+        loss += module.track(
+            (prediction.address, strata, Metric.loss, TensorKey.content),
+            value=torch.nn.functional.cross_entropy(
+                input=vocab_logits[known],
+                target=content_targets[known],
+                reduction="mean",
+            ),
         )
-        cluster_loss_sum = cluster_loss_sum + known_losses.sum()
+        module.track(
+            (prediction.address, strata, Metric.accuracy, TensorKey.content),
+            value=vocab_logits[:, : embedder.capacity].argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
+        )
 
-    if unavailable.any():
-        unavailable_losses = -torch.nn.functional.log_softmax(cluster_inputs[unavailable], dim=1).mean(dim=1)
-        cluster_loss_sum = cluster_loss_sum + unavailable_losses.sum()
-
-    cluster_loss = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.cluster), #TODO: TensorKey.cluster is public facing via logs--consider renaming to cluster
-        value=cluster_loss_sum / valued.float().sum().clamp_min(1.0),
-    )
-    loss += cluster_loss
-
-    if not known.any():
+    if strata != Strata.train:
         return loss
 
-    module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=cluster_inputs.argmax(dim=1).eq(cluster_targets).masked_select(known).float().mean(),
+    valued_logits = cluster_logits[valued]
+    n_valued: int = valued_logits.shape[0]
+    lower: int = request.n_clusters[0]
+
+    if n_valued < max(lower, 2):
+        return loss
+
+    valued_probs = torch.softmax(valued_logits, dim=-1)
+
+    with torch.no_grad():
+        batch_usage = valued_probs.detach().mean(dim=0)
+        embedder.usage_ema.mul_(request.ema_decay).add_(batch_usage * (1.0 - request.ema_decay))
+
+        _, committed_idx = embedder.usage_ema.topk(lower)
+        embedder.committed.zero_()
+        embedder.committed[committed_idx] = True
+
+        scaled = valued_logits[:, committed_idx] / request.balance_epsilon
+        Q = torch.exp(scaled - scaled.max())
+        Q = Q / Q.sum().clamp_min(1e-12)
+        for _ in range(request.balance_iters):
+            Q = Q / (n_valued * Q.sum(dim=1, keepdim=True).clamp_min(1e-12))
+            Q = Q / (lower * Q.sum(dim=0, keepdim=True).clamp_min(1e-12))
+        Q = Q * n_valued
+
+    committed_log_probs = torch.log_softmax(valued_logits, dim=-1)[:, committed_idx]
+    balance_loss = -(Q * committed_log_probs).sum(dim=-1).mean()
+
+    loss += module.track(
+        (prediction.address, strata, Metric.loss, TensorKey.cluster),
+        value=balance_loss,
     )
+    module.track(
+        (prediction.address, strata, "cluster", "active"),
+        value=(embedder.usage_ema > (1.0 / K)).sum().float(),
+    )
+    module.track(
+        (prediction.address, strata, "cluster", "committed"),
+        value=state_inputs.new_tensor(float(lower)),
+    )
+    module.track(
+        (prediction.address, strata, "cluster", "usage_entropy"),
+        value=-(embedder.usage_ema.clamp_min(1e-12) * embedder.usage_ema.clamp_min(1e-12).log()).sum(),
+    )
+    module.track(
+        (prediction.address, strata, "cluster", "sentinel_share"),
+        value=content_targets.eq(embedder.capacity).masked_select(valued).float().mean(),
+    )
+
+    if request.n_clusters[0] != request.n_clusters[-1] and request.sparsity_weight > 0.0:
+        uncommitted = ~embedder.committed
+        if uncommitted.any():
+            uncommitted_mass = valued_probs[:, uncommitted].mean(dim=0).sum()
+            loss += module.track(
+                (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data is trying to introduce a new cluster
+                value=uncommitted_mass * request.sparsity_weight,
+            )
 
     return loss
 
 
 @cluster.register
 def write(module: Model, prediction: Prediction):
+    node = module.nodes[prediction.address]
+    embedder: Embedder = node.embedder
     state_logits: torch.Tensor = prediction.payload[TensorKey.state]
     cluster_logits: torch.Tensor = prediction.payload[TensorKey.cluster]
 
@@ -435,11 +480,35 @@ def write(module: Model, prediction: Prediction):
     state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
     state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
-    cluster_log_norm = cluster_logits.logsumexp(dim=-1, keepdim=True)
-    cluster_distribution = (cluster_logits - cluster_log_norm).exp().detach().float().cpu().numpy()
-    cluster_payload = {TensorKey.probability.name: cluster_distribution}
+    cluster_log_probs = torch.log_softmax(cluster_logits, dim=-1)
+    cluster_probs = cluster_log_probs.exp()
+    cluster_max_logprobs, cluster_ids = cluster_log_probs.max(dim=-1)
+    cluster_payload = {
+        TensorKey.value.name: cluster_ids.detach().cpu().numpy().astype(np.int32),
+        TensorKey.probability.name: cluster_max_logprobs.exp().detach().float().cpu().numpy(),
+    }
+
+    assign_weight: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
+    vocab_logits: torch.Tensor = cluster_probs @ assign_weight.T
+
+    vocab = np.array(embedder.vocab.snapshot(), dtype=object)
+    content_shape = tuple(state_distribution.shape[:-1])
+    content_labels = np.full(content_shape, None, dtype=object)
+    content_probabilities = np.zeros(content_shape, dtype=np.float32)
+    if len(vocab) > 0:
+        candidate_indices = torch.arange(len(vocab), device=vocab_logits.device, dtype=torch.int64)
+        candidate_logits = vocab_logits.index_select(dim=-1, index=candidate_indices)
+        log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
+        max_logits, max_indices = candidate_logits.max(dim=-1)
+        content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
+        max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
+        content_labels = vocab[max_indices_np]
 
     return {
         TensorKey.state.name: state_payload,
         TensorKey.cluster.name: cluster_payload,
+        TensorKey.content.name: {
+            TensorKey.value.name: content_labels,
+            TensorKey.probability.name: content_probabilities,
+        },
     }
