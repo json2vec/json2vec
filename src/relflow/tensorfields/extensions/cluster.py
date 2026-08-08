@@ -462,7 +462,7 @@ def loss(
         if uncommitted.any():
             uncommitted_mass = valued_probs[:, uncommitted].mean(dim=0).sum()
             loss += module.track(
-                (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data/leaf is trying to introduce a new cluster
+                (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data/leaf is trying to introduce a new cluster. Note, for future changes, this field name is referenced in docs.
                 value=uncommitted_mass * request.sparsity_weight,
             )
 
