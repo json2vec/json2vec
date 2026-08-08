@@ -248,6 +248,7 @@ class Embedder(EmbedderBase):
                 TensorKey.content.name: torch.nn.Linear(
                     in_features=self.size,
                     out_features=schema.d_model,
+                    bias=False,
                 ),
             }
         )
@@ -461,7 +462,7 @@ def loss(
         if uncommitted.any():
             uncommitted_mass = valued_probs[:, uncommitted].mean(dim=0).sum()
             loss += module.track(
-                (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data is trying to introduce a new cluster
+                (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data/leaf is trying to introduce a new cluster
                 value=uncommitted_mass * request.sparsity_weight,
             )
 
