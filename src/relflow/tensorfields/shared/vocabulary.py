@@ -327,9 +327,11 @@ class OnlineVocabularyModel(torch.nn.Module):
 
     def snapshot(self) -> list[Any]:
         size = len(self.master)
-        if self._snapshot_cache is None or self._snapshot_size != size:
+        if self._snapshot_cache is None or self._snapshot_size > size:
             self._snapshot_cache = list(self.master)
-            self._snapshot_size = size
+        elif self._snapshot_size < size:
+            self._snapshot_cache.extend(self.master[self._snapshot_size:size])
+        self._snapshot_size = size
 
         return self._snapshot_cache
 
