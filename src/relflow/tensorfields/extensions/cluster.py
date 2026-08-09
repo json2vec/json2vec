@@ -440,7 +440,7 @@ def loss(
             Q = Q / (lower * Q.sum(dim=0, keepdim=True).clamp_min(1e-12))
         Q = Q * n_valued
 
-    committed_log_probs = torch.log_softmax(valued_logits, dim=-1)[:, committed_idx]
+    committed_log_probs = torch.log_softmax(valued_logits[:, committed_idx], dim=-1)
     balance_loss = -(Q * committed_log_probs).sum(dim=-1).mean()
 
     loss += module.track(
@@ -577,7 +577,7 @@ class ClusterReviveCallback(Callback):
             return None
 
         base = math.exp(-epoch / request.revive_temperature)
-        p = base * adherence
+        p = min(base * adherence, 1/n_dead)
         if p <= 0.0:
             return None
 

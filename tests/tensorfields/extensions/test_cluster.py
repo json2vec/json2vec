@@ -430,6 +430,62 @@ def test_cluster_loss_sinkhorn_pushes_gradient_toward_spread():
     assert valued_grad[:, 1:].mean().item() < 0.0
 
 
+def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
+    # Revive copies a live donor row into a dead column, which drives that column's decoder
+    # logit up to the donor's level. The balance loss must not spike from that step: it must
+    # depend only on the committed columns' relative logits.
+    structure = Schema.model_validate(
+        _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0, balance_epsilon=1.0)
+    )
+    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    K = structure.requests[ADDRESS].size
+    lower = structure.requests[ADDRESS].n_clusters[0]
+
+    base_logits = torch.zeros(*field.state.shape, K)
+    base_logits[..., 0] = 1.5
+    base_logits[..., 1] = 0.5
+
+    # Force a deterministic committed set (top-2) so both runs pick the same columns.
+    with torch.no_grad():
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[0] = 1.0
+        embedder.usage_ema[1] = 0.9
+
+    def _balance(cluster_logits: torch.Tensor) -> float:
+        module = _TrackingModule(structure, embedder, decoder)
+        prediction = Prediction(
+            address=ADDRESS,
+            payload=TensorDict(
+                {
+                    TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                    TensorKey.cluster: cluster_logits,
+                },
+                batch_size=field.batch_size,
+            ),
+        )
+        loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+        return module.tracked[(ADDRESS, Strata.train, "loss", TensorKey.cluster)].item()
+
+    baseline = _balance(base_logits.clone())
+
+    # Simulate the post-revive state: uncommitted columns 2 and 3 now sit at donor (col 0)'s
+    # logit — the exact aftermath of ClusterReviveCallback copying cluster_w[donor, :] into
+    # cluster_w[dead, :].
+    revived_logits = base_logits.clone()
+    revived_logits[..., 2] = base_logits[..., 0]
+    revived_logits[..., 3] = base_logits[..., 0]
+
+    # Committed selection is derived from usage_ema, which we froze above; sanity-check that
+    # column 0 stays committed and columns 2/3 stay uncommitted so the scenario is meaningful.
+    _, expected_committed = torch.tensor([1.0, 0.9, 0.0, 0.0]).topk(lower)
+    assert set(expected_committed.tolist()) == {0, 1}
+
+    revived = _balance(revived_logits)
+    assert revived == pytest.approx(baseline, rel=0.0, abs=1e-6)
+
+
 def test_cluster_loss_sentinel_share_reflects_target_content():
     structure = Schema.model_validate(_structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0))
     field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]], [["BETA", "ALPHA"]]])
@@ -547,14 +603,14 @@ class _FakeTrainer:
 
 
 def test_revive_callback_noop_when_revive_temperature_zero():
-    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch()
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=0.0)
     embedder.adherence_ema.fill_(0.9)
     prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
     prior_usage = embedder.usage_ema.detach().clone()
 
     ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
 
-    # revive_temperature defaults to 0 -> callback is a no-op, no weights touched, ema preserved.
+    # revive_temperature == 0 -> callback is a no-op, no weights touched, ema preserved.
     assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
     assert torch.equal(embedder.usage_ema, prior_usage)
     assert embedder.adherence_ema.item() == pytest.approx(0.9)
