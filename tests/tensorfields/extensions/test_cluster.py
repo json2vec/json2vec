@@ -28,7 +28,7 @@ def _structure_payload(
     sparsity_weight: float | None = None,
     gumbel_tau: float | None = None,
     balance_epsilon: float | None = None,
-    revive_scale: float | None = None,
+    revive_temperature: float | None = None,
     revive_noise: float | None = None,
 ) -> dict:
     field: dict = {
@@ -46,8 +46,8 @@ def _structure_payload(
         field["gumbel_tau"] = gumbel_tau
     if balance_epsilon is not None:
         field["balance_epsilon"] = balance_epsilon
-    if revive_scale is not None:
-        field["revive_scale"] = revive_scale
+    if revive_temperature is not None:
+        field["revive_temperature"] = revive_temperature
     if revive_noise is not None:
         field["revive_noise"] = revive_noise
 
@@ -489,7 +489,7 @@ def test_cluster_loss_usage_ema_updates_toward_batch_distribution():
 # ---------- ClusterReviveCallback ----------
 
 
-def _seed_uncommitted_batch(*, revive_scale: float | None = None, revive_noise: float | None = None):
+def _seed_uncommitted_batch(*, revive_temperature: float | None = None, revive_noise: float | None = None):
     """Prepare a train batch + real embedder/decoder with a range-bounded cluster leaf.
 
     Marks the upper half of the committed buffer as uncommitted so the loss will accumulate
@@ -500,7 +500,7 @@ def _seed_uncommitted_batch(*, revive_scale: float | None = None, revive_noise: 
             bounds=(2, 4),
             capacity=8,
             p_unavailable=1.0,
-            revive_scale=revive_scale,
+            revive_temperature=revive_temperature,
             revive_noise=revive_noise,
         )
     )
@@ -541,11 +541,12 @@ def test_adherence_ema_updates_without_sparsity_weight():
 
 
 class _FakeTrainer:
-    def __init__(self, is_global_zero: bool = True):
+    def __init__(self, is_global_zero: bool = True, current_epoch: int = 0):
         self.is_global_zero = is_global_zero
+        self.current_epoch = current_epoch
 
 
-def test_revive_callback_noop_when_revive_scale_zero():
+def test_revive_callback_noop_when_revive_temperature_zero():
     _, _, module, embedder, decoder, _ = _seed_uncommitted_batch()
     embedder.adherence_ema.fill_(0.9)
     prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
@@ -553,7 +554,7 @@ def test_revive_callback_noop_when_revive_scale_zero():
 
     ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
 
-    # revive_scale defaults to 0 -> callback is a no-op, no weights touched, ema preserved.
+    # revive_temperature defaults to 0 -> callback is a no-op, no weights touched, ema preserved.
     assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
     assert torch.equal(embedder.usage_ema, prior_usage)
     assert embedder.adherence_ema.item() == pytest.approx(0.9)
@@ -561,7 +562,7 @@ def test_revive_callback_noop_when_revive_scale_zero():
 
 def test_revive_callback_noop_when_bounds_are_fixed():
     structure = Schema.model_validate(
-        _structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0, revive_scale=10.0)
+        _structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0, revive_temperature=10.0)
     )
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
@@ -577,7 +578,7 @@ def test_revive_callback_noop_when_bounds_are_fixed():
 
 
 def test_revive_callback_noop_when_adherence_ema_is_zero():
-    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_scale=10.0)
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0)
     prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
 
     ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
@@ -591,7 +592,7 @@ def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
     # bounds=(3, 4) yields exactly 1 uncommitted column so the donor is halved exactly once.
     structure = Schema.model_validate(
         _structure_payload(
-            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_scale=100.0, revive_noise=0.0
+            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_temperature=10.0, revive_noise=0.0
         )
     )
     embedder = Embedder(schema=structure, address=ADDRESS)
@@ -623,9 +624,9 @@ def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
     content_w.data[:, dead] = 0.0
     cluster_w.data[dead, :] = 0.0
 
-    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=0), module)
 
-    # With revive_noise=0 and adherence_ema=1.0, dead column receives an exact copy of donor.
+    # With revive_noise=0 and adherence_ema=1.0 at epoch=0, dead column is an exact donor copy.
     assert torch.equal(assign_w.data[:, dead], donor_assign)
     assert torch.equal(content_w.data[:, dead], donor_content)
     assert torch.equal(cluster_w.data[dead, :], donor_cluster)
@@ -637,7 +638,7 @@ def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
 
 
 def test_revive_callback_respects_non_global_zero_rank():
-    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_scale=100.0, revive_noise=0.0)
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0, revive_noise=0.0)
     embedder.adherence_ema.fill_(1.0)
     prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
 
@@ -646,5 +647,30 @@ def test_revive_callback_respects_non_global_zero_rank():
     ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(is_global_zero=False), module)
 
     assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+    assert embedder.adherence_ema.item() == pytest.approx(1.0)
+
+
+def test_revive_callback_base_probability_decays_with_epoch():
+    # At epoch >> revive_temperature the base probability decays to ~0 and revival never fires
+    # even with saturated adherence.
+    torch.manual_seed(0)
+    structure = Schema.model_validate(
+        _structure_payload(
+            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_temperature=1.0, revive_noise=0.0
+        )
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    lower = structure.requests[ADDRESS].n_clusters[0]
+    embedder.committed[lower:] = False
+    embedder.adherence_ema.fill_(1.0)
+    module = _TrackingModule(structure, embedder, decoder)
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+
+    # exp(-100/1) ≈ 3.7e-44, so the per-column Bernoulli trial cannot pass.
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=100), module)
+
+    assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+    # Adherence stays intact because no revive occurred.
     assert embedder.adherence_ema.item() == pytest.approx(1.0)
 

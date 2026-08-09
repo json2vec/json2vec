@@ -1,6 +1,7 @@
 # ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -55,7 +56,8 @@ class Request(RequestBase):
     sparsity_weight: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     ema_decay: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.99)] = 0.99
     gumbel_tau: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
-    revive_scale: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.2
+    # Time constant (in epochs) of the revive base probability's exponential decay: 0 disables.
+    revive_temperature: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     revive_noise: Annotated[float, pydantic.Field(ge=0.0, default=0.02)] = 0.02
 
     n_clusters: Annotated[
@@ -530,8 +532,8 @@ class ClusterReviveCallback(Callback):
     """Split-heavy revival of dead clusters, gated by observed adherence.
 
     Fires on every ``on_train_epoch_end``. For each cluster leaf with
-    ``revive_scale > 0`` and range bounds (``lower < upper``), samples per dead
-    column with probability ``min(1/n_dead, adherence_ema * revive_scale)``,
+    ``revive_temperature > 0`` and range bounds (``lower < upper``), samples per
+    dead column with probability ``exp(-epoch / revive_temperature) * adherence_ema``,
     then copies the heaviest live column's assignment / content / decoder
     weights (± Gaussian noise) into every selected slot. Rank 0 plans and
     broadcasts to keep DDP replicas identical.
@@ -539,10 +541,11 @@ class ClusterReviveCallback(Callback):
 
     @torch.no_grad()
     def on_train_epoch_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        epoch = int(trainer.current_epoch)
         targets: dict[Address, tuple[Embedder, Decoder, Request]] = {}
         for address, node in pl_module.nodes.items():
             request = pl_module.schema.requests.get(cast(Address, address))
-            if not isinstance(request, Request) or request.revive_scale <= 0.0:
+            if not isinstance(request, Request) or request.revive_temperature <= 0.0:
                 continue
             if request.n_clusters[0] == request.n_clusters[-1]:
                 continue
@@ -557,14 +560,14 @@ class ClusterReviveCallback(Callback):
         plans: dict[Address, dict[str, Any] | None] = {}
         if trainer.is_global_zero:
             for address, (embedder, _, request) in targets.items():
-                plans[address] = self._plan(embedder, request)
+                plans[address] = self._plan(embedder, request, epoch=epoch)
         plans = broadcast_object(plans, src=0)
 
         for address, (embedder, decoder, request) in targets.items():
             self._apply(embedder, decoder, plans.get(address))
 
     @staticmethod
-    def _plan(embedder: "Embedder", request: "Request") -> dict[str, Any] | None:
+    def _plan(embedder: "Embedder", request: "Request", *, epoch: int) -> dict[str, Any] | None:
         dead = (~embedder.committed).nonzero(as_tuple=True)[0]
         n_dead = int(dead.numel())
         if n_dead == 0:
@@ -574,8 +577,8 @@ class ClusterReviveCallback(Callback):
         if adherence <= 0.0:
             return None
 
-        p_cap = 1.0 / n_dead
-        p = min(p_cap, adherence * request.revive_scale)
+        base = math.exp(-epoch / request.revive_temperature)
+        p = base * adherence
         if p <= 0.0:
             return None
 
