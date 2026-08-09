@@ -123,9 +123,9 @@ class TensorField(TensorFieldBase):
         interprocess_encoding_context.reserve(values, learn=learn)
         tokens = apply(values, interprocess_encoding_context.encode)
 
-        if len(interprocess_encoding_context) > (size := schema.requests[address].size):
+        if len(interprocess_encoding_context) > (capacity := schema.requests[address].capacity):
             logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
-                "vocabulary exceeds size={}", size
+                "vocabulary exceeds size={}", capacity
             )
 
         data, states = pad(
