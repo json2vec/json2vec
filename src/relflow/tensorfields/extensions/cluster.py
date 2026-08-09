@@ -58,6 +58,7 @@ class Request(RequestBase):
     gumbel_tau: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
     revive_temperature: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.1
     revive_noise: Annotated[float, pydantic.Field(ge=0.0, default=0.02)] = 0.02
+    decommit_temperature: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
 
     n_clusters: Annotated[
         tuple[int, int],
@@ -428,7 +429,17 @@ def loss(
         batch_usage = valued_probs.detach().mean(dim=0)
         embedder.usage_ema.mul_(request.ema_decay).add_(batch_usage * (1.0 - request.ema_decay))
 
-        _, committed_idx = embedder.usage_ema.topk(lower)
+        # Committed clusters gain a multiplicative stickiness that saturates toward 1 as
+        # ``epoch -> infinity``; the ranking is unchanged at epoch 0 and increasingly resists
+        # de-committment thereafter. Independent of ``revive_temperature``.
+        if request.decommit_temperature > 0.0:
+            epoch = int(getattr(module, "current_epoch", 0))
+            persistence = 1.0 - math.exp(-epoch / request.decommit_temperature)
+            biased_usage = embedder.usage_ema * (1.0 + persistence * embedder.committed.to(embedder.usage_ema.dtype))
+        else:
+            biased_usage = embedder.usage_ema
+
+        _, committed_idx = biased_usage.topk(lower)
         embedder.committed.zero_()
         embedder.committed[committed_idx] = True
 

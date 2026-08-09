@@ -30,6 +30,8 @@ def _structure_payload(
     balance_epsilon: float | None = None,
     revive_temperature: float | None = None,
     revive_noise: float | None = None,
+    ema_decay: float | None = None,
+    decommit_temperature: float | None = None,
 ) -> dict:
     field: dict = {
         "name": "cluster",
@@ -50,6 +52,10 @@ def _structure_payload(
         field["revive_temperature"] = revive_temperature
     if revive_noise is not None:
         field["revive_noise"] = revive_noise
+    if ema_decay is not None:
+        field["ema_decay"] = ema_decay
+    if decommit_temperature is not None:
+        field["decommit_temperature"] = decommit_temperature
 
     return {
         "d_model": 16,
@@ -484,6 +490,67 @@ def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
 
     revived = _balance(revived_logits)
     assert revived == pytest.approx(baseline, rel=0.0, abs=1e-6)
+
+
+def test_cluster_loss_decommit_stickiness_holds_committed_set_across_epochs():
+    # decommit_temperature grows a multiplicative stickiness on the currently-committed set so
+    # marginal usage_ema flips do not evict them; at epoch 0 the ranking is unchanged, and as
+    # epochs advance the same batch produces a different committed set.
+    import math
+
+    structure = Schema.model_validate(
+        _structure_payload(
+            bounds=(2, 4),
+            capacity=8,
+            p_unavailable=1.0,
+            ema_decay=0.0,
+            decommit_temperature=5.0,
+        )
+    )
+    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    K = structure.requests[ADDRESS].size
+    assert K == 4
+
+    # Softmax(log(target)) recovers `target` exactly when it sums to 1, so per-observation
+    # cluster_logits = log(target) forces batch_usage = target after ema_decay=0. Columns 1
+    # and 2 are separated by a small gap so torch.topk's tie-break policy doesn't affect the
+    # assertion.
+    target = torch.tensor([0.05, 0.29, 0.31, 0.35])
+    per_obs_logits = target.log()
+    cluster_logits = per_obs_logits.expand(*field.state.shape, K).contiguous()
+
+    def _run(epoch: int, committed_prev: list[int]) -> list[int]:
+        with torch.no_grad():
+            embedder.usage_ema.zero_()
+            embedder.committed.zero_()
+            for idx in committed_prev:
+                embedder.committed[idx] = True
+        module = _TrackingModule(structure, embedder, decoder)
+        module.current_epoch = epoch  # type: ignore[attr-defined]
+        prediction = Prediction(
+            address=ADDRESS,
+            payload=TensorDict(
+                {
+                    TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                    TensorKey.cluster: cluster_logits.clone(),
+                },
+                batch_size=field.batch_size,
+            ),
+        )
+        loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+        return sorted(torch.nonzero(embedder.committed, as_tuple=False).flatten().tolist())
+
+    # Sanity check: at epoch 0 stickiness is 0, so topk on raw usage picks {2, 3} (the top-two
+    # in `target`) and evicts previously-committed column 1.
+    assert _run(epoch=0, committed_prev=[1, 2]) == [2, 3]
+
+    # At epoch >> decommit_temperature, persistence saturates near 1: column 1's usage 0.30 is
+    # scaled to 0.60, beating column 3's uncommitted 0.35, so {1, 2} sticks.
+    persistence = 1.0 - math.exp(-100 / 5.0)
+    assert persistence > 0.99
+    assert _run(epoch=100, committed_prev=[1, 2]) == [1, 2]
 
 
 def test_cluster_loss_sentinel_share_reflects_target_content():
