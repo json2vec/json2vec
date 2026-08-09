@@ -55,7 +55,7 @@ class Request(RequestBase):
     sparsity_weight: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     ema_decay: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.99)] = 0.99
     gumbel_tau: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
-    revive_scale: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
+    revive_scale: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.2
     revive_noise: Annotated[float, pydantic.Field(ge=0.0, default=0.02)] = 0.02
 
     n_clusters: Annotated[
