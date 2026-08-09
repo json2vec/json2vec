@@ -4,10 +4,11 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
 from relflow.tensorfields.extensions.cluster import (
+    ClusterReviveCallback,
     Decoder,
     Embedder,
     TensorField,
@@ -27,6 +28,8 @@ def _structure_payload(
     sparsity_weight: float | None = None,
     gumbel_tau: float | None = None,
     balance_epsilon: float | None = None,
+    revive_scale: float | None = None,
+    revive_noise: float | None = None,
 ) -> dict:
     field: dict = {
         "name": "cluster",
@@ -43,6 +46,10 @@ def _structure_payload(
         field["gumbel_tau"] = gumbel_tau
     if balance_epsilon is not None:
         field["balance_epsilon"] = balance_epsilon
+    if revive_scale is not None:
+        field["revive_scale"] = revive_scale
+    if revive_noise is not None:
+        field["revive_noise"] = revive_noise
 
     return {
         "d_model": 16,
@@ -477,3 +484,167 @@ def test_cluster_loss_usage_ema_updates_toward_batch_distribution():
         assert embedder.usage_ema[k].item() < prior[k].item()
     # Distribution stays a probability vector.
     assert torch.isclose(embedder.usage_ema.sum(), torch.tensor(1.0), atol=1e-5)
+
+
+# ---------- ClusterReviveCallback ----------
+
+
+def _seed_uncommitted_batch(*, revive_scale: float | None = None, revive_noise: float | None = None):
+    """Prepare a train batch + real embedder/decoder with a range-bounded cluster leaf.
+
+    Marks the upper half of the committed buffer as uncommitted so the loss will accumulate
+    ``adherence_ema`` mass, and biases the cluster logits toward those columns.
+    """
+    structure = Schema.model_validate(
+        _structure_payload(
+            bounds=(2, 4),
+            capacity=8,
+            p_unavailable=1.0,
+            revive_scale=revive_scale,
+            revive_noise=revive_noise,
+        )
+    )
+    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    K = structure.requests[ADDRESS].size
+    lower = structure.requests[ADDRESS].n_clusters[0]
+    embedder.committed[lower:] = False
+
+    cluster_logits = torch.zeros(*field.state.shape, K)
+    cluster_logits[..., lower:] = 5.0
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                TensorKey.cluster: cluster_logits,
+            },
+            batch_size=field.batch_size,
+        ),
+    )
+    module = _TrackingModule(structure, embedder, decoder)
+    return structure, field, module, embedder, decoder, prediction
+
+
+def test_adherence_ema_updates_without_sparsity_weight():
+    structure, field, module, embedder, _, prediction = _seed_uncommitted_batch()
+    assert structure.requests[ADDRESS].sparsity_weight == 0.0
+    assert embedder.adherence_ema.item() == 0.0
+
+    loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+
+    # EMA received a positive uncommitted-mass update even with sparsity_weight == 0.
+    assert embedder.adherence_ema.item() > 0.0
+    # ...and the loss-side track was NOT emitted (sparsity_weight == 0 gate).
+    assert (ADDRESS, Strata.train, "cluster", "adherence") not in module.tracked
+
+
+class _FakeTrainer:
+    def __init__(self, is_global_zero: bool = True):
+        self.is_global_zero = is_global_zero
+
+
+def test_revive_callback_noop_when_revive_scale_zero():
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch()
+    embedder.adherence_ema.fill_(0.9)
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+    prior_usage = embedder.usage_ema.detach().clone()
+
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    # revive_scale defaults to 0 -> callback is a no-op, no weights touched, ema preserved.
+    assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+    assert torch.equal(embedder.usage_ema, prior_usage)
+    assert embedder.adherence_ema.item() == pytest.approx(0.9)
+
+
+def test_revive_callback_noop_when_bounds_are_fixed():
+    structure = Schema.model_validate(
+        _structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0, revive_scale=10.0)
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    embedder.adherence_ema.fill_(0.9)
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+
+    module = _TrackingModule(structure, embedder, decoder)
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    # lower == upper -> no dead columns are eligible; weights untouched, adherence preserved.
+    assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+    assert embedder.adherence_ema.item() == pytest.approx(0.9)
+
+
+def test_revive_callback_noop_when_adherence_ema_is_zero():
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_scale=10.0)
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+    assert embedder.adherence_ema.item() == 0.0
+
+
+def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
+    torch.manual_seed(0)
+    # bounds=(3, 4) yields exactly 1 uncommitted column so the donor is halved exactly once.
+    structure = Schema.model_validate(
+        _structure_payload(
+            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_scale=100.0, revive_noise=0.0
+        )
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    lower = structure.requests[ADDRESS].n_clusters[0]
+    embedder.committed[lower:] = False
+    module = _TrackingModule(structure, embedder, decoder)
+
+    # Force adherence high enough that the per-column trial passes deterministically.
+    embedder.adherence_ema.fill_(1.0)
+
+    # Concentrate all usage on column 0 so the donor is deterministic.
+    embedder.usage_ema.zero_()
+    embedder.usage_ema[0] = 1.0
+
+    # Give distinct values to donor + the dead column to detect the copy.
+    assign_w = embedder.embeddings[TensorKey.cluster.name].weight
+    content_w = embedder.embeddings[TensorKey.content.name].weight
+    cluster_w = decoder.linears[TensorKey.cluster.name].weight
+    dead = int((~embedder.committed).nonzero(as_tuple=True)[0][0].item())
+
+    donor_assign = torch.arange(assign_w.shape[0], dtype=assign_w.dtype)
+    donor_content = torch.arange(content_w.shape[0], dtype=content_w.dtype)
+    donor_cluster = torch.arange(cluster_w.shape[1], dtype=cluster_w.dtype)
+    assign_w.data[:, 0] = donor_assign
+    content_w.data[:, 0] = donor_content
+    cluster_w.data[0, :] = donor_cluster
+    assign_w.data[:, dead] = 0.0
+    content_w.data[:, dead] = 0.0
+    cluster_w.data[dead, :] = 0.0
+
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    # With revive_noise=0 and adherence_ema=1.0, dead column receives an exact copy of donor.
+    assert torch.equal(assign_w.data[:, dead], donor_assign)
+    assert torch.equal(content_w.data[:, dead], donor_content)
+    assert torch.equal(cluster_w.data[dead, :], donor_cluster)
+    # Donor usage halved; revived column inherits half of donor's usage.
+    assert embedder.usage_ema[0].item() == pytest.approx(0.5)
+    assert embedder.usage_ema[dead].item() == pytest.approx(0.5)
+    # adherence_ema reset after revive.
+    assert embedder.adherence_ema.item() == 0.0
+
+
+def test_revive_callback_respects_non_global_zero_rank():
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_scale=100.0, revive_noise=0.0)
+    embedder.adherence_ema.fill_(1.0)
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+
+    # No distributed backend is up -> broadcast_object is a passthrough, so a rank-non-zero
+    # trainer produces an empty plans dict; no weights change.
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(is_global_zero=False), module)
+
+    assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+    assert embedder.adherence_ema.item() == pytest.approx(1.0)
+

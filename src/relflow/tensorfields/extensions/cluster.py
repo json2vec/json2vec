@@ -8,10 +8,12 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from lightning.pytorch import Callback, Trainer
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.distributed import broadcast_object
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -53,6 +55,8 @@ class Request(RequestBase):
     sparsity_weight: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     ema_decay: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.99)] = 0.99
     gumbel_tau: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
+    revive_scale: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
+    revive_noise: Annotated[float, pydantic.Field(ge=0.0, default=0.02)] = 0.02
 
     n_clusters: Annotated[
         tuple[int, int],
@@ -222,6 +226,7 @@ class TensorField(TensorFieldBase):
 class Embedder(EmbedderBase):
     usage_ema: torch.Tensor
     committed: torch.Tensor
+    adherence_ema: torch.Tensor
 
     def __init__(self, schema: Schema, address: Address):
         super().__init__(schema=schema, address=address)
@@ -258,9 +263,9 @@ class Embedder(EmbedderBase):
             }
         )
 
-        # slow-moving usage tracker + committed set for Sinkhorn balance in loss
         self.register_buffer("usage_ema", torch.full((self.size,), 1.0 / self.size))
         self.register_buffer("committed", torch.ones(self.size, dtype=torch.bool))
+        self.register_buffer("adherence_ema", torch.zeros(()))
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -400,9 +405,10 @@ def loss(
                 reduction="mean",
             ),
         )
+        vocab_size: int = len(embedder.vocab.master)
         module.track(
             (prediction.address, strata, Metric.accuracy, TensorKey.content),
-            value=vocab_logits[:, : embedder.capacity].argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
+            value=vocab_logits[:, :vocab_size].argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
         )
 
     if strata != Strata.train:
@@ -457,14 +463,19 @@ def loss(
         value=content_targets.eq(embedder.capacity).masked_select(valued).float().mean(),
     )
 
-    if request.n_clusters[0] != request.n_clusters[-1] and request.sparsity_weight > 0.0:
+    if request.n_clusters[0] != request.n_clusters[-1]:
         uncommitted = ~embedder.committed
         if uncommitted.any():
             uncommitted_mass = valued_probs[:, uncommitted].mean(dim=0).sum()
-            loss += module.track(
-                (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data/leaf is trying to introduce a new cluster. Note, for future changes, this field name is referenced in docs.
-                value=uncommitted_mass * request.sparsity_weight,
-            )
+            with torch.no_grad():
+                embedder.adherence_ema.mul_(request.ema_decay).add_(
+                    uncommitted_mass.detach() * (1.0 - request.ema_decay)
+                )
+            if request.sparsity_weight > 0.0:
+                loss += module.track(
+                    (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data/leaf is trying to introduce a new cluster. Note, for future changes, this field name is referenced in docs.
+                    value=uncommitted_mass * request.sparsity_weight,
+                )
 
     return loss
 
@@ -513,3 +524,103 @@ def write(module: Model, prediction: Prediction):
             TensorKey.probability.name: content_probabilities,
         },
     }
+
+
+class ClusterReviveCallback(Callback):
+    """Split-heavy revival of dead clusters, gated by observed adherence.
+
+    Fires on every ``on_train_epoch_end``. For each cluster leaf with
+    ``revive_scale > 0`` and range bounds (``lower < upper``), samples per dead
+    column with probability ``min(1/n_dead, adherence_ema * revive_scale)``,
+    then copies the heaviest live column's assignment / content / decoder
+    weights (± Gaussian noise) into every selected slot. Rank 0 plans and
+    broadcasts to keep DDP replicas identical.
+    """
+
+    @torch.no_grad()
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        targets: dict[Address, tuple[Embedder, Decoder, Request]] = {}
+        for address, node in pl_module.nodes.items():
+            request = pl_module.schema.requests.get(cast(Address, address))
+            if not isinstance(request, Request) or request.revive_scale <= 0.0:
+                continue
+            if request.n_clusters[0] == request.n_clusters[-1]:
+                continue
+            embedder = getattr(node, "embedder", None)
+            decoder = getattr(node, "decoder", None)
+            if isinstance(embedder, Embedder) and isinstance(decoder, Decoder):
+                targets[cast(Address, address)] = (embedder, decoder, request)
+
+        if not targets:
+            return
+
+        plans: dict[Address, dict[str, Any] | None] = {}
+        if trainer.is_global_zero:
+            for address, (embedder, _, request) in targets.items():
+                plans[address] = self._plan(embedder, request)
+        plans = broadcast_object(plans, src=0)
+
+        for address, (embedder, decoder, request) in targets.items():
+            self._apply(embedder, decoder, plans.get(address))
+
+    @staticmethod
+    def _plan(embedder: "Embedder", request: "Request") -> dict[str, Any] | None:
+        dead = (~embedder.committed).nonzero(as_tuple=True)[0]
+        n_dead = int(dead.numel())
+        if n_dead == 0:
+            return None
+
+        adherence = float(embedder.adherence_ema.item())
+        if adherence <= 0.0:
+            return None
+
+        p_cap = 1.0 / n_dead
+        p = min(p_cap, adherence * request.revive_scale)
+        if p <= 0.0:
+            return None
+
+        trials = torch.rand(n_dead)
+        chosen_mask = trials < p
+        if not bool(chosen_mask.any().item()):
+            return None
+
+        chosen = dead[chosen_mask].tolist()
+        donor = int(embedder.usage_ema.argmax().item())
+        assign_w: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
+        content_w: torch.Tensor = embedder.embeddings[TensorKey.content.name].weight
+        v_plus_1 = int(assign_w.shape[0])
+        d_model = int(content_w.shape[0])
+        noise = float(request.revive_noise)
+        n_chosen = len(chosen)
+        return {
+            "dead_ids": chosen,
+            "donor": donor,
+            "noise_assign": noise * torch.randn(n_chosen, v_plus_1),
+            "noise_content": noise * torch.randn(n_chosen, d_model),
+            "noise_cluster": noise * torch.randn(n_chosen, d_model),
+        }
+
+    @staticmethod
+    def _apply(embedder: "Embedder", decoder: "Decoder", plan: dict[str, Any] | None) -> None:
+        if plan is None:
+            return
+
+        assign_w: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
+        content_w: torch.Tensor = embedder.embeddings[TensorKey.content.name].weight
+        cluster_w: torch.Tensor = decoder.linears[TensorKey.cluster.name].weight
+        donor = plan["donor"]
+        device = assign_w.device
+        dtype = assign_w.dtype
+
+        for i, k in enumerate(plan["dead_ids"]):
+            assign_w.data[:, k] = assign_w.data[:, donor] + plan["noise_assign"][i].to(device=device, dtype=dtype)
+            content_w.data[:, k] = content_w.data[:, donor] + plan["noise_content"][i].to(device=device, dtype=dtype)
+            cluster_w.data[k, :] = cluster_w.data[donor, :] + plan["noise_cluster"][i].to(device=cluster_w.device, dtype=cluster_w.dtype)
+            embedder.usage_ema[k] = embedder.usage_ema[donor] * 0.5
+            embedder.usage_ema[donor] *= 0.5
+
+        embedder.adherence_ema.zero_()
+
+
+cluster.callback(ClusterReviveCallback)
+
