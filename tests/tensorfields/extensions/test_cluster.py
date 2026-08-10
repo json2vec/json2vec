@@ -15,6 +15,7 @@ from relflow.tensorfields.extensions.cluster import (
     loss,
     write,
 )
+from relflow.tensorfields.shared.counter import Counter
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
 
 ADDRESS = "root/items/cluster"
@@ -26,12 +27,8 @@ def _structure_payload(
     bounds: int | list[int] | tuple[int, int] = (2, 4),
     p_unavailable: float | None = None,
     sparsity_weight: float | None = None,
-    gumbel_tau: float | None = None,
-    balance_epsilon: float | None = None,
     revive_temperature: float | None = None,
-    revive_noise: float | None = None,
     ema_decay: float | None = None,
-    decommit_temperature: float | None = None,
 ) -> dict:
     field: dict = {
         "name": "cluster",
@@ -44,18 +41,10 @@ def _structure_payload(
         field["p_unavailable"] = p_unavailable
     if sparsity_weight is not None:
         field["sparsity_weight"] = sparsity_weight
-    if gumbel_tau is not None:
-        field["gumbel_tau"] = gumbel_tau
-    if balance_epsilon is not None:
-        field["balance_epsilon"] = balance_epsilon
     if revive_temperature is not None:
         field["revive_temperature"] = revive_temperature
-    if revive_noise is not None:
-        field["revive_noise"] = revive_noise
     if ema_decay is not None:
         field["ema_decay"] = ema_decay
-    if decommit_temperature is not None:
-        field["decommit_temperature"] = decommit_temperature
 
     return {
         "d_model": 16,
@@ -396,10 +385,9 @@ def _prepared_train_batch(structure: Schema, *, values: list) -> TensorField:
 
 
 def test_cluster_loss_sinkhorn_pushes_gradient_toward_spread():
-    # balance_epsilon must be commensurate with the logit gap for Sinkhorn to actually spread
-    # mass; at default 0.05, a gap of 5.0 saturates the Boltzmann map to a one-hot Q.
+    # Logits must be commensurate with ε=0.05 so Sinkhorn's Boltzmann map is not saturated.
     structure = Schema.model_validate(
-        _structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0, balance_epsilon=1.0)
+        _structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0)
     )
     field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
@@ -408,7 +396,7 @@ def test_cluster_loss_sinkhorn_pushes_gradient_toward_spread():
     K = structure.requests[ADDRESS].size
 
     cluster_logits = torch.zeros(*field.state.shape, K)
-    cluster_logits[..., 0] = 0.5
+    cluster_logits[..., 0] = 0.025
     cluster_logits = cluster_logits.detach().requires_grad_(True)
 
     prediction = Prediction(
@@ -441,7 +429,7 @@ def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
     # logit up to the donor's level. The balance loss must not spike from that step: it must
     # depend only on the committed columns' relative logits.
     structure = Schema.model_validate(
-        _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0, balance_epsilon=1.0)
+        _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0)
     )
     field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
@@ -449,9 +437,10 @@ def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
     K = structure.requests[ADDRESS].size
     lower = structure.requests[ADDRESS].n_clusters[0]
 
+    # Scaled to sit inside the linear region of Sinkhorn's Boltzmann map at ε=0.05.
     base_logits = torch.zeros(*field.state.shape, K)
-    base_logits[..., 0] = 1.5
-    base_logits[..., 1] = 0.5
+    base_logits[..., 0] = 0.075
+    base_logits[..., 1] = 0.025
 
     # Force a deterministic committed set (top-2) so both runs pick the same columns.
     with torch.no_grad():
@@ -492,67 +481,6 @@ def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
     assert revived == pytest.approx(baseline, rel=0.0, abs=1e-6)
 
 
-def test_cluster_loss_decommit_stickiness_holds_committed_set_across_epochs():
-    # decommit_temperature grows a multiplicative stickiness on the currently-committed set so
-    # marginal usage_ema flips do not evict them; at epoch 0 the ranking is unchanged, and as
-    # epochs advance the same batch produces a different committed set.
-    import math
-
-    structure = Schema.model_validate(
-        _structure_payload(
-            bounds=(2, 4),
-            capacity=8,
-            p_unavailable=1.0,
-            ema_decay=0.0,
-            decommit_temperature=5.0,
-        )
-    )
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
-    embedder = Embedder(schema=structure, address=ADDRESS)
-    decoder = Decoder(schema=structure, address=ADDRESS)
-    K = structure.requests[ADDRESS].size
-    assert K == 4
-
-    # Softmax(log(target)) recovers `target` exactly when it sums to 1, so per-observation
-    # cluster_logits = log(target) forces batch_usage = target after ema_decay=0. Columns 1
-    # and 2 are separated by a small gap so torch.topk's tie-break policy doesn't affect the
-    # assertion.
-    target = torch.tensor([0.05, 0.29, 0.31, 0.35])
-    per_obs_logits = target.log()
-    cluster_logits = per_obs_logits.expand(*field.state.shape, K).contiguous()
-
-    def _run(epoch: int, committed_prev: list[int]) -> list[int]:
-        with torch.no_grad():
-            embedder.usage_ema.zero_()
-            embedder.committed.zero_()
-            for idx in committed_prev:
-                embedder.committed[idx] = True
-        module = _TrackingModule(structure, embedder, decoder)
-        module.current_epoch = epoch  # type: ignore[attr-defined]
-        prediction = Prediction(
-            address=ADDRESS,
-            payload=TensorDict(
-                {
-                    TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
-                    TensorKey.cluster: cluster_logits.clone(),
-                },
-                batch_size=field.batch_size,
-            ),
-        )
-        loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
-        return sorted(torch.nonzero(embedder.committed, as_tuple=False).flatten().tolist())
-
-    # Sanity check: at epoch 0 stickiness is 0, so topk on raw usage picks {2, 3} (the top-two
-    # in `target`) and evicts previously-committed column 1.
-    assert _run(epoch=0, committed_prev=[1, 2]) == [2, 3]
-
-    # At epoch >> decommit_temperature, persistence saturates near 1: column 1's usage 0.30 is
-    # scaled to 0.60, beating column 3's uncommitted 0.35, so {1, 2} sticks.
-    persistence = 1.0 - math.exp(-100 / 5.0)
-    assert persistence > 0.99
-    assert _run(epoch=100, committed_prev=[1, 2]) == [1, 2]
-
-
 def test_cluster_loss_sentinel_share_reflects_target_content():
     structure = Schema.model_validate(_structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0))
     field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]], [["BETA", "ALPHA"]]])
@@ -575,6 +503,57 @@ def test_cluster_loss_sentinel_share_reflects_target_content():
 
     share = module.tracked[(ADDRESS, Strata.train, "cluster", "sentinel_share")]
     assert share.item() == 1.0
+
+
+def test_cluster_content_counter_rebalances_content_loss_by_inverse_frequency():
+    # Content CE consumes the ``Counter(size=capacity + 1)`` weight identically to Category:
+    # uniform counts leave the loss unchanged, skewed counts rebalance it toward rare tokens.
+    structure = Schema.model_validate(_structure_payload(bounds=(4, 4), capacity=8, p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    K = structure.requests[ADDRESS].size
+    capacity = structure.requests[ADDRESS].capacity
+
+    content_counter = embedder.counters[TensorKey.content.name]
+    assert isinstance(content_counter, Counter)
+    assert content_counter.size == capacity + 1
+
+    # Encode the batch through the embedder's own vocab so the vocab-size gated accuracy
+    # metric can evaluate under known content targets.
+    field = TensorField.new(
+        values=[[["ALPHA", "BETA"]]] * 4,
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+        interprocess_encoding_context=embedder.vocab.state,
+    )
+    field.mask(1.0)
+    torch.manual_seed(0)
+    cluster_logits = torch.randn(*field.state.shape, K)
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                TensorKey.cluster: cluster_logits,
+            },
+            batch_size=field.batch_size,
+        ),
+    )
+
+    module_uniform = _TrackingModule(structure, embedder, decoder)
+    loss(module=module_uniform, prediction=prediction, batch=field, strata=Strata.train)
+    loss_uniform = module_uniform.tracked[(ADDRESS, Strata.train, "loss", TensorKey.content)].item()
+
+    with torch.no_grad():
+        content_counter.counts.fill_(1)
+        content_counter.counts[0] = 1000
+
+    module_skewed = _TrackingModule(structure, embedder, decoder)
+    loss(module=module_skewed, prediction=prediction, batch=field, strata=Strata.train)
+    loss_skewed = module_skewed.tracked[(ADDRESS, Strata.train, "loss", TensorKey.content)].item()
+
+    assert loss_uniform != pytest.approx(loss_skewed, abs=1e-6)
 
 
 def test_cluster_loss_usage_ema_updates_toward_batch_distribution():
@@ -612,11 +591,12 @@ def test_cluster_loss_usage_ema_updates_toward_batch_distribution():
 # ---------- ClusterReviveCallback ----------
 
 
-def _seed_uncommitted_batch(*, revive_temperature: float | None = None, revive_noise: float | None = None):
+def _seed_uncommitted_batch(*, revive_temperature: float | None = None):
     """Prepare a train batch + real embedder/decoder with a range-bounded cluster leaf.
 
-    Marks the upper half of the committed buffer as uncommitted so the loss will accumulate
-    ``adherence_ema`` mass, and biases the cluster logits toward those columns.
+    Seeds ``usage_ema`` to concentrate on the lower half so dynamic committed selection lands
+    on ``[0, lower)``, marks the upper half of ``committed`` as dead (for callback consumers),
+    and biases the cluster logits toward those dead columns so ``adherence_ema`` accumulates.
     """
     structure = Schema.model_validate(
         _structure_payload(
@@ -624,7 +604,6 @@ def _seed_uncommitted_batch(*, revive_temperature: float | None = None, revive_n
             capacity=8,
             p_unavailable=1.0,
             revive_temperature=revive_temperature,
-            revive_noise=revive_noise,
         )
     )
     field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
@@ -632,6 +611,10 @@ def _seed_uncommitted_batch(*, revive_temperature: float | None = None, revive_n
     decoder = Decoder(schema=structure, address=ADDRESS)
     K = structure.requests[ADDRESS].size
     lower = structure.requests[ADDRESS].n_clusters[0]
+    with torch.no_grad():
+        # Force perplexity ~ lower so dynamic n_committed lands at `lower` and topk picks [0, lower).
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[:lower] = 1.0 / lower
     embedder.committed[lower:] = False
 
     cluster_logits = torch.zeros(*field.state.shape, K)
@@ -700,14 +683,35 @@ def test_revive_callback_noop_when_bounds_are_fixed():
     assert embedder.adherence_ema.item() == pytest.approx(0.9)
 
 
-def test_revive_callback_noop_when_adherence_ema_is_zero():
+def test_revive_callback_noop_when_all_signals_are_off():
     _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0)
+    # Past warmup, adherence == 0, committed usage concentrated on a single column so it is
+    # not saturated. With every signal off the gate stays closed even under a live temperature.
+    with torch.no_grad():
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[0] = 1.0
     prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
 
-    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(), module)
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=100), module)
 
     assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
     assert embedder.adherence_ema.item() == 0.0
+
+
+def test_revive_callback_warmup_fires_without_adherence():
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0)
+    # During warmup the callback fires even with adherence == 0, seeding dead columns from the
+    # top-usage committed donor(s) so the model can reach the upper bound without needing to
+    # first accumulate mass on columns whose weights are still random.
+    with torch.no_grad():
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[0] = 1.0
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+
+    torch.manual_seed(0)
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=0), module)
+
+    assert not torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
 
 
 def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
@@ -715,7 +719,7 @@ def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
     # bounds=(3, 4) yields exactly 1 uncommitted column so the donor is halved exactly once.
     structure = Schema.model_validate(
         _structure_payload(
-            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_temperature=10.0, revive_noise=0.0
+            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_temperature=10.0
         )
     )
     embedder = Embedder(schema=structure, address=ADDRESS)
@@ -749,10 +753,10 @@ def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
 
     ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=0), module)
 
-    # With revive_noise=0 and adherence_ema=1.0 at epoch=0, dead column is an exact donor copy.
-    assert torch.equal(assign_w.data[:, dead], donor_assign)
-    assert torch.equal(content_w.data[:, dead], donor_content)
-    assert torch.equal(cluster_w.data[dead, :], donor_cluster)
+    # Symmetry-breaking noise is small, so the dead column is close to the donor.
+    assert torch.allclose(assign_w.data[:, dead], donor_assign, atol=0.2)
+    assert torch.allclose(content_w.data[:, dead], donor_content, atol=0.2)
+    assert torch.allclose(cluster_w.data[dead, :], donor_cluster, atol=0.2)
     # Donor usage halved; revived column inherits half of donor's usage.
     assert embedder.usage_ema[0].item() == pytest.approx(0.5)
     assert embedder.usage_ema[dead].item() == pytest.approx(0.5)
@@ -761,7 +765,7 @@ def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
 
 
 def test_revive_callback_respects_non_global_zero_rank():
-    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0, revive_noise=0.0)
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0)
     embedder.adherence_ema.fill_(1.0)
     prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
 
@@ -779,7 +783,7 @@ def test_revive_callback_base_probability_decays_with_epoch():
     torch.manual_seed(0)
     structure = Schema.model_validate(
         _structure_payload(
-            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_temperature=1.0, revive_noise=0.0
+            bounds=(3, 4), capacity=8, p_unavailable=1.0, revive_temperature=1.0
         )
     )
     embedder = Embedder(schema=structure, address=ADDRESS)

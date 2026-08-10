@@ -37,6 +37,14 @@ cluster: Plugin = Plugin(name="cluster")
 
 cluster.callback(VocabularySyncCallback, CounterUpdateCallback)
 
+# Algorithmic constants: fixed values from the SwAV/DINO literature or symmetry-breaking
+# magnitudes that have no principled reason to be user-tuned.
+_BALANCE_EPSILON: float = 0.05
+_BALANCE_ITERS: int = 3
+_GUMBEL_TAU: float = 1.0
+_REVIVE_NOISE: float = 0.02
+_REVIVE_WARMUP: int = 3
+
 
 @cluster.register
 class Request(RequestBase):
@@ -51,14 +59,9 @@ class Request(RequestBase):
     ] = 1024
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
 
-    balance_epsilon: Annotated[float, pydantic.Field(gt=0.0, default=0.05)] = 0.05
-    balance_iters: Annotated[int, pydantic.Field(gt=0, default=3)] = 3
     sparsity_weight: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     ema_decay: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.99)] = 0.99
-    gumbel_tau: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
-    revive_temperature: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.1
-    revive_noise: Annotated[float, pydantic.Field(ge=0.0, default=0.02)] = 0.02
-    decommit_temperature: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
+    revive_temperature: Annotated[float, pydantic.Field(ge=0.0, default=10.0)] = 10.0
 
     n_clusters: Annotated[
         tuple[int, int],
@@ -238,7 +241,6 @@ class Embedder(EmbedderBase):
         self.destination: Address = request.parent.address
         self.capacity: int = request.capacity
         self.size: int = request.size
-        self.gumbel_tau: float = request.gumbel_tau
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=self.capacity)
 
@@ -262,6 +264,9 @@ class Embedder(EmbedderBase):
         self.counters = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: Counter(address=address, size=len(Tokens)),
+                # Content counter covers all V+1 vocab_logits classes (real labels + sentinel);
+                # sentinel weight is unused because ``known`` masks it out of the CE target.
+                TensorKey.content.name: Counter(address=address, size=self.capacity + 1),
             }
         )
 
@@ -290,7 +295,7 @@ class Embedder(EmbedderBase):
         assign_logits = self.embeddings[TensorKey.cluster.name](safe_content)
         if self.training:
             cluster_assignments = torch.nn.functional.gumbel_softmax(
-                assign_logits, tau=self.gumbel_tau, hard=True, dim=-1
+                assign_logits, tau=_GUMBEL_TAU, hard=True, dim=-1
             )
         else:
             hard = torch.zeros_like(assign_logits)
@@ -390,7 +395,6 @@ def loss(
         return loss
 
     cluster_logits: torch.Tensor = prediction.payload[TensorKey.cluster].reshape(N, -1)
-    K: int = cluster_logits.shape[-1]
     content_targets = batch.targets[TensorKey.content].reshape(N)
 
     assign_weight: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
@@ -404,6 +408,7 @@ def loss(
             value=torch.nn.functional.cross_entropy(
                 input=vocab_logits[known],
                 target=content_targets[known],
+                weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
                 reduction="mean",
             ),
         )
@@ -424,31 +429,34 @@ def loss(
         return loss
 
     valued_probs = torch.softmax(valued_logits, dim=-1)
+    upper: int = request.n_clusters[-1]
 
     with torch.no_grad():
         batch_usage = valued_probs.detach().mean(dim=0)
         embedder.usage_ema.mul_(request.ema_decay).add_(batch_usage * (1.0 - request.ema_decay))
 
-        # Committed clusters gain a multiplicative stickiness that saturates toward 1 as
-        # ``epoch -> infinity``; the ranking is unchanged at epoch 0 and increasingly resists
-        # de-committment thereafter. Independent of ``revive_temperature``.
-        if request.decommit_temperature > 0.0:
-            epoch = int(getattr(module, "current_epoch", 0))
-            persistence = 1.0 - math.exp(-epoch / request.decommit_temperature)
-            biased_usage = embedder.usage_ema * (1.0 + persistence * embedder.committed.to(embedder.usage_ema.dtype))
-        else:
-            biased_usage = embedder.usage_ema
+        # Perplexity of natural usage tells us how many clusters the data is currently spending
+        # mass on. Clamped into [lower, upper] this becomes the committed count so the balance
+        # loss can grow the active set when content CE recruits more columns.
+        usage_normalized = embedder.usage_ema / embedder.usage_ema.sum().clamp_min(1e-12)
+        usage_safe = usage_normalized.clamp_min(1e-12)
+        usage_entropy = -(usage_safe * usage_safe.log()).sum()
+        perplexity = torch.exp(usage_entropy)
+        n_committed: int = max(lower, min(upper, int(round(perplexity.item()))))
 
-        _, committed_idx = biased_usage.topk(lower)
+        _, committed_idx = embedder.usage_ema.topk(n_committed)
         embedder.committed.zero_()
         embedder.committed[committed_idx] = True
 
-        scaled = valued_logits[:, committed_idx] / request.balance_epsilon
+        # Sinkhorn on log-probabilities (bounded in ``(-inf, 0]``) so ``_BALANCE_EPSILON`` acts as
+        # a real temperature over probabilities instead of raw-logit magnitudes.
+        sinkhorn_input = torch.log_softmax(valued_logits[:, committed_idx], dim=-1)
+        scaled = sinkhorn_input / _BALANCE_EPSILON
         Q = torch.exp(scaled - scaled.max())
         Q = Q / Q.sum().clamp_min(1e-12)
-        for _ in range(request.balance_iters):
+        for _ in range(_BALANCE_ITERS):
             Q = Q / (n_valued * Q.sum(dim=1, keepdim=True).clamp_min(1e-12))
-            Q = Q / (lower * Q.sum(dim=0, keepdim=True).clamp_min(1e-12))
+            Q = Q / (n_committed * Q.sum(dim=0, keepdim=True).clamp_min(1e-12))
         Q = Q * n_valued
 
     committed_log_probs = torch.log_softmax(valued_logits[:, committed_idx], dim=-1)
@@ -460,15 +468,15 @@ def loss(
     )
     module.track(
         (prediction.address, strata, "cluster", "active"),
-        value=(embedder.usage_ema > (1.0 / K)).sum().float(),
+        value=perplexity,
     )
     module.track(
         (prediction.address, strata, "cluster", "committed"),
-        value=state_inputs.new_tensor(float(lower)),
+        value=state_inputs.new_tensor(float(n_committed)),
     )
     module.track(
         (prediction.address, strata, "cluster", "usage_entropy"),
-        value=-(embedder.usage_ema.clamp_min(1e-12) * embedder.usage_ema.clamp_min(1e-12).log()).sum(),
+        value=usage_entropy,
     )
     module.track(
         (prediction.address, strata, "cluster", "sentinel_share"),
@@ -583,12 +591,30 @@ class ClusterReviveCallback(Callback):
         if n_dead == 0:
             return None
 
+        committed_idx = embedder.committed.nonzero(as_tuple=True)[0]
+        n_committed = int(committed_idx.numel())
         adherence = float(embedder.adherence_ema.item())
-        if adherence <= 0.0:
+        warmup = epoch < _REVIVE_WARMUP
+
+        # Committed usage is saturated when its entropy is within 5% of the uniform bound.
+        saturated = False
+        if n_committed >= 2:
+            committed_usage = embedder.usage_ema[committed_idx]
+            committed_norm = committed_usage / committed_usage.sum().clamp_min(1e-12)
+            committed_safe = committed_norm.clamp_min(1e-12)
+            entropy = -(committed_safe * committed_safe.log()).sum().item()
+            saturated = entropy > 0.95 * math.log(n_committed)
+
+        # Any of: warmup, observed uncommitted mass, or a fully-balanced committed set.
+        signal = max(adherence, 1.0 if warmup else 0.0, 1.0 if saturated else 0.0)
+        if signal <= 0.0:
             return None
 
         base = math.exp(-epoch / request.revive_temperature)
-        p = min(base * adherence, 1/n_dead)
+        # Warmup lets many dead columns revive in one epoch to seed the upper range early;
+        # afterwards the per-column cap keeps expected revivals at most one per epoch.
+        cap = 1.0 if warmup else (1.0 / n_dead)
+        p = min(base * signal, cap)
         if p <= 0.0:
             return None
 
@@ -598,16 +624,25 @@ class ClusterReviveCallback(Callback):
             return None
 
         chosen = dead[chosen_mask].tolist()
-        donor = int(embedder.usage_ema.argmax().item())
+
+        # Cycle donors through the top-usage committed columns so a single donor is not split
+        # into many near-identical copies during warmup.
+        if n_committed > 0:
+            committed_order = committed_idx[embedder.usage_ema[committed_idx].argsort(descending=True)]
+            donors = [int(committed_order[i % n_committed].item()) for i in range(len(chosen))]
+        else:
+            donor = int(embedder.usage_ema.argmax().item())
+            donors = [donor] * len(chosen)
+
         assign_w: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
         content_w: torch.Tensor = embedder.embeddings[TensorKey.content.name].weight
         v_plus_1 = int(assign_w.shape[0])
         d_model = int(content_w.shape[0])
-        noise = float(request.revive_noise)
+        noise = _REVIVE_NOISE
         n_chosen = len(chosen)
         return {
             "dead_ids": chosen,
-            "donor": donor,
+            "donors": donors,
             "noise_assign": noise * torch.randn(n_chosen, v_plus_1),
             "noise_content": noise * torch.randn(n_chosen, d_model),
             "noise_cluster": noise * torch.randn(n_chosen, d_model),
@@ -621,11 +656,12 @@ class ClusterReviveCallback(Callback):
         assign_w: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
         content_w: torch.Tensor = embedder.embeddings[TensorKey.content.name].weight
         cluster_w: torch.Tensor = decoder.linears[TensorKey.cluster.name].weight
-        donor = plan["donor"]
+        donors = plan["donors"]
         device = assign_w.device
         dtype = assign_w.dtype
 
         for i, k in enumerate(plan["dead_ids"]):
+            donor = donors[i]
             assign_w.data[:, k] = assign_w.data[:, donor] + plan["noise_assign"][i].to(device=device, dtype=dtype)
             content_w.data[:, k] = content_w.data[:, donor] + plan["noise_content"][i].to(device=device, dtype=dtype)
             cluster_w.data[k, :] = cluster_w.data[donor, :] + plan["noise_cluster"][i].to(device=cluster_w.device, dtype=cluster_w.dtype)
