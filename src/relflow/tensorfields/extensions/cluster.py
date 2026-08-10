@@ -43,7 +43,7 @@ _BALANCE_EPSILON: float = 0.05
 _BALANCE_ITERS: int = 3
 _GUMBEL_TAU: float = 1.0
 _REVIVE_NOISE: float = 0.02
-_REVIVE_WARMUP: int = 3
+_REVIVE_WARMUP: int = 1
 
 
 @cluster.register
@@ -270,8 +270,13 @@ class Embedder(EmbedderBase):
             }
         )
 
-        self.register_buffer("usage_ema", torch.full((self.size,), 1.0 / self.size))
-        self.register_buffer("committed", torch.ones(self.size, dtype=torch.bool))
+        lower: int = request.n_clusters[0]
+        usage_init = torch.zeros(self.size)
+        usage_init[:lower] = 1.0 / lower
+        committed_init = torch.zeros(self.size, dtype=torch.bool)
+        committed_init[:lower] = True
+        self.register_buffer("usage_ema", usage_init)
+        self.register_buffer("committed", committed_init)
         self.register_buffer("adherence_ema", torch.zeros(()))
 
     @beartype
@@ -483,7 +488,7 @@ def loss(
         value=content_targets.eq(embedder.capacity).masked_select(valued).float().mean(),
     )
 
-    if request.n_clusters[0] != request.n_clusters[-1]:
+    if lower != upper:
         uncommitted = ~embedder.committed
         if uncommitted.any():
             uncommitted_mass = valued_probs[:, uncommitted].mean(dim=0).sum()
@@ -596,17 +601,10 @@ class ClusterReviveCallback(Callback):
         adherence = float(embedder.adherence_ema.item())
         warmup = epoch < _REVIVE_WARMUP
 
-        # Committed usage is saturated when its entropy is within 5% of the uniform bound.
-        saturated = False
-        if n_committed >= 2:
-            committed_usage = embedder.usage_ema[committed_idx]
-            committed_norm = committed_usage / committed_usage.sum().clamp_min(1e-12)
-            committed_safe = committed_norm.clamp_min(1e-12)
-            entropy = -(committed_safe * committed_safe.log()).sum().item()
-            saturated = entropy > 0.95 * math.log(n_committed)
-
-        # Any of: warmup, observed uncommitted mass, or a fully-balanced committed set.
-        signal = max(adherence, 1.0 if warmup else 0.0, 1.0 if saturated else 0.0)
+        # Growth signals: warmup (bootstrap dead columns out of random init) or adherence
+        # (observed uncommitted mass indicating the data wants more clusters). Saturation of
+        # the committed set is a natural product of Sinkhorn balance, not a call for more.
+        signal = max(adherence, 1.0 if warmup else 0.0)
         if signal <= 0.0:
             return None
 

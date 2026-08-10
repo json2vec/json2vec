@@ -224,6 +224,42 @@ def test_cluster_embedder_rejects_indices_beyond_capacity():
         embedder(field)
 
 
+def test_cluster_embedder_init_commits_only_lower_columns():
+    # Init at ``lower`` keeps Sinkhorn from locking n_committed at ``upper`` from step 0.
+    structure = Schema.model_validate(_structure_payload(bounds=(2, 6), capacity=8))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+
+    assert embedder.committed.tolist() == [True, True, False, False, False, False]
+    assert torch.allclose(
+        embedder.usage_ema,
+        torch.tensor([0.5, 0.5, 0.0, 0.0, 0.0, 0.0]),
+    )
+
+
+def test_cluster_embedder_init_perplexity_matches_lower_bound():
+    # perplexity(usage_ema) at init must equal ``lower`` so the loss's n_committed selection
+    # starts small and only grows through revive.
+    import math
+
+    structure = Schema.model_validate(_structure_payload(bounds=(3, 8), capacity=16))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+
+    normalized = embedder.usage_ema / embedder.usage_ema.sum().clamp_min(1e-12)
+    safe = normalized.clamp_min(1e-12)
+    entropy = -(safe * safe.log()).sum().item()
+    perplexity = math.exp(entropy)
+    assert round(perplexity) == 3
+
+
+def test_cluster_embedder_init_matches_upper_when_bounds_fixed():
+    # lower == upper is the "fixed K" case; init should commit all columns uniformly.
+    structure = Schema.model_validate(_structure_payload(bounds=(4, 4), capacity=8))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+
+    assert embedder.committed.tolist() == [True] * 4
+    assert torch.allclose(embedder.usage_ema, torch.full((4,), 0.25))
+
+
 # ---------- write ----------
 
 
@@ -712,6 +748,23 @@ def test_revive_callback_warmup_fires_without_adherence():
     ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=0), module)
 
     assert not torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
+
+
+def test_revive_callback_does_not_fire_on_saturated_committed_alone():
+    # Saturation of the committed set (perfectly uniform usage on committed columns) is the
+    # natural end state of Sinkhorn balance, not a signal that more clusters are needed. Past
+    # warmup, with adherence == 0, saturation alone must NOT fire revive.
+    _, _, module, embedder, decoder, _ = _seed_uncommitted_batch(revive_temperature=10.0)
+    lower = module.schema.requests[ADDRESS].n_clusters[0]
+    with torch.no_grad():
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[:lower] = 1.0 / lower  # perfectly balanced -> "saturated"
+        embedder.adherence_ema.zero_()
+    prior_assign = embedder.embeddings[TensorKey.cluster.name].weight.detach().clone()
+
+    ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=100), module)
+
+    assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
 
 
 def test_revive_callback_splits_donor_into_dead_column_and_resets_state():
