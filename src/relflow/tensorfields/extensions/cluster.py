@@ -38,10 +38,9 @@ cluster: Plugin = Plugin(name="cluster")
 cluster.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 # Algorithmic constants: fixed values from the SwAV/DINO literature or symmetry-breaking
-# magnitudes that have no principled reason to be user-tuned.
+# magnitudes that have no reason to be user-tuned.
 _BALANCE_EPSILON: float = 0.05
 _BALANCE_ITERS: int = 3
-_GUMBEL_TAU: float = 1.0
 _REVIVE_NOISE: float = 0.02
 _REVIVE_WARMUP: int = 1
 
@@ -264,8 +263,6 @@ class Embedder(EmbedderBase):
         self.counters = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: Counter(address=address, size=len(Tokens)),
-                # Content counter covers all V+1 vocab_logits classes (real labels + sentinel);
-                # sentinel weight is unused because ``known`` masks it out of the CE target.
                 TensorKey.content.name: Counter(address=address, size=self.capacity + 1),
             }
         )
@@ -300,7 +297,7 @@ class Embedder(EmbedderBase):
         assign_logits = self.embeddings[TensorKey.cluster.name](safe_content)
         if self.training:
             cluster_assignments = torch.nn.functional.gumbel_softmax(
-                assign_logits, tau=_GUMBEL_TAU, hard=True, dim=-1
+                assign_logits, hard=True, dim=-1
             )
         else:
             hard = torch.zeros_like(assign_logits)
@@ -453,8 +450,6 @@ def loss(
         embedder.committed.zero_()
         embedder.committed[committed_idx] = True
 
-        # Sinkhorn on log-probabilities (bounded in ``(-inf, 0]``) so ``_BALANCE_EPSILON`` acts as
-        # a real temperature over probabilities instead of raw-logit magnitudes.
         sinkhorn_input = torch.log_softmax(valued_logits[:, committed_idx], dim=-1)
         scaled = sinkhorn_input / _BALANCE_EPSILON
         Q = torch.exp(scaled - scaled.max())
@@ -464,7 +459,8 @@ def loss(
             Q = Q / (n_committed * Q.sum(dim=0, keepdim=True).clamp_min(1e-12))
         Q = Q * n_valued
 
-    committed_log_probs = torch.log_softmax(valued_logits[:, committed_idx], dim=-1)
+    full_log_probs = torch.log_softmax(valued_logits, dim=-1)
+    committed_log_probs = full_log_probs[:, committed_idx]
     balance_loss = -(Q * committed_log_probs).sum(dim=-1).mean()
 
     loss += module.track(
@@ -552,16 +548,6 @@ def write(module: Model, prediction: Prediction):
 
 
 class ClusterReviveCallback(Callback):
-    """Split-heavy revival of dead clusters, gated by observed adherence.
-
-    Fires on every ``on_train_epoch_end``. For each cluster leaf with
-    ``revive_temperature > 0`` and range bounds (``lower < upper``), samples per
-    dead column with probability ``exp(-epoch / revive_temperature) * adherence_ema``,
-    then copies the heaviest live column's assignment / content / decoder
-    weights (± Gaussian noise) into every selected slot. Rank 0 plans and
-    broadcasts to keep DDP replicas identical.
-    """
-
     @torch.no_grad()
     def on_train_epoch_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
         epoch = int(trainer.current_epoch)
@@ -601,17 +587,12 @@ class ClusterReviveCallback(Callback):
         adherence = float(embedder.adherence_ema.item())
         warmup = epoch < _REVIVE_WARMUP
 
-        # Growth signals: warmup (bootstrap dead columns out of random init) or adherence
-        # (observed uncommitted mass indicating the data wants more clusters). Saturation of
-        # the committed set is a natural product of Sinkhorn balance, not a call for more.
         signal = max(adherence, 1.0 if warmup else 0.0)
         if signal <= 0.0:
             return None
 
         base = math.exp(-epoch / request.revive_temperature)
-        # Warmup lets many dead columns revive in one epoch to seed the upper range early;
-        # afterwards the per-column cap keeps expected revivals at most one per epoch.
-        cap = 1.0 if warmup else (1.0 / n_dead)
+        cap = 1.0 / n_dead
         p = min(base * signal, cap)
         if p <= 0.0:
             return None
@@ -623,8 +604,6 @@ class ClusterReviveCallback(Callback):
 
         chosen = dead[chosen_mask].tolist()
 
-        # Cycle donors through the top-usage committed columns so a single donor is not split
-        # into many near-identical copies during warmup.
         if n_committed > 0:
             committed_order = committed_idx[embedder.usage_ema[committed_idx].argsort(descending=True)]
             donors = [int(committed_order[i % n_committed].item()) for i in range(len(chosen))]
@@ -669,5 +648,86 @@ class ClusterReviveCallback(Callback):
         embedder.adherence_ema.zero_()
 
 
-cluster.callback(ClusterReviveCallback)
+_MERGE_THRESHOLD: float = 0.95
+
+
+class ClusterMergeCallback(Callback):
+    @torch.no_grad()
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        targets: dict[Address, tuple[Embedder, Decoder, Request]] = {}
+        for address, node in pl_module.nodes.items():
+            request = pl_module.schema.requests.get(cast(Address, address))
+            if not isinstance(request, Request):
+                continue
+            if request.n_clusters[0] == request.n_clusters[-1]:
+                continue
+            embedder = getattr(node, "embedder", None)
+            decoder = getattr(node, "decoder", None)
+            if isinstance(embedder, Embedder) and isinstance(decoder, Decoder):
+                targets[cast(Address, address)] = (embedder, decoder, request)
+
+        if not targets:
+            return
+
+        plans: dict[Address, dict[str, int] | None] = {}
+        if trainer.is_global_zero:
+            for address, (embedder, decoder, request) in targets.items():
+                plans[address] = self._plan(embedder, decoder, request)
+        plans = broadcast_object(plans, src=0)
+
+        for address, (embedder, decoder, _) in targets.items():
+            self._apply(embedder, decoder, plans.get(address))
+
+    @staticmethod
+    def _plan(embedder: "Embedder", decoder: "Decoder", request: "Request") -> dict[str, int] | None:
+        committed_idx = embedder.committed.nonzero(as_tuple=True)[0]
+        n_committed = int(committed_idx.numel())
+        lower = request.n_clusters[0]
+        if n_committed <= lower or n_committed < 2:
+            return None
+
+        content_w = embedder.embeddings[TensorKey.content.name].weight  # (d_model, K)
+        cluster_w = decoder.linears[TensorKey.cluster.name].weight  # (K, d_model)
+
+        content_cols = content_w[:, committed_idx]
+        cluster_rows = cluster_w[committed_idx, :]
+        content_norm = content_cols / content_cols.norm(dim=0).clamp_min(1e-12)
+        cluster_norm = cluster_rows / cluster_rows.norm(dim=1, keepdim=True).clamp_min(1e-12)
+
+        content_sim = content_norm.T @ content_norm
+        cluster_sim = cluster_norm @ cluster_norm.T
+        joint_sim = torch.minimum(content_sim, cluster_sim)
+        joint_sim.fill_diagonal_(-1.0)
+
+        max_sim, max_j = joint_sim.max(dim=1)
+        overall_max, overall_i = max_sim.max(dim=0)
+        if float(overall_max.item()) <= _MERGE_THRESHOLD:
+            return None
+
+        i_local = int(overall_i.item())
+        j_local = int(max_j[i_local].item())
+        i_global = int(committed_idx[i_local].item())
+        j_global = int(committed_idx[j_local].item())
+
+        if embedder.usage_ema[i_global] < embedder.usage_ema[j_global]:
+            loser, winner = i_global, j_global
+        else:
+            loser, winner = j_global, i_global
+        return {"loser": loser, "winner": winner}
+
+    @staticmethod
+    def _apply(embedder: "Embedder", decoder: "Decoder", plan: dict[str, int] | None) -> None:
+        if plan is None:
+            return
+
+        loser = plan["loser"]
+        winner = plan["winner"]
+        embedder.usage_ema[winner] = embedder.usage_ema[winner] + embedder.usage_ema[loser]
+        embedder.usage_ema[loser] = 0.0
+        embedder.committed[loser] = False
+        decoder.linears[TensorKey.cluster.name].weight.data[loser, :].zero_()
+
+
+cluster.callback(ClusterReviveCallback, ClusterMergeCallback)
+
 

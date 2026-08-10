@@ -8,6 +8,7 @@ from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
 from relflow.tensorfields.extensions.cluster import (
+    ClusterMergeCallback,
     ClusterReviveCallback,
     Decoder,
     Embedder,
@@ -460,10 +461,11 @@ def test_cluster_loss_sinkhorn_pushes_gradient_toward_spread():
     assert valued_grad[:, 1:].mean().item() < 0.0
 
 
-def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
-    # Revive copies a live donor row into a dead column, which drives that column's decoder
-    # logit up to the donor's level. The balance loss must not spike from that step: it must
-    # depend only on the committed columns' relative logits.
+def test_cluster_loss_balance_penalizes_uncommitted_mass():
+    # Balance loss uses a full-K log-softmax so uncommitted decoder rows receive gradient
+    # through the normalizer. Raising uncommitted logits (as revive does when it copies a
+    # donor row into a dead column) must INCREASE balance loss, which is exactly the signal
+    # the model needs to eventually push those uncommitted rows back down.
     structure = Schema.model_validate(
         _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0)
     )
@@ -473,12 +475,10 @@ def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
     K = structure.requests[ADDRESS].size
     lower = structure.requests[ADDRESS].n_clusters[0]
 
-    # Scaled to sit inside the linear region of Sinkhorn's Boltzmann map at ε=0.05.
     base_logits = torch.zeros(*field.state.shape, K)
     base_logits[..., 0] = 0.075
     base_logits[..., 1] = 0.025
 
-    # Force a deterministic committed set (top-2) so both runs pick the same columns.
     with torch.no_grad():
         embedder.usage_ema.zero_()
         embedder.usage_ema[0] = 1.0
@@ -501,20 +501,65 @@ def test_cluster_loss_balance_is_invariant_to_uncommitted_logit_scale():
 
     baseline = _balance(base_logits.clone())
 
-    # Simulate the post-revive state: uncommitted columns 2 and 3 now sit at donor (col 0)'s
-    # logit — the exact aftermath of ClusterReviveCallback copying cluster_w[donor, :] into
-    # cluster_w[dead, :].
     revived_logits = base_logits.clone()
     revived_logits[..., 2] = base_logits[..., 0]
     revived_logits[..., 3] = base_logits[..., 0]
 
-    # Committed selection is derived from usage_ema, which we froze above; sanity-check that
-    # column 0 stays committed and columns 2/3 stay uncommitted so the scenario is meaningful.
     _, expected_committed = torch.tensor([1.0, 0.9, 0.0, 0.0]).topk(lower)
     assert set(expected_committed.tolist()) == {0, 1}
 
     revived = _balance(revived_logits)
-    assert revived == pytest.approx(baseline, rel=0.0, abs=1e-6)
+    assert revived > baseline
+
+
+def test_cluster_loss_balance_gradient_reaches_uncommitted_columns():
+    # Under the full-K normalizer, backprop from balance loss must produce a *negative*-going
+    # gradient on uncommitted logits (push them down) while committed logits still get pulled
+    # up. This is the mechanism that lets ``adherence_ema`` decay once the true K is reached.
+    structure = Schema.model_validate(
+        _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0)
+    )
+    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    module = _TrackingModule(structure, embedder, decoder)
+    K = structure.requests[ADDRESS].size
+
+    with torch.no_grad():
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[0] = 1.0
+        embedder.usage_ema[1] = 0.9
+
+    cluster_logits = torch.zeros(*field.state.shape, K)
+    cluster_logits[..., 0] = 0.05
+    cluster_logits[..., 1] = 0.02
+    # Uncommitted logits raised above baseline; a healthy loss should pull them back down.
+    cluster_logits[..., 2] = 0.10
+    cluster_logits[..., 3] = 0.10
+    cluster_logits = cluster_logits.detach().requires_grad_(True)
+
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(*field.state.shape, len(Tokens)),
+                TensorKey.cluster: cluster_logits,
+            },
+            batch_size=field.batch_size,
+        ),
+    )
+    total = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+    total.backward()
+
+    grad = cluster_logits.grad
+    assert grad is not None
+    valued_mask = field.targets[TensorKey.state].eq(Tokens.valued.value)
+    valued_grad = grad[valued_mask]
+    # Uncommitted (columns 2, 3): positive gradient (loss increases with these logits -> SGD
+    # will push them down).
+    assert valued_grad[:, 2:].mean().item() > 0.0
+    # Committed (columns 0, 1): non-positive net gradient (loss decreases as these logits rise).
+    assert valued_grad[:, :2].mean().item() <= 0.0
 
 
 def test_cluster_loss_sentinel_share_reflects_target_content():
@@ -853,4 +898,190 @@ def test_revive_callback_base_probability_decays_with_epoch():
     assert torch.equal(embedder.embeddings[TensorKey.cluster.name].weight, prior_assign)
     # Adherence stays intact because no revive occurred.
     assert embedder.adherence_ema.item() == pytest.approx(1.0)
+
+
+def test_revive_callback_warmup_caps_expected_revivals_at_one_per_epoch():
+    # During warmup the base probability is 1.0 and adherence is boosted to 1.0, but the
+    # per-column cap is still ``1 / n_dead`` so the expected number of revivals in a single
+    # epoch is ~1 (not "all dead columns"). This is what prevents ``n_committed`` from jumping
+    # straight to the upper bound on the first epoch.
+    structure = Schema.model_validate(
+        _structure_payload(
+            bounds=(1, 12), capacity=8, p_unavailable=1.0, revive_temperature=10.0
+        )
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    lower = structure.requests[ADDRESS].n_clusters[0]
+    embedder.committed[:] = False
+    embedder.committed[:lower] = True
+    embedder.adherence_ema.zero_()  # warmup should drive the plan even without adherence
+
+    n_dead = int((~embedder.committed).sum().item())
+    assert n_dead == 11
+
+    # ``_apply`` sets ``usage_ema[k] = usage_ema[donor] * 0.5`` for each revived dead column,
+    # so counting non-zero entries after the callback is an exact proxy for revive count.
+    revive_counts: list[int] = []
+    module = _TrackingModule(structure, embedder, decoder)
+    for seed in range(50):
+        with torch.no_grad():
+            embedder.usage_ema.zero_()
+            embedder.usage_ema[0] = 1.0
+        torch.manual_seed(seed)
+        ClusterReviveCallback().on_train_epoch_end(_FakeTrainer(current_epoch=0), module)
+        revived = int((embedder.usage_ema > 0).sum().item()) - 1  # minus the donor column
+        revive_counts.append(revived)
+
+    mean = sum(revive_counts) / len(revive_counts)
+    # cap = 1/11, signal = 1 -> expected revivals per epoch = 1.
+    assert 0.5 <= mean <= 2.0, f"expected mean ≈ 1, got {mean} (samples: {revive_counts[:10]})"
+    # No single epoch should revive more than a small handful of columns.
+    assert max(revive_counts) < 6
+
+
+# ---------- ClusterMergeCallback ----------
+
+
+def _seed_committed_pair(*, similarity: float):
+    """Build a real embedder/decoder with two committed columns whose content_w columns and
+    cluster_w rows share ``similarity`` cosine similarity (both weights, since the merge plan
+    requires joint redundancy)."""
+    structure = Schema.model_validate(
+        _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0)
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    lower = structure.requests[ADDRESS].n_clusters[0]
+    K = structure.requests[ADDRESS].size
+
+    # Commit only [0, 1, 2] so K==4 with one dead column; merge target is between 0 and 1.
+    embedder.committed[:] = False
+    embedder.committed[: lower + 1] = True
+    assert int(embedder.committed.sum().item()) > lower
+
+    torch.manual_seed(0)
+    content_w = embedder.embeddings[TensorKey.content.name].weight
+    cluster_w = decoder.linears[TensorKey.cluster.name].weight
+    with torch.no_grad():
+        content_w.data.normal_()
+        cluster_w.data.normal_()
+        # Blend column 1 (content) and row 1 (cluster) toward column/row 0.
+        content_w.data[:, 1] = similarity * content_w.data[:, 0] + (
+            1.0 - similarity
+        ) * content_w.data[:, 1]
+        cluster_w.data[1, :] = similarity * cluster_w.data[0, :] + (
+            1.0 - similarity
+        ) * cluster_w.data[1, :]
+        # Winner is column 0 (higher usage) so the merge should decommit column 1.
+        embedder.usage_ema.zero_()
+        embedder.usage_ema[0] = 0.6
+        embedder.usage_ema[1] = 0.3
+        embedder.usage_ema[2] = 0.1
+
+    module = _TrackingModule(structure, embedder, decoder)
+    return structure, module, embedder, decoder, K
+
+
+def test_merge_callback_decommits_duplicate_lower_usage_column():
+    structure, module, embedder, decoder, _ = _seed_committed_pair(similarity=1.0)
+    prior_usage_winner = float(embedder.usage_ema[0].item())
+    prior_usage_loser = float(embedder.usage_ema[1].item())
+
+    ClusterMergeCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    # Column 1 (lower usage of the duplicated pair) is demoted; column 0 keeps its commit.
+    assert not bool(embedder.committed[1].item())
+    assert bool(embedder.committed[0].item())
+    # Loser mass rolled into winner so perplexity can actually drop.
+    assert embedder.usage_ema[1].item() == pytest.approx(0.0)
+    assert embedder.usage_ema[0].item() == pytest.approx(
+        prior_usage_winner + prior_usage_loser
+    )
+
+
+def test_merge_callback_zeros_loser_decoder_row():
+    # The loser's decoder row is zeroed so the softmax cannot immediately reattract mass to it
+    # via random noise; this lets ``n_committed`` actually shrink on the next epoch.
+    _, module, embedder, decoder, _ = _seed_committed_pair(similarity=1.0)
+    ClusterMergeCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    loser_row = decoder.linears[TensorKey.cluster.name].weight.data[1, :]
+    assert torch.equal(loser_row, torch.zeros_like(loser_row))
+
+
+def test_merge_callback_noop_when_columns_are_distinct():
+    _, module, embedder, decoder, _ = _seed_committed_pair(similarity=0.0)
+    prior_committed = embedder.committed.detach().clone()
+    prior_cluster_w = decoder.linears[TensorKey.cluster.name].weight.detach().clone()
+
+    ClusterMergeCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    # No pair exceeds the similarity threshold -> nothing changes.
+    assert torch.equal(embedder.committed, prior_committed)
+    assert torch.equal(
+        decoder.linears[TensorKey.cluster.name].weight, prior_cluster_w
+    )
+
+
+def test_merge_callback_noop_when_bounds_are_fixed():
+    # With a fixed range there is no "shrink room"; the merge plan must not fire even under
+    # perfect redundancy so the model can rely on the full committed set.
+    structure = Schema.model_validate(
+        _structure_payload(bounds=(3, 3), capacity=8, p_unavailable=1.0)
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    with torch.no_grad():
+        content_w = embedder.embeddings[TensorKey.content.name].weight
+        cluster_w = decoder.linears[TensorKey.cluster.name].weight
+        content_w.data.normal_()
+        cluster_w.data.normal_()
+        content_w.data[:, 1] = content_w.data[:, 0]
+        cluster_w.data[1, :] = cluster_w.data[0, :]
+    prior_committed = embedder.committed.detach().clone()
+
+    module = _TrackingModule(structure, embedder, decoder)
+    ClusterMergeCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    assert torch.equal(embedder.committed, prior_committed)
+
+
+def test_merge_callback_noop_at_lower_bound():
+    # ``n_committed == lower`` means the model already believes it's at the minimum plausible K
+    # for this batch; refusing to shrink further prevents cannibalizing the last cluster.
+    structure = Schema.model_validate(
+        _structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0)
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    decoder = Decoder(schema=structure, address=ADDRESS)
+    lower = structure.requests[ADDRESS].n_clusters[0]
+    # Only ``lower`` columns committed, and make them duplicates to prove the guard fires
+    # before the similarity check.
+    embedder.committed[:] = False
+    embedder.committed[:lower] = True
+    with torch.no_grad():
+        content_w = embedder.embeddings[TensorKey.content.name].weight
+        cluster_w = decoder.linears[TensorKey.cluster.name].weight
+        content_w.data.normal_()
+        cluster_w.data.normal_()
+        content_w.data[:, 1] = content_w.data[:, 0]
+        cluster_w.data[1, :] = cluster_w.data[0, :]
+    prior_committed = embedder.committed.detach().clone()
+
+    module = _TrackingModule(structure, embedder, decoder)
+    ClusterMergeCallback().on_train_epoch_end(_FakeTrainer(), module)
+
+    assert torch.equal(embedder.committed, prior_committed)
+
+
+def test_merge_callback_respects_non_global_zero_rank():
+    _, module, embedder, decoder, _ = _seed_committed_pair(similarity=1.0)
+    prior_committed = embedder.committed.detach().clone()
+
+    # Rank != 0 -> planning is skipped, no distributed backend means broadcast_object returns
+    # the empty dict, and nothing is applied.
+    ClusterMergeCallback().on_train_epoch_end(_FakeTrainer(is_global_zero=False), module)
+
+    assert torch.equal(embedder.committed, prior_committed)
 
