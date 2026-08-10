@@ -8,6 +8,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from lightning.pytorch import Callback
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
@@ -27,12 +28,12 @@ from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
+    from lightning.pytorch import Trainer
+
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
 category: Plugin = Plugin(name="category")
-
-category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 # Smaller clamps can overflow zero-query CosFace gradients in float16 at the default scale.
 _NORMALIZE_EPS: float = 1e-3
@@ -272,12 +273,16 @@ class Embedder(EmbedderBase):
 
     def content_directions(self, indices: torch.Tensor | None = None) -> torch.Tensor:
         embedding = self.embeddings[TensorKey.content.name]
-        content = embedding.weight if indices is None else embedding(indices)
-        return torch.nn.functional.normalize(content, dim=-1, eps=_NORMALIZE_EPS)
+        return embedding.weight if indices is None else embedding(indices)
 
     def content_cosine(self, query: torch.Tensor, indices: torch.Tensor | None = None) -> torch.Tensor:
         query_hat = torch.nn.functional.normalize(query, dim=-1, eps=_NORMALIZE_EPS)
         return query_hat @ self.content_directions(indices).T
+
+    @torch.no_grad()
+    def normalize_content_directions(self) -> None:
+        weight = self.embeddings[TensorKey.content.name].weight
+        weight.copy_(torch.nn.functional.normalize(weight, dim=-1, eps=_NORMALIZE_EPS))
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
@@ -518,3 +523,21 @@ def write(module: Model, prediction: Prediction):
             TensorKey.topk.name: topk_payload,
         },
     }
+
+
+class ContentNormalizeCallback(Callback):
+    """Renormalize categorical content directions at each train epoch end."""
+
+    @torch.no_grad()
+    def on_train_epoch_end(
+        self,
+        trainer: Trainer,
+        pl_module: Model,
+    ) -> None:  # ty:ignore[invalid-method-override]
+        for node in pl_module.nodes.values():
+            embedder = getattr(node, "embedder", None)
+            if isinstance(embedder, Embedder):
+                embedder.normalize_content_directions()
+
+
+category.callback(VocabularySyncCallback, CounterUpdateCallback, ContentNormalizeCallback)

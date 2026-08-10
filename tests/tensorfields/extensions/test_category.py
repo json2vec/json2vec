@@ -281,7 +281,7 @@ def test_category_embedder_only_adds_content_for_available_valued_tokens():
     assert torch.all(state_gradient.abs().sum(dim=-1) > 0)
 
 
-def test_category_embedder_normalizes_looked_up_rows_instead_of_full_table(monkeypatch):
+def test_category_embedder_does_not_renormalize_content_table_at_forward(monkeypatch):
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     embedder = Embedder(schema=structure, address=ADDRESS)
     field = TensorField(
@@ -291,18 +291,45 @@ def test_category_embedder_normalizes_looked_up_rows_instead_of_full_table(monke
         targets=TensorDict({}),
         batch_size=1,
     )
-    normalized_shapes: list[tuple[int, ...]] = []
+    content_weight = embedder.embeddings[TensorKey.content.name].weight
+    content_id = id(content_weight)
+    normalized_ids: list[int] = []
     normalize = torch.nn.functional.normalize
 
     def track_normalize(inputs: torch.Tensor, *args, **kwargs):
-        normalized_shapes.append(tuple(inputs.shape))
+        normalized_ids.append(id(inputs))
         return normalize(inputs, *args, **kwargs)
 
     monkeypatch.setattr(torch.nn.functional, "normalize", track_normalize)
 
     embedder(field)
 
-    assert normalized_shapes == [(field.content.numel(), structure.d_model)]
+    assert content_id not in normalized_ids
+
+
+def test_category_embedder_content_directions_are_unit_at_init():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+
+    norms = embedder.content_directions().norm(dim=-1)
+
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-6)
+
+
+def test_category_normalize_content_directions_restores_unit_rows():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    embedder = Embedder(schema=structure, address=ADDRESS)
+
+    with torch.no_grad():
+        embedder.embeddings[TensorKey.content.name].weight.mul_(3.0)
+
+    pre_norms = embedder.content_directions().norm(dim=-1)
+    assert torch.allclose(pre_norms, torch.full_like(pre_norms, 3.0), atol=1e-6)
+
+    embedder.normalize_content_directions()
+
+    post_norms = embedder.content_directions().norm(dim=-1)
+    assert torch.allclose(post_norms, torch.ones_like(post_norms), atol=1e-6)
 
 
 def test_category_cosface_is_finite_for_zero_float16_query_and_gradient():
