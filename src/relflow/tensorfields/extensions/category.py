@@ -343,7 +343,7 @@ def loss(
     )
     module.track(
         (prediction.address, strata, "vocabulary", "size"),
-        value=state_inputs.new_tensor(len(embedder.vocab.snapshot()), dtype=torch.float32),
+        value=state_inputs.new_tensor(len(embedder.vocab.master), dtype=torch.float32),
     )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
