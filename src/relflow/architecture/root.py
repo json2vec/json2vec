@@ -518,40 +518,13 @@ class Model(lit.LightningModule, Renderable):
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-        cluster_hints: dict[Address | str, dict[Any, Any]] | None = None,
     ) -> dict[Address, dict[str, Any]]:
         return ModelRuntime.predict(
             self,
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
-            cluster_hints=cluster_hints,
         )
-
-    def commit_cluster(
-        self,
-        address: Address | str,
-        token: Any,
-        *,
-        cluster: int | None = None,
-        probs: Any = None,
-    ) -> int:
-        embedder = self._cluster_embedder(address)
-        return embedder.commit(token, cluster=cluster, probs=probs)
-
-    def _cluster_embedder(self, address: Address | str):
-        from relflow.tensorfields.extensions.cluster import Embedder as ClusterEmbedder
-
-        key = Address(str(address))
-        if key not in self.nodes:
-            raise KeyError(f"no field at address {address!r}")
-        node = self.nodes[key]
-        embedder = getattr(node, "embedder", None)
-        if not isinstance(embedder, ClusterEmbedder):
-            raise TypeError(
-                f"address {address!r} is not a Cluster field (got {type(embedder).__name__})"
-            )
-        return embedder
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

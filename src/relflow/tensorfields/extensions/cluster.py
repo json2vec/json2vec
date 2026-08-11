@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from weakref import ReferenceType, ref
 
 import numpy as np
 import pydantic
@@ -43,6 +45,9 @@ _BALANCE_EPSILON: float = 0.05
 _BALANCE_ITERS: int = 3
 _REVIVE_NOISE: float = 0.02
 _REVIVE_WARMUP: int = 1
+_OVERRIDE_LOCK: str = "cluster assignment overrides"
+
+_Assignment = int | torch.Tensor | list[float] | tuple[float, ...]
 
 
 @cluster.register
@@ -99,6 +104,30 @@ class Request(RequestBase):
         if lower > upper:
             raise ValueError("n_clusters lower bound must be less than or equal to upper bound")
         return self
+
+    @classmethod
+    def assign(
+        cls,
+        model: "Model",
+        address: Address | str,
+        token: Any,
+        assignment: int | torch.Tensor | list[float] | tuple[float, ...],
+        /,
+    ) -> int:
+        """Persistently assign one token to a cluster or cluster distribution."""
+        return _ClusterRuntime(model=model, address=address).assign(token, assignment)
+
+    @classmethod
+    def override(
+        cls,
+        model: "Model",
+        address: Address | str,
+        assignments: Mapping[Any, int | torch.Tensor | list[float] | tuple[float, ...]],
+        /,
+    ) -> AbstractContextManager[None]:
+        """Temporarily override token assignments within a context."""
+        return _ClusterRuntime(model=model, address=address).override(assignments)
+
 
 @cluster.register
 @tensorclass
@@ -250,6 +279,7 @@ class Embedder(EmbedderBase):
             )
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=self.capacity)
+        self._override_depth: int = 0
 
         self.embeddings = torch.nn.ModuleDict(
             {
@@ -297,16 +327,12 @@ class Embedder(EmbedderBase):
         if valued.any():
             valid_content = content.masked_select(valued)
             if ((valid_content < 0) | (valid_content > self.capacity)).any().item():
-                raise ValueError(
-                    f"Token in address {self.origin} outside [0, {self.capacity}]"
-                )
+                raise ValueError(f"Token in address {self.origin} outside [0, {self.capacity}]")
 
         safe_content = content.masked_fill(~valued, 0)
         assign_logits = self.embeddings[TensorKey.cluster.name](safe_content)
         if self.training:
-            cluster_assignments = torch.nn.functional.gumbel_softmax(
-                assign_logits, hard=True, dim=-1
-            )
+            cluster_assignments = torch.nn.functional.gumbel_softmax(assign_logits, hard=True, dim=-1)
         else:
             hard = torch.zeros_like(assign_logits)
             hard.scatter_(-1, assign_logits.argmax(dim=-1, keepdim=True), 1.0)
@@ -329,92 +355,82 @@ class Embedder(EmbedderBase):
     def interprocess_encoding_context(self) -> VocabularyState:
         return self.vocab.state
 
-    def _resolve_assignment(
-        self,
-        *,
-        cluster: int | None,
-        probs: torch.Tensor | list[float] | tuple[float, ...] | None,
-    ) -> torch.Tensor:
-        if (cluster is None) == (probs is None):
-            raise ValueError("provide exactly one of cluster= or probs=")
+    def _resolve_assignment(self, assignment: _Assignment) -> torch.Tensor:
         weight = self.embeddings[TensorKey.cluster.name].weight
-        if cluster is not None:
-            if not isinstance(cluster, int) or isinstance(cluster, bool):
-                raise TypeError("cluster must be an int")
-            if not 0 <= cluster < self.size:
-                raise ValueError(f"cluster must be in [0, {self.size}); got {cluster}")
+        if isinstance(assignment, bool):
+            raise TypeError("assignment must be a cluster index or probability vector")
+        if isinstance(assignment, int):
+            if not 0 <= assignment < self.size:
+                raise ValueError(f"cluster must be in [0, {self.size}); got {assignment}")
             distribution = torch.zeros(self.size, dtype=weight.dtype, device=weight.device)
-            distribution[cluster] = 1.0
+            distribution[assignment] = 1.0
             return torch.log(distribution.clamp_min(1e-8))
-        distribution = torch.as_tensor(probs, dtype=weight.dtype, device=weight.device)
+        distribution = torch.as_tensor(assignment, dtype=weight.dtype, device=weight.device)
         if distribution.shape != (self.size,):
-            raise ValueError(f"probs must have shape ({self.size},); got {tuple(distribution.shape)}")
+            raise ValueError(
+                f"assignment probabilities must have shape ({self.size},); got {tuple(distribution.shape)}"
+            )
         if bool((distribution < 0).any().item()):
-            raise ValueError("probs must be non-negative")
+            raise ValueError("assignment probabilities must be non-negative")
         total = float(distribution.sum().item())
         if not math.isclose(total, 1.0, abs_tol=1e-4):
-            raise ValueError(f"probs must sum to 1; got {total}")
+            raise ValueError(f"assignment probabilities must sum to 1; got {total}")
         return torch.log(distribution.clamp_min(1e-8))
 
-    def commit(
-        self,
-        token: Any,
-        *,
-        cluster: int | None = None,
-        probs: torch.Tensor | list[float] | tuple[float, ...] | None = None,
-    ) -> int:
-        logits = self._resolve_assignment(cluster=cluster, probs=probs)
+    def _assign(self, token: Any, assignment: _Assignment) -> int:
+        logits = self._resolve_assignment(assignment)
         weight = self.embeddings[TensorKey.cluster.name].weight
         index = self.vocab.state.index.get(token)
         if index is None:
             if len(self.vocab.master) >= self.capacity:
-                raise ValueError(
-                    f"cluster field {self.origin} at capacity ({self.capacity}); cannot commit {token!r}"
-                )
+                raise ValueError(f"cluster field {self.origin} at capacity ({self.capacity}); cannot assign {token!r}")
             self.vocab.master.append(token)
             index = len(self.vocab.master) - 1
         with torch.no_grad():
             weight[index].copy_(logits)
         return index
 
-    def transient_commit(self, hints: Mapping[Any, Any]):
+    def _override(self, assignments: Mapping[Any, _Assignment]):
         embedder = self
 
-        class _Transient:
+        class _Override:
             def __enter__(self):
+                if embedder._override_depth:
+                    raise RuntimeError("Cluster assignment overrides cannot be nested")
+                embedder._override_depth += 1
                 weight = embedder.embeddings[TensorKey.cluster.name].weight
                 # (index, original_row, was_new_append) — LIFO on exit
                 self.saved: list[tuple[int, torch.Tensor, bool]] = []
                 try:
-                    for token, hint in hints.items():
-                        cluster_arg: int | None
-                        probs_arg: Any | None
-                        if isinstance(hint, int) and not isinstance(hint, bool):
-                            cluster_arg, probs_arg = hint, None
-                        else:
-                            cluster_arg, probs_arg = None, hint
+                    for token, assignment in assignments.items():
                         existing = embedder.vocab.state.index.get(token)
                         if existing is not None:
                             original = weight[existing].detach().clone()
-                            embedder.commit(token, cluster=cluster_arg, probs=probs_arg)
+                            embedder._assign(token, assignment)
                             self.saved.append((existing, original, False))
                         else:
                             if len(embedder.vocab.master) >= embedder.capacity:
                                 raise ValueError(
                                     f"cluster field {embedder.origin} at capacity ({embedder.capacity}); "
-                                    f"cannot hint {token!r}"
+                                    f"cannot override {token!r}"
                                 )
                             new_index = len(embedder.vocab.master)
                             original = weight[new_index].detach().clone()
-                            embedder.commit(token, cluster=cluster_arg, probs=probs_arg)
+                            embedder._assign(token, assignment)
                             self.saved.append((new_index, original, True))
                 except BaseException:
-                    self._rollback()
+                    try:
+                        self._rollback()
+                    finally:
+                        embedder._override_depth -= 1
                     raise
                 return None
 
             def __exit__(self, exc_type, exc_val, exc_tb):
-                self._rollback()
+                try:
+                    self._rollback()
+                finally:
+                    embedder._override_depth -= 1
                 return False
 
             def _rollback(self):
@@ -426,7 +442,65 @@ class Embedder(EmbedderBase):
                             embedder.vocab.master.pop()
                 self.saved.clear()
 
-        return _Transient()
+        return _Override()
+
+    def _save_to_state_dict(self, state_dict, prefix, keep_vars):  # ty:ignore[invalid-method-override]
+        if self._override_depth:
+            raise RuntimeError("cannot save or rebuild a model while Cluster assignment overrides are active")
+        super()._save_to_state_dict(state_dict, prefix, keep_vars)
+
+
+class _ClusterRuntime:
+    """Resolve and mutate one Cluster field's model-owned runtime state."""
+
+    def __init__(self, model: "Model", address: Address | str):
+        self._model: ReferenceType[Model] = ref(model)
+        self.address: Address = Address(str(address))
+        self._embedder()
+
+    def _resolve(self) -> tuple[Model, Embedder]:
+        model = self._model()
+        if model is None:
+            raise RuntimeError("the model bound to this Cluster field no longer exists")
+        if self.address not in model.nodes:
+            raise KeyError(f"no field at address {str(self.address)!r}")
+
+        embedder = getattr(model.nodes[self.address], "embedder", None)
+        if not isinstance(embedder, Embedder):
+            raise TypeError(f"address {str(self.address)!r} is not a Cluster field (got {type(embedder).__name__})")
+        return model, embedder
+
+    def _embedder(self) -> Embedder:
+        return self._resolve()[1]
+
+    @staticmethod
+    def _assert_writable(model: Model, embedder: Embedder) -> None:
+        if embedder.vocab.is_shared:
+            raise RuntimeError("Cluster assignments cannot change while vocabulary state is shared")
+        active = tuple(str(name) for name, count in model.locks.items() if count > 0)
+        if active:
+            raise RuntimeError(f"Cluster assignments cannot change while the model is active: {', '.join(active)}")
+
+    def assign(self, token: Any, assignment: _Assignment) -> int:
+        model, embedder = self._resolve()
+        with embedder.vocab.lock:
+            self._assert_writable(model, embedder)
+            return embedder._assign(token, assignment)
+
+    @contextmanager
+    def override(self, assignments: Mapping[Any, _Assignment]) -> Iterator[None]:
+        model, embedder = self._resolve()
+        with embedder.vocab.lock:
+            self._assert_writable(model, embedder)
+            model.locks[_OVERRIDE_LOCK] += 1
+            try:
+                with embedder._override(assignments):
+                    yield
+            finally:
+                if model.locks[_OVERRIDE_LOCK] <= 1:
+                    model.locks.pop(_OVERRIDE_LOCK, None)
+                else:
+                    model.locks[_OVERRIDE_LOCK] -= 1
 
 
 @cluster.register
@@ -444,10 +518,8 @@ class Decoder(DecoderBase):
                     out_features=len(Tokens),
                 ),
                 TensorKey.cluster.name: torch.nn.Linear(
-                    in_features=schema.d_model,
-                    out_features=n_clusters,
-                    bias=False
-                )
+                    in_features=schema.d_model, out_features=n_clusters, bias=False
+                ),
             }
         )
 
@@ -742,7 +814,9 @@ class ClusterReviveCallback(Callback):
             donor = donors[i]
             assign_w.data[:, k] = assign_w.data[:, donor] + plan["noise_assign"][i].to(device=device, dtype=dtype)
             content_w.data[:, k] = content_w.data[:, donor] + plan["noise_content"][i].to(device=device, dtype=dtype)
-            cluster_w.data[k, :] = cluster_w.data[donor, :] + plan["noise_cluster"][i].to(device=cluster_w.device, dtype=cluster_w.dtype)
+            cluster_w.data[k, :] = cluster_w.data[donor, :] + plan["noise_cluster"][i].to(
+                device=cluster_w.device, dtype=cluster_w.dtype
+            )
             embedder.usage_ema[k] = embedder.usage_ema[donor] * 0.5
             embedder.usage_ema[donor] *= 0.5
 
@@ -830,4 +904,3 @@ class ClusterMergeCallback(Callback):
 
 
 cluster.callback(ClusterReviveCallback, ClusterMergeCallback)
-

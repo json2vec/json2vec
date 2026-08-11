@@ -118,17 +118,13 @@ class _CommittedTrajectory(lit.Callback):
 def _format(trajectory: list[dict[str, float]]) -> str:
     header = f"{'epoch':>5} {'n_committed':>12} {'perplexity':>11} {'adherence':>10}"
     rows = [
-        f"{r['epoch']:>5.0f} {r['n_committed']:>12.0f}"
-        f" {r['perplexity']:>11.3f} {r['adherence']:>10.4f}"
+        f"{r['epoch']:>5.0f} {r['n_committed']:>12.0f} {r['perplexity']:>11.3f} {r['adherence']:>10.4f}"
         for r in trajectory
     ]
     return "\n".join([header, *rows])
 
 
-@pytest.mark.skipif(
-    "not config.getoption('--run-slow')",
-    reason="Only run when --run-slow is given"
-)
+@pytest.mark.skipif("not config.getoption('--run-slow')", reason="Only run when --run-slow is given")
 def test_cluster_n_committed_converges_to_true_k_when_loss_engaged():
     """When the loss is engaged (via ``p_mask``), K must converge close to true K.
 
@@ -188,8 +184,7 @@ def test_cluster_n_committed_converges_to_true_k_when_loss_engaged():
     )
     # Explicit boundary checks — the failure modes that inspired this test.
     assert final_n[-1] != UPPER, (
-        f"n_committed glued to upper bound: {final_n}\n"
-        f"Full trajectory:\n{_format(trajectory.trajectory)}"
+        f"n_committed glued to upper bound: {final_n}\nFull trajectory:\n{_format(trajectory.trajectory)}"
     )
     assert final_n[-1] != LOWER or LOWER == TRUE_K, (
         f"n_committed glued to lower bound (mechanism dormant): {final_n}\n"
@@ -197,10 +192,7 @@ def test_cluster_n_committed_converges_to_true_k_when_loss_engaged():
     )
 
 
-@pytest.mark.skipif(
-    "not config.getoption('--run-slow')",
-    reason="Only run when --run-slow is given"
-)
+@pytest.mark.skipif("not config.getoption('--run-slow')", reason="Only run when --run-slow is given")
 def test_cluster_loss_is_dormant_when_field_is_plain_input():
     """A plain-input ``Cluster`` never engages the loss, so ``usage_ema`` never moves.
 
@@ -249,18 +241,11 @@ def test_cluster_loss_is_dormant_when_field_is_plain_input():
 
     n_series = [row["n_committed"] for row in trajectory.trajectory]
     adherence = [row["adherence"] for row in trajectory.trajectory]
-    assert len(set(n_series)) == 1, (
-        f"expected frozen n_committed for dormant cluster, got {n_series}"
-    )
-    assert all(a == 0.0 for a in adherence), (
-        f"expected zero adherence for dormant cluster, got {adherence}"
-    )
+    assert len(set(n_series)) == 1, f"expected frozen n_committed for dormant cluster, got {n_series}"
+    assert all(a == 0.0 for a in adherence), f"expected zero adherence for dormant cluster, got {adherence}"
 
 
-@pytest.mark.skipif(
-    "not config.getoption('--run-slow')",
-    reason="Only run when --run-slow is given"
-)
+@pytest.mark.skipif("not config.getoption('--run-slow')", reason="Only run when --run-slow is given")
 def test_cluster_n_committed_converges_via_regime_regression():
     """Repeated IDs, each tagged to one of 5 hidden ``y = f_k(x)`` regimes.
 
@@ -322,10 +307,8 @@ def test_cluster_n_committed_converges_via_regime_regression():
         f"Full trajectory:\n{_format(trajectory.trajectory)}"
     )
     assert final_n[-1] != UPPER, (
-        f"n_committed glued to upper bound: {final_n}\n"
-        f"Full trajectory:\n{_format(trajectory.trajectory)}"
+        f"n_committed glued to upper bound: {final_n}\nFull trajectory:\n{_format(trajectory.trajectory)}"
     )
     assert final_n[-1] != LOWER, (
-        f"n_committed glued to lower bound: {final_n}\n"
-        f"Full trajectory:\n{_format(trajectory.trajectory)}"
+        f"n_committed glued to lower bound: {final_n}\nFull trajectory:\n{_format(trajectory.trajectory)}"
     )
