@@ -4,6 +4,7 @@ pyproject: |
   requires-python = ">=3.12"
   dependencies = [
     "blake3>=1.0.8",
+    "einops>=0.8.2",
     "marimo>=0.23.8",
     "relflow[text] @ git+https://github.com/relflow/relflow.git",
   ]

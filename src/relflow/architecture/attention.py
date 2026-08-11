@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 
 from relflow.architecture.rotary import RotaryEmbedding
 
@@ -30,15 +31,6 @@ class RotaryMultiheadAttention(torch.nn.Module):
         self.rotary = RotaryEmbedding(d_model=self.head_dim)
         self.dropout_p = dropout
 
-    def splitheads(self, inputs: torch.Tensor, nhead: int) -> torch.Tensor:
-        batch, seq_len, _ = inputs.shape
-        return inputs.reshape(batch, seq_len, nhead, self.head_dim).transpose(1, 2)
-
-    def rotate(self, inputs: torch.Tensor) -> torch.Tensor:
-        batch, nhead, seq_len, head_dim = inputs.shape
-        rotated = self.rotary(inputs.reshape(batch * nhead, seq_len, head_dim))
-        return rotated.reshape(batch, nhead, seq_len, head_dim)
-
     def forward(
         self,
         query: torch.Tensor,
@@ -46,9 +38,25 @@ class RotaryMultiheadAttention(torch.nn.Module):
         value: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q = self.rotate(self.splitheads(self.q_proj(query), nhead=self.nhead))
-        k = self.rotate(self.splitheads(self.k_proj(key), nhead=self.n_kv_heads))
-        v = self.splitheads(self.v_proj(value), nhead=self.n_kv_heads)
+        q = self.rotary(
+            rearrange(
+                self.q_proj(query),
+                "batch query (head head_channel) -> batch head query head_channel",
+                head=self.nhead,
+            )
+        )
+        k = self.rotary(
+            rearrange(
+                self.k_proj(key),
+                "batch key (head head_channel) -> batch head key head_channel",
+                head=self.n_kv_heads,
+            )
+        )
+        v = rearrange(
+            self.v_proj(value),
+            "batch key (head head_channel) -> batch head key head_channel",
+            head=self.n_kv_heads,
+        )
 
         attn_mask: torch.Tensor | None = None
 
@@ -70,6 +78,9 @@ class RotaryMultiheadAttention(torch.nn.Module):
             dropout_p=self.dropout_p if self.training else 0.0,
             enable_gqa=self.n_kv_heads != self.nhead,
         )
-        context = context.transpose(1, 2).reshape(query.shape[0], query.shape[1], self.d_model)
+        context = rearrange(
+            context,
+            "batch head query head_channel -> batch query (head head_channel)",
+        )
 
         return self.out_proj(context)

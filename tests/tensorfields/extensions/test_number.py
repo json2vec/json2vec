@@ -7,7 +7,15 @@ from tensordict import TensorDict
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
-from relflow.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
+from relflow.tensorfields.extensions.number import (
+    Decoder,
+    Embedder,
+    GlobalOnlineNormalizer,
+    TensorField,
+    jitter,
+    loss,
+    write,
+)
 
 ADDRESS = "root/items/amount"
 
@@ -175,6 +183,38 @@ def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
     assert torch.isfinite(embedder.normalizer.mean).all()
     assert torch.isfinite(embedder.normalizer.var).all()
     assert torch.isfinite(parcel.payload).all()
+
+
+def test_number_embedder_preserves_flattened_jitter_draw_order():
+    payload = _structure_payload()
+    payload["fields"]["fields"][0]["fields"][0]["jitter"] = 0.25
+    structure = Schema.model_validate(payload)
+    field = TensorField.new(
+        values=[[[1.0, 2.0]], [[3.0]]],
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    embedder.train()
+    embedder.normalizer.eval()
+
+    flat_state = field.state.reshape(-1)
+    flat_content = embedder.normalizer(
+        inputs=field.content.reshape(-1),
+        mask=flat_state.eq(Tokens.valued),
+    )
+    torch.manual_seed(123)
+    flat_content = jitter(flat_content, jitter_amount=embedder.jitter)
+    flat_content = embedder.clamp(content=flat_content, state=flat_state)
+    weighted = flat_content.unsqueeze(-1).mul(embedder.weights)
+    fourier = torch.cat((weighted.sin(), weighted.cos()), dim=-1)
+    expected = embedder.embeddings(flat_state) + torch.nn.functional.gelu(embedder.linear(fourier))
+
+    torch.manual_seed(123)
+    output = embedder(field).payload
+
+    assert torch.equal(output.reshape_as(expected), expected)
 
 
 def test_number_write_emits_state_probability_map():

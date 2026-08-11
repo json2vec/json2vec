@@ -1,19 +1,19 @@
 import torch
 
 from relflow.architecture.encoder import BranchEncoder
-from relflow.architecture.pool import MeanPool
 from relflow.architecture.root import Model
 from relflow.structs.enums import TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Parcel
+from relflow.structs.pooling import Attention, Mean
 
 
-def _payload(*, attention: str = "mha", pooling: str = "query") -> dict:
+def _payload(*, attention: str = "mha", pooling: dict | None = None) -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
         "query": "[*].items[*].label",
-        "pooling": pooling,
+        "pooling": pooling or Attention().model_dump(),
         "size": 8,
     }
     return {
@@ -59,7 +59,7 @@ def test_branch_encoder_none_skips_transformer_layers():
 
 
 def test_decoder_mean_pooling_repeats_heritage_mean_for_each_target_slot():
-    schema = Schema.model_validate(_payload(pooling="mean"))
+    schema = Schema.model_validate(_payload(pooling=Mean().model_dump()))
     model = Model(schema=schema, batch_size=2)
     decoder = model.nodes["root/items/category"].decoder
     parcel = Parcel(
@@ -71,6 +71,6 @@ def test_decoder_mean_pooling_repeats_heritage_mean_for_each_target_slot():
 
     prediction = decoder([parcel])
 
-    assert isinstance(decoder.pool, MeanPool)
+    assert decoder.pool is None
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 8)

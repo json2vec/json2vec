@@ -9,13 +9,15 @@ from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overl
 
 import pluggy
 import torch
+from einops import pack
 from lightning.pytorch import Callback
 from rich.text import Text
 from tensordict import TensorDict
 
-from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
+from relflow.architecture.pool import ConvolutionPool, LearnedQueryCrossAttention
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
+from relflow.structs.pooling import Attention, Convolution, Mean
 from relflow.structs.tree import Address, Leaf, Node, Renderable
 from relflow.tensorfields.spec import PluginSpec
 
@@ -56,20 +58,32 @@ class DecoderBase(torch.nn.Module):
         self.sigma: torch.Tensor = torch.nn.Parameter(torch.zeros(1))
 
         request = schema.requests[address]
-        n_context = 1
+        self.pool_width = 1
         for dimension in schema.shapes[address]:
-            n_context *= dimension
+            self.pool_width *= dimension
         match request.pooling:
-            case "query":
+            case Mean():
+                self.pool: torch.nn.Module | None = None
+            case Attention():
                 self.pool = LearnedQueryCrossAttention(
-                    n_context=n_context,
+                    n_context=self.pool_width,
                     d_model=schema.d_model,
-                    nhead=request.n_heads,
-                    dropout=float(request.dropout or 0.0),
-                    n_linear=request.n_linear,
+                    nhead=request.pooling.n_heads or request.n_heads,
+                    dropout=float(
+                        request.pooling.dropout if request.pooling.dropout is not None else request.dropout or 0.0
+                    ),
+                    n_layers=request.pooling.n_layers,
                 )
-            case "mean":
-                self.pool = MeanPool(n_context=n_context)
+            case Convolution():
+                self.pool = ConvolutionPool(
+                    width=self.pool_width,
+                    d_model=schema.d_model,
+                    kernel_size=request.pooling.kernel_size,
+                    n_layers=request.pooling.n_layers,
+                    dropout=float(
+                        request.pooling.dropout if request.pooling.dropout is not None else request.dropout or 0.0
+                    ),
+                )
             case _:
                 raise ValueError(f"unsupported decoder pooling: {request.pooling}")
 
@@ -80,9 +94,12 @@ class DecoderBase(torch.nn.Module):
         if len(parcels) == 0:
             raise ValueError("decoder requires at least one parcel")
 
-        N, *_, C = parcels[0].payload.shape
-        stacked = torch.cat([parcel.payload.reshape(N, -1, C) for parcel in parcels], dim=1)
-        pooled = self.pool(stacked)
+        stacked, _ = pack([parcel.payload for parcel in parcels], "batch * channel")
+        pooled = (
+            stacked.mean(dim=-2, keepdim=True).expand(-1, self.pool_width, -1)
+            if self.pool is None
+            else self.pool(stacked)
+        )
 
         payload = self.decode(pooled)
         if embed:

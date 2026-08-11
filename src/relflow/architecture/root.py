@@ -30,13 +30,14 @@ from relflow.data.datasets.base import EncodedBatch, EncodedInput
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata
 from relflow.structs.experiment import (
-    NodeAttribute,
-    NodePredicate,
+    NodeSelector,
     Schema,
     SchemaField,
     TreeFieldInput,
 )
 from relflow.structs.packages import Prediction
+from relflow.structs.pooling import Attention, PoolingConfig
+from relflow.structs.reference import Reference
 from relflow.structs.tree import Address, Node, Rate, Renderable
 from relflow.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
@@ -87,7 +88,8 @@ class Model(lit.LightningModule, Renderable):
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
-        n_linear: int = 1,
+        pooling: PoolingConfig = Attention(),
+        reference: Reference | tuple[Reference, ...] = (),
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
@@ -112,9 +114,9 @@ class Model(lit.LightningModule, Renderable):
             description: Optional description on the generated root branch.
             embed: Configure the generated root branch as an embedding output.
             attention: Attention mode for the generated root branch.
-            n_linear: Learned-query cross-attention pooling block count on the
-                generated root branch. Each block also contains a feed-forward
-                network.
+            pooling: Pooling configuration for the generated root branch.
+            reference: Exact context Reference or ordered tuple of References
+                attached to the generated root branch.
             dropout: Optional dropout rate on the generated root branch.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
@@ -133,7 +135,8 @@ class Model(lit.LightningModule, Renderable):
             description=description,
             embed=embed,
             attention=attention,
-            n_linear=n_linear,
+            pooling=pooling,
+            reference=reference,
             dropout=dropout,
             optimizer=optimizer,
             scheduler=scheduler,
@@ -154,7 +157,8 @@ class Model(lit.LightningModule, Renderable):
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
-        n_linear: int = 1,
+        pooling: PoolingConfig = Attention(),
+        reference: Reference | tuple[Reference, ...] = (),
         dropout: Rate | None = None,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
@@ -166,6 +170,9 @@ class Model(lit.LightningModule, Renderable):
         options as :meth:`from_tree`. Passing ``schema=...`` is retained for
         checkpoint loading and lower-level integrations.
         """
+        if "n_linear" in field_kwargs:
+            raise ValueError("n_linear was removed; use pooling=Attention(n_layers=...)")
+
         if field_args and isinstance(field_args[0], Schema):
             if len(field_args) != 1 or schema is not None:
                 raise TypeError("a positional Schema cannot be combined with other fields or schema=")
@@ -194,7 +201,8 @@ class Model(lit.LightningModule, Renderable):
                 description=description,
                 embed=embed,
                 attention=attention,
-                n_linear=n_linear,
+                pooling=pooling,
+                reference=reference,
                 dropout=dropout,
                 **field_kwargs,
             )
@@ -275,7 +283,7 @@ class Model(lit.LightningModule, Renderable):
 
     def select(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool = True,
         use_cache: bool = True,
     ) -> list[Node]:
@@ -284,7 +292,7 @@ class Model(lit.LightningModule, Renderable):
 
     def update(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,
@@ -320,7 +328,7 @@ class Model(lit.LightningModule, Renderable):
 
     def extend(
         self,
-        *args: NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField,
+        *args: NodeSelector | SchemaField,
         include_root: bool = True,
         use_cache: bool = True,
     ) -> None:
@@ -329,7 +337,7 @@ class Model(lit.LightningModule, Renderable):
 
     def delete(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool = False,
         use_cache: bool = True,
     ) -> None:
@@ -338,7 +346,7 @@ class Model(lit.LightningModule, Renderable):
 
     def reset(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool = True,
         use_cache: bool = True,
         descendants: bool = False,
@@ -354,7 +362,7 @@ class Model(lit.LightningModule, Renderable):
     @contextmanager
     def override(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,

@@ -478,6 +478,15 @@ wheels = [
 ]
 
 [[package]]
+name = "einops"
+version = "0.8.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/77/850bef8d72ffb9219f0b1aac23fbc1bf7d038ee6ea666f331fa273031aa2/einops-0.8.2.tar.gz", hash = "sha256:609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827", size = 56261, upload-time = "2026-01-26T04:13:17.638Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl", hash = "sha256:54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193", size = 65638, upload-time = "2026-01-26T04:13:18.546Z" },
+]
+
+[[package]]
 name = "execnet"
 version = "2.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2358,6 +2367,7 @@ dependencies = [
     { name = "anytree" },
     { name = "beartype" },
     { name = "blake3" },
+    { name = "einops" },
     { name = "jmespath" },
     { name = "lightning" },
     { name = "loguru" },
@@ -2409,6 +2419,7 @@ requires-dist = [
     { name = "anytree", specifier = ">=2.13.0" },
     { name = "beartype", specifier = ">=0.21.0" },
     { name = "blake3", specifier = ">=1.0.8" },
+    { name = "einops", specifier = ">=0.8.2" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.124.0" },
     { name = "jmespath", specifier = ">=1.0.1" },
     { name = "lightning", specifier = ">=2.6.4" },

@@ -24,7 +24,7 @@ def test_leaf_rich_display_uses_schema_summary() -> None:
 
     assert "amount [number] active" in rendered
     assert "query=" not in rendered
-    assert "pooling=query weight=1 p_mask=0 p_prune=0 n_heads=4 n_linear=1" in rendered
+    assert "pooling=attention weight=1 p_mask=0 p_prune=0 n_heads=4" in rendered
     assert "jitter=0 n_bands=8 offset=4 objective=mae" in rendered
     assert "model_config" not in rendered
     assert "model_fields_set" not in rendered
@@ -82,7 +82,7 @@ def test_leaf_display_separates_common_and_specific_attributes() -> None:
     assert "objective=huber" in number_lines[2]
     assert number_lines[2].startswith(" ")
 
-    assert "pooling=query" in category_lines[1]
+    assert "pooling=attention" in category_lines[1]
     assert category_lines[1].startswith(" ")
     assert "size=2048" not in category_lines[1]
     assert "size=2048" in category_lines[2]
@@ -99,7 +99,9 @@ def test_branch_rich_display_renders_child_subtree() -> None:
         )
     )
 
-    assert "line_items [branch] length=32 overflow=head attention=mha n_layers=1 n_heads=4 n_linear=1" in rendered
+    assert (
+        "line_items [branch] length=32 overflow=head attention=mha n_layers=1 n_heads=4 pooling=attention" in rendered
+    )
     assert "embed=False" not in rendered
     assert "|-- sku [category] active" in rendered
     assert "`-- quantity [number] active" in rendered
@@ -257,7 +259,7 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
     assert isinstance(selection, list)
     for output in (rendered, rich_rendered):
         assert "species [category] active target query=[*].species" in output
-        assert " pooling=query weight=1 p_mask=0 p_prune=1 n_heads=4 n_linear=1" in output
+        assert " pooling=attention weight=1 p_mask=0 p_prune=1 n_heads=4" in output
         assert " size=4 p_unavailable=0.01 topk=[]" in output
         assert "Request(name=" not in output
         assert "Selection(" not in output

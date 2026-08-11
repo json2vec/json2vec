@@ -185,7 +185,7 @@ def test_model_constructor_accepts_root_branch_options():
         description="event records",
         embed=True,
         attention="none",
-        n_linear=2,
+        pooling=rf.Attention(n_layers=2),
         dropout=0.2,
     )
     params = model.schema
@@ -195,7 +195,7 @@ def test_model_constructor_accepts_root_branch_options():
     assert params.fields.embed is True
     assert params.fields.attention == "none"
     assert params.fields.length == 1
-    assert params.fields.n_linear == 2
+    assert params.fields.pooling == rf.Attention(n_layers=2)
     assert params.fields.dropout == 0.2
     assert not hasattr(params.fields, "p_mask")
     assert params.embed == ["events"]
@@ -227,6 +227,7 @@ def test_model_constructor_rejects_root_branch_mask_options():
 def test_model_select_returns_nodes_and_update_refreshes_cached_role_views():
     model = rf.Model(
         rf.Number("amount"),
+        rf.Number("context"),
         rf.Category("label", target=True, embed=False),
         d_model=16,
         n_layers=1,
@@ -480,6 +481,7 @@ def test_model_override_temporarily_updates_schema_and_rebuilds_modules():
 def test_model_override_target_restores_original_prune_rate():
     model = rf.Model(
         rf.Number(name="amount", p_prune=0.25),
+        rf.Number(name="context"),
         d_model=16,
         n_layers=1,
         n_heads=4,

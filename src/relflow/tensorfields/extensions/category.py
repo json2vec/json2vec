@@ -8,6 +8,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from einops import rearrange
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
@@ -248,12 +249,8 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N: int
-        dims: list[int]
-
-        N, *dims = inputs.state.shape
-        state = inputs.state.reshape(-1)
-        content = inputs.content.reshape(-1)
+        state = inputs.state
+        content = inputs.content
         valued = state.eq(Tokens.valued.value)
 
         if valued.any() and (content.masked_select(valued) > self.size).any().item():
@@ -263,15 +260,13 @@ class Embedder(EmbedderBase):
         safe_content = content.masked_fill(~known, 0)
         content_embedding = self.embeddings[TensorKey.content.name](safe_content) * known.unsqueeze(-1)
 
-        embeddings: torch.Tensor = (self.embeddings[TensorKey.state.name](state) + content_embedding).reshape(
-            N, *dims, -1
-        )
+        embeddings: torch.Tensor = self.embeddings[TensorKey.state.name](state) + content_embedding
 
         return Parcel(
             payload=embeddings,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
     @property
@@ -317,11 +312,9 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     embedder: Embedder = module.nodes[prediction.address].embedder
-    N: int = batch.targets[TensorKey.state].numel()
-    trainable = batch.trainable.reshape(N)
-
-    state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
-    state_targets = batch.targets[TensorKey.state].reshape(N)
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    state_inputs = rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes")
+    state_targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
@@ -350,8 +343,8 @@ def loss(
     if not valued.any():
         return loss
 
-    content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
-    content_targets = batch.targets[TensorKey.content].reshape(N)
+    content_inputs = rearrange(prediction.payload[TensorKey.content], "... classes -> (...) classes")
+    content_targets = rearrange(batch.targets[TensorKey.content], "... -> (...)")
     n_content_tokens = content_inputs.shape[-1]
     invalid = valued & content_targets.gt(n_content_tokens)
     if invalid.any():

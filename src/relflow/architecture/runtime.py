@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import torch
+from einops import rearrange, reduce
 from loguru import logger
 from tensordict import TensorDict
 
 from relflow.architecture.contracts import sanitize
 from relflow.architecture.encoder import BranchEncoder
+from relflow.architecture.execution import CompiledExecutionGraph, InputPlan
 from relflow.architecture.node import NodeModule
 from relflow.data.datasets.base import EncodedBatch, EncodedInput
 from relflow.data.iterables import encode as encode_batch
@@ -19,6 +20,7 @@ from relflow.data.iterables import mask as apply_mask
 from relflow.data.processors import Postprocessor, Preprocessor
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
+from relflow.structs.pooling import Mean
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
     TENSORFIELDS,
@@ -50,9 +52,11 @@ class ModelRuntime:
         dataloader_idx: int = 0,
     ) -> list[Prediction]:
         sanitize(module, inputs, strata=strata, dataloader_idx=dataloader_idx)
+        strata = Strata.normalize(strata)
 
-        processed: dict[Address, list[Parcel]] = defaultdict(list)
-        outgoing: dict[Address, Parcel] = {}
+        execution: CompiledExecutionGraph = module.execution_graph
+        memory: dict[Address, torch.Tensor] = {}
+        summary: dict[Address, torch.Tensor] = {}
         predictions: list[Prediction] = []
 
         for address in module.schema.active_requests.keys():
@@ -63,61 +67,188 @@ class ModelRuntime:
             node_module = cast(NodeModule, module.nodes[address])
             embedder: EmbedderBase = node_module.embedder
             embedding: Parcel = embedder(tensorfield)
-            if embedding.destination is None:
-                raise ValueError(f"parcel from '{embedding.origin}' has no destination")
-            processed[embedding.destination].append(embedding)
-            outgoing[embedding.origin] = embedding
+            memory[address] = embedding.payload
+            summary[address] = embedding.payload
 
-        for depth in reversed(module.schema.depthwise):
-            for address in depth:
-                if len(processed[address]) == 0:
-                    continue
+        for address in execution.encoder_order:
+            if address not in execution.active_branches:
+                continue
 
-                node_module = cast(NodeModule, module.nodes[address])
-                encoder: BranchEncoder = node_module.encoder
-                encoding: Parcel = encoder(processed[address])
-                if encoding.destination is None:
-                    raise ValueError(f"parcel from '{encoding.origin}' has no destination")
-                processed[encoding.destination].append(encoding)
-                outgoing[encoding.origin] = encoding
-
-                if address in module.schema.embed:
-                    predictions.append(
-                        Prediction(
-                            address=encoding.origin,
-                            payload=TensorDict(
-                                {TensorKey.embedding: encoding.payload},
-                                batch_size=encoding.payload.shape[0],
-                            ),
-                            batch_size=encoding.payload.shape[0],
-                        )
+            node_module = cast(NodeModule, module.nodes[address])
+            encoder: BranchEncoder = node_module.encoder
+            payloads: list[torch.Tensor] = []
+            for plan in execution.branch_inputs[address]:
+                payload = ModelRuntime._activation(plan, memory=memory, summary=summary)
+                if plan.reference_id is not None:
+                    payload = ModelRuntime._reference_payload(
+                        module=module,
+                        node_module=node_module,
+                        plan=plan,
+                        payload=payload,
                     )
+                payloads.append(payload)
+
+            encoding = encoder(payloads)
+            memory[address] = encoding.memory
+            summary[address] = encoding.summary
+
+            if address in module.schema.embed:
+                predictions.append(
+                    Prediction(
+                        address=address,
+                        payload=TensorDict(
+                            {TensorKey.embedding: encoding.summary},
+                            batch_size=encoding.summary.shape[0],
+                        ),
+                        batch_size=encoding.summary.shape[0],
+                    )
+                )
 
         for address in module.schema.active_requests.keys():
-            has_masked_input = inputs[address].state.eq(Tokens.masked.value).any()
-            if (
-                torch.any(inputs[address].trainable)
-                or (strata == Strata.predict and has_masked_input)
-                or (address in module.schema.target)
-                or (address in module.schema.embed)
-            ):
-                heritage: list[Address] = module.schema.requests[address].heritage
-                parcels: list[Parcel] = [
-                    outgoing[address]
-                    for address in heritage
-                    if address not in module.schema.target and address in outgoing.keys()
-                ]
+            field = inputs[address]
+            if strata == Strata.predict:
+                inferred = field.state.eq(Tokens.masked.value)
+                should_decode = bool(inferred.any()) or address in module.schema.embed
+            else:
+                inferred = field.trainable.bool()
+                should_decode = bool(inferred.any())
+            if not should_decode:
+                continue
 
-                node_module = cast(NodeModule, module.nodes[address])
-                decoder: DecoderBase = node_module.decoder
-                prediction = decoder(parcels, embed=address in module.schema.embed)
-                if Strata.normalize(strata) == Strata.predict:
-                    prediction.payload[TensorKey.inferred] = inputs[address].state.eq(Tokens.masked.value)
-                else:
-                    prediction.payload[TensorKey.inferred] = inputs[address].trainable.bool()
-                predictions.append(prediction)
+            parcels: list[Parcel] = []
+            for plan in execution.decoder_contexts[address]:
+                payload = ModelRuntime._activation(plan, memory=memory, summary=summary)
+                parcels.append(
+                    Parcel(
+                        payload=payload,
+                        origin=plan.address,
+                        destination=address,
+                        batch_size=payload.shape[0],
+                    )
+                )
+
+            node_module = cast(NodeModule, module.nodes[address])
+            decoder: DecoderBase = node_module.decoder
+            prediction = decoder(parcels, embed=address in module.schema.embed)
+            prediction.payload[TensorKey.inferred] = inferred
+            predictions.append(prediction)
 
         return predictions
+
+    @staticmethod
+    def _activation(
+        plan: InputPlan,
+        *,
+        memory: dict[Address, torch.Tensor],
+        summary: dict[Address, torch.Tensor],
+    ) -> torch.Tensor:
+        values = memory if plan.view == "memory" else summary
+        try:
+            return values[plan.address]
+        except KeyError as error:
+            raise RuntimeError(f"compiled {plan.view} for '{plan.address}' was unavailable during forward") from error
+
+    @staticmethod
+    def _reference_payload(
+        *,
+        module: "Model",
+        node_module: NodeModule,
+        plan: InputPlan,
+        payload: torch.Tensor,
+    ) -> torch.Tensor:
+        if plan.reference_id is None:
+            return payload
+
+        reference = module.execution_graph.references[plan.reference_id]
+        if reference.declaration.reduce is not None:
+            payload = ModelRuntime._reduce_reference(
+                module=module,
+                node_module=node_module,
+                reference_id=plan.reference_id,
+                payload=payload,
+            )
+
+        consumer = module.schema.branches[reference.consumer]
+        outer = [ancestor.length for ancestor in consumer.ancestors if getattr(ancestor, "type", None) == "branch"]
+        actual = list(payload.shape[1 : 1 + len(outer)])
+        if actual != outer:
+            raise ValueError(
+                f"reference '{plan.address}' cannot align with branch '{reference.consumer}': "
+                f"expected outer coordinates {outer}, got {actual}"
+            )
+
+        batch = payload.shape[0]
+        channel = payload.shape[-1]
+        return payload.reshape(batch, *outer, -1, channel)
+
+    @staticmethod
+    def _reduce_reference(
+        *,
+        module: "Model",
+        node_module: NodeModule,
+        reference_id: tuple[Address, int],
+        payload: torch.Tensor,
+    ) -> torch.Tensor:
+        plan = module.execution_graph.references[reference_id]
+        reduction = plan.declaration.reduce
+        if reduction is None or not plan.axes:
+            return payload
+
+        middle_count = payload.ndim - 2
+        by_position = {axis.position: axis for axis in plan.axes}
+        input_axes: list[str] = []
+        output_axes: list[str] = []
+        reduced_axes: list[str] = []
+        sizes: dict[str, int] = {}
+
+        for position in range(middle_count):
+            name = f"d{position}"
+            axis = by_position.get(position)
+            if axis is None:
+                input_axes.append(name)
+                output_axes.append(name)
+                sizes[name] = payload.shape[position + 1]
+                continue
+
+            output_name = f"{name}_out"
+            reduce_name = f"{name}_reduce"
+            input_axes.append(f"({output_name} {reduce_name})")
+            output_axes.append(output_name)
+            reduced_axes.append(reduce_name)
+            sizes[output_name] = axis.size
+            sizes[reduce_name] = axis.extent // axis.size
+
+        input_pattern = " ".join(("batch", *input_axes, "channel"))
+        reducer = reduction.reducer
+        if isinstance(reducer, Mean) or isinstance(reducer, str):
+            name = "mean" if isinstance(reducer, Mean) else reducer
+            output_pattern = " ".join(("batch", *output_axes, "channel"))
+            return reduce(
+                payload,
+                f"{input_pattern} -> {output_pattern}",
+                reduction=name,
+                **sizes,
+            )
+
+        kept = output_axes
+        leading = "batch" if not kept else f"(batch {' '.join(kept)})"
+        tokens = reduced_axes[0] if len(reduced_axes) == 1 else f"({' '.join(reduced_axes)})"
+        folded = rearrange(
+            payload,
+            f"{input_pattern} -> {leading} {tokens} channel",
+            **sizes,
+        )
+        module_reducer = node_module.reference_reducers[str(reference_id[1])]
+        aggregated = module_reducer(folded).squeeze(-2)
+        if not kept:
+            return aggregated
+
+        restore_sizes = {"batch": payload.shape[0], **{name: sizes[name] for name in kept}}
+        return rearrange(
+            aggregated,
+            f"(batch {' '.join(kept)}) channel -> batch {' '.join(kept)} channel",
+            **restore_sizes,
+        )
 
     @staticmethod
     def step(

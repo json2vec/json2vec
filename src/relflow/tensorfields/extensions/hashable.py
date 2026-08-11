@@ -11,6 +11,7 @@ import pydantic
 import torch
 from beartype import beartype
 from blake3 import blake3
+from einops import einsum, rearrange, reduce
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
@@ -204,7 +205,7 @@ class Embedder(EmbedderBase):
         offset = request.offset
         n_frequencies = (schema.d_model + 1) // 2
         weights = torch.logspace(start=-n_bands, end=offset, steps=n_frequencies, base=2).mul(math.pi)
-        self.register_buffer("weights", weights.reshape(1, 1, -1))
+        self.register_buffer("weights", weights)
         self.weights: torch.Tensor
 
         self.state_embeddings = torch.nn.Embedding(num_embeddings=len(Tokens), embedding_dim=schema.d_model)
@@ -212,27 +213,28 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N: int
-        dims: list[int]
-
-        N, *dims = inputs.state.shape
-        state = inputs.state.reshape(-1)
-        content = inputs.content.reshape(-1, self.n_hashes)
-        valued = state.eq(Tokens.valued.value)
-
-        normalized = content.to(dtype=self.weights.dtype).div(_HASH_NORMALIZER)
-        weighted = normalized.unsqueeze(-1).mul(self.weights)
-        sinusoidal = torch.stack([torch.sin(weighted), torch.cos(weighted)], dim=-1)
-        sinusoidal = sinusoidal.flatten(start_dim=-2)[..., : self.d_model]
-        content_embeddings = sinusoidal.sum(dim=1)
-        state_embeddings = self.state_embeddings(state)
-        embeddings = torch.where(valued.unsqueeze(-1), content_embeddings, state_embeddings).reshape(N, *dims, -1)
+        normalized = inputs.content.to(dtype=self.weights.dtype).div(_HASH_NORMALIZER)
+        weighted = einsum(
+            normalized,
+            self.weights,
+            "... hash, frequency -> ... hash frequency",
+        )
+        sinusoidal = rearrange(
+            torch.stack((weighted.sin(), weighted.cos()), dim=-1),
+            "... hash frequency trig -> ... hash (frequency trig)",
+        )[..., : self.d_model]
+        content = reduce(sinusoidal, "... hash channel -> ... channel", "sum")
+        embeddings = torch.where(
+            inputs.state.eq(Tokens.valued.value)[..., None],
+            content,
+            self.state_embeddings(inputs.state),
+        )
 
         return Parcel(
             payload=embeddings,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
 
@@ -268,10 +270,9 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-    N: int = batch.targets[TensorKey.state].numel()
-    trainable = batch.trainable.reshape(N)
-    state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
-    state_targets = batch.targets[TensorKey.state].reshape(N)
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    state_inputs = rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes")
+    state_targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
@@ -300,8 +301,13 @@ def loss(
     n_buckets: int = request.n_buckets
 
     # Per-hash categorical over deterministic quantile buckets.
-    inputs = prediction.payload[TensorKey.content].reshape(N * n_hashes, n_buckets)
-    raw_targets = batch.targets[TensorKey.content].reshape(N, n_hashes)
+    inputs = rearrange(
+        prediction.payload[TensorKey.content],
+        "... (hash bucket) -> (... hash) bucket",
+        hash=n_hashes,
+        bucket=n_buckets,
+    )
+    raw_targets = rearrange(batch.targets[TensorKey.content], "... hash -> (...) hash")
     bucket_targets = (
         raw_targets.to(dtype=torch.get_default_dtype())
         .div(_HASH_NORMALIZER)
@@ -310,31 +316,26 @@ def loss(
         .floor()
         .long()
         .clamp(min=0, max=n_buckets - 1)
-        .reshape(N * n_hashes)
     )
+    bucket_targets = rearrange(bucket_targets, "slot hash -> (slot hash)")
 
     per_hash_ce = torch.nn.functional.cross_entropy(
         input=inputs,
         target=bucket_targets,
         reduction="none",
     )
+    per_slot_ce = rearrange(per_hash_ce, "(slot hash) -> slot hash", hash=n_hashes)
 
     loss += module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),
-        value=(per_hash_ce.reshape(N, n_hashes).mean(dim=-1).masked_select(valued).mean()),
+        value=per_slot_ce.mean(dim=-1).masked_select(valued).mean(),
     )
 
+    per_hash_accuracy = inputs.argmax(dim=-1).eq(bucket_targets).float()
+    per_slot_accuracy = rearrange(per_hash_accuracy, "(slot hash) -> slot hash", hash=n_hashes)
     module.track(
         (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=(
-            inputs.argmax(dim=-1)
-            .eq(bucket_targets)
-            .float()
-            .reshape(N, n_hashes)
-            .mean(dim=-1)
-            .masked_select(valued)
-            .mean()
-        ),
+        value=per_slot_accuracy.mean(dim=-1).masked_select(valued).mean(),
     )
 
     return loss

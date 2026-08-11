@@ -14,6 +14,7 @@ from relflow.structs import experiment, selectors
 def _model() -> rf.Model:
     return rf.Model(
         rf.Number(name="amount"),
+        rf.Number(name="context"),
         rf.Category(name="label", target=True, size=4),
         d_model=8,
         n_layers=1,

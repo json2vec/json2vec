@@ -28,6 +28,7 @@ private/
 *.ckpt
 
 /specs
-/benchmarks
+/benchmarks/*
+!/benchmarks/hash_transfer.py
 
 /.quarto/

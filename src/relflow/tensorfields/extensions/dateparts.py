@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import difflib
 import enum
-import math
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
@@ -12,6 +11,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from einops import rearrange
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
@@ -367,20 +367,17 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N, *dims = inputs.state.shape
-        D = math.prod(tuple([N, *dims]))
-
-        embeddings: torch.Tensor = self.embeddings(inputs.state.reshape(D))
+        embeddings: torch.Tensor = self.embeddings(inputs.state)
 
         for datepart in self.dateparts:
             projection: torch.nn.Linear = self.dateparts[datepart]
-            embeddings = embeddings + projection(inputs.content[datepart].reshape(D, 2))
+            embeddings = embeddings + projection(inputs.content[datepart])
 
         return Parcel(
-            payload=embeddings.reshape(N, *dims, -1),
+            payload=embeddings,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
 
@@ -420,16 +417,16 @@ def loss(
     batch: TensorFieldBase,
     strata: Strata,
 ) -> torch.Tensor:
-    numel: int = batch.targets[TensorKey.state].numel()
-
-    trainable = batch.trainable.reshape(numel)
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    inputs = rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes")
+    targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
-                input=(inputs := prediction.payload[TensorKey.state].reshape(numel, -1)),
-                target=(targets := batch.targets[TensorKey.state].reshape(numel)),
+                input=inputs,
+                target=targets,
                 reduction="none",
             )
             .masked_select(mask=trainable)
@@ -447,8 +444,8 @@ def loss(
     losses: list[torch.Tensor] = []
 
     for datepart in request.dateparts:
-        pred_raw: torch.Tensor = prediction.payload[TensorKey.content][datepart].reshape(numel, 2)
-        target: torch.Tensor = batch.targets[TensorKey.content][datepart].reshape(numel, 2)
+        pred_raw = rearrange(prediction.payload[TensorKey.content][datepart], "... feature -> (...) feature")
+        target = rearrange(batch.targets[TensorKey.content][datepart], "... feature -> (...) feature")
 
         pred: torch.Tensor = pred_raw / pred_raw.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         cosine: torch.Tensor = (pred * target).sum(dim=-1)

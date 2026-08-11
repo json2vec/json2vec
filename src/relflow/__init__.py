@@ -47,11 +47,14 @@ from relflow.structs.enums import (
 from relflow.structs.experiment import (
     NodeAttribute,
     NodePredicate,
+    NodeSelector,
     Schema,
     SchemaField,
     predicate,
     where,
 )
+from relflow.structs.pooling import Attention, Convolution, Mean, PoolingConfig
+from relflow.structs.reference import AxisName, AxisResize, Reduce, Reference
 from relflow.structs.structure import Branch, Mask
 from relflow.structs.tree import Address, Leaf
 from relflow.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
@@ -110,11 +113,15 @@ def __dir__() -> list[str]:
 __all__ = [
     "Address",
     "Accelerator",
+    "Attention",
+    "AttentionMode",
+    "AxisName",
+    "AxisResize",
     "Branch",
     "Boolean",
-    "AttentionMode",
     "Category",
     "Component",
+    "Convolution",
     "CustomDataModule",
     "DateParts",
     "DecoderBase",
@@ -130,17 +137,20 @@ __all__ = [
     "MASK_LITERAL",
     "Mask",
     "MaskLiteral",
+    "Mean",
     "Metadata",
     "Model",
     "ModelSource",
     "MutationLockCallback",
     "NodeAttribute",
     "NodePredicate",
+    "NodeSelector",
     "Number",
     "Observation",
     "OptimizerConfig",
     "Overflow",
     "Plugin",
+    "PoolingConfig",
     "PolarsDataModule",
     "Postprocessor",
     "PostprocessorProvider",
@@ -150,6 +160,8 @@ __all__ = [
     "PreprocessorProvider",
     "RawBatch",
     "RawObservation",
+    "Reduce",
+    "Reference",
     "RequestBase",
     "RollbackCheckpoint",
     "RuntimePlacementCallback",

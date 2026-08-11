@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, overload
 
 import pydantic
 
 from relflow.structs.structure import Branch
-from relflow.structs.tree import Leaf, Node
+from relflow.structs.tree import Address, Leaf, Node
 
 SelectionKey: TypeAlias = tuple[Any, ...]
 SchemaField: TypeAlias = Branch | Leaf
@@ -43,6 +43,13 @@ class NodePredicate(pydantic.BaseModel):
         if isinstance(value, cls):
             return value
 
+        if isinstance(value, str):
+            address = str(value)
+            return cls(
+                func=lambda node: str(node.address) == address,
+                key=("eq", "address", address),
+            )
+
         if isinstance(value, NodeAttribute):
             return cls(
                 func=lambda node: _has_model_attribute(node, value.name) and value.get(node) is True,
@@ -50,7 +57,7 @@ class NodePredicate(pydantic.BaseModel):
             )
 
         if not callable(value):
-            raise TypeError("node predicates must be where(...) expressions or callables")
+            raise TypeError("node selectors must be exact addresses, where(...) expressions, or callables")
 
         return cls(
             func=value,
@@ -184,7 +191,7 @@ class NodeAttribute(pydantic.BaseModel):
         regex = re.compile(pattern) if isinstance(pattern, str) else pattern
         return NodePredicate(
             func=lambda node: regex.search(str(self.get(node, ""))) is not None,
-            key=("matches", self.name, regex.pattern),
+            key=("matches", self.name, regex.pattern, regex.flags),
         )
 
     def contains(self, value: Any) -> NodePredicate:
@@ -218,12 +225,40 @@ class NodeAttribute(pydantic.BaseModel):
         )
 
 
-def where(name: str) -> NodeAttribute:
-    """Start a schema predicate against a node attribute."""
+_MISSING = object()
+
+
+@overload
+def where(name: str, /) -> NodeAttribute: ...
+
+
+@overload
+def where(*, address: str | Address) -> NodePredicate: ...
+
+
+def where(
+    name: str | object = _MISSING,
+    /,
+    *,
+    address: str | Address | object = _MISSING,
+) -> NodeAttribute | NodePredicate:
+    """Start an attribute predicate or select one exact schema address."""
+    if name is not _MISSING and address is not _MISSING:
+        raise TypeError("where accepts either a positional attribute name or address=, not both")
+    if name is _MISSING and address is _MISSING:
+        raise TypeError("where requires a positional attribute name or address=")
+
+    if address is not _MISSING:
+        if not isinstance(address, str):
+            raise TypeError("where(address=...) requires a string or Address")
+        return NodeAttribute.named("address") == str(address)
+
+    if not isinstance(name, str):
+        raise TypeError("where attribute names must be strings")
     return NodeAttribute.named(name)
 
 
-NodeSelector: TypeAlias = NodePredicate | NodeAttribute | Callable[[Node], bool]
+NodeSelector: TypeAlias = str | Address | NodePredicate | NodeAttribute | Callable[[Node], bool]
 ExtendArg: TypeAlias = NodeSelector | SchemaField
 
 

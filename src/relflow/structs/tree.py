@@ -5,7 +5,7 @@ import io
 import re
 from abc import ABC
 from collections.abc import Mapping
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, TypeAlias
 
 import jmespath
 import pydantic
@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.text import Text
 
 from relflow.structs.enums import Overflow
+from relflow.structs.pooling import Attention, PoolingConfig
 
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
 PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
@@ -191,11 +192,10 @@ class Leaf(Node):
     type: str
     query: str | None = None
     nullable: bool = True
-    pooling: Literal["query", "mean"] = "query"
+    pooling: PoolingConfig = pydantic.Field(default_factory=Attention)
     weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
     p_mask: Rate = 0.0
     p_prune: PruneRate = 0.0
-    n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
 
     def __init__(self, name: str | None = None, **data: Any):
         if name is not None:
@@ -223,6 +223,11 @@ class Leaf(Node):
             return data
 
         values = dict(data)
+        removed = sorted({"n_linear", "reference", "references"}.intersection(values))
+        if removed:
+            names = ", ".join(removed)
+            raise ValueError(f"unsupported tensorfield option(s): {names}")
+
         target = values.pop("target", None)
 
         if target is None:
@@ -319,7 +324,7 @@ class Leaf(Node):
             heading.append(self.query, style="cyan")
         yield heading
 
-        common_names = ("pooling", "weight", "p_mask", "p_prune", "n_heads", "n_linear", "dropout")
+        common_names = ("pooling", "weight", "p_mask", "p_prune", "n_heads", "dropout")
         common = Text()
         first = True
         for name in common_names:
@@ -328,6 +333,8 @@ class Leaf(Node):
                 continue
             if isinstance(value, float) and value.is_integer():
                 value = int(value)
+            elif name == "pooling":
+                value = value.type
             elif hasattr(value, "value"):
                 value = value.value
             if not first:

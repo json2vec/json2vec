@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,14 +24,14 @@ from relflow.architecture.root import Model
 from relflow.data.iterables import JMESPathResolutionMonitor, encode
 from relflow.data.processors import Postprocessor, Preprocessor
 from relflow.structs.enums import Strata, TensorKey
-from relflow.structs.experiment import NodeAttribute, NodePredicate
+from relflow.structs.experiment import NodeSelector
 from relflow.structs.packages import Prediction
-from relflow.structs.tree import Address, Node
+from relflow.structs.tree import Address
 from relflow.tensorfields.base import TensorFieldBase
 
 Input: TypeAlias = TensorDict[Address, TensorFieldBase]
 ModelSource: TypeAlias = str | Path | Model
-UpdateOperation: TypeAlias = tuple[tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...], dict[str, Any]]
+UpdateOperation: TypeAlias = tuple[tuple[NodeSelector, ...], dict[str, Any]]
 
 
 class Accelerator(StrEnum):
@@ -530,7 +529,7 @@ class Deployment(BaseSettings):
     @beartype
     def update(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,

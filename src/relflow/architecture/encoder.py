@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
+from einops import pack, rearrange, unpack
 
 from relflow.architecture.attention import RotaryMultiheadAttention
-from relflow.architecture.pool import LearnedQueryCrossAttention
+from relflow.architecture.pool import ConvolutionPool, LearnedQueryCrossAttention
 from relflow.structs.enums import AttentionMode
 from relflow.structs.packages import Parcel
+from relflow.structs.pooling import Attention, Convolution, Mean
 from relflow.structs.tree import Address
 
 if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
+
+
+@dataclass(frozen=True)
+class BranchEncoding:
+    """Full Branch memory plus its pooled structural summary."""
+
+    memory: torch.Tensor
+    summary: torch.Tensor
 
 
 class RotaryTransformerEncoderLayer(torch.nn.Module):
@@ -75,31 +86,50 @@ class BranchEncoder(torch.nn.Module):
 
         self.encoder = torch.nn.ModuleList(layers)
 
-        self.pool = LearnedQueryCrossAttention(
-            n_context=1,
-            d_model=schema.d_model,
-            nhead=branch.n_heads,
-            dropout=dropout,
-            n_linear=branch.n_linear,
-        )
+        self.pool_width = branch.pooling.width or 1
+        match branch.pooling:
+            case Mean():
+                self.pool: torch.nn.Module | None = None
+            case Attention():
+                self.pool = LearnedQueryCrossAttention(
+                    n_context=self.pool_width,
+                    d_model=schema.d_model,
+                    nhead=branch.pooling.n_heads or branch.n_heads,
+                    dropout=float(branch.pooling.dropout if branch.pooling.dropout is not None else dropout),
+                    n_layers=branch.pooling.n_layers,
+                )
+            case Convolution():
+                self.pool = ConvolutionPool(
+                    width=self.pool_width,
+                    d_model=schema.d_model,
+                    kernel_size=branch.pooling.kernel_size,
+                    n_layers=branch.pooling.n_layers,
+                    dropout=float(branch.pooling.dropout if branch.pooling.dropout is not None else dropout),
+                )
+            case _:
+                raise ValueError(f"unsupported branch pooling: {branch.pooling}")
 
-    def forward(self, parcels: list[Parcel]) -> Parcel:
-        payloads: list[torch.Tensor] = []
-        for parcel in parcels:
-            payloads.append(parcel.payload)
+    def forward(self, inputs: list[Parcel] | list[torch.Tensor]) -> BranchEncoding:
+        payloads = [item.payload if isinstance(item, Parcel) else item for item in inputs]
+        if not payloads:
+            raise ValueError("branch encoder requires at least one input")
 
-        concatenated: torch.Tensor = torch.cat(payloads, dim=-2)
-        N, *dims, L, C = concatenated.shape
-        encoded: torch.Tensor = concatenated.reshape(-1, L, C)
+        concatenated = torch.cat(payloads, dim=-2)
+        encoded, leading_shape = pack([concatenated], "* token channel")
 
         for layer in self.encoder:
             encoded = layer(encoded)
 
-        pooled: torch.Tensor = self.pool(encoded).reshape(N, *dims[:-1], -1, C)
-
-        return Parcel(
-            payload=pooled,
-            origin=self.origin,
-            destination=self.destination,
-            batch_size=N,
+        [memory] = unpack(encoded, leading_shape, "* token channel")
+        pooled_flat = encoded.mean(dim=-2, keepdim=True) if self.pool is None else self.pool(encoded)
+        [pooled] = unpack(pooled_flat, leading_shape, "* width channel")
+        summary = (
+            rearrange(
+                pooled,
+                "batch ... coordinate width channel -> batch ... (coordinate width) channel",
+            )
+            if pooled.ndim > 3
+            else pooled
         )
+
+        return BranchEncoding(memory=memory, summary=summary)

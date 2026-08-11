@@ -14,6 +14,8 @@ from anytree import LevelOrderGroupIter, PreOrderIter
 from rich.text import Text
 
 from relflow.structs.enums import AttentionMode, Overflow
+from relflow.structs.pooling import Attention, PoolingConfig
+from relflow.structs.reference import Reference
 from relflow.structs.selectors import (
     ExtendArg,
     NodeAttribute,
@@ -93,6 +95,11 @@ class Schema(Node):
     @classmethod
     def update_values(cls, values: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(values)
+        if "address" in normalized:
+            raise ValueError("address is derived and cannot be updated; pass an exact address as a positional selector")
+        if "n_linear" in normalized:
+            raise ValueError("n_linear was removed; use pooling=Attention(n_layers=...)")
+
         target = normalized.get("target", None)
 
         if target is None:
@@ -175,11 +182,15 @@ class Schema(Node):
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
-        n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
+        pooling: PoolingConfig = Attention(),
+        reference: Reference | tuple[Reference, ...] = (),
         dropout: Rate | None = None,
         **field_kwargs: TreeFieldInput,
     ) -> Self:
         """Build schema from tree fields."""
+        if "n_linear" in field_kwargs:
+            raise ValueError("n_linear was removed; use pooling=Attention(n_layers=...)")
+
         normalized = [
             *(bind_tree_field(None, field) for field in (fields or ())),
             *(bind_tree_field(None, field) for field in field_args),
@@ -211,7 +222,8 @@ class Schema(Node):
             attention=attention,
             n_layers=n_layers,
             n_heads=n_heads,
-            n_linear=n_linear,
+            pooling=pooling,
+            reference=reference,
             length=1,
             overflow=Overflow.error,
             dropout=dropout,
@@ -276,6 +288,16 @@ class Schema(Node):
     def shapes(self) -> dict[Address, tuple[int, ...]]:
         return {request.address: request.shape for request in self.requests.values()}
 
+    @functools.cached_property
+    def summary_shapes(self) -> dict[Address, tuple[int, ...]]:
+        """Routed Branch summary coordinates, excluding batch and channel."""
+        shapes: dict[Address, tuple[int, ...]] = {}
+        for address, branch in self.branches.items():
+            outer = tuple(ancestor.length for ancestor in branch.ancestors if isinstance(ancestor, Branch))
+            width = branch.pooling.width or 1
+            shapes[address] = (width,) if not outer else (*outer[:-1], outer[-1] * width)
+        return shapes
+
     def overflows(self, address: Address) -> tuple[Overflow, ...]:
         return (Overflow.error, *self.requests[Address(str(address))].overflows)
 
@@ -301,8 +323,23 @@ class Schema(Node):
 
         return out
 
+    @functools.cached_property
+    def execution_graph(self):
+        """Compiled structural and Reference routing for this bound schema."""
+        from relflow.architecture.execution import compile_execution_graph
+
+        return compile_execution_graph(self)
+
     def _clear_tree_caches(self) -> None:
-        for name in ("branches", "requests", "active_requests", "shapes", "depthwise"):
+        for name in (
+            "branches",
+            "requests",
+            "active_requests",
+            "shapes",
+            "summary_shapes",
+            "depthwise",
+            "execution_graph",
+        ):
             self.__dict__.pop(name, None)
 
         for node in PreOrderIter(self.fields):
@@ -331,8 +368,53 @@ class Schema(Node):
         for branch in self.branches.values():
             branch.post_bind_validate()
 
+            if self.d_model % branch.n_heads != 0 or self.d_model // branch.n_heads < 2:
+                raise ValueError(
+                    f"branch '{branch.address}' requires n_heads to divide d_model "
+                    "with at least two dimensions per head"
+                )
+
+            if isinstance(branch.pooling, Attention):
+                n_heads = branch.pooling.n_heads or branch.n_heads
+                if self.d_model % n_heads != 0 or self.d_model // n_heads < 2:
+                    raise ValueError(
+                        f"branch '{branch.address}' Attention pooling requires n_heads to divide "
+                        "d_model with at least two dimensions per head"
+                    )
+
+            references = (branch.reference,) if isinstance(branch.reference, Reference) else branch.reference
+            for index, reference in enumerate(references):
+                if reference.reduce is None or not isinstance(reference.reduce.reducer, Attention):
+                    continue
+                n_heads = reference.reduce.reducer.n_heads or branch.n_heads
+                if self.d_model % n_heads != 0 or self.d_model // n_heads < 2:
+                    raise ValueError(
+                        f"branch '{branch.address}' reference[{index}] Attention reduction requires "
+                        "n_heads to divide d_model with at least two dimensions per head"
+                    )
+
         for request in self.requests.values():
             request.post_bind_validate()
+
+            width = request.pooling.width
+            expected_width = 1
+            for dimension in request.shape:
+                expected_width *= dimension
+            if width is not None and width != expected_width:
+                raise ValueError(
+                    f"request '{request.address}' pooling width must equal flattened schema size {expected_width}"
+                )
+
+            if isinstance(request.pooling, Attention):
+                n_heads = request.pooling.n_heads or request.n_heads
+                if self.d_model % n_heads != 0 or self.d_model // n_heads < 2:
+                    raise ValueError(
+                        f"request '{request.address}' Attention pooling requires n_heads to divide "
+                        "d_model with at least two dimensions per head"
+                    )
+
+        # These invariants need the complete, fully bound tree.
+        self.execution_graph
 
     def select(
         self,
@@ -389,6 +471,8 @@ class Schema(Node):
             raise ValueError("update requires at least one field value")
 
         nodes = self.select(*predicates, include_root=include_root, use_cache=use_cache)
+        prepared: list[tuple[Node, dict[str, Any]]] = []
+        snapshot: list[tuple[Node, str, Any, bool]] = []
         for node in nodes:
             can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
             missing = [name for name in values if not _has_model_attribute(node, name) and not can_apply_extra]
@@ -410,14 +494,46 @@ class Schema(Node):
                 validated = type(node).model_validate(payload)
                 applicable_values = {name: getattr(validated, name) for name in applicable_values}
 
-            for name, value in applicable_values.items():
-                setattr(node, name, value)
-                if name in getattr(type(node), "model_fields", {}):
-                    node.model_fields_set.add(name)
+            prepared.append((node, applicable_values))
+            for name in applicable_values:
+                storage_name = "p_prune" if name == "target" else name
+                snapshot.append(
+                    (
+                        node,
+                        storage_name,
+                        getattr(node, storage_name, _MISSING),
+                        storage_name in getattr(node, "model_fields_set", set()),
+                    )
+                )
 
-        self._clear_tree_caches()
-        self._post_bind_validate()
-        self.refresh_selection_cache()
+        selection_cache = dict(self._selection_cache)
+        try:
+            for node, applicable_values in prepared:
+                for name, value in applicable_values.items():
+                    setattr(node, name, value)
+                    if name in getattr(type(node), "model_fields", {}):
+                        node.model_fields_set.add(name)
+
+            self._clear_tree_caches()
+            self._post_bind_validate()
+            self.refresh_selection_cache()
+        except Exception:
+            for node, name, original, was_set in reversed(snapshot):
+                if original is _MISSING:
+                    if getattr(node, name, _MISSING) is not _MISSING:
+                        delattr(node, name)
+                else:
+                    setattr(node, name, original)
+                if name in getattr(type(node), "model_fields", {}):
+                    if was_set:
+                        node.model_fields_set.add(name)
+                    else:
+                        node.model_fields_set.discard(name)
+
+            self._clear_tree_caches()
+            self._post_bind_validate()
+            self._selection_cache = selection_cache
+            raise
 
     def extend(
         self,
@@ -522,22 +638,34 @@ class Schema(Node):
         if not remaining_request_addresses:
             raise ValueError("delete would remove every request")
 
-        remaining_branch_addresses = {address for address in self.branches if address not in removed_addresses}
-        for address in remaining_branch_addresses:
-            prefix = f"{address}/"
-            if not any(str(request_address).startswith(prefix) for request_address in remaining_request_addresses):
-                raise ValueError(f"delete would leave branch '{address}' without request descendants")
-
+        parent_fields: dict[int, tuple[Branch, list[Branch | RequestTypes]]] = {}
         for node in roots:
             parent = node.parent
             if not isinstance(parent, Branch):
                 raise ValueError(f"delete cannot remove '{node.address}' because it has no branch parent")
-            parent.fields = [field for field in parent.fields if field is not node]
-            node.parent = None
+            parent_fields.setdefault(id(parent), (parent, list(parent.fields)))
 
-        self._clear_tree_caches()
-        self._post_bind_validate()
-        self.refresh_selection_cache()
+        selection_cache = dict(self._selection_cache)
+        try:
+            for node in roots:
+                parent = node.parent
+                if not isinstance(parent, Branch):  # pragma: no cover - checked above
+                    raise RuntimeError("delete parent changed during mutation")
+                parent.fields = [field for field in parent.fields if field is not node]
+                node.parent = None
+
+            self._clear_tree_caches()
+            self._post_bind_validate()
+            self.refresh_selection_cache()
+        except Exception:
+            for parent, fields in parent_fields.values():
+                parent.children = ()
+                parent.fields = fields
+                parent.children = tuple(fields)
+            self._clear_tree_caches()
+            self._post_bind_validate()
+            self._selection_cache = selection_cache
+            raise
 
     @contextmanager
     def override(

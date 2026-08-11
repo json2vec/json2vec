@@ -9,6 +9,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from einops import pack, rearrange, unpack
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
@@ -293,34 +294,32 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N, *dims = inputs.state.shape
-        D = math.prod(tuple([N, *dims]))
-
-        state = inputs.state.reshape(D)
-        content = inputs.content.reshape(D)
+        state = inputs.state
+        content = inputs.content
 
         content = self.normalizer(inputs=content, mask=state.eq(Tokens.valued))
 
         if self.training:
-            content = jitter(content, jitter_amount=self.jitter)
+            flat_content, slot_shape = pack([content], "*")
+            flat_content = jitter(flat_content, jitter_amount=self.jitter)
+            [content] = unpack(flat_content, slot_shape, "*")
 
         content = self.clamp(content=content, state=state)
 
         # weight inputs with buffers of precision bands
-        weighted = content.unsqueeze(dim=1).mul(self.weights)
+        weighted = content[..., None].mul(self.weights)
 
         # apply sine and cosine functions to weighted inputs
-        fourier = torch.cat([torch.sin(weighted), torch.cos(weighted)], dim=1)
+        fourier = torch.cat((weighted.sin(), weighted.cos()), dim=-1)
 
-        projection = torch.nn.functional.gelu(self.linear(fourier)).reshape(N, *dims, -1)
-
-        embeddings = self.embeddings(state).reshape(N, *dims, -1)
+        projection = torch.nn.functional.gelu(self.linear(fourier))
+        embeddings = self.embeddings(state)
 
         return Parcel(
             payload=embeddings + projection,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
 
@@ -355,16 +354,14 @@ def loss(
     embedder: Embedder = module.nodes[address].embedder
     normalizer: GlobalOnlineNormalizer = embedder.normalizer
 
-    N: int = batch.targets[TensorKey.state].numel()
-
-    trainable: torch.Tensor = batch.trainable.reshape(N)
-    state_targets = batch.targets[TensorKey.state].reshape(N)
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    state_targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
 
     loss: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
-                input=prediction.payload[TensorKey.state].reshape(N, -1),
+                input=rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes"),
                 target=state_targets,
                 weight=embedder.counter.weight,
                 reduction="none",
@@ -374,8 +371,8 @@ def loss(
         ),
     )
 
-    target: torch.Tensor = batch.targets[TensorKey.content].reshape(N)
-    inputs: torch.Tensor = prediction.payload[TensorKey.content].reshape(N)
+    target = rearrange(batch.targets[TensorKey.content], "... -> (...)")
+    inputs = rearrange(prediction.payload[TensorKey.content], "... 1 -> (...)")
     diff: torch.Tensor = inputs.subtract(target)
 
     loss += module.track(

@@ -15,7 +15,7 @@ from loguru import logger
 
 from relflow.architecture.graph import ModelGraph
 from relflow.structs.enums import Strata
-from relflow.structs.experiment import NodeAttribute, NodePredicate, SchemaField
+from relflow.structs.experiment import NodeSelector, SchemaField
 from relflow.structs.structure import Branch
 from relflow.structs.tree import Leaf, Node
 
@@ -120,7 +120,7 @@ class SchemaEditor:
 
     def select(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool = True,
         use_cache: bool = True,
     ) -> list[Node]:
@@ -132,7 +132,7 @@ class SchemaEditor:
 
     def update(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,
@@ -164,7 +164,7 @@ class SchemaEditor:
 
     def extend(
         self,
-        *args: NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField,
+        *args: NodeSelector | SchemaField,
         include_root: bool = True,
         use_cache: bool = True,
     ) -> None:
@@ -183,7 +183,7 @@ class SchemaEditor:
 
     def delete(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool = False,
         use_cache: bool = True,
     ) -> None:
@@ -202,7 +202,7 @@ class SchemaEditor:
 
     def reset(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool = True,
         use_cache: bool = True,
         descendants: bool = False,
@@ -230,7 +230,7 @@ class SchemaEditor:
     @contextmanager
     def override(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         strict: bool = True,
         allow_extra: bool = False,
         include_root: bool = True,
@@ -273,7 +273,7 @@ class SchemaEditor:
         self,
         *,
         values: dict[str, Any],
-        predicates: tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...],
+        predicates: tuple[NodeSelector, ...],
         allow_extra: bool,
         include_root: bool,
         use_cache: bool,
@@ -302,11 +302,11 @@ class SchemaEditor:
 
     def _extend_target(
         self,
-        *args: NodePredicate | NodeAttribute | Callable[[Node], bool] | SchemaField,
+        *args: NodeSelector | SchemaField,
         include_root: bool,
         use_cache: bool,
     ) -> tuple[Branch, int]:
-        predicates: list[NodePredicate | NodeAttribute | Callable[[Node], bool]] = []
+        predicates: list[NodeSelector] = []
         field_count = 0
         reading_fields = False
 
@@ -336,7 +336,7 @@ class SchemaEditor:
 
     def _delete_roots(
         self,
-        *predicates: NodePredicate | NodeAttribute | Callable[[Node], bool],
+        *predicates: NodeSelector,
         include_root: bool,
         use_cache: bool,
     ) -> list[Node]:

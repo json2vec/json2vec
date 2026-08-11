@@ -6,6 +6,8 @@ import pydantic
 from rich.text import Text
 
 from relflow.structs.enums import AttentionMode, Overflow
+from relflow.structs.pooling import Attention, Mean, PoolingConfig
+from relflow.structs.reference import Reference
 from relflow.structs.tree import Leaf, Node, Rate
 from relflow.tensorfields import extensions as _extensions  # noqa: F401
 from relflow.tensorfields.base import TENSORFIELDS
@@ -82,14 +84,19 @@ class Branch(Node):
     attention: AttentionMode = AttentionMode.mha
     length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     overflow: Overflow = Overflow.head
-    n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    pooling: PoolingConfig = pydantic.Field(default_factory=Attention)
+    reference: Reference | tuple[Reference, ...] = ()
     masks: list[Mask] = pydantic.Field(default_factory=list)
     fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)
 
     def __init__(self, *children: Self | RequestTypes | Leaf, **data):
         if "max_length" in data:
             raise ValueError("max_length was removed; use length")
+        if "n_linear" in data:
+            raise ValueError("n_linear was removed; use pooling=Attention(n_layers=...)")
+        if "references" in data:
+            raise ValueError("references was removed; use the singular reference field")
 
         if data.get("type") not in (None, "branch"):
             super().__init__(**data)
@@ -120,6 +127,10 @@ class Branch(Node):
         values = dict(data)
         if "max_length" in values:
             raise ValueError("max_length was removed; use length")
+        if "n_linear" in values:
+            raise ValueError("n_linear was removed; use pooling=Attention(n_layers=...)")
+        if "references" in values:
+            raise ValueError("references was removed; use the singular reference field")
 
         mask = values.pop("mask", None)
         if mask is None:
@@ -130,6 +141,30 @@ class Branch(Node):
 
         values["masks"] = [mask]
         return values
+
+    @pydantic.field_validator("reference", mode="before")
+    @classmethod
+    def normalize_references(cls, value: Any) -> Any:
+        if value is None:
+            raise TypeError("reference must be a Reference or tuple of References")
+        if isinstance(value, (list, tuple)):
+            references = tuple(value)
+            if not references:
+                return ()
+            if len(references) == 1:
+                return references[0]
+            return references
+        return value
+
+    @pydantic.field_serializer("reference")
+    def serialize_references(self, value: Reference | tuple[Reference, ...], info: pydantic.SerializationInfo):
+        references = (value,) if isinstance(value, Reference) else value
+        dumped = [reference.model_dump(mode=info.mode, round_trip=info.round_trip) for reference in references]
+        if not dumped:
+            return []
+        if len(dumped) == 1:
+            return dumped[0]
+        return dumped
 
     def model_post_init(self, __context):
         for field in self.fields:
@@ -146,6 +181,9 @@ class Branch(Node):
         return self
 
     def post_bind_validate(self):
+        if isinstance(self.pooling, Mean) and self.pooling.width not in (None, 1):
+            raise ValueError(f"branch '{self.address}' Mean pooling width must be 1")
+
         if len(self.masks) == 0:
             return None
 
@@ -195,7 +233,7 @@ class Branch(Node):
     def __rich_console__(self, console, options):
         is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
         display_type = "root" if is_root else self.type
-        attributes = ("attention", "n_layers", "n_heads", "n_linear", "dropout")
+        attributes = ("attention", "n_layers", "n_heads", "pooling", "dropout")
         if not is_root:
             attributes = ("length", "overflow", *attributes)
 
@@ -212,6 +250,8 @@ class Branch(Node):
                 continue
             if isinstance(value, float) and value.is_integer():
                 value = int(value)
+            elif name == "pooling":
+                value = value.type
             elif hasattr(value, "value"):
                 value = value.value
             heading.append(" ")

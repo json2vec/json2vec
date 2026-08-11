@@ -47,6 +47,7 @@ class ModelGraph:
 
     @staticmethod
     def install(module: "Model") -> None:
+        module.execution_graph = module.schema.execution_graph
         module.nodes, module.example_input_array = ModelGraph.build(
             schema=module.schema,
             batch_size=module.batch_size,

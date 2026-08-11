@@ -8,6 +8,7 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from einops import rearrange
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
@@ -240,30 +241,25 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N: int
-        dims: list[int]
-
-        N, *dims, n_tokens = inputs.content.shape
+        n_tokens = inputs.content.shape[-1]
         if n_tokens != self.size:
             raise ValueError(f"Set in address {self.origin} has invalid vocabulary width")
 
-        state = inputs.state.reshape(-1)
-        content = inputs.content.reshape(-1, n_tokens)
+        state = inputs.state
+        content = inputs.content
         valued = state.eq(Tokens.valued.value)
 
         weights = cast(torch.nn.Embedding, self.embeddings[TensorKey.content.name]).weight
         counts = content.sum(dim=-1, keepdim=True).clamp_min(1.0)
         content_embedding = content.to(dtype=weights.dtype).matmul(weights) / counts
 
-        embeddings: torch.Tensor = (
-            self.embeddings[TensorKey.state.name](state) + content_embedding * valued.unsqueeze(-1)
-        ).reshape(N, *dims, -1)
+        embeddings: torch.Tensor = self.embeddings[TensorKey.state.name](state) + content_embedding * valued[..., None]
 
         return Parcel(
             payload=embeddings,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
     @property
@@ -309,11 +305,9 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     embedder: Embedder = module.nodes[prediction.address].embedder
-    N: int = batch.targets[TensorKey.state].numel()
-    trainable = batch.trainable.reshape(N)
-
-    state_inputs = prediction.payload[TensorKey.state].reshape(N, -1)
-    state_targets = batch.targets[TensorKey.state].reshape(N)
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    state_inputs = rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes")
+    state_targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
@@ -338,14 +332,14 @@ def loss(
     if not valued.any():
         return loss
 
-    content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
-    content_targets = batch.targets[TensorKey.content].reshape(N, -1)
+    content_inputs = rearrange(prediction.payload[TensorKey.content], "... classes -> (...) classes")
+    content_targets = rearrange(batch.targets[TensorKey.content], "... classes -> (...) classes")
 
     loss += module.track(
         (prediction.address, strata, Metric.loss, TensorKey.content),
         value=torch.nn.functional.binary_cross_entropy_with_logits(
-            input=content_inputs.masked_select(valued.unsqueeze(1)).reshape(-1, content_inputs.shape[-1]),
-            target=content_targets.masked_select(valued.unsqueeze(1)).reshape(-1, content_targets.shape[-1]),
+            input=content_inputs[valued],
+            target=content_targets[valued],
         ),
     )
 

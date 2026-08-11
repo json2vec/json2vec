@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import enum
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
 import pydantic
 import torch
 from beartype import beartype
+from einops import pack, rearrange, unpack
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
@@ -299,17 +299,15 @@ class Embedder(EmbedderBase):
         content: TensorDict[str, torch.Tensor],
         state: torch.Tensor,
     ) -> torch.Tensor:
-        N, *dims = state.shape
-        D = math.prod((N, *dims))
+        flat_ids, documents = pack([content[INPUT_IDS]], "* token")
+        flat_mask, _ = pack([content[ATTENTION_MASK]], "* token")
+        flat_state, _ = pack([state], "*")
 
-        flat_state = state.reshape(D)
-        flat_ids = content[INPUT_IDS].reshape(D, -1)
-        flat_mask = content[ATTENTION_MASK].reshape(D, -1)
-
-        embeddings = torch.zeros((D, self.hidden_size), device=flat_ids.device, dtype=torch.float32)
+        embeddings = torch.zeros((flat_state.shape[0], self.hidden_size), device=flat_ids.device, dtype=torch.float32)
         valued = flat_state.eq(Tokens.valued.value)
         if not valued.any():
-            return embeddings.reshape(N, *dims, self.hidden_size)
+            [embeddings] = unpack(embeddings, documents, "* channel")
+            return embeddings
 
         valued_ids = flat_ids[valued]
         valued_mask = flat_mask[valued]
@@ -345,7 +343,8 @@ class Embedder(EmbedderBase):
 
         embeddings[valued] = torch.cat(encoded, dim=0)
 
-        return embeddings.reshape(N, *dims, self.hidden_size)
+        [embeddings] = unpack(embeddings, documents, "* channel")
+        return embeddings
 
     @beartype
     def target_embeddings(self, inputs: TensorField) -> torch.Tensor:
@@ -360,23 +359,20 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N, *dims = inputs.state.shape
-        D = math.prod((N, *dims))
-
         if TensorKey.content in inputs.targets.keys() and TensorKey.state in inputs.targets.keys():
             self.target_embeddings(cast(TensorField, inputs))
 
-        state = inputs.state.reshape(D)
+        state = inputs.state
         valued = state.eq(Tokens.valued.value).unsqueeze(-1)
-        encoded = self.encode(content=inputs.content, state=inputs.state).reshape(D, self.hidden_size)
+        encoded = self.encode(content=inputs.content, state=state)
         projected = self.linear(encoded) * valued
         embeddings = self.embeddings(state)
 
         return Parcel(
-            payload=(embeddings + projected).reshape(N, *dims, -1),
+            payload=embeddings + projected,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
 
@@ -417,9 +413,9 @@ def loss(
     request: Request = module.schema.requests[address]
     embedder: Embedder = module.nodes[address].embedder
 
-    trainable = batch.trainable.reshape(-1)
-    state_targets = batch.targets[TensorKey.state].reshape(-1)
-    state_inputs = prediction.payload[TensorKey.state].reshape(-1, len(Tokens))
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    state_targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
+    state_inputs = rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes")
 
     loss: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),
@@ -444,8 +440,8 @@ def loss(
     if not valued.any():
         return loss
 
-    inputs = prediction.payload[TensorKey.content].reshape(-1, embedder.hidden_size)
-    targets = embedder.target_embeddings(batch).reshape(-1, embedder.hidden_size)
+    inputs = rearrange(prediction.payload[TensorKey.content], "... feature -> (...) feature")
+    targets = rearrange(embedder.target_embeddings(batch), "... feature -> (...) feature")
     diff = inputs.subtract(targets)
 
     loss += module.track(

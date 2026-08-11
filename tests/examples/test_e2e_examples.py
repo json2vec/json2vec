@@ -185,7 +185,6 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
         "weight",
         "p_mask",
         "p_prune",
-        "n_linear",
     }
     pages = {
         rf.Boolean: docs / "boolean.qmd",

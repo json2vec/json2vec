@@ -1,4 +1,5 @@
 import torch
+from einops import rearrange
 
 
 class RotaryEmbedding(torch.nn.Module):
@@ -17,12 +18,12 @@ class RotaryEmbedding(torch.nn.Module):
         self.register_buffer("inv_freq", base ** (-index / self.rotary_dim), persistent=False)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        _, seq_len, _ = inputs.shape
+        seq_len = inputs.shape[-2]
 
         positions = torch.arange(seq_len, device=inputs.device, dtype=self.inv_freq.dtype)
         freqs = torch.outer(positions, self.inv_freq)
-        cos = freqs.cos().to(dtype=inputs.dtype).unsqueeze(0)
-        sin = freqs.sin().to(dtype=inputs.dtype).unsqueeze(0)
+        cos = freqs.cos().to(dtype=inputs.dtype)
+        sin = freqs.sin().to(dtype=inputs.dtype)
 
         rotated = inputs[..., : self.rotary_dim]
         passthrough = inputs[..., self.rotary_dim :]
@@ -32,7 +33,10 @@ class RotaryEmbedding(torch.nn.Module):
 
         rotated_even = even * cos - odd * sin
         rotated_odd = even * sin + odd * cos
-        rotated = torch.stack((rotated_even, rotated_odd), dim=-1).flatten(start_dim=-2)
+        rotated = rearrange(
+            torch.stack((rotated_even, rotated_odd), dim=-1),
+            "... rotary_frequency pair -> ... (rotary_frequency pair)",
+        )
 
         if passthrough.shape[-1] == 0:
             return rotated

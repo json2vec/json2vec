@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 import enum
-import math
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
 import pydantic
 import torch
 from beartype import beartype
+from einops import rearrange
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
@@ -210,20 +210,14 @@ class Embedder(EmbedderBase):
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:
-        N, *dims = inputs.state.shape
-        D = math.prod((N, *dims))
-
-        state = inputs.state.reshape(D)
-        content = inputs.content.reshape(D, -1)
-
-        projected = self.linear(content)
-        embeddings = self.embeddings(state)
+        projected = self.linear(inputs.content)
+        embeddings = self.embeddings(inputs.state)
 
         return Parcel(
-            payload=(projected + embeddings).reshape(N, *dims, -1),
+            payload=projected + embeddings,
             origin=self.origin,
             destination=self.destination,
-            batch_size=N,
+            batch_size=inputs.state.shape[0],
         )
 
 
@@ -263,9 +257,9 @@ def loss(
     address: Address = prediction.address
     request: Request = module.schema.requests[address]
 
-    trainable = batch.trainable.reshape(-1)
-    state_targets = batch.targets[TensorKey.state].reshape(-1)
-    state_inputs = prediction.payload[TensorKey.state].reshape(-1, len(Tokens))
+    trainable = rearrange(batch.trainable, "... -> (...)")
+    state_targets = rearrange(batch.targets[TensorKey.state], "... -> (...)")
+    state_inputs = rearrange(prediction.payload[TensorKey.state], "... classes -> (...) classes")
 
     output: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),
@@ -289,8 +283,8 @@ def loss(
     if not valued.any():
         return output
 
-    inputs = prediction.payload[TensorKey.content].reshape(-1, request.n_dim)
-    targets = batch.targets[TensorKey.content].reshape(-1, request.n_dim)
+    inputs = rearrange(prediction.payload[TensorKey.content], "... feature -> (...) feature")
+    targets = rearrange(batch.targets[TensorKey.content], "... feature -> (...) feature")
     diff = inputs.subtract(targets)
 
     output += module.track(

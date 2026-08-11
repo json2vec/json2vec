@@ -43,6 +43,13 @@ def test_schema_derives_target_from_node_prune_rate():
     payload = _schema_payload()
     payload["fields"]["fields"][0]["fields"][0]["p_prune"] = 1.0
     payload["fields"]["fields"][0]["fields"][0]["embed"] = False
+    payload["fields"]["fields"][0]["fields"].append(
+        {
+            "name": "context",
+            "type": "number",
+            "query": "[*].items[*].context",
+        }
+    )
 
     schema = Schema.model_validate(payload)
 
