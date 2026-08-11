@@ -11,10 +11,9 @@ import torch
 from tensordict import TensorDict
 
 import relflow as rf
-from relflow.structs.enums import TensorKey, Tokens
+from relflow.structs.enums import Tokens
 from relflow.structs.tree import Address
 from relflow.tensorfields.extensions.cluster import Embedder, TensorField
-
 
 CAPACITY = 8
 K = 4
