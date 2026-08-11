@@ -121,20 +121,41 @@ State and categorical content make separate contributions to the encoder:
 
 - Every position receives the learned embedding for its state: `valued`,
   `null`, `padded`, `masked`, or the reserved `other` state.
-- Only an available valued label receives a learned categorical-content
-  embedding.
-- Unavailable valued content contributes an all-zero categorical vector while
-  retaining the separate `valued` state embedding.
-- Non-valued positions also contribute zero categorical content while retaining
+- Every valued position receives a learned cluster-content embedding. In-vocab
+  labels route through their committed cluster row; out-of-vocabulary labels
+  route through a reserved sentinel row that learns a cluster distribution
+  from `p_unavailable`-simulated OOV rows during training.
+- Non-valued positions contribute zero cluster content while retaining
   their distinct state embedding.
 
 This is an internal encoder representation. It is not the normalized public
 embedding returned by `embed=True`; see
 [Internal And Exported Embeddings](../core-concepts/embeddings.qmd#internal-and-exported-embeddings).
 
-`p_unavailable` simulates the same valued-but-content-unavailable condition for
-known labels during training. It does not create a new state or teach the model
-to emit an unavailable class.
+`p_unavailable` simulates the sentinel-routing path for known labels during
+training. It does not create a new state or teach the model to emit an
+unavailable class.
+
+## Committing OOV Assignments
+
+The sentinel row gives every OOV label the same average cluster. When a
+specific new label should route to a specific cluster, replace the sentinel
+path with an explicit assignment. Two APIs support this.
+
+`Model.commit_cluster(address, token, cluster=...)` writes `token` into the
+field's vocabulary and sets its cluster assignment row to a one-hot on
+`cluster` (or a full probability vector via `probs=...`). The commit is
+persistent and consumes one vocabulary slot.
+
+`Model.predict(..., cluster_hints={address: {token: cluster}})` performs the
+same write transiently for the duration of a single prediction call. Vocabulary
+and embedding state are restored before `predict` returns. This is particularly 
+in cases where the same token may be part of inference for multiple calls, in 
+which the inferred cluster assignment from previous assignments may be used as 
+input to the subsequent calls.
+
+Both APIs replace the sentinel path for the hinted or committed token. They
+do not touch the sentinel row itself.
 
 ## Loss And Metrics
 

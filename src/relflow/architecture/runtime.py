@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import torch
@@ -238,35 +239,45 @@ class ModelRuntime:
         batch: EncodedBatch | list[dict[str, Any]],
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
+        cluster_hints: dict[Address | str, dict[Any, Any]] | None = None,
     ) -> dict[Address, dict[str, Any]]:
         was_training = module.training
         raw_batch = batch
-        inputs = ModelRuntime.encode(module=module, batch=batch, preprocess=preprocess, strata=Strata.predict)
 
-        module.eval()
-        try:
-            with torch.inference_mode():
-                raw_predictions = module(inputs, strata=Strata.predict)
-        finally:
-            if was_training:
-                module.train()
+        with ExitStack() as stack:
+            if cluster_hints:
+                for raw_address, hints in cluster_hints.items():
+                    if not hints:
+                        continue
+                    embedder = module._cluster_embedder(raw_address)
+                    stack.enter_context(embedder.transient_commit(hints))
 
-        predictions = module.write(raw_predictions)
+            inputs = ModelRuntime.encode(module=module, batch=batch, preprocess=preprocess, strata=Strata.predict)
 
-        resolved_postprocessor = Postprocessor.normalize(postprocess)
-        if resolved_postprocessor is not None:
-            processed = resolved_postprocessor.run(
-                predictions,
-                available={
-                    "batch": raw_batch,
-                    "observations": inputs[TensorKey.metadata],
-                    "input": inputs,
-                    "metadata": inputs[TensorKey.metadata],
-                },
-            )
+            module.eval()
+            try:
+                with torch.inference_mode():
+                    raw_predictions = module(inputs, strata=Strata.predict)
+            finally:
+                if was_training:
+                    module.train()
 
-            if processed is not None:
-                predictions = dict(processed)
+            predictions = module.write(raw_predictions)
+
+            resolved_postprocessor = Postprocessor.normalize(postprocess)
+            if resolved_postprocessor is not None:
+                processed = resolved_postprocessor.run(
+                    predictions,
+                    available={
+                        "batch": raw_batch,
+                        "observations": inputs[TensorKey.metadata],
+                        "input": inputs,
+                        "metadata": inputs[TensorKey.metadata],
+                    },
+                )
+
+                if processed is not None:
+                    predictions = dict(processed)
 
         return predictions
 

@@ -241,7 +241,7 @@ class Embedder(EmbedderBase):
         self.size: int = request.size
 
         if request.p_mask == 0.0 and request.p_prune == 0.0:
-            # Cluster loss (usage/adherence/Sinkhorn) fires only for masked/pruned/target rows;
+            # Cluster loss fires only for masked/pruned/target rows;
             # a plain-input Cluster silently freezes n_committed at init.
             logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
                 "Cluster field {address!s} has p_mask=0 and p_prune=0; dynamic K-selection "
@@ -328,6 +328,105 @@ class Embedder(EmbedderBase):
     @property
     def interprocess_encoding_context(self) -> VocabularyState:
         return self.vocab.state
+
+    def _resolve_assignment(
+        self,
+        *,
+        cluster: int | None,
+        probs: torch.Tensor | list[float] | tuple[float, ...] | None,
+    ) -> torch.Tensor:
+        if (cluster is None) == (probs is None):
+            raise ValueError("provide exactly one of cluster= or probs=")
+        weight = self.embeddings[TensorKey.cluster.name].weight
+        if cluster is not None:
+            if not isinstance(cluster, int) or isinstance(cluster, bool):
+                raise TypeError("cluster must be an int")
+            if not 0 <= cluster < self.size:
+                raise ValueError(f"cluster must be in [0, {self.size}); got {cluster}")
+            distribution = torch.zeros(self.size, dtype=weight.dtype, device=weight.device)
+            distribution[cluster] = 1.0
+            return torch.log(distribution.clamp_min(1e-8))
+        distribution = torch.as_tensor(probs, dtype=weight.dtype, device=weight.device)
+        if distribution.shape != (self.size,):
+            raise ValueError(f"probs must have shape ({self.size},); got {tuple(distribution.shape)}")
+        if bool((distribution < 0).any().item()):
+            raise ValueError("probs must be non-negative")
+        total = float(distribution.sum().item())
+        if not math.isclose(total, 1.0, abs_tol=1e-4):
+            raise ValueError(f"probs must sum to 1; got {total}")
+        return torch.log(distribution.clamp_min(1e-8))
+
+    def commit(
+        self,
+        token: Any,
+        *,
+        cluster: int | None = None,
+        probs: torch.Tensor | list[float] | tuple[float, ...] | None = None,
+    ) -> int:
+        logits = self._resolve_assignment(cluster=cluster, probs=probs)
+        weight = self.embeddings[TensorKey.cluster.name].weight
+        index = self.vocab.state.index.get(token)
+        if index is None:
+            if len(self.vocab.master) >= self.capacity:
+                raise ValueError(
+                    f"cluster field {self.origin} at capacity ({self.capacity}); cannot commit {token!r}"
+                )
+            self.vocab.master.append(token)
+            index = len(self.vocab.master) - 1
+        with torch.no_grad():
+            weight[index].copy_(logits)
+        return index
+
+    def transient_commit(self, hints: Mapping[Any, Any]):
+        embedder = self
+
+        class _Transient:
+            def __enter__(self):
+                weight = embedder.embeddings[TensorKey.cluster.name].weight
+                # (index, original_row, was_new_append) — LIFO on exit
+                self.saved: list[tuple[int, torch.Tensor, bool]] = []
+                try:
+                    for token, hint in hints.items():
+                        cluster_arg: int | None
+                        probs_arg: Any | None
+                        if isinstance(hint, int) and not isinstance(hint, bool):
+                            cluster_arg, probs_arg = hint, None
+                        else:
+                            cluster_arg, probs_arg = None, hint
+                        existing = embedder.vocab.state.index.get(token)
+                        if existing is not None:
+                            original = weight[existing].detach().clone()
+                            embedder.commit(token, cluster=cluster_arg, probs=probs_arg)
+                            self.saved.append((existing, original, False))
+                        else:
+                            if len(embedder.vocab.master) >= embedder.capacity:
+                                raise ValueError(
+                                    f"cluster field {embedder.origin} at capacity ({embedder.capacity}); "
+                                    f"cannot hint {token!r}"
+                                )
+                            new_index = len(embedder.vocab.master)
+                            original = weight[new_index].detach().clone()
+                            embedder.commit(token, cluster=cluster_arg, probs=probs_arg)
+                            self.saved.append((new_index, original, True))
+                except BaseException:
+                    self._rollback()
+                    raise
+                return None
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self._rollback()
+                return False
+
+            def _rollback(self):
+                weight = embedder.embeddings[TensorKey.cluster.name].weight
+                with torch.no_grad():
+                    for index, original, was_new in reversed(self.saved):
+                        weight[index].copy_(original)
+                        if was_new and embedder.vocab.master:
+                            embedder.vocab.master.pop()
+                self.saved.clear()
+
+        return _Transient()
 
 
 @cluster.register
