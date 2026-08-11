@@ -58,7 +58,6 @@ class Request(RequestBase):
     ] = 1024
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
 
-    sparsity_weight: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
     ema_decay: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.99)] = 0.99
     revive_temperature: Annotated[float, pydantic.Field(ge=0.0, default=10.0)] = 10.0
 
@@ -240,6 +239,15 @@ class Embedder(EmbedderBase):
         self.destination: Address = request.parent.address
         self.capacity: int = request.capacity
         self.size: int = request.size
+
+        if request.p_mask == 0.0 and request.p_prune == 0.0:
+            # Cluster loss (usage/adherence/Sinkhorn) fires only for masked/pruned/target rows;
+            # a plain-input Cluster silently freezes n_committed at init.
+            logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
+                "Cluster field {address!s} has p_mask=0 and p_prune=0; dynamic K-selection "
+                "will not engage. Set p_mask, p_prune, or target=True to train the cluster head.",
+                address=address,
+            )
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=self.capacity)
 
@@ -492,12 +500,6 @@ def loss(
                 embedder.adherence_ema.mul_(request.ema_decay).add_(
                     uncommitted_mass.detach() * (1.0 - request.ema_decay)
                 )
-            if request.sparsity_weight > 0.0:
-                loss += module.track(
-                    (prediction.address, strata, "cluster", "adherence"), #TODO: Not sure if adherence is the right word... this is tracking the opposite of "sparsity" so perhaps "density"? The core concept is tracking how much the data/leaf is trying to introduce a new cluster. Note, for future changes, this field name is referenced in docs.
-                    value=uncommitted_mass * request.sparsity_weight,
-                )
-
     return loss
 
 
@@ -729,5 +731,4 @@ class ClusterMergeCallback(Callback):
 
 
 cluster.callback(ClusterReviveCallback, ClusterMergeCallback)
-
 

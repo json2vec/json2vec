@@ -4,7 +4,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
 from relflow.tensorfields.extensions.cluster import (
@@ -27,7 +27,6 @@ def _structure_payload(
     capacity: int = 8,
     bounds: int | list[int] | tuple[int, int] = (2, 4),
     p_unavailable: float | None = None,
-    sparsity_weight: float | None = None,
     revive_temperature: float | None = None,
     ema_decay: float | None = None,
 ) -> dict:
@@ -40,8 +39,6 @@ def _structure_payload(
     }
     if p_unavailable is not None:
         field["p_unavailable"] = p_unavailable
-    if sparsity_weight is not None:
-        field["sparsity_weight"] = sparsity_weight
     if revive_temperature is not None:
         field["revive_temperature"] = revive_temperature
     if ema_decay is not None:
@@ -712,19 +709,6 @@ def _seed_uncommitted_batch(*, revive_temperature: float | None = None):
     )
     module = _TrackingModule(structure, embedder, decoder)
     return structure, field, module, embedder, decoder, prediction
-
-
-def test_adherence_ema_updates_without_sparsity_weight():
-    structure, field, module, embedder, _, prediction = _seed_uncommitted_batch()
-    assert structure.requests[ADDRESS].sparsity_weight == 0.0
-    assert embedder.adherence_ema.item() == 0.0
-
-    loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
-
-    # EMA received a positive uncommitted-mass update even with sparsity_weight == 0.
-    assert embedder.adherence_ema.item() > 0.0
-    # ...and the loss-side track was NOT emitted (sparsity_weight == 0 gate).
-    assert (ADDRESS, Strata.train, "cluster", "adherence") not in module.tracked
 
 
 class _FakeTrainer:
