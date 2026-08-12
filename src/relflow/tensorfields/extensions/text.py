@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import enum
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
@@ -37,6 +38,18 @@ INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
 TEXT_TENSOR_KEYS = (INPUT_IDS, ATTENTION_MASK)
 DEFAULT_TEXT_MODEL = "google/bert_uncased_L-2_H-128_A-2"
+
+
+def _autocast_dtype(device_type: str) -> torch.dtype | None:
+    if device_type == "cuda":
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16
+    if device_type == "cpu":
+        return torch.bfloat16
+    if device_type == "mps":
+        return torch.float16
+    return None
 
 
 class Pooling(enum.StrEnum):
@@ -197,7 +210,7 @@ class TensorField(TensorFieldBase):
                 return_tensors="pt",
             )
 
-            valued_index = torch.from_numpy(valued.astype(bool))
+            valued_index = torch.from_numpy(valued)
             token_ids[valued_index] = encoded[INPUT_IDS].to(dtype=torch.int64)
             attention_mask[valued_index] = encoded[ATTENTION_MASK].to(dtype=torch.int64)
 
@@ -228,10 +241,7 @@ class TensorField(TensorFieldBase):
         self.state = self.state.masked_scatter(selected, mask_token)
         expanded = selected.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
         for key in TEXT_TENSOR_KEYS:
-            self.content[key] = self.content[key].masked_scatter(
-                expanded,
-                torch.zeros_like(input=self.content[key]),
-            )
+            self.content[key] = self.content[key].masked_fill(expanded,0)
 
         if trainable:
             self.trainable |= selected
@@ -315,33 +325,40 @@ class Embedder(EmbedderBase):
         valued_mask = flat_mask[valued]
         model = self.__dict__["_cached_model"].module_for(flat_ids.device)
         encoded: list[torch.Tensor] = []
-        for start in range(0, valued_ids.size(0), self.request.encoder_batch_size):
-            stop = start + self.request.encoder_batch_size
-            batch_mask = valued_mask[start:stop]
+        device_type = flat_ids.device.type
+        autocast_dtype = _autocast_dtype(device_type)
+        autocast_ctx = (
+            torch.autocast(device_type=device_type, dtype=autocast_dtype)
+            if autocast_dtype is not None
+            else nullcontext()
+        )
+        with torch.inference_mode(), autocast_ctx:
+            for start in range(0, valued_ids.size(0), self.request.encoder_batch_size):
+                stop = start + self.request.encoder_batch_size
+                batch_mask = valued_mask[start:stop]
 
-            with torch.inference_mode():
                 outputs = model(
                     input_ids=valued_ids[start:stop],
                     attention_mask=batch_mask,
                 )
 
-            if self.request.encoder_pooling == Pooling.pooler:
-                pooled = getattr(outputs, "pooler_output", None)
-                if pooled is None:
-                    raise ValueError(f"text model '{self.request.model}' does not expose pooler_output")
-            else:
-                hidden = getattr(outputs, "last_hidden_state", None)
-                if hidden is None:
-                    raise ValueError(f"text model '{self.request.model}' does not expose last_hidden_state")
-
-                if self.request.encoder_pooling == Pooling.cls:
-                    pooled = hidden[:, 0]
+                if self.request.encoder_pooling == Pooling.pooler:
+                    pooled = getattr(outputs, "pooler_output", None)
+                    if pooled is None:
+                        raise ValueError(f"text model '{self.request.model}' does not expose pooler_output")
                 else:
-                    mask = batch_mask.unsqueeze(-1).to(dtype=hidden.dtype)
-                    denom = mask.sum(dim=1).clamp_min(1.0)
-                    pooled = (hidden * mask).sum(dim=1) / denom
+                    hidden = getattr(outputs, "last_hidden_state", None)
+                    if hidden is None:
+                        raise ValueError(f"text model '{self.request.model}' does not expose last_hidden_state")
 
-            encoded.append(pooled.to(dtype=torch.float32))
+                    if self.request.encoder_pooling == Pooling.cls:
+                        pooled = hidden[:, 0]
+                    else:
+                        mask = batch_mask.unsqueeze(-1).to(dtype=hidden.dtype)
+                        denom = mask.sum(dim=1).clamp_min(1.0)
+                        pooled = (hidden * mask).sum(dim=1) / denom
+
+                encoded.append(pooled.to(dtype=torch.float32))
 
         embeddings[valued] = torch.cat(encoded, dim=0)
 
