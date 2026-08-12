@@ -241,6 +241,7 @@ class ModelRuntime:
     ) -> dict[Address, dict[str, Any]]:
         was_training = module.training
         raw_batch = batch
+
         inputs = ModelRuntime.encode(module=module, batch=batch, preprocess=preprocess, strata=Strata.predict)
 
         module.eval()
