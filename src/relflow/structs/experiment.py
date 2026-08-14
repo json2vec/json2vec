@@ -284,7 +284,11 @@ class Schema(Node):
         applications: list[tuple[Address, Mask]] = []
         for branch in [node for node in request.path if isinstance(node, Branch)]:
             for mask in branch.masks:
-                if any(leaf is request for leaf in branch.excluded_leaves(mask)):
+                prefix = f"{branch.address}/"
+                excluded = {
+                    value if value.startswith(prefix) else f"{prefix}{value}" for value in map(str, mask.exclude)
+                }
+                if str(request.address) in excluded:
                     continue
 
                 applications.append((branch.address, mask))

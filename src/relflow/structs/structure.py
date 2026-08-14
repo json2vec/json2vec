@@ -153,6 +153,8 @@ class Branch(Node):
         if not active_leaves:
             raise ValueError(f"branch '{self.address}' has masks but no active descendant leaves")
 
+        prefix = f"{self.address}/"
+        active_addresses = {str(leaf.address) for leaf in active_leaves}
         names = [mask.name for mask in self.masks if mask.name is not None]
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
@@ -162,27 +164,14 @@ class Branch(Node):
             if mask.offset >= self.length:
                 raise ValueError(f"branch '{self.address}' mask offset must be less than length={self.length}")
 
-            excluded = self.excluded_leaves(mask)
-            if len(excluded) == len(active_leaves):
+            excluded = {
+                address if address.startswith(prefix) else f"{prefix}{address}" for address in map(str, mask.exclude)
+            }
+            if active_addresses <= excluded:
                 label = f" '{mask.name}'" if mask.name is not None else ""
                 raise ValueError(f"branch '{self.address}' mask{label} excludes every active descendant leaf")
 
         return None
-
-    def excluded_leaves(self, mask: Mask) -> tuple[Leaf, ...]:
-        if not mask.exclude:
-            return ()
-
-        from relflow.structs.selectors import NodePredicate
-
-        predicate = NodePredicate.from_addresses(mask.exclude, base=str(self.address))
-        return tuple(
-            descendant
-            for descendant in getattr(self, "descendants", ())
-            if isinstance(descendant, Leaf)
-            if getattr(descendant, "active", True)
-            if predicate(descendant)
-        )
 
     def __rich_console__(self, console, options):
         is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
