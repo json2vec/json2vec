@@ -519,7 +519,6 @@ class Model(lit.LightningModule, Renderable):
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
     ) -> dict[Address, dict[str, Any]]:
-        """Return typed predictions and configured embeddings for a raw or encoded batch."""
         return ModelRuntime.predict(
             self,
             batch=batch,

@@ -34,7 +34,7 @@ repos:
 
       - id: pytest
         name: Run Pytest
-        entry: uv run pytest
+        entry: uv run pytest --run-slow
         language: system
         pass_filenames: false
         always_run: true
