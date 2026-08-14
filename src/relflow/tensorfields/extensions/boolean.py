@@ -13,6 +13,8 @@ from torchmetrics.classification import (
     BinaryAUROC,
     BinaryPrecision,
     BinaryRecall,
+    BinarySensitivityAtSpecificity,
+    BinarySpecificityAtSensitivity,
 )
 
 from relflow.data.nested import extract_mask_literals, pad
@@ -51,6 +53,8 @@ class Request(RequestBase):
 
     type: Literal["boolean"] = "boolean"
     threshold: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.5)] = 0.5
+    min_tnr: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
+    min_tpr: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
 
 
 class BooleanCounter(Counter):
@@ -191,6 +195,16 @@ class Decoder(DecoderBase):
                         Metric.precision.value: BinaryPrecision(threshold=request.threshold),
                         Metric.recall.value: BinaryRecall(threshold=request.threshold),
                         Metric.auc.value: BinaryAUROC(),
+                        **(
+                            {Metric.tpr_at_tnr.value: BinarySensitivityAtSpecificity(min_specificity=request.min_tnr)}
+                            if request.min_tnr is not None
+                            else {}
+                        ),
+                        **(
+                            {Metric.tnr_at_tpr.value: BinarySpecificityAtSensitivity(min_sensitivity=request.min_tpr)}
+                            if request.min_tpr is not None
+                            else {}
+                        ),
                     }
                 )
                 for strata in (Strata.train, Strata.validate, Strata.test)

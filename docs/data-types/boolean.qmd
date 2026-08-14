@@ -56,6 +56,8 @@ embedding requested with `embed=True`.
 | Option | Default | Notes |
 | --- | --- | --- |
 | `threshold` | `0.5` | Decision boundary used by prediction `content.value` and tracked accuracy, precision, and recall. Must be between `0` and `1`. |
+| `min_tnr` | `None` | Minimum TNR to be used when measuring and logging TPR. Must be between `0` and `1`. |
+| `min_tpr` | `None` | Minimum TPR to be used when measuring and logging TNR. Must be between `0` and `1`. |
 
 Shared leaf options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight`
 are described in [Built-In Data Types](../core-concepts/data-types.qmd).
@@ -77,6 +79,10 @@ prediction. The page-level metrics are:
 AUC and binary cross entropy continue to use unthresholded probabilities. Tune
 the threshold using held-out data when false positives and false negatives have
 different costs.
+
+Optional metrics may be logged to measure the sensitivity at a specified specificity,
+as well as the converse metric. These metrics are only logged when min_tnr or min_tpr 
+is provided to the request. 
 
 ## Prediction Output
 

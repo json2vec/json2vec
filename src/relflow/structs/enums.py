@@ -75,6 +75,8 @@ class Metric(enum.StrEnum):
     throughput = "throughput"
     mae = "mae"
     rmse = "rmse"
+    tnr_at_tpr = "tnr@tpr"
+    tpr_at_tnr = "tpr@tnr"
 
 
 class ShardingStrategy(enum.StrEnum):
