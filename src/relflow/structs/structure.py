@@ -56,15 +56,11 @@ class Mask(pydantic.BaseModel):
             normalized: list[Address] = []
             for item in value:
                 if not isinstance(item, str):
-                    raise TypeError(
-                        f"Mask.exclude entries must be Address strings; got {type(item).__name__}"
-                    )
+                    raise TypeError(f"Mask.exclude entries must be Address strings; got {type(item).__name__}")
                 normalized.append(Address(item))
             return tuple(normalized)
 
-        raise TypeError(
-            f"Mask.exclude must be an Address, a tuple of Addresses, or None; got {type(value).__name__}"
-        )
+        raise TypeError(f"Mask.exclude must be an Address, a tuple of Addresses, or None; got {type(value).__name__}")
 
 
 class Branch(Node):

@@ -414,7 +414,7 @@ class Model(lit.LightningModule, Renderable):
         def groupname(names: tuple[str, ...]) -> str:
             assert len(names) > 1
 
-            group, *keys = tuple(map(lambda x: x.replace("/", "/").lower(), names))
+            group, *keys = tuple(map(lambda x: x.replace("/", ".").lower(), names))
             key = ".".join(list(keys))
 
             return f"{group}/{key}"

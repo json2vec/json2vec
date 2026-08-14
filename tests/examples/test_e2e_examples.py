@@ -338,7 +338,7 @@ def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
     trainer.fit(model=model, datamodule=datamodule)
     metrics = trainer.validate(model=model, datamodule=datamodule, verbose=False)[0]
     assert "loss/validate" in metrics
-    assert "record/species/validate.accuracy.content" in metrics
+    assert "record.species/validate.accuracy.content" in metrics
 
     artifact = tmp_path / "getting-started.rf"
     model.save(artifact)
@@ -396,7 +396,7 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
 
     trainer.fit(model=model, datamodule=datamodule)
     metrics = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
-    assert metrics["flower/species/test.accuracy.content"] == pytest.approx(0.9)
+    assert metrics["flower.species/test.accuracy.content"] == pytest.approx(0.9)
 
     artifact = tmp_path / "iris-model.rf"
     model.save(artifact)
