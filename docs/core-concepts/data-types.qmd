@@ -146,7 +146,7 @@ datatype decides which selected targets contribute to content loss. See
 | Type | Public decoded content | State probabilities | Notes |
 | --- | --- | --- | --- |
 | `Number` | Scalar value | Yes | MAE and RMSE are reported in original value scale. |
-| `Boolean` | Value plus true probability | Yes | Vocabulary-free binary decoding. |
+| `Boolean` | Probability of `True` | Yes | Vocabulary-free binary decoding; configured thresholds affect metrics only. |
 | `Category` | Best populated-vocabulary label plus optional candidates | Yes | The unavailable sentinel is internal and never a class. |
 | `Set` | Per-label probabilities or thresholded labels | Yes | Unknown labels and unused capacity are omitted. |
 | `Vector` | Reconstructed vector | Yes | Non-valued tensorized content is a zero vector. |

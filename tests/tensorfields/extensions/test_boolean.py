@@ -14,7 +14,7 @@ from relflow.tensorfields.extensions.boolean import BooleanCounter, Decoder, Emb
 ADDRESS = "root/groups/items/enabled"
 
 
-def _schema(*, threshold: float = 0.5) -> Schema:
+def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
     return Schema.model_validate(
         {
             "d_model": 8,
@@ -121,7 +121,7 @@ class _TrackingModule:
 
 
 def test_boolean_loss_tracks_binary_torchmetrics():
-    schema = _schema()
+    schema = _schema(threshold=[0.25, 0.75])
     field = TensorField.new(
         values=[[[[False, True]]], [[[True, False]]]],
         address=ADDRESS,
@@ -151,8 +151,21 @@ def test_boolean_loss_tracks_binary_torchmetrics():
         module.nodes[ADDRESS].embedder.counters[TensorKey.content.name].counts,
         torch.ones(2, dtype=torch.int64),
     )
-    for metric in (Metric.accuracy, Metric.precision, Metric.recall, Metric.auc):
-        tracked = module.tracked[(ADDRESS, Strata.train, metric, TensorKey.content)]
+    expected_names = {
+        Metric.auc.value,
+        *(
+            f"{metric.value}@{threshold}"
+            for threshold in (0.25, 0.75)
+            for metric in (
+                Metric.accuracy,
+                Metric.precision,
+                Metric.recall,
+                Metric.specificity,
+            )
+        ),
+    }
+    for metric_name in expected_names:
+        tracked = module.tracked[(ADDRESS, Strata.train, metric_name, TensorKey.content)]
         assert isinstance(tracked, TorchMetric)
 
 
@@ -172,13 +185,48 @@ def test_boolean_counter_maps_fixed_content_to_false_and_true_classes():
     assert counter.counts.tolist() == [3, 2]
 
 
-def test_boolean_threshold_configures_decision_metrics():
-    decoder = Decoder(_schema(threshold=0.8), ADDRESS)
+@pytest.mark.parametrize(
+    ("threshold", "expected"),
+    [
+        (0.8, (0.8,)),
+        ([0.8, 0.2, 0.8, 0.5, 0.2], (0.8, 0.2, 0.5)),
+    ],
+)
+def test_boolean_request_normalizes_scalar_and_ordered_unique_thresholds(
+    threshold: float | list[float],
+    expected: tuple[float, ...],
+):
+    request = _schema(threshold=threshold).requests[ADDRESS]
+
+    assert request.thresholds == expected
+
+
+def test_boolean_thresholds_configure_unique_metrics_and_one_auc():
+    decoder = Decoder(_schema(threshold=[0.8, 0.2, 0.8]), ADDRESS)
 
     metrics = decoder.metrics[f"{Strata.train.value}_metrics"]
-    assert metrics[Metric.accuracy.value].threshold == 0.8
-    assert metrics[Metric.precision.value].threshold == 0.8
-    assert metrics[Metric.recall.value].threshold == 0.8
+    assert set(metrics) == {Metric.auc.value, "threshold_0", "threshold_1"}
+
+    expected_metric_names = {
+        Metric.accuracy.value,
+        Metric.precision.value,
+        Metric.recall.value,
+        Metric.specificity.value,
+    }
+    for index, threshold in enumerate((0.8, 0.2)):
+        threshold_metrics = metrics[f"threshold_{index}"]
+        assert set(threshold_metrics) == expected_metric_names
+        assert all(metric.threshold == threshold for metric in threshold_metrics.values())
+
+    named_metrics = list(decoder.content_metrics(Strata.train))
+    names = [name for name, _ in named_metrics]
+    assert names.count(Metric.auc.value) == 1
+    assert len(names) == len(set(names)) == 9
+    assert set(names) == {
+        Metric.auc.value,
+        *(f"{name}@{threshold}" for threshold in (0.8, 0.2) for name in expected_metric_names),
+    }
+    assert all(isinstance(metric, TorchMetric) for _, metric in named_metrics)
 
 
 def test_boolean_metrics_ignore_null_and_padded_targets():
@@ -207,15 +255,19 @@ def test_boolean_metrics_ignore_null_and_padded_targets():
 
     loss(module, prediction, field, Strata.train)
 
-    metrics = decoder.metrics[f"{Strata.train.value}_metrics"]
-    assert metrics[Metric.accuracy.value].compute().item() == 1.0
-    assert metrics[Metric.precision.value].compute().item() == 1.0
-    assert metrics[Metric.recall.value].compute().item() == 1.0
-    assert metrics[Metric.auc.value].compute().item() == 1.0
+    metrics: dict[str, TorchMetric] = dict(decoder.content_metrics(Strata.train))
+    assert set(metrics) == {
+        Metric.auc.value,
+        f"{Metric.accuracy.value}@0.5",
+        f"{Metric.precision.value}@0.5",
+        f"{Metric.recall.value}@0.5",
+        f"{Metric.specificity.value}@0.5",
+    }
+    assert all(metric.compute().item() == 1.0 for metric in metrics.values())  # ty: ignore[missing-argument]
 
 
 def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_metrics():
-    schema = _schema()
+    schema = _schema(threshold=[0.25, 0.75])
     field = TensorField.new(
         values=[[[[None]]]],
         address=ADDRESS,
@@ -240,11 +292,10 @@ def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_
 
     assert torch.isfinite(result)
     assert (ADDRESS, Strata.train, Metric.loss, TensorKey.content) not in module.tracked
-    metrics = decoder.metrics[f"{Strata.train.value}_metrics"]
-    assert all(metric.update_count == 0 for metric in metrics.values())
-    assert all(
-        (ADDRESS, Strata.train, metric_name, TensorKey.content) in module.tracked for metric_name in metrics.keys()
-    )
+    metrics = tuple(decoder.content_metrics(Strata.train))
+    assert len(metrics) == 9
+    assert all(metric.update_count == 0 for _, metric in metrics)
+    assert all((ADDRESS, Strata.train, metric_name, TensorKey.content) in module.tracked for metric_name, _ in metrics)
 
 
 def test_boolean_write_preserves_nested_shape_and_emits_true_probability():
@@ -262,16 +313,26 @@ def test_boolean_write_preserves_nested_shape_and_emits_true_probability():
         ),
     )
 
-    assert output[TensorKey.content.name][TensorKey.value.name].tolist() == [
-        [[[False, True, True], [True, False, True]]]
-    ]
-    probabilities = output[TensorKey.content.name][TensorKey.probability.name]
+    content = output[TensorKey.content.name]
+    assert set(content) == {TensorKey.probability.name}
+    probabilities = content[TensorKey.probability.name]
     assert probabilities.shape == (1, 1, 2, 3)
+    assert np.allclose(
+        probabilities,
+        [[[[0.11920292, 0.5, 0.880797], [0.880797, 0.11920292, 0.5]]]],
+    )
     assert set(output[TensorKey.state.name]) == set(Tokens.__members__)
 
 
-def test_boolean_write_uses_configured_threshold():
-    schema = _schema(threshold=0.8)
+@pytest.mark.parametrize(
+    "thresholds",
+    [
+        [0.8, 0.2],
+        [0.2, 0.8],
+    ],
+)
+def test_boolean_write_is_independent_of_evaluation_thresholds(thresholds: list[float]):
+    schema = _schema(threshold=thresholds)
     output = write(
         SimpleNamespace(schema=schema),
         Prediction(
@@ -286,4 +347,8 @@ def test_boolean_write_uses_configured_threshold():
         ),
     )
 
-    assert not output[TensorKey.content.name][TensorKey.value.name].any()
+    content = output[TensorKey.content.name]
+    assert set(content) == {TensorKey.probability.name}
+    probabilities = content[TensorKey.probability.name]
+    assert probabilities.shape == (1, 1, 2, 3)
+    assert np.allclose(probabilities, torch.tensor(1.0).sigmoid().item())

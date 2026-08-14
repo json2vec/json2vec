@@ -123,7 +123,7 @@ The envelope is shared, but `content` is not:
 | Datatype | Typical written content |
 | --- | --- |
 | `Category` | `value`, `probability`, and configured `topk` candidates. |
-| `Boolean` | Thresholded `value` and the probability of `True`. |
+| `Boolean` | Probability of `True`. |
 | `Number` | Numeric prediction. |
 | `Set` | Per-label probabilities or a thresholded label-to-score mapping. |
 | `DateParts` | No decoded writer payload in the current implementation; only a requested embedding is emitted. |
@@ -133,8 +133,9 @@ The envelope is shared, but `content` is not:
 
 The relevant [datatype page](../core-concepts/data-types.qmd) is authoritative
 for content members and their interpretation. A Category probability is
-normalized over its populated vocabulary, for example, while a Boolean value
-uses its configured threshold.
+normalized over its populated vocabulary, for example, while a Boolean
+probability is the model's sigmoid score. Boolean thresholds configure
+evaluation metrics; they do not threshold the written prediction.
 
 ## Interactive, Batch, And HTTP Shapes
 

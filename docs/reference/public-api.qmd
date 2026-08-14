@@ -61,7 +61,7 @@ with tree fields or root architecture arguments.
 | Export | Source value | Public decoded content |
 | --- | --- | --- |
 | `Number` | Continuous scalar with meaningful distance | Numeric value |
-| `Boolean` | Strict Boolean | Boolean value and probability |
+| `Boolean` | Strict Boolean | Probability of `True` |
 | `Category` | One bounded persistent label | Best known label, probability, optional top-k |
 | `Set` | Multiple bounded persistent labels | Known labels and probabilities, optionally thresholded |
 | `Entity` | Observation-local repeated identity | Training metrics; no decoded identity label |

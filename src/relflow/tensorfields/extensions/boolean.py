@@ -1,6 +1,7 @@
 # ty: ignore[unknown-argument]
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
@@ -8,13 +9,13 @@ import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
+from torchmetrics import Metric as TorchMetric
 from torchmetrics.classification import (
     BinaryAccuracy,
     BinaryAUROC,
     BinaryPrecision,
     BinaryRecall,
-    BinarySensitivityAtSpecificity,
-    BinarySpecificityAtSensitivity,
+    BinarySpecificity,
 )
 
 from relflow.data.nested import extract_mask_literals, pad
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
 boolean: Plugin = Plugin(name="boolean")
 boolean.callback(CounterUpdateCallback)
 BOOLEAN_VALUES = (-1.0, 0.0, 1.0)
+Threshold = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
+Thresholds = Annotated[list[Threshold], pydantic.Field(min_length=1)]
 
 
 def _encode(value: Any) -> float:
@@ -52,9 +55,20 @@ class Request(RequestBase):
     """Boolean scalar tensorfield request without a vocabulary."""
 
     type: Literal["boolean"] = "boolean"
-    threshold: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.5)] = 0.5
-    min_tnr: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
-    min_tpr: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
+    threshold: Threshold | Thresholds = 0.5
+
+    @pydantic.field_validator("threshold", mode="after")
+    @classmethod
+    def deduplicate_thresholds(cls, value: float | list[float]) -> float | list[float]:
+        if isinstance(value, list):
+            return list(dict.fromkeys(value))
+        return value
+
+    @property
+    def thresholds(self) -> tuple[float, ...]:
+        if isinstance(self.threshold, list):
+            return tuple(self.threshold)
+        return (self.threshold,)
 
 
 class BooleanCounter(Counter):
@@ -187,29 +201,36 @@ class Decoder(DecoderBase):
         request: Request = schema.requests[address]
         self.state = torch.nn.Linear(schema.d_model, len(Tokens))
         self.content = torch.nn.Linear(schema.d_model, 1)
+        self.thresholds = request.thresholds
         self.metrics = torch.nn.ModuleDict(
             {
                 f"{strata.value}_metrics": torch.nn.ModuleDict(
                     {
-                        Metric.accuracy.value: BinaryAccuracy(threshold=request.threshold),
-                        Metric.precision.value: BinaryPrecision(threshold=request.threshold),
-                        Metric.recall.value: BinaryRecall(threshold=request.threshold),
                         Metric.auc.value: BinaryAUROC(),
-                        **(
-                            {Metric.tpr_at_tnr.value: BinarySensitivityAtSpecificity(min_specificity=request.min_tnr)}
-                            if request.min_tnr is not None
-                            else {}
-                        ),
-                        **(
-                            {Metric.tnr_at_tpr.value: BinarySpecificityAtSensitivity(min_sensitivity=request.min_tpr)}
-                            if request.min_tpr is not None
-                            else {}
-                        ),
+                        **{
+                            f"threshold_{index}": torch.nn.ModuleDict(
+                                {
+                                    Metric.accuracy.value: BinaryAccuracy(threshold=threshold),
+                                    Metric.precision.value: BinaryPrecision(threshold=threshold),
+                                    Metric.recall.value: BinaryRecall(threshold=threshold),
+                                    Metric.specificity.value: BinarySpecificity(threshold=threshold),
+                                }
+                            )
+                            for index, threshold in enumerate(self.thresholds)
+                        },
                     }
                 )
                 for strata in (Strata.train, Strata.validate, Strata.test)
             }
         )
+
+    def content_metrics(self, strata: Strata) -> Iterator[tuple[str, TorchMetric]]:
+        metrics = cast(torch.nn.ModuleDict, self.metrics[f"{strata.value}_metrics"])
+        yield Metric.auc.value, cast(TorchMetric, metrics[Metric.auc.value])
+        for index, threshold in enumerate(self.thresholds):
+            threshold_metrics = cast(torch.nn.ModuleDict, metrics[f"threshold_{index}"])
+            for name, metric in threshold_metrics.items():
+                yield f"{name}@{threshold}", cast(TorchMetric, metric)
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -243,12 +264,12 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
     )
 
     decoder: Decoder = module.nodes[address].decoder
-    metrics = decoder.metrics[f"{strata.value}_metrics"]
+    metrics = tuple(decoder.content_metrics(strata))
     valued = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
         # Every rank must log the same stateful metrics even when this rank's
         # batch has no valued targets. The metrics remain unchanged here.
-        for metric_name, metric in metrics.items():
+        for metric_name, metric in metrics:
             module.track((address, strata, metric_name, TensorKey.content), value=metric)
         return total
 
@@ -263,7 +284,7 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
     )
 
     probabilities = logits.sigmoid()
-    for metric_name, metric in metrics.items():
+    for metric_name, metric in metrics:
         metric.update(probabilities, targets)
         module.track((address, strata, metric_name, TensorKey.content), value=metric)
     return total
@@ -271,7 +292,6 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
 
 @boolean.register
 def write(module: Model, prediction: Prediction):
-    request: Request = module.schema.requests[prediction.address]
     state_logits = prediction.payload[TensorKey.state]
     state_distribution = state_logits.softmax(dim=-1).detach().float().cpu().numpy()
     state_payload = {token.name: state_distribution[..., token.value] for token in Tokens}
@@ -279,8 +299,5 @@ def write(module: Model, prediction: Prediction):
     probabilities = prediction.payload[TensorKey.content].sigmoid().squeeze(-1).detach().float().cpu().numpy()
     return {
         TensorKey.state.name: state_payload,
-        TensorKey.content.name: {
-            TensorKey.value.name: probabilities >= request.threshold,
-            TensorKey.probability.name: probabilities,
-        },
+        TensorKey.content.name: {TensorKey.probability.name: probabilities},
     }

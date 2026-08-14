@@ -85,6 +85,28 @@ def test_boolean_threshold_rejects_values_above_one():
         Schema.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("threshold", "match"),
+    [
+        ([], "at least 1 item"),
+        ([-0.1, 0.5], "greater than or equal to 0"),
+        ([0.5, 1.1], "less than or equal to 1"),
+    ],
+)
+def test_boolean_threshold_rejects_invalid_lists(threshold: list[float], match: str):
+    payload = _structure_with_field(
+        {
+            "name": "enabled",
+            "type": "boolean",
+            "query": "[*].enabled",
+            "threshold": threshold,
+        }
+    )
+
+    with pytest.raises(ValueError, match=match):
+        Schema.model_validate(payload)
+
+
 def test_dateparts_dateparts_reject_duplicates():
     payload = _structure_with_field(
         {

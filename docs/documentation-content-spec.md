@@ -299,8 +299,9 @@ Every leaf datatype page should answer these questions in this order:
 10. Which alternative datatype should the reader choose for adjacent cases?
 11. Where should the reader go next?
 
-Boolean should receive the same configuration and decision sections as the
-other datatype pages, including its `threshold` behavior.
+Boolean should receive the same configuration and evaluation sections as the
+other datatype pages, including how scalar or list `threshold` values configure
+threshold-qualified metrics without changing prediction output.
 
 ### Workflow Guide
 
