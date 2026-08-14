@@ -119,8 +119,8 @@ website:
             text: Category
           - href: data-types/set.qmd
             text: Set
-          - href: data-types/entity.qmd
-            text: Entity
+          - href: data-types/hash.qmd
+            text: Hash
           - href: data-types/dateparts.qmd
             text: DateParts
           - href: data-types/vector.qmd

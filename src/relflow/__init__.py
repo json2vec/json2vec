@@ -59,7 +59,7 @@ from relflow.tensorfields.extensions.boolean import Request as Boolean
 from relflow.tensorfields.extensions.category import Request as Category
 from relflow.tensorfields.extensions.cluster import Request as Cluster
 from relflow.tensorfields.extensions.dateparts import Request as DateParts
-from relflow.tensorfields.extensions.entity import Request as Entity
+from relflow.tensorfields.extensions.hashable import Request as Hash
 from relflow.tensorfields.extensions.number import Request as Number
 from relflow.tensorfields.extensions.set import Request as Set
 from relflow.tensorfields.extensions.text import Request as Text
@@ -122,7 +122,7 @@ __all__ = [
     "DecoderBase",
     "Deployment",
     "EmbedderBase",
-    "Entity",
+    "Hash",
     "helpers",
     "Schema",
     "Input",

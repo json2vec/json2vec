@@ -805,16 +805,16 @@ Pretraining masks sampled positions; pruning and `target=True` hide whole leaf i
 
 Because this state system is shared, new datatypes get masking, pruning, padding, and missing-value behavior without inventing their own control flow. The datatype still decides what its `content` tensor means, which selected states contribute to content loss, and how to write decoded predictions. See the current #link("https://relflow.github.io/relflow/core-concepts/data-types.html")[Data Types reference] for the canonical state and prediction-envelope contract.
 
-=== Built-In Entity Encoding
+=== Built-In Hash Encoding
 
-Entity fields are for identifiers where the exact value matters only in relation to other values in the same observation.
+Hash fields are for identifiers where the exact value matters only in relation to other values in the same observation.
 Examples include devices inside login sessions, accounts inside a transfer graph, merchants inside a transaction window, or repeated users inside a collaboration event (complex, many-to-many relationships such as multiple accounts per customer, or multiple customers per account).
 
 These values are usually high-cardinality and unstable. Treating them as ordinary categories can waste vocabulary capacity, while treating them as raw strings can make generalization brittle.
 
-The `entity` datatype instead locally re-indexes hashable scalar values within each encoded observation and Entity leaf. If the same `device_id` appears in three login sessions in the same observation and leaf, those positions receive the same local entity index. A different device receives a different local entity index. Indexing restarts at zero for every observation, follows first-seen order, and does not align across separate Entity leaves, observations, batches, or checkpoints.
+The `hash` datatype instead maps scalar values through several keyed 64-bit hashes and sinusoidal encodings. Equal values receive equal representations across Hash leaves in the same encoded batch. Training and validation rotate the key per batch to prevent persistent value memorization, while test and prediction use a fixed key for deterministic inference.
 
-This gives the model a way to learn sameness, repetition, and co-occurrence patterns without maintaining an enormous global entity vocabulary. In other words, an `entity` defines an ephemeral, machine-readable temporary identifier. It allows the model to compare repeated values within one leaf without learning anything specific about the object globally. Cross-collection identity requires restructuring or stacking both roles into that same leaf; two sibling Entity fields do not share a code space.
+This gives the model a way to learn sameness, repetition, and co-occurrence patterns without maintaining an enormous global identifier vocabulary. Matching values share a code space across fields, but sibling branches still pool their tokens before interacting. Cross-collection correspondence may therefore require restructuring or stacking both roles into one repeated branch.
 
 For example:
 

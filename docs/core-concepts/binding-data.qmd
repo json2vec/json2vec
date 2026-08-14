@@ -242,7 +242,7 @@ paths—fall back to standard JMESPath evaluation, whose projections can omit
 null results. Preserve positions with `map`:
 
 ```python
-device_id=rf.Entity(
+device_id=rf.Hash(
     query="[*].map(&device_id, events[?event_type == 'login'])"
 )
 risk_score=rf.Number(

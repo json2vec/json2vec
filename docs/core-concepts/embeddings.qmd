@@ -175,7 +175,7 @@ model = rf.Model(
     login_sessions=rf.Branch(
         length=32,
         embed=True,
-        device_id=rf.Entity(embed=True),
+        device_id=rf.Hash(embed=True),
         event_type=rf.Category(p_mask=0.10, size=128),
     ),
 )
@@ -183,10 +183,10 @@ model = rf.Model(
 model
 ```
 
-Use `Entity` for local repeated-identity matching, such as whether the same
-device appears multiple times inside one observation and one Entity leaf. Use
-`Category` for bounded labels that should have a persistent vocabulary across
-training and prediction.
+Use `Hash` when equality between large identifiers matters without learning
+a persistent vocabulary. Matching values share their hash representation across
+all Hash leaves in an encoded batch. Use `Category` for bounded labels that
+should have a persistent vocabulary across training and prediction.
 
 ## An Unsupervised Schema
 

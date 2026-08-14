@@ -171,7 +171,7 @@ address-keyed model output intact until the postprocessor boundary. See
 | --- | --- | --- |
 | Root model | `rf.Model(...)` | [Model Tree](core-concepts/model-tree.qmd) |
 | Repeated context | `rf.Branch(...)` | [Branch](data-types/branch.qmd) |
-| Typed leaves | `rf.Number`, `Category`, `Set`, `Entity`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
+| Typed leaves | `rf.Number`, `Category`, `Set`, `Hash`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
 | In-memory / streaming input | `rf.PolarsDataModule`, `rf.StreamingDataModule` | [Data Modules](guides/data-modules.qmd) |
 | Interactive prediction | `model.predict(...)` | [Getting Started](getting-started.qmd#interpret-the-prediction) |
 | Prediction contract | address-keyed `state`, `content`, `inferred`, `embedding` | [Prediction Output](guides/prediction-output.qmd) |
@@ -187,8 +187,9 @@ address-keyed model output intact until the postprocessor boundary. See
 - Keep `n_heads` positive and even. For the root, every Branch, and each leaf
   using `pooling="query"`, require `d_model % n_heads == 0` and
   `d_model // n_heads >= 2`.
-- Put `Entity` under a repeated context and do not assume its local indices
-  align across observations or sibling leaves.
+- Use `Hash` for large identifiers whose equality matters. Matching values
+  align across leaves in one encoded batch, though branch pooling can discard
+  token-level correspondence.
 - Set bounded capacity for Category and Set fields, then monitor vocabulary
   growth rather than inventing a missing-value class.
 - Use `overflow="tail"` only when source order places the newest values last.

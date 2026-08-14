@@ -6,7 +6,7 @@ from relflow.structs.experiment import Schema
 def _structure_payload() -> dict:
     field: dict = {
         "name": "identifier",
-        "type": "entity",
+        "type": "hash",
         "query": "[*].items[*].id",
     }
     return {

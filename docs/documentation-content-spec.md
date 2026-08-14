@@ -112,7 +112,7 @@ before adding new conceptual material.
 | Model Tree example | The prose says the example order includes a customer ID, but the shown schema does not. | Add the field or remove the claim. |
 | Category unavailable values | The main docs describe an extra unavailable embedding/output class. Tensorization uses sentinel index `size`; the embedder converts it to zero content. The implementation has exactly `size` content rows/classes, excludes unavailable values from content accuracy, and applies a uniform content target for unavailable targets. | Describe unavailable as `state=valued` with unavailable/zero embedded content, never as a learned label, state, or emitted class. Keep implementation-specific training details in the Category page. |
 | Set unavailable values | The Set page describes a reserved unavailable slot. Unknown labels are omitted from the `size`-wide multi-hot vector, and `p_unavailable` drops known positive bits during training. | Document Set-specific omission/dropout semantics. Explain that valued empty, all-OOV, and fully dropped sets can all have zero content. State that unavailable behavior is datatype-specific. |
-| Entity semantics | The page suggests a shared or batch-local codebook and identity scoring. The implementation reindexes identities independently per observation and predicts fixed local slot IDs. | Describe first-seen observation-local indexing, fixed decoder width, nonalignment across observations/leaves/checkpoints, and where cross-context identity requires restructuring. Explain why partially masking repeated occurrences is normally more meaningful than hiding the entire leaf. |
+| Hash semantics | The type uses batch-salted deterministic hashes rather than a learned vocabulary. | Describe equality across fields in one encoded batch, per-batch salt rotation during training, deterministic inference, quantized hash reconstruction, and the correspondence lost when sibling branches pool independently. |
 | DateParts precision | The page claims minute precision and omits seconds. The implementation stores second precision and supports `second_of_minute`. | Add the implemented part, remove the minute-only claim, and document per-part angular error in radians rather than generic content “accuracies.” |
 | Branch attention | The Branch page documents only `mha` and `none`; the public enum also includes `gqa` and `mqa`. | Document all supported modes and their intended tradeoffs, or classify unsupported values as non-public. |
 | State vocabulary | Core pages omit `other`, most output examples omit it, and the whitepaper invents a separate `pruned` state. There is no `pruned` token: pruning hides input with `masked` while retaining targets/trainability. | Make the Data Types overview authoritative for `valued`, `null`, `padded`, `masked`, and reserved `other`. Explain pruning as an operation, not a value state. |
@@ -120,7 +120,7 @@ before adding new conceptual material.
 | Category capacity examples | Several tutorials allocate one more slot than the labels shown (`size=4` for three Iris labels and `size=3` for binary examples), reinforcing the false extra-bucket model. | Use exact capacity in introductory examples or explicitly label extra capacity as future-vocabulary headroom and explain its cost. |
 | Invalid top-k example | AI / Expert Quickstart mutates a `Category(size=2)` to `topk=[2]`, but `topk` must be less than `size`. | Use a legal value on a larger category or remove the mutation. Execute this example as a docs contract test. |
 | Dynamic masking | The prose says `p_mask` samples observed values, while leaf masking can select null and padded positions; branch masking excludes padding but may select null positions. | Make an explicit product decision: change the implementation to valued-only selection or document and test the exact position/state behavior. Use one term consistently. |
-| Device Tenure case study | The schema puts separate `Entity` fields under sibling branches, while the narrative claims the model can match that identity across those branches. The page later warns that this does not happen automatically. | Restructure the example around a shared repeated context/stacked field, or remove the cross-branch identity claim. Keep hypotheses distinct from demonstrated capability. |
+| Device Tenure case study | The schema puts separate `Hash` fields under sibling branches, while the narrative claims the model can match that identity across those branches. The page later warns that this does not happen automatically. | Restructure the example around a shared repeated context/stacked field, or remove the cross-branch identity claim. Keep hypotheses distinct from demonstrated capability. |
 | Whitepaper category/state model | The whitepaper repeats the old unavailable bucket and separate `pruned` state. | Align its high-level architecture story with the canonical Data Types and Category pages; do not duplicate option-level details. |
 
 Every correction should add or update a test when a small executable example can
@@ -330,7 +330,7 @@ and capacity.
 
 The page should flow as follows:
 
-1. bounded categorical value and decision boundary against Set, Entity, and
+1. bounded categorical value and decision boundary against Set, Hash, and
    Text;
 2. minimal schema and record using a genuinely bounded example such as
    `merchant_category`, not a massive `merchant_id`;
@@ -410,7 +410,7 @@ same model artifact using documented public APIs.
 - Add model configuration, temporal validation, performance/distributed, and
   troubleshooting guidance.
 - Apply the datatype page contract to all built-ins, beginning with Category,
-  Entity, Set, Boolean, DateParts, and Branch.
+  Hash, Set, Boolean, DateParts, and Branch.
 - Document or explicitly de-scope the extension API.
 
 Exit gate: important choices have stated tradeoffs, diagnostics, and limits.
@@ -434,7 +434,7 @@ and no concept has competing authoritative explanations.
   one coherent example.
 - A reader can explain the difference between state, content, trainability,
   pruning, and exported embeddings.
-- A reader can choose among Category, Set, Entity, Text, Number, Boolean,
+- A reader can choose among Category, Set, Hash, Text, Number, Boolean,
   DateParts, and Vector from explicit decision boundaries.
 - A practitioner can choose interactive, batch, or online prediction and knows
   whether all three are supported at their version.
