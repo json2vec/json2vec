@@ -288,7 +288,10 @@ singleton. The display previews `state[0, 0]`.
 ## Excluding Leaves
 
 Use `exclude=` when a branch-mask policy should sample some descendant fields
-but leave others untouched:
+but leave others untouched. `exclude=` accepts a single address or a tuple of
+addresses. Each address is either the full slash-delimited path to a leaf (the
+same key you would see in `model.schema.requests`) or a path relative to the
+branch which owns the mask:
 
 ```{python .marimo}
 #| echo: true
@@ -300,7 +303,7 @@ rf.Branch(
     mask=rf.Mask(
         rate=0.25,
         window=32,
-        exclude=rf.where("name") == "country",
+        exclude="country",
     ),
     merchant=rf.Category(size=4096),
     amount=rf.Number,
@@ -308,9 +311,7 @@ rf.Branch(
 )
 ```
 
-`exclude` accepts one predicate or a list of predicates. Predicates are resolved
-after the schema is bound, relative to the active descendant leaves of the branch
-that owns the mask:
+Full addresses are also accepted. Pass a tuple to exclude multiple leaves:
 
 ```{python .marimo}
 #| echo: true
@@ -319,10 +320,10 @@ that owns the mask:
 rf.Mask(
     rate=0.25,
     window=32,
-    exclude=[
-        rf.where("type") == "entity",
-        rf.where("name") == "country",
-    ],
+    exclude=(
+        "record/transactions/entity",
+        "country",
+    ),
 )
 ```
 

@@ -6,7 +6,7 @@ import pydantic
 from rich.text import Text
 
 from relflow.structs.enums import AttentionMode, Overflow
-from relflow.structs.tree import Leaf, Node, Rate
+from relflow.structs.tree import Address, Leaf, Node, Rate
 from relflow.tensorfields import extensions as _extensions  # noqa: F401
 from relflow.tensorfields.base import TENSORFIELDS
 
@@ -34,7 +34,7 @@ class Mask(pydantic.BaseModel):
     branch: bool = False
     start: bool = False
     offset: Annotated[int, pydantic.Field(ge=0)] = 0
-    exclude: Any = None
+    exclude: tuple[Address, ...] = pydantic.Field(default_factory=tuple)
 
     @pydantic.model_validator(mode="after")
     def check_rate_or_count(self):
@@ -45,30 +45,26 @@ class Mask(pydantic.BaseModel):
 
     @pydantic.field_validator("exclude", mode="before")
     @classmethod
-    def normalize_exclude(cls, value: Any) -> Any:
+    def normalize_exclude(cls, value: Any) -> tuple[Address, ...]:
         if value is None:
-            return None
+            return ()
+
+        if isinstance(value, str):
+            return (Address(value),)
 
         if isinstance(value, (list, tuple)):
-            values = tuple(value)
-        else:
-            values = (value,)
+            normalized: list[Address] = []
+            for item in value:
+                if not isinstance(item, str):
+                    raise TypeError(
+                        f"Mask.exclude entries must be Address strings; got {type(item).__name__}"
+                    )
+                normalized.append(Address(item))
+            return tuple(normalized)
 
-        if any(isinstance(item, dict) and {"func", "key"}.issubset(item) for item in values):
-            from relflow.structs.selectors import NodePredicate
-
-            return tuple(
-                NodePredicate.model_validate(item)
-                if isinstance(item, dict) and {"func", "key"}.issubset(item)
-                else item
-                for item in values
-            )
-
-        return values
-
-    @pydantic.field_serializer("exclude")
-    def serialize_exclude(self, value: Any) -> Any:
-        return value
+        raise TypeError(
+            f"Mask.exclude must be an Address, a tuple of Addresses, or None; got {type(value).__name__}"
+        )
 
 
 class Branch(Node):
@@ -178,18 +174,18 @@ class Branch(Node):
         return None
 
     def excluded_leaves(self, mask: Mask) -> tuple[Leaf, ...]:
-        if mask.exclude is None:
+        if not mask.exclude:
             return ()
 
         from relflow.structs.selectors import NodePredicate
 
-        predicates = tuple(NodePredicate.from_selector(item) for item in mask.exclude)
+        predicate = NodePredicate.from_addresses(mask.exclude, base=str(self.address))
         return tuple(
             descendant
             for descendant in getattr(self, "descendants", ())
             if isinstance(descendant, Leaf)
             if getattr(descendant, "active", True)
-            if any(predicate(descendant) for predicate in predicates)
+            if predicate(descendant)
         )
 
     def __rich_console__(self, console, options):

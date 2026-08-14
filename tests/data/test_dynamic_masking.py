@@ -66,14 +66,40 @@ def test_model_encode_mask_flag_applies_and_skips_branch_masks():
     assert set(masked.targets.keys()) == {TensorKey.content, TensorKey.state}
 
 
-def test_branch_mask_exclude_predicate_skips_matching_leaf():
+def test_branch_mask_exclude_address_skips_matching_leaf():
     model = rf.Model(
         rf.Branch(
             rf.Number("amount"),
             rf.Category("code", size=8),
             name="items",
             length=2,
-            mask=rf.Mask(count=1, exclude=rf.where("type") == "category"),
+            mask=rf.Mask(count=1, exclude="record/items/code"),
+        ),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+    )
+    inputs = encode(
+        batch=[[{"items": [{"amount": 1.0, "code": "A"}, {"amount": 2.0, "code": "B"}]}]],
+        schema=model.schema,
+        strata=Strata.train,
+        interprocess_encoding_context=model.interprocess_encoding_context,
+    )
+
+    masked = next(mask([inputs], model.schema, Strata.train))
+
+    assert int(masked["record/items/amount"].trainable.sum()) == 1
+    assert not masked["record/items/code"].trainable.any()
+
+
+def test_branch_mask_exclude_relative_address_skips_matching_leaf():
+    model = rf.Model(
+        rf.Branch(
+            rf.Number("amount"),
+            rf.Category("code", size=8),
+            name="items",
+            length=2,
+            mask=rf.Mask(count=1, exclude="code"),
         ),
         d_model=8,
         n_layers=1,

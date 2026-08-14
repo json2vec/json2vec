@@ -39,6 +39,24 @@ class NodePredicate(pydantic.BaseModel):
         return cls(func=func, key=cache_key)
 
     @classmethod
+    def from_addresses(cls, addresses: "Iterable[str]", *, base: str | None = None) -> "NodePredicate":
+        address_set = frozenset(str(item) for item in addresses)
+        base_prefix = f"{base}/" if base else ""
+
+        def matches(node: Node) -> bool:
+            node_address = str(getattr(node, "address", ""))
+            if node_address in address_set:
+                return True
+            if base_prefix and node_address.startswith(base_prefix):
+                return node_address[len(base_prefix) :] in address_set
+            return False
+
+        return cls(
+            func=matches,
+            key=("addresses", tuple(sorted(address_set)), base or ""),
+        )
+
+    @classmethod
     def from_selector(cls, value: "NodeSelector") -> "NodePredicate":
         if isinstance(value, cls):
             return value

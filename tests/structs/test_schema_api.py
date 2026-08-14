@@ -167,7 +167,7 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
                 rf.Number("amount"),
                 name="transactions",
                 length=2,
-                masks=[rf.Mask(count=1, exclude=rf.where("type") == "number")],
+                masks=[rf.Mask(count=1, exclude="record/transactions/amount")],
             ),
             d_model=16,
             n_layers=1,
