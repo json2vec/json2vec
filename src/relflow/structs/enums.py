@@ -70,6 +70,7 @@ class Metric(enum.StrEnum):
     auc = "auc"
     precision = "precision"
     recall = "recall"
+    specificity = "specificity"
     loss = "loss"
     sigma = "sigma"
     throughput = "throughput"

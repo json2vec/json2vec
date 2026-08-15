@@ -144,10 +144,30 @@ datatype page before comparing metrics across fields.
 
 ## Classification Thresholds And Imbalance
 
-`Boolean.threshold` controls the value written at prediction time. It does not
-change the training objective, and changing it does not retrain the model.
-Choose a threshold on validation data using the cost of false positives and
-false negatives rather than assuming `0.5` is optimal.
+`Boolean.threshold` accepts either one float or a nonempty list of floats from
+`0` through `1`. Duplicate list values are removed while preserving their
+first-seen order. These values configure threshold-qualified metrics only; they
+do not change the probability-only prediction payload. A list lets one trained
+model report several operating points:
+
+```python
+converted = rf.Boolean(
+    target=True,
+    threshold=[0.5, 0.7, 0.9, 0.7],
+)
+```
+
+This configuration evaluates `0.5`, `0.7`, and `0.9`. It logs accuracy,
+precision, recall, and specificity separately at each unique threshold, with
+names such as `accuracy@0.5`, `recall@0.7`, and `specificity@0.9`. Recall is
+sensitivity, or the binary true-positive rate. Content loss and AUC are each
+logged once because they do not use a discrete decision boundary.
+
+Changing the configured thresholds does not change the training objective or
+retrain the model. Choose thresholds on validation data using the cost of false
+positives and false negatives rather than assuming `0.5` is optimal. When
+selecting a checkpoint or comparing runs, name the exact threshold-qualified
+metric so the operating point is unambiguous.
 
 For bounded categorical targets, ordinary accuracy can obscure rare classes.
 Use configured top-k accuracy only when returning several candidates is useful

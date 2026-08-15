@@ -19,7 +19,7 @@ model = rf.Model(
     n_layers=1,
     n_heads=4,
     events=rf.Branch(length=8, succeeded=rf.Boolean),
-    converted=rf.Boolean(target=True),
+    converted=rf.Boolean(target=True, threshold=[0.5, 0.8]),
 )
 ```
 
@@ -55,7 +55,7 @@ embedding requested with `embed=True`.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `threshold` | `0.5` | Decision boundary used by prediction `content.value` and tracked accuracy, precision, and recall. Must be between `0` and `1`. |
+| `threshold` | `0.5` | One metric threshold, or a nonempty list of metric thresholds, from `0` through `1`. Duplicate list values are removed while preserving their first-seen order. Every unique threshold receives its own decision metrics; thresholds do not change prediction content. |
 
 Shared leaf options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight`
 are described in [Built-In Data Types](../core-concepts/data-types.qmd).
@@ -71,17 +71,25 @@ Null, padded, masked, and reserved-other targets contribute only to state
 prediction. The page-level metrics are:
 
 - state accuracy and state loss;
-- Boolean content loss, accuracy, precision, recall, and AUC.
+- Boolean content loss and AUC, each reported once; and
+- Boolean content accuracy, precision, recall, and specificity at
+  every unique configured threshold.
 
-`threshold` controls the discrete accuracy, precision, recall, and output value.
-AUC and binary cross entropy continue to use unthresholded probabilities. Tune
-the threshold using held-out data when false positives and false negatives have
-different costs.
+Threshold-qualified metrics use names such as `accuracy@0.5`,
+`precision@0.5`, `recall@0.5`, and `specificity@0.5`. Recall is sensitivity,
+or the binary true-positive rate; specificity is the true-negative rate. For
+example, `threshold=[0.5, 0.8, 0.5]` logs one set at `0.5` and one at `0.8`, in
+that order. It does not log the repeated `0.5` twice.
+
+Thresholds control discrete decision metrics, but AUC and binary cross entropy
+continue to use unthresholded probabilities or logits. Tune thresholds using
+held-out data when false positives and false negatives have different costs.
 
 ## Prediction Output
 
-Predictions contain the thresholded Boolean value and the probability of
-`True`. This is the complete shared envelope for the field:
+Predictions contain the probability of `True`, without a thresholded Boolean
+value. The configured `threshold` values affect metrics only and do not change
+this payload. This is the complete shared envelope for the field:
 
 ```python
 {
@@ -93,14 +101,14 @@ Predictions contain the thresholded Boolean value and the probability of
             "masked": ...,
             "other": ...,
         },
-        "content": {"value": ..., "probability": ...},
+        "content": {"probability": ...},
         "inferred": ...,
     }
 }
 ```
 
-Content is emitted for every decoded position. Interpret it together with the
-state distribution and `inferred` mask. The
+The content probability is emitted for every decoded position. Interpret it
+together with the state distribution and `inferred` mask. The
 [Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
 explains those shared members.
 
