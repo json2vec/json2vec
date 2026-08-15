@@ -29,11 +29,11 @@ query -> validate -> tensorize state/content -> embed visible input
 | --- | --- | --- |
 | Continuous scalar | [`Number`](../data-types/number.qmd) | Numeric value is an ID, code, or class label. |
 | Boolean | [`Boolean`](../data-types/boolean.qmd) | The source has more than two valued labels; use `Category`. |
-| One bounded label | [`Category`](../data-types/category.qmd) | The value is a massive or unstable identifier; keep it as metadata or use `Entity` for local repeated equality. |
+| One bounded label | [`Category`](../data-types/category.qmd) | The value is a massive or unstable identifier; keep it as metadata or use `Hash` for equality without a vocabulary. |
 | Zero or more labels | [`Set`](../data-types/set.qmd) | Labels have attributes or order; use `Branch`. |
 | Repeated objects | [`Branch`](../data-types/branch.qmd) | Repetition is only an upstream storage artifact; preprocess or flatten. |
 | Timestamp/calendar value | [`DateParts`](../data-types/dateparts.qmd) | Elapsed time or recency matters; derive a `Number`. |
-| Observation-local repeated identity | [`Entity`](../data-types/entity.qmd) | The ID is intentionally a small, stable, globally learned label; use `Category`. |
+| Large or unbounded identifier | [`Hash`](../data-types/hash.qmd) | The ID is intentionally a small, stable, globally learned label; use `Category`. |
 | Precomputed dense vector | [`Vector`](../data-types/vector.qmd) | `relflow` should compute embeddings from strings; use `Text`. |
 | Free-form text | [`Text`](../data-types/text.qmd) | The string is a bounded label; use `Category` or `Set`. |
 
@@ -41,8 +41,8 @@ The same raw shape can have different meaning:
 
 - `"12345"` is a `Number` only if numeric distance and magnitude matter.
 - `"12345"` is a `Category` if it is a bounded code or label.
-- `"12345"` is an `Entity` if only repeated equality within one observation
-  and one leaf matters.
+- `"12345"` is a `Hash` if equality matters but a learned vocabulary does
+  not.
 - `["red", "sale"]` is a `Set` if membership is unordered.
 - `[{"name": "red"}, {"name": "sale"}]` is a `Branch` if each item has
   fields or position.
@@ -151,12 +151,12 @@ datatype decides which selected targets contribute to content loss. See
 | `Set` | Per-label probabilities or thresholded labels | Yes | Unknown labels and unused capacity are omitted. |
 | `Vector` | Reconstructed vector | Yes | Non-valued tensorized content is a zero vector. |
 | `DateParts` | None | No public payload | Trains state accuracy plus per-part cosine loss and angular error. |
-| `Entity` | None | No public payload | Predicts fixed observation-local slots only for training diagnostics. |
+| `Hash` | None | No public payload | Reconstructs quantized hash lanes for training diagnostics. |
 | `Text` | None | No public payload | Reconstructs frozen encoder embeddings, not text. |
 | `Branch` | None | No | Child leaves may decode; `embed=True` can export branch context. |
 
 No public decoded payload does not mean a field is ignored. `DateParts`,
-`Entity`, and `Text` can be visible inputs, train reconstruction objectives, and
+`Hash`, and `Text` can be visible inputs, train reconstruction objectives, and
 emit an embedding when configured with `embed=True`.
 
 ## Prediction Envelope

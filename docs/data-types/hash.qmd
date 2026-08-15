@@ -1,0 +1,90 @@
+---
+marimo-static-output: true
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "blake3>=1.0.8",
+    "marimo>=0.23.8",
+    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
+  ]
+---
+
+# Hash
+
+Use `Hash` for large or unbounded identifiers when equality is useful but
+the values should not become a learned vocabulary. Typical examples include
+device, account, counterparty, product, and hostname identifiers.
+In serialized schemas, select it with `"type": "hash"`.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import relflow as rf
+
+transactions = rf.Branch(
+    name="transactions",
+    length=16,
+    account_id=rf.Hash(p_mask=0.15, n_hashes=4),
+    amount=rf.Number,
+)
+
+transactions
+```
+
+Use `Category` instead for a small, stable vocabulary whose individual labels
+should be learned. Keep an identifier as metadata when equality itself carries
+no useful signal.
+
+## Input Values
+
+`Hash` accepts MessagePack-compatible hashable scalar values such as
+strings, integers, floats, booleans, and bytes. `None` has state `null`, and a
+missing branch slot has state `padded`. Lists, mappings, and unsupported Python
+objects are rejected.
+
+The same value receives the same representation everywhere in one encoded
+batch, including across different `Hash` leaves. Training and validation
+use a fresh random salt for each batch, preventing persistent value
+memorization while preserving batch-local equality. Test and prediction use a
+fixed zero salt, making inference deterministic.
+
+## Configuration
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `n_hashes` | `1` | Number of independent signed 64-bit hash lanes. More lanes reduce fingerprint collisions and increase the reconstruction target capacity. |
+| `n_bands` | `8` | Number of octaves spanned below the base sinusoidal frequency. |
+| `offset` | `4` | Upper octave of the sinusoidal frequency range. |
+| `n_buckets` | `4` | Number of reconstruction classes per hash lane. Must be greater than one. Effective target capacity is `n_buckets ** n_hashes`. |
+
+Shared leaf options are documented in
+[Built-In Data Types](../core-concepts/data-types.qmd).
+
+## Representation And Learning
+
+Tensorization encodes each value with keyed BLAKE3 into `n_hashes` signed
+64-bit integers. On the model device, each integer is normalized and expanded
+into a sinusoidal representation. The lane representations are summed directly
+in model space. Non-valued states use a field-local learned state embedding.
+
+For reconstruction, each hash lane is uniformly quantized into `n_buckets` and
+trained with cross entropy. These metrics measure recovery of the fingerprint;
+the original raw value cannot be decoded from model output.
+
+Matching hashes allow attention to recognize equal values while their tokens
+remain together. They do not guarantee correspondence after a branch has been
+compressed into a pooled representation.
+
+## Prediction Output
+
+`Hash` has no decoded writer payload. Configure `embed=True` only when a
+normalized representation at the field address is useful; it is not a durable
+identifier across separately tensorized training batches.
+
+## Where Next
+
+- Use [Category](category.qmd) for persistent bounded labels.
+- Use [Branch](branch.qmd) to configure repeated observations.
+- Read [Field Stacking](../guides/field-stacking.qmd) when several semantic
+  roles need token-level interaction before pooling.

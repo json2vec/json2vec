@@ -64,7 +64,7 @@ with tree fields or root architecture arguments.
 | `Boolean` | Strict Boolean | Probability of `True` |
 | `Category` | One bounded persistent label | Best known label, probability, optional top-k |
 | `Set` | Multiple bounded persistent labels | Known labels and probabilities, optionally thresholded |
-| `Entity` | Observation-local repeated identity | Training metrics; no decoded identity label |
+| `Hash` | Hashed identifier equality | Training metrics; no decoded identity label |
 | `DateParts` | Datetime parsed into configured cyclical parts | No decoded public calendar value currently |
 | `Vector` | Fixed-width numeric vector | Vector content |
 | `Text` | Text tokenized by an optional model/tokenizer | No decoded text currently; configure `embed=True` for contextual output |

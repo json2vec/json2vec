@@ -36,13 +36,13 @@ future split.
 
 ## Use One Shared Event Context
 
-`Entity` reindexes identities independently within each observation and each
-Entity leaf. Two separate Entity fields under sibling `login_sessions` and
-`transactions` branches do not share an identity map.
+`Hash` gives matching identifiers the same representation across fields in
+an encoded batch. However, sibling branches pool their individual tokens before
+they interact, so that equality alone does not preserve which login token
+matches which transaction token.
 
-To let one Entity field represent recurrence across both sources, stack login
-and transaction events into one repeated context and retain source/role as an
-explicit category:
+To retain token-level correspondence, stack login and transaction events into
+one repeated context and keep source/role as an explicit category:
 
 ```json
 {
@@ -97,7 +97,7 @@ model = rf.Model(
         length=160,
         overflow="tail",
         embed=True,
-        device_id=rf.Entity(p_mask=0.15, embed=True),
+        device_id=rf.Hash(p_mask=0.15, embed=True),
         source=rf.Category(size=2),
         event_type=rf.Category(size=128),
         days_since_event=rf.Number,
@@ -111,21 +111,21 @@ model = rf.Model(
 model
 ```
 
-Within one processed customer observation, every `events/device_id` value uses
-the same observation-local mapping. Repeated device IDs therefore share a local
-content token across login and transaction positions. `source` keeps those
-roles distinguishable after stacking.
+Within one encoded batch, equal `events/device_id` values receive the same
+salted hash representation. Repeated device IDs can therefore attend to one
+another before branch pooling. `source` keeps those roles distinguishable after
+stacking.
 
 The preprocessor below writes every sparse key on every event. RelFlow's direct
 extractor for these simple inferred paths preserves the explicit `None`
 placeholders, so login-only and transaction-only fields stay on the same event
 coordinates.
 
-`p_mask=0.15` hides some individual device occurrences during train, validation,
-and test. The decoder can learn local identity reconstruction when another
-occurrence remains visible. Validation/test metrics therefore sample the same
-masking distribution. Using `target=True` on the entire Entity leaf would hide
-every local identity occurrence and remove the relationship the model needs.
+`p_mask=0.15` hides some individual device occurrences during train and
+validation. The decoder learns quantized hash reconstruction when another
+occurrence remains visible. Using `target=True` on the entire Hash leaf
+would hide every identity occurrence and remove the relationship the model
+needs.
 
 `days_since_event` supplies recency. Root and event embeddings are requested for
 diagnostics; they are not explanations by themselves.
@@ -282,7 +282,7 @@ Compare at least:
 
 1. a strong tabular model with the original device-tenure feature;
 2. the structured model without any device ID field;
-3. the structured model with the shared Entity field;
+3. the structured model with the shared Hash field;
 4. the structured model with and without transaction events;
 5. the structured model with and without recency fields.
 
@@ -301,15 +301,16 @@ by networks. Fraud labels may be delayed and policy-dependent. Governance,
 retention, consent, and protected-class proxy review remain product
 requirements.
 
-Observation-local Entity IDs are not stable across customers, batches, leaves,
-or checkpoints. They capture equality structure inside the prepared
-observation, not global facts about a device.
+Training-time Hash representations are salted per batch and therefore are
+not durable identifiers across batches or checkpoints. They capture equality
+structure, not global facts about a device. Test and prediction use a fixed salt
+for deterministic inference.
 
 ## Where Next
 
 - Use [Field Stacking](../guides/field-stacking.qmd) for the general shared-role
   pattern used here.
-- Use [Entity](../data-types/entity.qmd) for exact observation-local semantics.
+- Use [Hash](../data-types/hash.qmd) for hashed equality without a vocabulary.
 - Use [Temporal Validation](../guides/temporal-validation.qmd) for cutoff and
   split design.
 - Use [Evaluation and Metrics](../guides/evaluation.qmd) to define model

@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -71,7 +72,7 @@ of the approach.
 
 ## What The Schema Controls
 
-- Leaf types such as `Number`, `Category`, `Set`, `Entity`, `DateParts`,
+- Leaf types such as `Number`, `Category`, `Set`, `Hash`, `DateParts`,
   `Text`, and `Vector` own value encoding, loss, metrics, and prediction output.
 - `Branch` nodes preserve repeated contexts and pool them into their parent.
 - `target=True`, masking, and pruning decide which values are hidden and

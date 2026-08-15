@@ -321,7 +321,7 @@ rf.Mask(
     rate=0.25,
     window=32,
     exclude=(
-        "record/transactions/entity",
+        "record/transactions/amount",
         "country",
     ),
 )

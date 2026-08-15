@@ -37,8 +37,15 @@ def test_common_resources_are_available_from_package_root():
     assert relflow.Boolean.model_fields["type"].default == "boolean"
     assert relflow.Number.model_fields["type"].default == "number"
     assert relflow.Set.model_fields["type"].default == "set"
+    assert relflow.Hash.model_fields["type"].default == "hash"
+    assert not hasattr(relflow, "Entity")
+    assert not hasattr(relflow, "StaticEntity")
     assert relflow.Overflow.tail == "tail"
     assert relflow.VocabularySyncCallback.__name__ == "VocabularySyncCallback"
     assert "number" in relflow.TENSORFIELDS
     assert "boolean" in relflow.TENSORFIELDS
     assert "set" in relflow.TENSORFIELDS
+    assert "hash" in relflow.TENSORFIELDS
+    assert "entity" not in relflow.TENSORFIELDS
+    assert "static_entity" not in relflow.TENSORFIELDS
+    assert "hashable" not in relflow.TENSORFIELDS

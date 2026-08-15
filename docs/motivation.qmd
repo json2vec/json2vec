@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -64,10 +65,10 @@ valuable even for a nested problem: it reveals whether the additional
 structure earns its memory, latency, and operational cost.
 
 Preserving hierarchy also does not invent relationships that are absent from
-the schema. Separate sibling branches have separate contexts. Repeated
-identifiers do not automatically align across branches, and `Entity` indices
-are local rather than a global join key. Cross-context identity must be made
-explicit by restructuring or preprocessing the observation.
+the schema. `Hash` gives repeated identifiers matching representations, but
+separate sibling branches pool their tokens before interacting. Cross-context
+correspondence may therefore need restructuring or preprocessing so matching
+roles meet before pooling.
 
 ## Schema As Model Blueprint
 
