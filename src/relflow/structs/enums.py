@@ -65,19 +65,6 @@ class TensorKey(enum.StrEnum):
     inferred = "inferred"
 
 
-class Metric(enum.StrEnum):
-    accuracy = "accuracy"
-    auc = "auc"
-    precision = "precision"
-    recall = "recall"
-    specificity = "specificity"
-    loss = "loss"
-    sigma = "sigma"
-    throughput = "throughput"
-    mae = "mae"
-    rmse = "rmse"
-
-
 class ShardingStrategy(enum.StrEnum):
     file = "file"
     chunk = "chunk"

@@ -17,7 +17,8 @@ from relflow.data.datasets.base import EncodedBatch, EncodedInput
 from relflow.data.iterables import encode as encode_batch
 from relflow.data.iterables import mask as apply_mask
 from relflow.data.processors import Postprocessor, Preprocessor
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.metric import Metric
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (

@@ -15,6 +15,7 @@ from tensordict import TensorDict
 
 from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
+from relflow.structs.metric import Metric, Traits, TraitsInput, _coerce_traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address, Leaf, Node, Renderable
 from relflow.tensorfields.spec import PluginSpec
@@ -382,9 +383,12 @@ class Plugin:
     Register request, tensorfield, embedder, decoder, loss, and write
     components with `@plugin.register`. Creating a plugin with an existing
     name replaces the registry entry and emits a warning.
+
+    `traits` advertises which `Traits` this datatype satisfies so that
+    trait-guarded metrics can query eligibility via `plugin.qualifies_for(metric)`.
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, *, traits: TraitsInput = None):
         if not isinstance(name, str):
             raise TypeError("Plugin name must be a string")
 
@@ -393,6 +397,7 @@ class Plugin:
             raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
 
         self.name: str = name
+        self.traits: frozenset[Traits] = _coerce_traits(traits)
         self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
 
@@ -404,6 +409,10 @@ class Plugin:
             )
 
         TENSORFIELDS[name] = self
+
+    def qualifies_for(self, metric: Metric) -> bool:
+        """Return True if this plugin's traits cover `metric`'s required traits."""
+        return metric.qualifies(self)
 
     @overload
     def register(self, obj: None, component: Component | str) -> None: ...

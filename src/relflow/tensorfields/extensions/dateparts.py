@@ -15,7 +15,8 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -163,7 +164,7 @@ def _(arr: np.ndarray) -> np.ndarray:
     return (np.sin(radians), np.cos(radians))
 
 
-dateparts: Plugin = Plugin(name="dateparts")
+dateparts: Plugin = Plugin(name="dateparts", traits=[Traits.continuous])
 
 
 @dateparts.register
@@ -439,7 +440,7 @@ def loss(
 
     module.track(
         (prediction.address, strata, Metric.accuracy, TensorKey.state),
-        value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(),
+        value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(), #TODO replace with Metrics.accuracy
     )
 
     request: RequestBase = module.schema.requests[prediction.address]

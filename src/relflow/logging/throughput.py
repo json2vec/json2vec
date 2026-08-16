@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 import torch
 from lightning import Callback, Trainer
 
-from relflow.structs.enums import Metric, Strata
+from relflow.structs.enums import Strata
+from relflow.structs.metric import Metric
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model

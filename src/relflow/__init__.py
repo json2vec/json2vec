@@ -36,7 +36,6 @@ from relflow.inference.callback import Writer
 from relflow.structs.enums import (
     AttentionMode,
     Component,
-    Metric,
     Overflow,
     ShardingStrategy,
     Strata,
@@ -44,6 +43,7 @@ from relflow.structs.enums import (
     TensorKey,
     Tokens,
 )
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.experiment import (
     NodeAttribute,
     NodePredicate,
@@ -168,6 +168,7 @@ __all__ = [
     "TensorKey",
     "Text",
     "Tokens",
+    "Traits",
     "UpdateOperation",
     "Vector",
     "VocabularySyncCallback",
