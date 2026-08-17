@@ -7,7 +7,6 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import torch
-from loguru import logger
 from tensordict import TensorDict
 
 from relflow.architecture.contracts import sanitize
@@ -17,6 +16,7 @@ from relflow.data.datasets.base import EncodedBatch, EncodedInput
 from relflow.data.iterables import encode as encode_batch
 from relflow.data.iterables import mask as apply_mask
 from relflow.data.processors import Postprocessor, Preprocessor
+from relflow.rich import console, record_incident
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -151,7 +151,11 @@ class ModelRuntime:
             losses.append(loss * torch.tensor(request.weight))
 
         if len(losses) == 0:
-            logger.warning("no trainable fields in batch, returning zero loss")
+            if record_incident("zero-loss", id(module), str(strata)).emit:
+                console.log(
+                    "[relflow.warning]no trainable fields in the batch; returning zero loss[/]",
+                    {"strata": strata},
+                )
             loss: torch.Tensor = torch.tensor(0.0, device=batch.device, requires_grad=True)
             return Output(loss=loss)
 

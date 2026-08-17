@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 
 import torch
-from loguru import logger
 from tensordict import TensorDict
 
+from relflow.rich import console, incidents
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -104,7 +104,7 @@ def test_number_normalizer_ignores_nonfinite_values_when_updating():
     assert torch.isnan(output[3])
 
 
-def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
+def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns_once_per_embedder():
     structure = Schema.model_validate(_structure_payload())
     embedder = Embedder(schema=structure, address=ADDRESS)
     bound = embedder.max_fourier_input.detach()
@@ -127,35 +127,31 @@ def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
         ],
         dtype=torch.int64,
     )
-    events: list[dict[str, object]] = []
-    messages: list[str] = []
-    sink_id = logger.add(
-        lambda message: (
-            events.append(dict(message.record["extra"])),
-            messages.append(message.record["message"]),
-        ),
-        level="WARNING",
-    )
-
-    try:
+    incidents.reset()
+    with console.capture() as captured:
         clamped = embedder.clamp(content=content, state=state)
-    finally:
-        logger.remove(sink_id)
+    diagnostic = captured.get()
 
     assert torch.isfinite(clamped).all()
     assert torch.allclose(clamped[:3], torch.stack([bound, -bound, bound]))
     assert clamped[3].item() == 0.0
     assert clamped[4].item() == bound.item()
-    assert any("number Fourier inputs exceed safe range" in message for message in messages)
-    assert any(
-        event.get("component") == "tensorfield"
-        and event.get("field_type") == "number"
-        and event.get("address") == ADDRESS
-        and event.get("count") == 5
-        and event.get("valued_count") == 4
-        and event.get("nonfinite_count") == 2
-        for event in events
-    )
+    assert "number inputs exceed the safe Fourier range" in diagnostic
+    assert ADDRESS in diagnostic
+    assert "'count': 5" in diagnostic
+    assert "'valued_count': 4" in diagnostic
+    assert "'nonfinite_count': 2" in diagnostic
+
+    with console.capture() as repeated:
+        embedder.clamp(content=content, state=state)
+    assert repeated.get() == ""
+    assert incidents.snapshot()[("number-clamp", id(embedder), ADDRESS, "nonfinite")] == 2
+
+    next_embedder = Embedder(schema=structure, address=ADDRESS)
+    with console.capture() as next_run:
+        next_embedder.clamp(content=content, state=state)
+    assert "number inputs exceed the safe Fourier range" in next_run.get()
+    incidents.reset()
 
 
 def test_number_embedder_outputs_finite_payload_for_extreme_outliers():

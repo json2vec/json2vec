@@ -8,10 +8,10 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
-from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.rich import console, record_incident
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -121,9 +121,11 @@ class TensorField(TensorFieldBase):
         tokens = apply(values, interprocess_encoding_context.encode)
 
         if len(interprocess_encoding_context) > (size := schema.requests[address].size):
-            logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
-                "vocabulary exceeds size={}", size
-            )
+            if record_incident("vocabulary-capacity", id(schema), "category", str(address), size).emit:
+                console.log(
+                    "[relflow.warning]category vocabulary exceeds configured capacity[/]",
+                    {"address": address, "size": len(interprocess_encoding_context), "capacity": size},
+                )
 
         data, states = pad(
             nested=tokens,

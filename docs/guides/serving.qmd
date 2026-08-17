@@ -269,6 +269,17 @@ environment variables:
 to empty or null-like results and raises a diagnostic error. It is useful while
 validating an integration, but it is not full drift monitoring.
 
+`Deployment.log_level` configures Uvicorn; it does not configure RelFlow's
+internal Rich diagnostics. Embedding `Deployment.app()` does not reconfigure
+process output, so an external ASGI runner continues to own its loggers and
+traceback policy. RelFlow's bounded internal diagnostics remain incident-only;
+they never create request-, batch-, step-, or epoch-level console chatter.
+The process-owning `Deployment.serve()` entry point installs Rich uncaught
+tracebacks with locals hidden; `Deployment.app()` does not. Applications using
+an external runner may call
+`rich.traceback.install(show_locals=False)` at their own entry point. That hook
+is process-wide and should not expose traceback details in HTTP responses.
+
 ## Failure Behavior
 
 | Condition | Response or behavior |
@@ -281,9 +292,11 @@ validating an integration, but it is not full drift monitoring.
 | `GET /health` | Confirms the app is running after startup, but does not probe downstream systems or prediction quality. |
 
 The error envelope contains a numeric `status_code` and message. The embedded
-code is not always the HTTP transport status in the current runtime. Avoid
-exposing sensitive source values or stack traces through custom exception
-handling.
+code is not always the HTTP transport status in the current runtime. A server
+may render one unexpected exception for operators, but the traceback and locals
+must never enter the HTTP response. Avoid exposing sensitive source values or
+stack traces through custom exception handling, and avoid printing the same
+failure once through RelFlow and again through Uvicorn.
 
 ## Production Checklist
 

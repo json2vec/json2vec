@@ -10,6 +10,7 @@ import relflow as rf
 from relflow.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
 from relflow.data.iterables import encode
 from relflow.logging.throughput import ThroughputLogger
+from relflow.rich import console, incidents
 from relflow.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
@@ -161,7 +162,7 @@ def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
     assert model.schema.model_dump(mode="python") == schema.model_dump(mode="python")
 
 
-def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> None:
+def test_rollback_checkpoint_restores_on_non_global_rank_without_diagnostic(tmp_path: Path) -> None:
     model = Model(schema=_schema(), batch_size=2)
     best_path = tmp_path / "best.ckpt"
     model.save(best_path)
@@ -194,13 +195,18 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
             self.barriers.append(name)
 
     strategy = StrategyStub()
-    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    trainer = type("TrainerStub", (), {"strategy": strategy, "is_global_zero": False})()
     callback = RollbackCheckpoint(dirpath=tmp_path)
     callback.best_model_path = str(best_path)
     callback.best_model_score = torch.tensor(0.25)
 
-    callback.on_fit_end(trainer=trainer, pl_module=model)
+    incidents.reset()
+    with console.capture() as captured:
+        callback.on_fit_end(trainer=trainer, pl_module=model)
+    diagnostic = captured.get()
+    incidents.reset()
 
+    assert diagnostic == ""
     assert strategy.barriers == ["rollback_checkpoint_load"]
     assert strategy.checkpoint_io.loaded == [(str(best_path), torch.device("cpu"), False)]
     assert model.batch_size == 2
@@ -240,12 +246,17 @@ def test_rollback_checkpoint_loads_schema_metadata_with_weights_only_disabled(tm
             pass
 
     strategy = StrategyStub()
-    trainer = type("TrainerStub", (), {"strategy": strategy})()
+    trainer = type("TrainerStub", (), {"strategy": strategy, "is_global_zero": True})()
     callback = RollbackCheckpoint(dirpath=tmp_path)
     callback.best_model_path = str(best_path)
 
-    callback.on_fit_end(trainer=trainer, pl_module=model)
+    incidents.reset()
+    with console.capture() as captured:
+        callback.on_fit_end(trainer=trainer, pl_module=model)
+    diagnostic = captured.get()
+    incidents.reset()
 
+    assert "restored the best checkpoint" in diagnostic
     assert strategy.checkpoint_io.weights_only is False
 
 

@@ -9,10 +9,10 @@ import numpy as np
 import pydantic
 import torch
 from beartype import beartype
-from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
+from relflow.rich import console, record_incident
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -267,26 +267,30 @@ class Embedder(EmbedderBase):
 
         if unsafe.any():
             unsafe_values = content[unsafe].detach()
-            unsafe_abs = unsafe_values.abs()
-            finite_abs = unsafe_abs[torch.isfinite(unsafe_abs)]
-            if torch.isinf(unsafe_abs).any():
-                max_abs = math.inf
-            elif finite_abs.numel() > 0:
-                max_abs = float(finite_abs.max().cpu().item())
-            else:
-                max_abs = math.nan
+            nonfinite = ~torch.isfinite(unsafe_values)
+            severity = "nonfinite" if nonfinite.any() else "out-of-range"
+            if record_incident("number-clamp", id(self), str(self.origin), severity).emit:
+                unsafe_abs = unsafe_values.abs()
+                finite_abs = unsafe_abs[torch.isfinite(unsafe_abs)]
+                if torch.isinf(unsafe_abs).any():
+                    max_abs = math.inf
+                elif finite_abs.numel() > 0:
+                    max_abs = float(finite_abs.max().cpu().item())
+                else:
+                    max_abs = math.nan
 
-            logger.bind(
-                component="tensorfield",
-                field_type="number",
-                address=str(self.origin),
-                count=int(unsafe.sum().cpu().item()),
-                valued_count=int((unsafe & valued).sum().cpu().item()),
-                nonfinite_count=int((~torch.isfinite(unsafe_values)).sum().cpu().item()),
-                max_abs_normalized=max_abs,
-                bound=float(bound.detach().cpu().item()),
-                safe_max_angle=FOURIER_SAFE_MAX_ANGLE,
-            ).warning("number Fourier inputs exceed safe range; clamping normalized values")
+                console.log(
+                    "[relflow.warning]number inputs exceed the safe Fourier range; clamping values[/]",
+                    {
+                        "address": self.origin,
+                        "count": int(unsafe.sum().cpu().item()),
+                        "valued_count": int((unsafe & valued).sum().cpu().item()),
+                        "nonfinite_count": int(nonfinite.sum().cpu().item()),
+                        "max_abs_normalized": max_abs,
+                        "bound": float(bound.detach().cpu().item()),
+                        "safe_max_angle": FOURIER_SAFE_MAX_ANGLE,
+                    },
+                )
 
         clamped = content.clamp(min=-bound, max=bound)
         return torch.where(torch.isnan(clamped), torch.zeros_like(clamped), clamped)

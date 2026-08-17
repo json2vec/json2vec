@@ -51,20 +51,12 @@ model = rf.Model(
 model
 ```
 
-```text
-order                         root branch, exported embedding
-|-- source_channel            inactive category leaf
-|-- line_items                repeated branch, exported embedding
-|   |-- sku                   category leaf
-|   |-- quantity              number leaf
-|   `-- price                 number leaf, masked reconstruction
-`-- returned                  supervised category target
-```
-
-The schema says that one order contains a repeated list of line items and a
-return target. `source_channel` remains in the serializable schema but is
-inactive. The line-item fields share item coordinates, and the branch can emit
-its own representation before the order is represented at the root.
+Leaving `model` as the cell's final expression asks Marimo to use RelFlow's
+Rich HTML/plain-text MIME representation. The live tree says that one order
+contains a repeated list of line items and a return target. `source_channel`
+remains in the serializable schema but is inactive. The line-item fields share
+item coordinates, and the branch can emit its own representation before the
+order is represented at the root.
 
 ## Node Kinds
 

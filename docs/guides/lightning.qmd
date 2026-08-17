@@ -141,6 +141,13 @@ Attach any Lightning logger for durable experiment tracking. The exact naming
 contract, loss composition, and model-selection advice live in
 [Evaluation And Metrics](evaluation.qmd).
 
+Lightning metric loggers are separate from RelFlow's internal Rich diagnostics.
+Those diagnostics are bounded and incident-only; they do not mirror metrics,
+progress, epochs, steps, or batches. Applications own any additional console or
+traceback configuration. See
+[Troubleshooting](troubleshooting.qmd#diagnostics-and-tracebacks) for a safe Rich
+traceback setup at an application boundary.
+
 ## Select And Restore Checkpoints
 
 An ordinary Lightning callback records the best path:

@@ -17,7 +17,6 @@ import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import torch
 from beartype import beartype
-from loguru import logger
 from torch.utils.data import DataLoader, IterableDataset
 
 from relflow.data.datasets.base import (
@@ -47,6 +46,7 @@ from relflow.data.iterables import (
 from relflow.data.processors import Preprocessor
 from relflow.distributed import rank as distributed_rank
 from relflow.distributed import world_size as distributed_world_size
+from relflow.rich import console, record_incident
 from relflow.structs.enums import ShardingStrategy, Strata, Suffix
 from relflow.structs.experiment import Schema
 
@@ -60,6 +60,19 @@ PatternInput = str | re.Pattern[str]
 
 def _compile_pattern(pattern: PatternInput) -> re.Pattern[str]:
     return re.compile(pattern) if isinstance(pattern, str) else pattern
+
+
+def diagnostic_path(uri_path: str | Path, *, limit: int = 240) -> str:
+    """Return a useful path label without URI credentials, queries, or fragments."""
+
+    parsed = urlparse(str(uri_path))
+    if not parsed.scheme:
+        return parsed.path[:limit]
+
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    return parsed._replace(netloc=hostname, query="", fragment="").geturl()[:limit]
 
 
 @beartype
@@ -198,10 +211,8 @@ def read(
 
                 if parsed.scheme == "s3":
                     fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
-                    path = f"{parsed.netloc}{parsed.path}"
                 elif parsed.scheme in ("", "file"):
                     fs = pafs.LocalFileSystem()
-                    path = parsed.path
                 else:
                     raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
 
@@ -241,9 +252,23 @@ def read(
 
                         yield from rows
                 except Exception as error:
-                    logger.bind(component="data", path=path, suffix=suffix.value).warning(
-                        "error reading streaming dataset file, skipping: {}", error
+                    safe_path = diagnostic_path(uri_path)
+                    reason = type(error).__qualname__
+                    incident = record_incident(
+                        "streaming-read",
+                        safe_path,
+                        suffix.value,
+                        reason,
                     )
+                    if incident.emit:
+                        console.log(
+                            "[relflow.warning]skipping an unreadable streaming dataset file[/]",
+                            {
+                                "path": safe_path,
+                                "suffix": suffix.value,
+                                "reason": reason,
+                            },
+                        )
                     continue
 
         case _:

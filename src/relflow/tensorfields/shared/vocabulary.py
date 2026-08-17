@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 from lightning.pytorch import Callback, Trainer
-from loguru import logger
 
 from relflow.data.nested import MASK_LITERAL
 from relflow.distributed import (
@@ -20,6 +19,7 @@ from relflow.distributed import (
     is_rank_zero,
     synchronize_epoch_metrics,
 )
+from relflow.rich import console, record_incident
 from relflow.structs.tree import Address
 
 if TYPE_CHECKING:
@@ -425,12 +425,11 @@ def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -
     if is_rank_zero():
         for address, stats in payload["stats"].items():
             if stats["max"] > 0 and stats["size"] / stats["max"] >= 0.95:
-                logger.bind(
-                    component="vocabulary",
-                    address=address,
-                    size=stats["size"],
-                    max=stats["max"],
-                ).warning("vocabulary is near capacity")
+                if record_incident("vocabulary-near-capacity", id(pl_module), str(address), stats["max"]).emit:
+                    console.log(
+                        "[relflow.warning]vocabulary is near capacity[/]",
+                        {"address": address, "size": stats["size"], "capacity": stats["max"]},
+                    )
 
 
 class VocabularySyncCallback(Callback):

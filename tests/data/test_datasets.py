@@ -20,6 +20,7 @@ from relflow.data.datasets.custom import CustomBatchDataset, CustomDataModule
 from relflow.data.datasets.polars import PolarsBatchDataset, PolarsDataModule
 from relflow.data.datasets.streaming import BatchDataset, StreamingDataModule
 from relflow.data.datasets.synthetic import SyntheticDataModule
+from relflow.rich import console, incidents
 from relflow.structs.enums import ShardingStrategy, Strata, Suffix
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
@@ -460,6 +461,38 @@ def test_read_unsupported_suffix_raises_value_error():
                 chunk_batch_size=2,
             )
         )
+
+
+def test_streaming_read_diagnostic_hides_rows_and_uri_credentials(monkeypatch: pytest.MonkeyPatch):
+    uri = "file://reader:password@localhost/private/customers.csv?token=secret#fragment"
+    raw_row = "SECRET_CUSTOMER_VALUE,3,4"
+
+    def fail_dataset(*args, **kwargs):
+        raise ValueError(f"CSV parse error in row: {raw_row}")
+
+    monkeypatch.setattr(streaming.ds, "dataset", fail_dataset)
+    incidents.reset("streaming-read")
+    try:
+        with console.capture() as captured:
+            assert (
+                list(
+                    streaming.read.__wrapped__(
+                        [uri],
+                        suffix=Suffix.csv,
+                        sharding=ShardingStrategy.chunk,
+                        chunk_batch_size=2,
+                    )
+                )
+                == []
+            )
+    finally:
+        incidents.reset("streaming-read")
+
+    output = captured.get()
+    assert "file://localhost/private/customers.csv" in output
+    assert "ValueError" in output
+    for secret in ("reader", "password", "token", "secret", raw_row):
+        assert secret not in output
 
 
 def test_process_transformation_preprocessor_wraps_observation_output():

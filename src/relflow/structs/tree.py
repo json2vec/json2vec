@@ -1,19 +1,20 @@
 """Schema tree node primitives used by models and tensorfields."""
 
 import functools
-import io
 import re
 from abc import ABC
 from collections.abc import Mapping
+from enum import Enum
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import jmespath
 import pydantic
 from anytree import NodeMixin
 from jmespath.exceptions import JMESPathError
-from rich.console import Console
+from rich.console import Console, Group
 from rich.text import Text
 
+from relflow.rich import MimeBundleDisplay, render_html, render_text
 from relflow.structs.enums import Overflow
 
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
@@ -23,39 +24,50 @@ PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
 class Renderable(ABC):
     """Base class for objects rendered consistently through Rich."""
 
-    RICH_NAME_STYLE: ClassVar[str] = "bold white on #1f2937"
-    RICH_TYPE_STYLE: ClassVar[str] = "bold yellow on #3f3f46"
-    RICH_TREE_STYLE: ClassVar[str] = "bold dim"
+    RICH_NAME_STYLE: ClassVar[str] = "relflow.name"
+    RICH_TYPE_STYLE: ClassVar[str] = "relflow.type"
+    RICH_TREE_STYLE: ClassVar[str] = "relflow.dim"
+
+    _RICH_STYLE_FALLBACKS: ClassVar[dict[str, str]] = {
+        "relflow.info": "cyan",
+        "relflow.warning": "yellow",
+        "relflow.error": "bold red",
+        "relflow.name": "bold white on #1f2937",
+        "relflow.type": "bold yellow on #3f3f46",
+        "relflow.dim": "dim",
+    }
+
+    @classmethod
+    def _rich_style(cls, console: Console, name: str):
+        """Resolve a semantic style on both RelFlow and ordinary Rich consoles."""
+        return console.get_style(name, default=cls._RICH_STYLE_FALLBACKS.get(name, "none"))
 
     def __rich_console__(self, console, options):
         yield Text(repr(self))
 
-    def __rich_repr__(self):
-        yield str(self)
-
     def __str__(self) -> str:
-        console = Console(file=io.StringIO(), record=True, width=120, force_jupyter=False)
-        console.print(self)
-        return console.export_text(clear=False).rstrip("\n")
+        return render_text(self)
+
+    def _display_(self) -> MimeBundleDisplay:
+        """Give Marimo a MIME bundle before type-specific formatters run."""
+        return MimeBundleDisplay(self)
 
     def _repr_mimebundle_(self, include=None, exclude=None):
-        return {
-            "text/plain": str(self),
-            "text/html": self._repr_html_(),
-        }
+        requested = {"text/plain", "text/html"}
+        if include is not None:
+            requested.intersection_update(include)
+        if exclude is not None:
+            requested.difference_update(exclude)
+
+        bundle: dict[str, str] = {}
+        if "text/plain" in requested:
+            bundle["text/plain"] = str(self)
+        if "text/html" in requested:
+            bundle["text/html"] = self._repr_html_()
+        return bundle
 
     def _repr_html_(self):
-        console = Console(file=io.StringIO(), record=True, width=120, force_jupyter=False)
-        console.print(self)
-        return console.export_html(
-            inline_styles=True,
-            clear=False,
-            code_format=(
-                '<pre style="font-family: Menlo, Consolas, monospace; '
-                "white-space: pre-wrap; margin: 0; padding: 0; border: 0; "
-                'background: transparent;"><code>{code}</code></pre>'
-            ),
-        )
+        return render_html(self)
 
     def _mime_(self):
         return "text/html", self._repr_html_()
@@ -74,19 +86,15 @@ class Selection(list, Renderable):
             yield Text("[]")
             return
 
-        yield Text("[", style="dim")
+        dim = self._rich_style(console, self.RICH_TREE_STYLE)
+        yield Text("[", style=dim)
         for index, node in enumerate(self):
-            lines = list(node.__rich_console__(console, options))
-            for line_index, line in enumerate(lines):
-                text = Text("  ")
-                if isinstance(line, Text):
-                    text.append_text(line)
-                else:
-                    text.append(str(line))
-                if index < len(self) - 1 and line_index == len(lines) - 1:
-                    text.append(",")
-                yield text
-        yield Text("]", style="dim")
+            text = Text("  ")
+            text.append_text(node._rich_selection_label(console))
+            if index < len(self) - 1:
+                text.append(",", style=dim)
+            yield text
+        yield Text("]", style=dim)
 
 
 class Address(str):
@@ -174,6 +182,57 @@ class Node(NodeMixin, Renderable, pydantic.BaseModel):
 
     def post_bind_validate(self):
         return None
+
+    @property
+    def _rich_name(self) -> str:
+        return self.name if self.name is not None else "<unnamed>"
+
+    @property
+    def _rich_type(self) -> str:
+        is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
+        return "root" if is_root else self.type
+
+    @staticmethod
+    def _rich_value(value: Any) -> str:
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        if isinstance(value, Enum):
+            return str(value.value)
+        return str(value)
+
+    def _rich_identity(self, console: Console, *, name: str | None = None) -> Text:
+        heading = Text()
+        heading.append(name or self._rich_name, style=self._rich_style(console, self.RICH_NAME_STYLE))
+        heading.append(" ")
+        heading.append(f"[{self._rich_type}]", style=self._rich_style(console, self.RICH_TYPE_STYLE))
+        return heading
+
+    def _rich_renderable(self, console: Console):
+        heading = self._rich_identity(console)
+        if self.description is None:
+            return heading
+
+        description = Text("  ")
+        description.append(self.description, style=self._rich_style(console, "relflow.dim"))
+        return Group(heading, description)
+
+    def _rich_address(self) -> str:
+        """Return the display address without populating the cached property."""
+        parts = tuple(node.name for node in self.path[1:])
+        if not parts or any(not isinstance(part, str) or not part for part in parts):
+            return ""
+        return str(Address(*parts))
+
+    def _rich_selection_label(self, console: Console) -> Text:
+        address = self._rich_address()
+        return self._rich_identity(console, name=address or self._rich_name)
+
+    def __rich_repr__(self):
+        """Compact nested representation; direct display uses ``__rich_console__``."""
+        yield "name", self.name
+        yield "type", self.type
+        if self.description is not None:
+            yield "description", self.description
 
 
 class Leaf(Node):
@@ -291,57 +350,73 @@ class Leaf(Node):
         if self.query is None:
             raise ValueError(f"request '{self.address}' must define query")
 
-    def __rich_console__(self, console, options):
+    def __rich_repr__(self):
+        yield "name", self.name
+        yield "type", self.type
+        yield "active", self.active, True
+        yield "embed", self.embed, False
+        yield "target", self.target, False
+        if self.query is not None:
+            yield "query", self.query
+
+    def _rich_heading(self, console: Console, *, name: str | None = None) -> Text:
         flags = ["active" if self.active else "inactive"]
         if self.embed:
             flags.append("embed")
         if self.target:
             flags.append("target")
 
-        heading = Text()
-        heading.append(self.name, style=self.RICH_NAME_STYLE)
-        heading.append(" ")
-        heading.append(f"[{self.type}]", style=self.RICH_TYPE_STYLE)
+        heading = self._rich_identity(console, name=name)
         for flag in flags:
             heading.append(" ")
             heading.append(
                 flag,
                 style={
-                    "active": "bold #64748b",
-                    "inactive": "bold #7f1d1d",
-                    "embed": "bold #065f46",
-                    "target": "bold #713f12",
+                    "active": self._rich_style(console, "relflow.dim"),
+                    "inactive": self._rich_style(console, "relflow.error"),
+                    "embed": self._rich_style(console, "relflow.info"),
+                    "target": self._rich_style(console, "relflow.warning"),
                 }.get(flag, "bold"),
             )
         if self.query is not None:
             heading.append(" ")
-            heading.append("query=", style="dim")
-            heading.append(self.query, style="cyan")
-        yield heading
+            heading.append("query=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(self.query, style=self._rich_style(console, "relflow.info"))
+        return heading
 
-        common_names = ("pooling", "weight", "p_mask", "p_prune", "n_heads", "n_linear", "dropout")
-        common = Text()
+    def _rich_attributes(self, console: Console, names: tuple[str, ...]) -> Text:
+        attributes = Text("  ")
         first = True
-        for name in common_names:
+        for name in names:
             value = getattr(self, name, None)
             if value is None:
                 continue
-            if isinstance(value, float) and value.is_integer():
-                value = int(value)
-            elif hasattr(value, "value"):
-                value = value.value
             if not first:
-                common.append(" ")
-            common.append(f"{name}=", style="dim")
-            common.append(str(value), style="cyan")
+                attributes.append(" ")
+            attributes.append(f"{name}=", style=self._rich_style(console, "relflow.dim"))
+            attributes.append(self._rich_value(value), style=self._rich_style(console, "relflow.info"))
             first = False
-        if common.plain:
-            line = Text(" ")
-            line.append_text(common)
-            yield line
+        return attributes
+
+    def _rich_renderable(self, console: Console):
+        lines: list[Text] = [self._rich_heading(console)]
+
+        if self.description is not None:
+            description = Text("  ")
+            description.append(self.description, style=self._rich_style(console, "relflow.dim"))
+            lines.append(description)
+
+        common_names = ("pooling", "weight", "p_mask", "p_prune", "n_heads", "n_linear", "dropout")
+        common = self._rich_attributes(console, common_names)
+        if not self.nullable:
+            common.append(" ")
+            common.append("nullable=", style=self._rich_style(console, "relflow.dim"))
+            common.append("False", style=self._rich_style(console, "relflow.info"))
+        if common.plain.strip():
+            lines.append(common)
 
         excluded = {"name", "type", "description", "active", "embed", "query", "nullable", *common_names}
-        specific = Text()
+        specific = Text("  ")
         first = True
         for name, field in type(self).model_fields.items():
             if name in excluded:
@@ -349,20 +424,23 @@ class Leaf(Node):
             value = getattr(self, name, None)
             if value is None:
                 continue
-            if isinstance(value, float) and value.is_integer():
-                value = int(value)
-            elif hasattr(value, "value"):
-                value = value.value
             if not first:
                 specific.append(" ")
             label = str(field.serialization_alias or field.alias or name)
-            specific.append(f"{label}=", style="dim")
-            specific.append(str(value), style="cyan")
+            specific.append(f"{label}=", style=self._rich_style(console, "relflow.dim"))
+            specific.append(self._rich_value(value), style=self._rich_style(console, "relflow.info"))
             first = False
-        if specific.plain:
-            line = Text(" ")
-            line.append_text(specific)
-            yield line
+        if specific.plain.strip():
+            lines.append(specific)
+
+        return Group(*lines)
+
+    def _rich_selection_label(self, console: Console) -> Text:
+        address = self._rich_address()
+        return self._rich_heading(console, name=address or self._rich_name)
+
+    def __rich_console__(self, console, options):
+        yield self._rich_renderable(console)
 
     @functools.cached_property
     def shape(self) -> tuple[int, ...]:

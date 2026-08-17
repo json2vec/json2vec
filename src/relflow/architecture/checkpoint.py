@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 import lightning.pytorch as lit
 import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
-from loguru import logger
 
 from relflow.architecture.graph import ModelGraph
+from relflow.rich import console, is_verbose, record_incident
 from relflow.structs.experiment import Schema
 
 if TYPE_CHECKING:
@@ -50,11 +50,14 @@ class RollbackCheckpoint(ModelCheckpoint):
             checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
 
         pl_module.restore_checkpoint_state(checkpoint)
-        logger.bind(
-            component="checkpoint",
-            checkpoint=best_model_path,
-            score=self.best_model_score,
-        ).info("rolled back Model to best checkpoint")
+        if (
+            getattr(trainer, "is_global_zero", True)
+            and record_incident("checkpoint-rollback", id(self), best_model_path).emit
+        ):
+            console.log(
+                "[relflow.warning]restored the best checkpoint at fit end[/]",
+                {"checkpoint": Path(best_model_path), "score": self.best_model_score},
+            )
 
 
 class CheckpointState:
@@ -96,7 +99,8 @@ class CheckpointState:
     @staticmethod
     def load(model_cls: type["Model"], checkpoint: str | Path) -> "Model":
         path = Path(checkpoint)
-        logger.bind(component="model_factory", checkpoint=str(path)).info("loading Model from checkpoint")
+        if is_verbose():
+            console.log("[relflow.info]loading model checkpoint[/]", path)
         state = torch.load(path, weights_only=False, map_location="cpu")
         if "schema" not in state:
             raise ValueError("missing schema in checkpoint")
@@ -106,6 +110,5 @@ class CheckpointState:
             batch_size=state["batch_size"],
         )
         model.restore_checkpoint_state(state)
-        logger.bind(component="model_factory", checkpoint=str(path)).info("restored model state from checkpoint")
 
         return model

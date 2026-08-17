@@ -1,20 +1,27 @@
 ---
 marimo-static-output: true
-eval: false
+eval: true
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "marimo>=0.23.8",
+    "relflow @ git+https://github.com/relflow/relflow.git",
+  ]
 ---
 
 # Public API Map
 
-**Example status — excerpt:** inspection blocks illustrate discovery APIs and
-assume a model where stated.
+**Example status — runnable:** the inspection cells build a small model and use
+its production Rich MIME views. Larger workflow snippets remain excerpts.
 
 Normal applications should import RelFlow from the package root:
 
 ```{python .marimo}
 #| echo: true
-#| output: true
+#| output: false
 
 import relflow as rf
+from rich.pretty import Pretty
 ```
 
 This page maps the intended top-level surface to its conceptual documentation.
@@ -43,7 +50,7 @@ extension internals and should be treated as more version-coupled.
 | `d_model` | Required | Shared representation width. |
 | `n_layers` | Required | Generated root self-attention depth. |
 | `n_heads` | Required | Generated root attention/pooling heads; positive, even, a divisor of `d_model`, and small enough that `d_model // n_heads >= 2`. |
-| `batch_size` | `1` | Expected batch size used by data modules, examples, and logging. |
+| `batch_size` | `1` | Expected batch size used by data modules, examples, and throughput accounting. |
 | `name` | `"record"` | Generated singleton root name and address prefix. |
 | `description` | `None` | Human-readable root metadata. |
 | `embed` | `False` | Emit the normalized root embedding during prediction. |
@@ -179,20 +186,46 @@ for detecting defaults at the installed version:
 #| output: true
 
 category_schema = rf.Category.model_json_schema()
-print(category_schema["properties"].keys())
+category_schema["properties"].keys()
 ```
 
-For a bound model, use the Rich display or inspect validated requests:
+For a bound model, leave it as the final expression so its Rich HTML/plain-text
+MIME representation remains available instead of flattening it through
+`print(...)`:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-print(model)
-print(model.schema.requests)
+inspection_model = rf.Model(
+    d_model=16,
+    n_layers=1,
+    n_heads=4,
+    amount=rf.Number,
+    merchant=rf.Category(size=32),
+    label=rf.Category(target=True, size=2),
+)
+
+inspection_model
 ```
 
-The second block is an inspection excerpt using a model built elsewhere.
+Rich composition also keeps RelFlow objects readable when they are nested in a
+basic Python container. `Pretty` is deliberate here: the mapping itself does
+not own RelFlow's MIME hook, while each nested request still uses its compact
+Rich representation.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+Pretty(
+    {
+        "amount": inspection_model.schema.requests["record/amount"],
+        "label": inspection_model.schema.requests["record/label"],
+    },
+    expand_all=True,
+)
+```
 
 ## Compatibility
 

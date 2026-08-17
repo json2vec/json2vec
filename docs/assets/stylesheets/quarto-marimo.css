@@ -2,9 +2,10 @@
   --qmo-cell-bg: #ffffff;
   --qmo-cell-border: #d8dee8;
   --qmo-cell-muted-bg: #eef2f6;
-  --qmo-rich-fg: #17202a;
-  --qmo-rich-cyan: #007f7c;
-  --qmo-rich-green: #1f7a3a;
+  --qmo-output-fg: #17202a;
+  --qmo-output-accent-fg: #006a6a;
+  --qmo-output-emphasis-bg: #334155;
+  --qmo-output-emphasis-fg: #ffffff;
   --qmo-table-bg: #ffffff;
   --qmo-table-fg: #17202a;
   --qmo-table-muted-fg: #667085;
@@ -19,9 +20,10 @@ body.quarto-dark {
   --qmo-cell-bg: #383838;
   --qmo-cell-border: #3b4653;
   --qmo-cell-muted-bg: #20262d;
-  --qmo-rich-fg: #f8fafc;
-  --qmo-rich-cyan: #5eead4;
-  --qmo-rich-green: #86efac;
+  --qmo-output-fg: #f8fafc;
+  --qmo-output-accent-fg: #99f6e4;
+  --qmo-output-emphasis-bg: #475569;
+  --qmo-output-emphasis-fg: #f8fafc;
   --qmo-table-bg: #242a31;
   --qmo-table-fg: #f8fafc;
   --qmo-table-muted-fg: #cbd5e1;
@@ -44,7 +46,7 @@ main.content .qmo-static-cell-output {
   padding: 5px;
   overflow: auto;
   background: var(--qmo-cell-bg);
-  color: var(--qmo-rich-fg);
+  color: var(--qmo-output-fg);
   border: 1px solid var(--qmo-cell-border);
   border-radius: var(--qmo-radius);
   font-size: var(--qmo-code-font-size);
@@ -70,7 +72,7 @@ main.content .qmo-static-cell-output pre {
   padding: 0.8rem 1rem;
   overflow: visible;
   background: transparent;
-  color: var(--qmo-rich-fg);
+  color: var(--qmo-output-fg);
   font-family: var(--qmo-code-font);
   font-size: var(--qmo-code-font-size);
   line-height: var(--qmo-code-line-height);
@@ -82,14 +84,14 @@ main.content .qmo-static-cell-output img {
   max-width: 100%;
 }
 
-main.content .qmo-static-cell-output pre span[style*="color: #008080"] {
-  color: var(--qmo-rich-cyan) !important;
-  text-decoration-color: var(--qmo-rich-cyan) !important;
+main.content .qmo-static-cell-output pre span[style*="color:"] {
+  color: var(--qmo-output-accent-fg) !important;
+  text-decoration-color: currentColor !important;
 }
 
-main.content .qmo-static-cell-output pre span[style*="color: #008000"] {
-  color: var(--qmo-rich-green) !important;
-  text-decoration-color: var(--qmo-rich-green) !important;
+main.content .qmo-static-cell-output pre span[style*="background-color:"] {
+  color: var(--qmo-output-emphasis-fg) !important;
+  background-color: var(--qmo-output-emphasis-bg) !important;
 }
 
 main.content .qmo-static-table-wrap {

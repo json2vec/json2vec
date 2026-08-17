@@ -38,6 +38,11 @@ Prediction has no Lightning result collection, so `throughput/predict` is kept
 on the `ThroughputLogger` callback and sent directly to an attached logger; do
 not expect it in `trainer.callback_metrics`.
 
+Internal Rich diagnostics are not part of this telemetry path. RelFlow keeps
+them incident-only, bounds repeated warnings, and does not add observation-,
+batch-, step-, or epoch-level output. Include the cost of the hosting
+application's progress and metric loggers when profiling a run.
+
 ## Control Repeated Context First
 
 Every `Branch(length=...)` reserves a fixed number of positions. Short records

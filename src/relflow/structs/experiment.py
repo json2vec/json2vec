@@ -12,6 +12,7 @@ from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 import pydantic
 from anytree import LevelOrderGroupIter, PreOrderIter
 from rich.text import Text
+from rich.tree import Tree
 
 from relflow.structs.enums import AttentionMode, Overflow
 from relflow.structs.selectors import (
@@ -600,37 +601,53 @@ class Schema(Node):
             self.refresh_selection_cache()
 
     def __rich_console__(self, console, options):
-        heading = Text()
-        heading.append(self.name, style=self.RICH_NAME_STYLE)
-        heading.append(" ")
-        heading.append(f"[{self.type}]", style=self.RICH_TYPE_STYLE)
+        heading = self._rich_heading(console)
+        tree = Tree(
+            heading,
+            guide_style=self._rich_style(console, self.RICH_TREE_STYLE),
+        )
+        self.fields._rich_add_to_tree(tree, console)
+        yield tree
+
+    def _rich_summary(self) -> dict[str, int]:
+        """Collect display counts without populating schema selection caches."""
+        nodes = self.descendants
+        branches = [node for node in nodes if isinstance(node, Branch)]
+        requests = [node for node in nodes if isinstance(node, Leaf)]
+        active = [request for request in requests if request.active]
+        return {
+            "branches": len(branches),
+            "fields": len(active),
+            "targets": sum(request.target for request in active),
+            "embeds": sum(bool(node.embed) for node in nodes if not isinstance(node, Leaf) or node.active),
+            "inactive": len(requests) - len(active),
+        }
+
+    def __rich_repr__(self):
+        summary = self._rich_summary()
+        yield "d_model", self.d_model
+        yield "branches", summary["branches"]
+        yield "fields", summary["fields"]
+        yield "targets", summary["targets"]
+        yield "embeds", summary["embeds"]
+
+    def _rich_heading(self, console) -> Text:
+        summary = self._rich_summary()
+        heading = self._rich_identity(console)
         for name, value in (
             ("d_model", self.d_model),
-            ("branches", len(self.branches)),
-            ("fields", len(self.active_requests)),
-            ("targets", len(self.target)),
-            ("embeds", len(self.embed)),
+            ("branches", summary["branches"]),
+            ("fields", summary["fields"]),
+            ("targets", summary["targets"]),
+            ("embeds", summary["embeds"]),
         ):
             heading.append(" ")
-            heading.append(f"{name}=", style="dim")
-            heading.append(str(value), style="cyan")
-        yield heading
+            heading.append(f"{name}=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(value), style=self._rich_style(console, "relflow.info"))
 
-        lines = list(self.fields.__rich_console__(console, options))
-        if not lines:
-            return
-        first = Text()
-        first.append("`-- ", style=self.RICH_TREE_STYLE)
-        if isinstance(lines[0], Text):
-            first.append_text(lines[0])
-        else:
-            first.append(str(lines[0]))
-        yield first
-        for line in lines[1:]:
-            nested = Text()
-            nested.append("    ", style=self.RICH_TREE_STYLE)
-            if isinstance(line, Text):
-                nested.append_text(line)
-            else:
-                nested.append(str(line))
-            yield nested
+        inactive = summary["inactive"]
+        if inactive:
+            heading.append(" ")
+            heading.append("inactive=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(inactive), style=self._rich_style(console, "relflow.warning"))
+        return heading

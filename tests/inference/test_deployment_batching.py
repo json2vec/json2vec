@@ -15,6 +15,11 @@ from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.packages import Prediction
 
 
+@pytest.fixture(autouse=True)
+def _avoid_process_wide_traceback_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(deployment_module, "install_tracebacks", lambda: None)
+
+
 class _DummyModel:
     def __init__(self):
         self.calls = 0
@@ -312,6 +317,7 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
         predictions: dict = {}
 
     captured = {}
+    traceback_installs = []
 
     def fake_run(app, *, host, port, log_level):
         captured["app"] = app
@@ -320,6 +326,7 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
         captured["log_level"] = log_level
 
     monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
+    monkeypatch.setattr(deployment_module, "install_tracebacks", lambda: traceback_installs.append(True))
 
     Deployment(
         checkpoint="unused",
@@ -336,6 +343,7 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8765
     assert captured["log_level"] == "error"
+    assert traceback_installs == [True]
 
 
 def test_deployment_forge_registers_openapi_signatures():

@@ -247,7 +247,7 @@ by `Model.predict(...)` is keyed by `rf.Address` objects.
 ## Where Next
 
 - Use [Set](set.qmd) for unordered multi-label values.
-- Use [Entity](entity.qmd) for equality within one observation and one leaf.
+- Use [Hash](hash.qmd) for equality-preserving identifier signals.
 - Use [Text](text.qmd) when subword meaning matters.
 - Read [Built-In Data Types](../core-concepts/data-types.qmd) for shared state,
   training, and prediction semantics.

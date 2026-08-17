@@ -11,8 +11,8 @@ import lightning.pytorch as lit
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
-from loguru import logger
 from rich.text import Text
+from rich.tree import Tree
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
@@ -215,14 +215,6 @@ class Model(lit.LightningModule, Renderable):
 
         self._build()
 
-        logger.bind(
-            component="model",
-            batch_size=self.batch_size,
-            requests=len(self.schema.active_requests),
-            branches=len(self.schema.branches),
-            embeds=len(self.schema.embed),
-        ).info("initialized Model module")
-
     def _build(self) -> None:
         ModelGraph.install(self)
 
@@ -235,43 +227,51 @@ class Model(lit.LightningModule, Renderable):
         self._contract_scheduler.reset()
 
     def __rich_console__(self, console, options):
+        heading = self._rich_heading(console)
+        tree = Tree(
+            heading,
+            guide_style=self._rich_style(console, self.RICH_TREE_STYLE),
+        )
+        self.schema.fields._rich_add_to_tree(tree, console)
+        yield tree
+
+    def __rich_repr__(self):
         parameters = sum(parameter.numel() for parameter in self.parameters())
+        summary = self.schema._rich_summary()
+        yield "batch_size", self.batch_size
+        yield "d_model", self.schema.d_model
+        yield "parameters", parameters
+        yield "branches", summary["branches"]
+        yield "fields", summary["fields"]
+        yield "targets", summary["targets"]
+        yield "embeds", summary["embeds"]
+
+    def _rich_heading(self, console) -> Text:
+        parameters = sum(parameter.numel() for parameter in self.parameters())
+        summary = self.schema._rich_summary()
         heading = Text()
-        heading.append(type(self).__name__, style=self.RICH_NAME_STYLE)
+        heading.append(type(self).__name__, style=self._rich_style(console, self.RICH_NAME_STYLE))
         heading.append(" ")
-        heading.append("[model]", style=self.RICH_TYPE_STYLE)
+        heading.append("[model]", style=self._rich_style(console, self.RICH_TYPE_STYLE))
         for name, value in (
             ("batch_size", self.batch_size),
             ("d_model", self.schema.d_model),
             ("parameters", f"{parameters:,}"),
-            ("branches", len(self.schema.branches)),
-            ("fields", len(self.schema.active_requests)),
-            ("targets", len(self.schema.target)),
-            ("embeds", len(self.schema.embed)),
+            ("branches", summary["branches"]),
+            ("fields", summary["fields"]),
+            ("targets", summary["targets"]),
+            ("embeds", summary["embeds"]),
         ):
             heading.append(" ")
-            heading.append(f"{name}=", style="dim")
-            heading.append(str(value), style="cyan")
-        yield heading
+            heading.append(f"{name}=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(value), style=self._rich_style(console, "relflow.info"))
 
-        lines = list(self.schema.fields.__rich_console__(console, options))
-        if not lines:
-            return
-        first = Text()
-        first.append("`-- ", style=self.RICH_TREE_STYLE)
-        if isinstance(lines[0], Text):
-            first.append_text(lines[0])
-        else:
-            first.append(str(lines[0]))
-        yield first
-        for line in lines[1:]:
-            nested = Text()
-            nested.append("    ", style=self.RICH_TREE_STYLE)
-            if isinstance(line, Text):
-                nested.append_text(line)
-            else:
-                nested.append(str(line))
-            yield nested
+        inactive = summary["inactive"]
+        if inactive:
+            heading.append(" ")
+            heading.append("inactive=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(inactive), style=self._rich_style(console, "relflow.warning"))
+        return heading
 
     def select(
         self,

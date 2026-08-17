@@ -8,6 +8,7 @@ import lightning.pytorch as lit
 import polars as pl
 import pytest
 import torch
+from rich.pretty import Pretty
 
 import relflow as rf
 
@@ -29,6 +30,20 @@ def _quarto_anchors(source: Path) -> set[str]:
             anchors.add(slug)
 
     return anchors
+
+
+def _marimo_cells(source: str) -> list[str]:
+    return re.findall(r"```\{python \.marimo[^}]*\}\n(.*?)\n```", source, flags=re.DOTALL)
+
+
+def _contrast_ratio(first: str, second: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
 
 
 def test_quarto_docs_snapshot_contains_expected_pages() -> None:
@@ -88,6 +103,77 @@ def test_quarto_docs_use_current_public_api_style() -> None:
     assert "rf.Branch(" in sources
     assert "Struct(" not in sources
     assert not re.search(r"Model\.from_tree\([^)]*\broot\s*=", sources, re.DOTALL)
+
+
+def test_quarto_rich_examples_use_live_mime_display_and_semantic_styles() -> None:
+    docs = _repo_root() / "docs"
+    model_tree = (docs / "core-concepts/model-tree.qmd").read_text()
+    mutation = (docs / "guides/schema-mutation.qmd").read_text()
+    public_api = (docs / "reference/public-api.qmd").read_text()
+    troubleshooting = (docs / "guides/troubleshooting.qmd").read_text()
+    stylesheet = (docs / "assets/stylesheets/quarto-marimo.css").read_text()
+
+    model_cells = _marimo_cells(model_tree)
+    mutation_cells = _marimo_cells(mutation)
+    public_cells = _marimo_cells(public_api)
+
+    assert any(cell.rstrip().endswith("model") for cell in model_cells)
+    assert "from rich.padding import Padding" not in model_tree
+    assert "print(model)" not in model_tree
+
+    assert any(cell.rstrip().endswith("numbers") for cell in mutation_cells)
+    assert "print([str(node.address)" not in mutation
+    assert '"relflow @ git+' in mutation
+
+    assert any(cell.rstrip().endswith("inspection_model") for cell in public_cells)
+    assert "from rich.padding import Padding" not in public_api
+    assert any(re.search(r"Pretty\(.*expand_all=True,\s*\)\s*$", cell, flags=re.DOTALL) for cell in public_cells)
+    assert "print(inspection_model)" not in public_api
+    assert '"relflow @ git+' in public_api
+
+    troubleshooting_prose = " ".join(troubleshooting.split())
+    assert "incident-only" in troubleshooting
+    assert "optimizer steps, and epochs do not emit diagnostic lines" in troubleshooting_prose
+    assert "show_locals=False" in troubleshooting
+    assert "from rich.traceback import install" in troubleshooting
+
+    published = "\n".join(path.read_text() for path in docs.rglob("*.qmd"))
+    assert "rf.console" not in published
+    assert "rf.configure_console" not in published
+    assert "rf.install_tracebacks" not in published
+
+    nested = Pretty({"amount": rf.Number("amount")}, expand_all=True)
+    bundle = nested._repr_mimebundle_(include=None, exclude=None)
+    assert set(bundle) == {"text/html", "text/plain"}
+    assert bundle["text/html"].startswith("<pre")
+    assert "<span" in bundle["text/html"]
+    assert "Request" in bundle["text/html"]
+
+    assert stylesheet.count("--qmo-output-fg:") == 2
+    assert stylesheet.count("--qmo-output-accent-fg:") == 2
+    assert "--qmo-rich-" not in stylesheet
+    assert "#008000" not in stylesheet
+    assert "#800080" not in stylesheet
+    assert "#808000" not in stylesheet
+    assert 'span[style*="color:"]' in stylesheet
+
+    def values(name: str) -> list[str]:
+        return re.findall(rf"{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}});", stylesheet)
+
+    cell_backgrounds = values("--qmo-cell-bg")
+    accents = values("--qmo-output-accent-fg")
+    emphasis_backgrounds = values("--qmo-output-emphasis-bg")
+    emphasis_foregrounds = values("--qmo-output-emphasis-fg")
+    assert len(cell_backgrounds) == len(accents) == 2
+    assert len(emphasis_backgrounds) == len(emphasis_foregrounds) == 2
+    assert all(
+        _contrast_ratio(foreground, background) >= 4.5
+        for foreground, background in zip(accents, cell_backgrounds, strict=True)
+    )
+    assert all(
+        _contrast_ratio(foreground, background) >= 4.5
+        for foreground, background in zip(emphasis_foregrounds, emphasis_backgrounds, strict=True)
+    )
 
 
 def test_workflow_guides_label_example_status() -> None:

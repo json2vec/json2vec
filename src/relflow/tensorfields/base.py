@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overl
 import pluggy
 import torch
 from lightning.pytorch import Callback
+from rich.console import Console, Group
 from rich.text import Text
 from tensordict import TensorDict
 
@@ -163,93 +164,166 @@ class TensorFieldBase(Renderable):
         count = int(nulls.sum().item())
         raise ValueError(f"request '{address}' has nullable=False but input contains {count} null value(s)")
 
-    def __rich_console__(self, console, options):
+    def _rich_tensorfield_type(self) -> str:
+        for name, plugin in TENSORFIELDS.items():
+            if plugin.components.get(Component.TensorField) is type(self):
+                return name
+        return type(self).__module__.rsplit(".", maxsplit=1)[-1]
+
+    def __rich_repr__(self):
         state = getattr(self, TensorKey.state, None)
+        yield "type", self._rich_tensorfield_type()
+        if torch.is_tensor(state):
+            yield "shape", tuple(state.shape)
+            yield "dtype", str(state.dtype).removeprefix("torch.")
+            yield "device", str(state.device)
+
+    @staticmethod
+    def _tensor_shape(value: Any) -> str | None:
+        if torch.is_tensor(value):
+            return str(tuple(value.shape))
+        if not isinstance(value, TensorDict):
+            return None
+
+        items: list[str] = []
+        keys = sorted(value.keys(), key=str)
+        for key in keys[:4]:
+            tensor = value.get(key)
+            shape = tuple(tensor.shape) if torch.is_tensor(tensor) else type(tensor).__name__
+            items.append(f"{key}:{shape}")
+        if len(keys) > 4:
+            items.append(f"+{len(keys) - 4} more")
+        return "{" + ", ".join(items) + "}"
+
+    def __rich_console__(self, console: Console, options):
+        state = getattr(self, TensorKey.state, None)
+        content = getattr(self, TensorKey.content, None)
         trainable = getattr(self, TensorKey.trainable, None)
         targets = getattr(self, TensorKey.targets, None)
 
         heading = Text()
-        heading.append(type(self).__name__, style=self.RICH_NAME_STYLE)
+        heading.append(type(self).__name__, style=self._rich_style(console, self.RICH_NAME_STYLE))
         heading.append(" ")
-        heading.append("[tensorfield]", style=self.RICH_TYPE_STYLE)
+        heading.append(
+            f"[{self._rich_tensorfield_type()}]",
+            style=self._rich_style(console, self.RICH_TYPE_STYLE),
+        )
 
         if torch.is_tensor(state):
             heading.append(" ")
-            heading.append("state=", style="dim")
-            heading.append(str(tuple(state.shape)), style="cyan")
+            heading.append("state=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(tuple(state.shape)), style=self._rich_style(console, "relflow.info"))
             heading.append(" ")
-            heading.append("device=", style="dim")
-            heading.append(str(state.device), style="cyan")
+            heading.append("dtype=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(
+                str(state.dtype).removeprefix("torch."),
+                style=self._rich_style(console, "relflow.info"),
+            )
+            heading.append(" ")
+            heading.append("device=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(state.device), style=self._rich_style(console, "relflow.info"))
 
         if torch.is_tensor(trainable):
             heading.append(" ")
-            heading.append("trainable=", style="dim")
-            heading.append(str(int(trainable.sum().item())), style="cyan")
+            heading.append("trainable=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(tuple(trainable.shape)), style=self._rich_style(console, "relflow.info"))
 
-        yield heading
+        lines: list[Text] = [heading]
+
+        content_shape = self._tensor_shape(content)
+        if content_shape is not None:
+            text = Text("  ")
+            text.append("content=", style=self._rich_style(console, "relflow.dim"))
+            text.append(content_shape, style=self._rich_style(console, "relflow.info"))
+            lines.append(text)
 
         if torch.is_tensor(state):
-            yield self._state_counts_text(state)
-            yield self._state_preview_text(state)
+            preview = self._bounded_state_preview(state)
+            if preview is None:
+                text = Text("  preview omitted for ", style=self._rich_style(console, "relflow.dim"))
+                text.append(str(state.device), style=self._rich_style(console, "relflow.info"))
+                lines.append(text)
+            else:
+                rows, truncated = preview
+                lines.append(self._state_counts_text(rows, console=console, truncated=truncated))
+                lines.append(self._state_preview_text(rows, console=console, truncated=truncated))
 
         if isinstance(targets, TensorDict) and targets.keys():
-            text = Text(" targets=", style="dim")
-            text.append(", ".join(str(key) for key in sorted(targets.keys(), key=str)), style="cyan")
-            yield text
+            text = Text("  targets=", style=self._rich_style(console, "relflow.dim"))
+            text.append(
+                ", ".join(str(key) for key in sorted(targets.keys(), key=str)),
+                style=self._rich_style(console, "relflow.info"),
+            )
+            lines.append(text)
 
-    def _state_counts_text(self, state: torch.Tensor) -> Text:
-        values = state.detach().reshape(-1).to(device="cpu", dtype=torch.int64)
-        text = Text(" counts ", style="dim")
+        yield Group(*lines)
+
+    def _state_counts_text(self, rows: list[list[int]], *, console: Console, truncated: bool) -> Text:
+        values = [value for row in rows for value in row]
+        text = Text("  preview counts ", style=self._rich_style(console, "relflow.dim"))
         for token in Tokens:
-            count = int(values.eq(token.value).sum().item())
+            count = values.count(token.value)
             text.append(self.STATE_LABELS[token.value], style=self.STATE_STYLES[token.value])
-            text.append(f"={count} ", style="dim")
+            text.append(f"={count} ", style=self._rich_style(console, "relflow.dim"))
+
+        if truncated:
+            text.append("(sample)", style=self._rich_style(console, "relflow.dim"))
 
         return text
 
-    def _state_preview_text(self, state: torch.Tensor) -> Text:
-        preview = self._first_root_slice(state)
-        text = Text(" state ", style="dim")
-
-        if preview.ndim <= 1:
-            rows = preview.reshape(1, -1)
-            row_prefix = " "
-        else:
-            rows = preview.reshape(-1, preview.shape[-1])
-            row_prefix = "\n       "
-
-        limit = min(int(preview.numel()), self.STATE_PREVIEW_LIMIT)
-        count = 0
+    def _state_preview_text(self, rows: list[list[int]], *, console: Console, truncated: bool) -> Text:
+        text = Text("  state ", style=self._rich_style(console, "relflow.dim"))
+        if not rows:
+            text.append("<empty>", style=self._rich_style(console, "relflow.dim"))
+            return text
 
         for row_index, row in enumerate(rows):
-            if count >= limit:
-                break
             if row_index:
-                text.append(row_prefix, style="dim")
+                text.append("\n        ", style=self._rich_style(console, "relflow.dim"))
 
-            for column_index, value in enumerate(row.tolist()):
-                if count >= limit:
-                    break
+            for column_index, value in enumerate(row):
                 if column_index:
                     text.append(" ")
 
                 token = int(value)
                 text.append(self.STATE_LABELS.get(token, str(token)), style=self.STATE_STYLES.get(token, "bold red"))
-                count += 1
 
-        if int(preview.numel()) > limit:
-            text.append(" ...", style="dim")
+        if truncated:
+            text.append(" ...", style=self._rich_style(console, "relflow.dim"))
 
         return text
 
-    def _first_root_slice(self, tensor: torch.Tensor) -> torch.Tensor:
-        values = tensor.detach().to(device="cpu")
+    def _bounded_state_preview(self, tensor: torch.Tensor) -> tuple[list[list[int]], bool] | None:
+        if tensor.device.type != "cpu":
+            return None
+
+        values = tensor.detach()
+        if values.numel() == 0:
+            return [], False
+
         if values.ndim > 0:
             values = values[0]
         if values.ndim > 0:
             values = values[0]
 
-        return values.to(dtype=torch.int64)
+        while values.ndim > 2:
+            values = values[0]
+
+        if values.ndim == 0:
+            rows = [[int(values.tolist())]]
+            return rows, False
+
+        if values.ndim == 1:
+            width = min(values.shape[0], self.STATE_PREVIEW_LIMIT)
+            bounded = values[:width]
+            rows = [[int(value) for value in bounded.tolist()]]
+            return rows, values.numel() > width
+
+        n_rows = min(values.shape[0], self.STATE_PREVIEW_LIMIT)
+        n_columns = min(values.shape[1], max(1, self.STATE_PREVIEW_LIMIT // max(1, n_rows)))
+        bounded = values[:n_rows, :n_columns]
+        rows = [[int(value) for value in row] for row in bounded.tolist()]
+        return rows, values.numel() > bounded.numel()
 
 
 def _broadcast_to_state(selected: torch.Tensor, state: torch.Tensor) -> torch.Tensor:

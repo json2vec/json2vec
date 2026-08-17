@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
@@ -12,11 +13,11 @@ import pydantic
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback, Trainer
-from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
 from relflow.distributed import broadcast_object
+from relflow.rich import console, record_incident
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -160,9 +161,11 @@ class TensorField(TensorFieldBase):
         tokens = apply(values, interprocess_encoding_context.encode)
 
         if len(interprocess_encoding_context) > (capacity := schema.requests[address].capacity):
-            logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
-                "vocabulary exceeds size={}", capacity
-            )
+            if record_incident("vocabulary-capacity", id(schema), "cluster", str(address), capacity).emit:
+                console.log(
+                    "[relflow.warning]cluster vocabulary exceeds configured capacity[/]",
+                    {"address": address, "size": len(interprocess_encoding_context), "capacity": capacity},
+                )
 
         data, states = pad(
             nested=tokens,
@@ -272,10 +275,11 @@ class Embedder(EmbedderBase):
         if request.p_mask == 0.0 and request.p_prune == 0.0:
             # Cluster loss fires only for masked/pruned/target rows;
             # a plain-input Cluster silently freezes n_committed at init.
-            logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
-                "Cluster field {address!s} has p_mask=0 and p_prune=0; dynamic K-selection "
+            warnings.warn(
+                f"Cluster field {address!s} has p_mask=0 and p_prune=0; dynamic K-selection "
                 "will not engage. Set p_mask, p_prune, or target=True to train the cluster head.",
-                address=address,
+                UserWarning,
+                stacklevel=2,
             )
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=self.capacity)

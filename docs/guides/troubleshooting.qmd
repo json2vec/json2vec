@@ -14,7 +14,7 @@ smallest raw observation before changing the architecture.
 
 ## First Five Checks
 
-1. Print the model and confirm names, addresses, lengths, targets, and active
+1. Display the model and confirm names, addresses, lengths, targets, and active
    fields.
 2. Run `model.encode([one_record])` and inspect state/content shapes.
 3. Evaluate the exact request query with `jmespath.search(...)` when binding is
@@ -44,6 +44,35 @@ print(model.encode([record]))
 The snippet is a diagnostic excerpt; use the model from the page where the
 problem occurred.
 
+## Diagnostics And Tracebacks
+
+RelFlow's internal Rich diagnostics go to stderr and are incident-only. Routine
+construction, mutations, observations, batches, optimizer steps, and epochs do
+not emit diagnostic lines, and repeated incident warnings are bounded. Progress,
+loss, throughput, and counters belong to Lightning's progress display and
+metric loggers.
+
+RelFlow does not expose a console or traceback-configuration API. Applications
+that want their own Rich output should create and own a console directly. A
+terminal application may also install Rich's uncaught-exception hook at its
+entry point:
+
+```python
+from rich.console import Console
+from rich.traceback import install
+
+console = Console(stderr=True)
+console.print(model)
+install(console=console, show_locals=False)
+```
+
+Installing the hook is explicit and process-wide; importing RelFlow never
+changes it. Keep locals hidden because observations, processor arguments,
+tokens, and credentials may be present. In a notebook, use Rich's supported
+IPython integration instead of installing a process hook from a documentation
+cell. Applications that need durable, structured, JSON, or remote logs should
+configure their standard-library or platform logger at their own boundaries.
+
 ## Symptom Guide
 
 | Symptom | Likely cause | Check or fix |
@@ -69,6 +98,7 @@ problem occurred.
 | Distributed results duplicate records | Input sharding does not match files/workers/ranks | Check sharding strategy, worker count, file discovery, and output partitions. |
 | Accelerator is idle | Input/query/preprocessor or output serialization is the bottleneck | Benchmark preparation, forward, and writing separately; tune workers and output before scaling ranks. |
 | NaN/unstable loss | Invalid numeric input, aggressive optimizer, precision issue, or empty metric selection | Inspect raw/encoded values, lower learning rate, reproduce at full precision, and identify the exact address/content loss. |
+| No RelFlow diagnostic appears for an epoch or step | This is intentional; internal diagnostics are incident-only | Inspect Lightning progress, callback metrics, or the attached experiment logger. |
 
 ## Understand State Before Content
 

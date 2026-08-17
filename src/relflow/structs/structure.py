@@ -3,7 +3,9 @@
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias, Union
 
 import pydantic
+from rich.console import Console, Group
 from rich.text import Text
+from rich.tree import Tree
 
 from relflow.structs.enums import AttentionMode, Overflow
 from relflow.structs.tree import Address, Leaf, Node, Rate
@@ -173,56 +175,69 @@ class Branch(Node):
 
         return None
 
-    def __rich_console__(self, console, options):
-        is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
-        display_type = "root" if is_root else self.type
+    def __rich_repr__(self):
+        yield "name", self.name
+        yield "type", self._rich_type
+        yield "length", self.length, 1
+        yield "fields", len(self.fields)
+        yield "embed", self.embed, False
+
+    def _rich_heading(self, console: Console, *, name: str | None = None) -> Text:
+        is_root = self._rich_type == "root"
         attributes = ("attention", "n_layers", "n_heads", "n_linear", "dropout")
         if not is_root:
             attributes = ("length", "overflow", *attributes)
 
-        heading = Text()
-        heading.append(self.name, style=self.RICH_NAME_STYLE)
-        heading.append(" ")
-        heading.append(f"[{display_type}]", style=self.RICH_TYPE_STYLE)
+        heading = self._rich_identity(console, name=name)
         if self.embed:
             heading.append(" ")
-            heading.append("embed", style="bold #065f46")
-        for name in attributes:
-            value = getattr(self, name, None)
+            heading.append("embed", style=self._rich_style(console, "relflow.info"))
+        for attribute in attributes:
+            value = getattr(self, attribute, None)
             if value is None:
                 continue
-            if isinstance(value, float) and value.is_integer():
-                value = int(value)
-            elif hasattr(value, "value"):
-                value = value.value
             heading.append(" ")
-            heading.append(f"{name}=", style="dim")
-            heading.append(str(value), style="cyan")
+            heading.append(f"{attribute}=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(self._rich_value(value), style=self._rich_style(console, "relflow.info"))
         if self.masks:
             heading.append(" ")
-            heading.append("masks=", style="dim")
-            heading.append(str(len(self.masks)), style="cyan")
+            heading.append("masks=", style=self._rich_style(console, "relflow.dim"))
+            heading.append(str(len(self.masks)), style=self._rich_style(console, "relflow.info"))
 
-        yield heading
+        return heading
 
-        for index, child in enumerate(self.fields):
-            connector = "`-- " if index == len(self.fields) - 1 else "|-- "
-            continuation = "    " if index == len(self.fields) - 1 else "|   "
-            lines = list(child.__rich_console__(console, options))
-            if not lines:
-                continue
-            first = Text()
-            first.append(connector, style=self.RICH_TREE_STYLE)
-            if isinstance(lines[0], Text):
-                first.append_text(lines[0])
+    def _rich_renderable(self, console: Console):
+        heading = self._rich_heading(console)
+        if self.description is None:
+            return heading
+
+        description = Text("  ")
+        description.append(self.description, style=self._rich_style(console, "relflow.dim"))
+        return Group(heading, description)
+
+    def _rich_add_to_tree(self, tree: Tree, console: Console) -> Tree:
+        branch = tree.add(self._rich_renderable(console))
+        self._rich_add_children(branch, console)
+        return branch
+
+    def _rich_add_children(self, tree: Tree, console: Console) -> None:
+        for child in self.fields:
+            if isinstance(child, Branch):
+                child._rich_add_to_tree(tree, console)
             else:
-                first.append(str(lines[0]))
-            yield first
-            for line in lines[1:]:
-                nested = Text()
-                nested.append(continuation, style=self.RICH_TREE_STYLE)
-                if isinstance(line, Text):
-                    nested.append_text(line)
-                else:
-                    nested.append(str(line))
-                yield nested
+                tree.add(child._rich_renderable(console))
+
+    def _rich_tree(self, console: Console) -> Tree:
+        tree = Tree(
+            self._rich_renderable(console),
+            guide_style=self._rich_style(console, self.RICH_TREE_STYLE),
+        )
+        self._rich_add_children(tree, console)
+        return tree
+
+    def _rich_selection_label(self, console: Console) -> Text:
+        address = self._rich_address()
+        return self._rich_heading(console, name=address or self._rich_name)
+
+    def __rich_console__(self, console, options):
+        yield self._rich_tree(console)

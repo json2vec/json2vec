@@ -1,6 +1,12 @@
 ---
 marimo-static-output: true
-eval: false
+eval: true
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "marimo>=0.23.8",
+    "relflow @ git+https://github.com/relflow/relflow.git",
+  ]
 ---
 
 # Schema Mutation
@@ -21,7 +27,7 @@ and save the artifact you intend to operate.
 
 ```{python .marimo}
 #| echo: true
-#| output: true
+#| output: false
 
 import relflow as rf
 
@@ -31,11 +37,10 @@ model = rf.Model(
     n_layers=1,
     n_heads=4,
     amount=rf.Number,
+    shipping=rf.Number,
     channel=rf.Category(size=8),
     returned=rf.Category(target=True, size=2),
 )
-
-model
 ```
 
 ## Select Before You Change
@@ -47,19 +52,18 @@ model
 #| output: true
 
 numbers = model.select(rf.where("type") == "number")
-target = model.select(rf.where("name") == "returned")
 
-print([str(node.address) for node in numbers])
-print([str(node.address) for node in target])
+numbers
 ```
+
+The final expression uses the `Selection` MIME representation directly. It
+keeps one compact entry per selected address instead of printing a second,
+hand-maintained list of address strings.
 
 Prefer stable attributes such as `address`, `name`, and `type`. A callable is
 available for conditions that cannot be expressed with `rf.where(...)`:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 embedded = model.select(lambda node: getattr(node, "embed", False))
 ```
 
@@ -71,10 +75,7 @@ defaults to `True` for selection and update, and to `False` for delete.
 `update(...)` changes every selected node that accepts the requested values and
 then rebuilds the runtime graph:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model.update(rf.where("type") == "number", p_mask=0.10)
 model.update(rf.where("name") == "returned", weight=2.0, topk=[])
 ```
@@ -92,17 +93,13 @@ application is intentional.
 `extend(...)` requires exactly one selected branch, followed by one or more new
 fields:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model.extend(
     rf.where("name") == "order",
     rf.Boolean("expedited"),
     rf.Category("region", size=32),
 )
 
-model
 ```
 
 New fields receive new runtime modules. Existing compatible modules keep their
@@ -113,10 +110,7 @@ branches fail validation.
 
 `delete(...)` removes selected roots and all their descendants:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model.delete(rf.where("name") == "expedited")
 ```
 
@@ -128,10 +122,7 @@ without any request descendants. There is no automatic undo; use
 
 `reset(...)` keeps schema values but reinitializes selected runtime modules:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model.reset(rf.where("name") == "channel")
 ```
 
@@ -151,10 +142,7 @@ reinitialize the incompatible tensors while preserving unrelated modules.
 restores the prior schema and rebuilds it with whatever compatible runtime
 state exists when the context exits:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 with model.override(rf.where("name") == "amount", active=False):
     ablated_predictions = model.predict(
         [{"channel": "web"}]
@@ -177,10 +165,7 @@ Schema mutation cannot run while RelFlow is inside an active `forward`,
 interactive inference call, or Lightning train/validate/test/predict loop.
 Mutate between complete loops:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 trainer.fit(model=model, datamodule=datamodule)
 
 model.update(rf.where("name") == "amount", p_mask=0.0)
@@ -199,10 +184,7 @@ loop.
 
 After a permanent mutation and its evaluation, save a new artifact:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 model.save("artifacts/order-v2.rf")
 loaded = rf.Model.load("artifacts/order-v2.rf")
 ```
@@ -215,7 +197,7 @@ schema migration record.
 
 Before shipping a changed schema:
 
-1. print the selected addresses and the mutated Rich tree;
+1. display the selected nodes and the mutated Rich tree;
 2. encode representative train and inference observations;
 3. confirm which parameters and preprocessing states were preserved;
 4. re-evaluate every supervised target and important slice;

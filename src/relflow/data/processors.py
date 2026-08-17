@@ -9,8 +9,6 @@ from enum import StrEnum
 from types import UnionType
 from typing import Any, Self, TypeAlias, Union, get_args, get_origin, overload
 
-from loguru import logger
-
 from relflow.structs.tree import Address
 
 RawObservation: TypeAlias = dict[str, Any]
@@ -149,14 +147,7 @@ class Processor:
             if name in self.bound_params:
                 raise ValueError(f"{self.kind} '{self.name}' parameter '{name}' is already bound")
 
-        bound = {**self.bound_params, **values}
-        logger.bind(
-            component="processor",
-            processor=self.kind,
-            name=self.name,
-            bound=sorted(values),
-        ).debug("bound processor parameters")
-        return replace(self, bound_params=bound)
+        return replace(self, bound_params={**self.bound_params, **values})
 
     def validate_ready(self) -> None:
         missing = []
@@ -171,17 +162,9 @@ class Processor:
             formatted = ", ".join(repr(name) for name in missing)
             raise ValueError(f"{self.kind} '{self.name}' requires unbound parameter(s): {formatted}")
 
-        # logger.bind(component="processor", processor=self.kind, name=self.name).debug("validated processor bindings")
-
     def _call(self, primary: Any, runtime_values: Mapping[str, Any]) -> Any:
         self.validate_ready()
         supplied = {name: runtime_values[name] for name in self.runtime_params if name in runtime_values}
-        # logger.bind(
-        #     component="processor",
-        #     processor=self.kind,
-        #     name=self.name,
-        #     providers=sorted(supplied),
-        # ).debug("resolved processor providers")
         return self.func(primary, **dict(self.bound_params), **supplied)
 
     def __call__(self, primary: Any, **runtime_values: Any) -> Any:
@@ -202,9 +185,6 @@ class Preprocessor(Processor):
         if value is None:
             return None
         if isinstance(value, cls):
-            logger.bind(component="processor", processor="preprocessor", source="object", name=value.name).debug(
-                "using configured processor object"
-            )
             value.validate_ready()
             return value
 
@@ -230,15 +210,9 @@ class Preprocessor(Processor):
 
     def _normalize_outputs(self, result: Any) -> Iterable[list[RawObservation]]:
         if result is None:
-            logger.bind(component="processor", processor=self.kind, name=self.name, output="none").trace(
-                "discarded preprocessor output"
-            )
             return
 
         if isinstance(result, Observation):
-            logger.bind(component="processor", processor=self.kind, name=self.name, output="observation").trace(
-                "accepted preprocessor output"
-            )
             yield [dict(result.data)]
             return
 
@@ -253,14 +227,8 @@ class Preprocessor(Processor):
                 f"got {type(result).__name__}"
             )
 
-        logger.bind(component="processor", processor=self.kind, name=self.name, output="iterable").trace(
-            "expanding preprocessor output"
-        )
         for output in result:
             if output is None:
-                logger.bind(component="processor", processor=self.kind, name=self.name, output="none").trace(
-                    "skipped preprocessor output item"
-                )
                 continue
             if not isinstance(output, Observation):
                 raise TypeError(
@@ -283,9 +251,6 @@ class Postprocessor(Processor):
         if value is None:
             return None
         if isinstance(value, cls):
-            logger.bind(component="processor", processor="postprocessor", source="object", name=value.name).debug(
-                "using configured processor object"
-            )
             value.validate_ready()
             return value
 
@@ -296,26 +261,11 @@ class Postprocessor(Processor):
         for name in self.runtime_params:
             if name in available:
                 runtime_values[name] = available[name]
-                logger.bind(
-                    component="processor",
-                    processor=self.kind,
-                    name=self.name,
-                    provider=name,
-                    available=True,
-                ).debug("resolved postprocessor provider")
                 continue
 
             parameter = self.signature.parameters[name]
             if _is_optional(parameter):
                 runtime_values[name] = None
-                logger.bind(
-                    component="processor",
-                    processor=self.kind,
-                    name=self.name,
-                    provider=name,
-                    available=False,
-                    optional=True,
-                ).debug("resolved unavailable postprocessor provider as None")
                 continue
 
             raise ValueError(
@@ -325,16 +275,10 @@ class Postprocessor(Processor):
 
         result = self._call(predictions, runtime_values)
         if result is None:
-            logger.bind(component="processor", processor=self.kind, name=self.name, action="mutate").debug(
-                "postprocessor mutated predictions in place"
-            )
             return None
         if not isinstance(result, Mapping):
             raise TypeError(f"postprocessor '{self.name}' must return a mapping or None, got {type(result).__name__}")
 
-        logger.bind(component="processor", processor=self.kind, name=self.name, action="replace").debug(
-            "postprocessor replaced predictions"
-        )
         return result
 
 

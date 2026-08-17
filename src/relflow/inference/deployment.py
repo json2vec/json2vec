@@ -24,6 +24,7 @@ from tensordict import TensorDict
 from relflow.architecture.root import Model
 from relflow.data.iterables import JMESPathResolutionMonitor, encode
 from relflow.data.processors import Postprocessor, Preprocessor
+from relflow.rich import install_tracebacks
 from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.experiment import NodeAttribute, NodePredicate
 from relflow.structs.packages import Prediction
@@ -743,6 +744,7 @@ class Deployment(BaseSettings):
             previous = {key: os.environ.get(key) for key in env_updates}
             try:
                 os.environ.update(env_updates)
+                install_tracebacks()
                 uvicorn.run(
                     "relflow.inference.deployment:create_app",
                     factory=True,
@@ -759,6 +761,7 @@ class Deployment(BaseSettings):
                         os.environ[key] = value
             return
 
+        install_tracebacks()
         uvicorn.run(
             self.app(),
             host=self.host,
