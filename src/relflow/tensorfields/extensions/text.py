@@ -282,6 +282,7 @@ class Embedder(EmbedderBase):
         self.__dict__["_cached_model"] = cached_model
         self.hidden_size: int = cached_model.hidden_size
         self.request = request
+        self.padding_side: str = getattr(CachedModel.get_tokenizer(request.model), "padding_side", "right")
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
@@ -314,14 +315,47 @@ class Embedder(EmbedderBase):
         valued_ids = flat_ids[valued]
         valued_mask = flat_mask[valued]
         model = self.__dict__["_cached_model"].module_for(flat_ids.device)
+
+        restore_order: torch.Tensor | None = None
+        starts = range(0, valued_ids.size(0), self.request.encoder_batch_size)
+        stops = [min(start + self.request.encoder_batch_size, valued_ids.size(0)) for start in starts]
+        if self.padding_side == "right":
+            lengths = valued_mask.count_nonzero(dim=-1)
+            restore_order = torch.argsort(lengths, stable=True)
+            valued_ids = valued_ids.index_select(0, restore_order)
+            valued_mask = valued_mask.index_select(0, restore_order)
+            sorted_lengths = lengths.index_select(0, restore_order)
+
+            # Copy every microbatch boundary length to the host in one
+            # synchronization, rather than calling .item() before each encoder
+            # invocation. A valued row with no attended tokens is forwarded at
+            # full width to preserve the previous cls/pooler behavior.
+            metadata_indexes = torch.as_tensor(
+                [*starts, *(stop - 1 for stop in stops)],
+                device=sorted_lengths.device,
+            )
+            metadata = sorted_lengths.index_select(0, metadata_indexes).tolist()
+            boundary = len(stops)
+            chunk_minimums = metadata[:boundary]
+            chunk_maximums = metadata[boundary:]
+            widths = [
+                valued_ids.size(1) if minimum == 0 else maximum
+                for minimum, maximum in zip(chunk_minimums, chunk_maximums, strict=True)
+            ]
+        else:
+            # Removing leading padding changes absolute position ids for many
+            # models. Keep the full width and original order for left-padded
+            # tokenizers.
+            widths = [valued_ids.size(1)] * len(stops)
+
         encoded: list[torch.Tensor] = []
-        for start in range(0, valued_ids.size(0), self.request.encoder_batch_size):
-            stop = start + self.request.encoder_batch_size
-            batch_mask = valued_mask[start:stop]
+        for start, stop, width in zip(starts, stops, widths, strict=True):
+            batch_ids = valued_ids[start:stop, :width]
+            batch_mask = valued_mask[start:stop, :width]
 
             with torch.inference_mode():
                 outputs = model(
-                    input_ids=valued_ids[start:stop],
+                    input_ids=batch_ids,
                     attention_mask=batch_mask,
                 )
 
@@ -343,7 +377,13 @@ class Embedder(EmbedderBase):
 
             encoded.append(pooled.to(dtype=torch.float32))
 
-        embeddings[valued] = torch.cat(encoded, dim=0)
+        batched_embeddings = torch.cat(encoded, dim=0)
+        if restore_order is None:
+            valued_embeddings = batched_embeddings
+        else:
+            valued_embeddings = torch.empty_like(batched_embeddings)
+            valued_embeddings[restore_order] = batched_embeddings
+        embeddings[valued] = valued_embeddings
 
         return embeddings.reshape(N, *dims, self.hidden_size)
 
@@ -363,12 +403,13 @@ class Embedder(EmbedderBase):
         N, *dims = inputs.state.shape
         D = math.prod((N, *dims))
 
-        if TensorKey.content in inputs.targets.keys() and TensorKey.state in inputs.targets.keys():
-            self.target_embeddings(cast(TensorField, inputs))
-
         state = inputs.state.reshape(D)
         valued = state.eq(Tokens.valued.value).unsqueeze(-1)
-        encoded = self.encode(content=inputs.content, state=inputs.state).reshape(D, self.hidden_size)
+        if TensorKey.content in inputs.targets.keys() and TensorKey.state in inputs.targets.keys():
+            encoded = self.target_embeddings(cast(TensorField, inputs))
+        else:
+            encoded = self.encode(content=inputs.content, state=inputs.state)
+        encoded = encoded.reshape(D, self.hidden_size)
         projected = self.linear(encoded) * valued
         embeddings = self.embeddings(state)
 

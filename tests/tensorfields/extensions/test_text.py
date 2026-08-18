@@ -64,6 +64,7 @@ class FakeTokenizer:
     pad_token_id = 0
     eos_token = "[EOS]"
     sep_token = "[SEP]"
+    padding_side = "right"
 
     def __call__(self, texts, *, padding, truncation, max_length, return_tensors):
         assert padding == "max_length"
@@ -90,6 +91,7 @@ class FakeHFModel:
         self.config = SimpleNamespace(hidden_size=hidden_size)
         self.device = torch.device("cpu")
         self.calls = 0
+        self.batches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def eval(self):
         return self
@@ -103,6 +105,7 @@ class FakeHFModel:
 
     def __call__(self, *, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         self.calls += 1
+        self.batches.append((input_ids.detach().cpu().clone(), attention_mask.detach().cpu().clone()))
         input_ids = input_ids.to(dtype=torch.float32)
         attention_mask = attention_mask.to(dtype=torch.float32)
         hidden = torch.stack(
@@ -298,6 +301,196 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
     prediction = decoder([parcel])
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 4)
+
+
+def test_text_partial_mask_reuses_target_embeddings_for_visible_input_and_loss(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_model = _patch_hf(monkeypatch)
+
+    structure = Schema.model_validate(_structure_payload(encoder_batch_size=2))
+    field = TensorField.new(
+        values=_values(),
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+    )
+    selected = torch.zeros_like(field.state, dtype=torch.bool)
+    selected[..., 0] = True
+    field.hide(selected)
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    parcel = embedder(field)
+
+    # The original four values fit in two encoder batches. Visible values must
+    # reuse those target embeddings instead of requiring a third model call.
+    assert fake_model.calls == 2
+    target_embeddings = field.targets[TensorKey.embedding]
+    valued = field.state.eq(Tokens.valued.value).unsqueeze(-1)
+    expected = embedder.embeddings(field.state) + embedder.linear(target_embeddings) * valued
+    assert torch.allclose(parcel.payload, expected)
+
+    state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
+    state_logits[..., Tokens.valued.value] = 50.0
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: state_logits,
+                TensorKey.content: target_embeddings.clone(),
+            },
+            batch_size=[2],
+        ),
+    )
+    module = _DummyModule(structure, embedder, Decoder(schema=structure, address=ADDRESS))
+
+    output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+
+    assert torch.isfinite(output)
+    assert fake_model.calls == 2
+
+
+@pytest.mark.parametrize("encoder_pooling", ["cls", "mean", "pooler"])
+def test_text_encoder_buckets_by_length_trims_batches_and_restores_order(
+    monkeypatch: pytest.MonkeyPatch,
+    encoder_pooling: str,
+):
+    fake_model = _patch_hf(monkeypatch)
+    payload = _structure_payload(encoder_batch_size=2, encoder_pooling=encoder_pooling)
+    payload["fields"]["fields"][0]["fields"][0]["max_length"] = 5
+    structure = Schema.model_validate(payload)
+    field = TensorField.new(
+        values=[
+            [["a", "abcde"]],
+            [["ab", "abcd"]],
+            [["abc", None]],
+        ],
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+    )
+
+    # Five valued rows have deliberately shuffled sequence lengths, including
+    # a tie. The sixth row is missing and must remain a zero embedding.
+    input_ids = torch.tensor(
+        [
+            [10, 0, 0, 0, 0],
+            [20, 21, 22, 23, 24],
+            [30, 31, 0, 0, 0],
+            [40, 41, 42, 43, 0],
+            [50, 51, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+        ]
+    )
+    attention_mask = torch.tensor(
+        [
+            [1, 0, 0, 0, 0],
+            [1, 1, 1, 1, 1],
+            [1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 0],
+            [1, 1, 0, 0, 0],
+            [0, 0, 0, 0, 0],
+        ]
+    )
+    field.content[INPUT_IDS] = input_ids.reshape(3, 1, 2, 5)
+    field.content[ATTENTION_MASK] = attention_mask.reshape(3, 1, 2, 5)
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    encoded = embedder.encode(content=field.content, state=field.state).reshape(6, 4)
+
+    # Stable ascending bucketing yields [1, 2], [2, 4], [5], leaving the
+    # longest row in the uneven final batch. Each batch is cropped to its
+    # longest member.
+    assert [tuple(ids.shape) for ids, _ in fake_model.batches] == [(2, 2), (2, 4), (1, 5)]
+    assert [ids[:, 0].tolist() for ids, _ in fake_model.batches] == [[10, 30], [50, 40], [20]]
+    assert [mask.tolist() for _, mask in fake_model.batches] == [
+        [[1, 0], [1, 1]],
+        [[1, 1, 0, 0], [1, 1, 1, 1]],
+        [[1, 1, 1, 1, 1]],
+    ]
+
+    first_channel = (
+        torch.tensor([10.0, 22.0, 30.5, 41.5, 50.5])
+        if encoder_pooling == "mean"
+        else torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0])
+    )
+    expected = torch.stack(
+        [first_channel, first_channel + 1.0, torch.ones(5), first_channel],
+        dim=1,
+    )
+    expected = torch.cat([expected, torch.zeros(1, 4)])
+    assert torch.equal(encoded, expected)
+
+
+def test_text_encoder_keeps_full_width_for_left_padding(monkeypatch: pytest.MonkeyPatch):
+    fake_model = _patch_hf(monkeypatch)
+    payload = _structure_payload(encoder_batch_size=2, encoder_pooling="mean")
+    payload["fields"]["fields"][0]["fields"][0]["max_length"] = 5
+    structure = Schema.model_validate(payload)
+    field = TensorField.new(
+        values=_values(),
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+    )
+    tokenizer = CachedModel.get_tokenizer("bert-base-uncased")
+    tokenizer.padding_side = "left"
+    input_ids = torch.tensor(
+        [
+            [0, 0, 0, 0, 10],
+            [0, 20, 21, 22, 23],
+            [0, 0, 0, 30, 31],
+            [0, 0, 40, 41, 42],
+        ]
+    )
+    attention_mask = torch.tensor(
+        [
+            [0, 0, 0, 0, 1],
+            [0, 1, 1, 1, 1],
+            [0, 0, 0, 1, 1],
+            [0, 0, 1, 1, 1],
+        ]
+    )
+    field.content[INPUT_IDS] = input_ids.reshape(2, 1, 2, 5)
+    field.content[ATTENTION_MASK] = attention_mask.reshape(2, 1, 2, 5)
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    encoded = embedder.encode(content=field.content, state=field.state).reshape(4, 4)
+
+    # Prefix slicing is only valid for right padding. Retaining full width for
+    # left padding prevents the content tokens at the end from being dropped.
+    assert [tuple(ids.shape) for ids, _ in fake_model.batches] == [(2, 5), (2, 5)]
+    first_channel = torch.tensor([10.0, 21.5, 30.5, 41.0])
+    expected = torch.stack(
+        [first_channel, first_channel + 1.0, torch.ones(4), first_channel],
+        dim=1,
+    )
+    assert torch.equal(encoded, expected)
+
+
+def test_text_encoder_keeps_full_width_for_valued_row_without_attended_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_model = _patch_hf(monkeypatch)
+    structure = Schema.model_validate(_structure_payload())
+    field = TensorField.new(
+        values=_values(),
+        address=ADDRESS,
+        schema=structure,
+        strata=Strata.train,
+    )
+    field.content[INPUT_IDS][0, 0, 0].zero_()
+    field.content[ATTENTION_MASK][0, 0, 0].zero_()
+
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    encoded = embedder.encode(content=field.content, state=field.state).reshape(4, 4)
+
+    # Empty strings can be valued while producing no attended tokens for
+    # tokenizers that add no special tokens. Preserve the previous cls/pooler
+    # behavior by retaining the original width for the containing microbatch.
+    assert [tuple(ids.shape) for ids, _ in fake_model.batches] == [(2, 4), (2, 2)]
+    assert torch.equal(fake_model.batches[0][1][0], torch.zeros(4, dtype=torch.int64))
+    assert torch.equal(encoded[0], torch.tensor([0.0, 1.0, 0.0, 0.0]))
 
 
 def test_text_frozen_hf_model_is_not_registered_in_state_dict(monkeypatch: pytest.MonkeyPatch):

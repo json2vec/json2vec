@@ -72,7 +72,12 @@ signal.
 
 Text is tokenized with the configured Hugging Face tokenizer using max-length
 padding and truncation. Token IDs and attention masks are stored as tensorfield
-content.
+content. Before frozen-encoder inference, right-padded valued rows are stably
+sorted by attended length. Each encoder microbatch is cropped to its longest
+row, and the pooled outputs are restored to their original order. This keeps
+the fixed tensorfield storage contract while avoiding max-length encoder work
+for short text. Left-padded tokenizers retain their original order and full
+width because removing leading padding can change absolute position IDs.
 
 ## Examples
 
@@ -149,7 +154,7 @@ output.
 | --- | --- | --- |
 | `model` | `"google/bert_uncased_L-2_H-128_A-2"` | Hugging Face model or local path. Must be a non-empty string. |
 | `max_length` | `128` | Tokenizer max length. Must be positive. |
-| `encoder_batch_size` | `32` | Number of flattened text values encoded per Hugging Face forward pass. |
+| `encoder_batch_size` | `32` | Maximum number of length-grouped, flattened text values per Hugging Face forward pass. |
 | `encoder_pooling` | `"cls"` | Pooling mode: `"cls"`, `"mean"`, or `"pooler"`. |
 | `objective` | `"l2"` | Hidden-embedding reconstruction objective: `"l1"` or `"l2"`. |
 
@@ -166,6 +171,11 @@ When `Text` is masked or used as a target, the decoder predicts:
 
 The decoder does not generate text tokens. It reconstructs the frozen text
 embedding used as the target representation.
+
+For partial masking, the original frozen embedding is computed once and reused
+both as the reconstruction target and, after applying the current visibility
+mask, as input for values that remain visible. The frozen encoder is not run a
+second time for those visible values.
 
 State uses frequency-weighted cross entropy and reports state accuracy. Valued
 targets use the configured `l1` or `l2` content objective and report MAE and
@@ -196,7 +206,9 @@ the separate contract of the embeddings returned to callers.
 
 The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
 by `relflow`. Use `encoder_batch_size` to manage memory when many text values are
-flattened from nested branches.
+flattened from nested branches. Right-padding removal is dynamic within each
+encoder call, so `max_length` remains a truncation and storage limit rather than
+the amount of encoder work paid by every microbatch.
 
 ## Where Next
 

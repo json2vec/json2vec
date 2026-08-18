@@ -38,10 +38,10 @@ merchant_category = rf.Cluster(
 merchant_category
 ```
 
-Use `Set` when several labels may be present at once. Use `Entity` when only
-repeated equality inside one observation matters. Use `Text` when the words or
-subwords inside a string carry the signal. Use `Category` when each label 
-carries special meaning worth learning.
+Use `Set` when several labels may be present at once. Use `Hash` when equality
+between large or unbounded identifiers matters without learning a vocabulary.
+Use `Text` when the words or subwords inside a string carry the signal. Use
+`Category` when each label carries special meaning worth learning.
 
 Unique identifiers are well-suited for a `Cluster` representation if it is 
 reasonable to accept that per-identifier personalization (or, put otherwise,
@@ -247,7 +247,8 @@ by `Model.predict(...)` is keyed by `rf.Address` objects.
 ## Where Next
 
 - Use [Set](set.qmd) for unordered multi-label values.
-- Use [Entity](entity.qmd) for equality within one observation and one leaf.
+- Use [Hash](hash.qmd) for large or unbounded identifiers when equality is
+  useful without a learned vocabulary.
 - Use [Text](text.qmd) when subword meaning matters.
 - Read [Built-In Data Types](../core-concepts/data-types.qmd) for shared state,
   training, and prediction semantics.
