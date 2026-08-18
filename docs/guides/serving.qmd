@@ -202,6 +202,10 @@ the final, postprocessed response and also defines its OpenAPI schema. Because
 the default address-keyed response is dynamic, a fixed response model is most
 useful after a postprocessor creates an application-specific shape.
 
+Request-validation errors provide bounded counts by validation type without
+echoing rejected values or user-controlled mapping keys. Application-defined
+validation still runs inside the request model.
+
 Pydantic models document an interface; they do not provide authentication,
 authorization, request size limits, rate limiting, or backward-compatible
 versioning. Add those at the surrounding service or gateway.
@@ -271,14 +275,14 @@ validating an integration, but it is not full drift monitoring.
 
 `Deployment.log_level` configures Uvicorn; it does not configure RelFlow's
 internal Rich diagnostics. Embedding `Deployment.app()` does not reconfigure
-process output, so an external ASGI runner continues to own its loggers and
-traceback policy. RelFlow's bounded internal diagnostics remain incident-only;
-they never create request-, batch-, step-, or epoch-level console chatter.
-The process-owning `Deployment.serve()` entry point installs Rich uncaught
-tracebacks with locals hidden; `Deployment.app()` does not. Applications using
-an external runner may call
-`rich.traceback.install(show_locals=False)` at their own entry point. That hook
-is process-wide and should not expose traceback details in HTTP responses.
+process output beyond the safe traceback hook already installed once by
+`import relflow`, so an external ASGI runner continues to own its loggers.
+`Deployment.serve()` uses the same default and does not install a second hook.
+The default hides locals; an application that intentionally needs different
+traceback presentation may replace it with Rich's API at its own process entry
+point. RelFlow's bounded internal diagnostics remain incident-only; they never
+create request-, batch-, step-, or epoch-level console chatter, and traceback
+details are never exposed in HTTP responses.
 
 ## Failure Behavior
 
@@ -287,16 +291,20 @@ is process-wide and should not expose traceback details in HTTP responses.
 | Model cannot load | Application startup fails; the server does not become ready. |
 | Malformed JSON | HTTP `400` with empty `predictions` and an `error` object. |
 | Body is not an object or array of objects | HTTP `422` with an error envelope. |
-| Request validation or preprocessing fails after an object is accepted | HTTP `200` with empty `predictions` and `error.status_code=422`; clients must inspect the body. |
-| Inference or postprocessing raises unexpectedly | Unhandled server error; log and monitor it as HTTP `500`. |
+| Request-model validation fails | HTTP `200` with empty `predictions` and `error.status_code=422`; the bounded message omits rejected input values. |
+| A preprocessor drops a request or produces more than one observation | HTTP `200` with empty `predictions` and `error.status_code=422`; clients must inspect the body. |
+| Preprocessing, inference, or postprocessing raises unexpectedly | HTTP `500` with a static error envelope; log and monitor the operator traceback. |
+| Prediction output cannot be serialized as JSON | HTTP `500` with the same static envelope and one bounded operator traceback. |
 | `GET /health` | Confirms the app is running after startup, but does not probe downstream systems or prediction quality. |
 
 The error envelope contains a numeric `status_code` and message. The embedded
 code is not always the HTTP transport status in the current runtime. A server
-may render one unexpected exception for operators, but the traceback and locals
-must never enter the HTTP response. Avoid exposing sensitive source values or
-stack traces through custom exception handling, and avoid printing the same
-failure once through RelFlow and again through Uvicorn.
+renders the first unexpected exception at each bounded code-site signature for
+operators, returns a static HTTP `500` envelope, and summarizes suppressed
+repeats when the batcher stops. The rendered traceback omits locals and the
+original exception message because either may contain request data. Tracebacks
+never enter the HTTP response, and the handled failure is not printed again by
+Uvicorn.
 
 ## Production Checklist
 

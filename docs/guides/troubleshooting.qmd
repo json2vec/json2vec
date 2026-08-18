@@ -52,25 +52,52 @@ not emit diagnostic lines, and repeated incident warnings are bounded. Progress,
 loss, throughput, and counters belong to Lightning's progress display and
 metric loggers.
 
-RelFlow does not expose a console or traceback-configuration API. Applications
-that want their own Rich output should create and own a console directly. A
-terminal application may also install Rich's uncaught-exception hook at its
-entry point:
+Importing `relflow` installs one process-wide Rich uncaught-exception hook. The
+installation is idempotent, import itself emits no diagnostic output, and the
+default uses `show_locals=False`. RelFlow does not expose a console or
+traceback-configuration API.
+
+Tracebacks and source-code panels use a stable 88-column maximum; narrower
+terminals may constrain both. Already-printed terminal output
+cannot reflow after a resize. Rich treats `TERM=dumb` and `TERM=unknown` as
+fixed 80-column terminals. Exception messages and notes are also bounded so one
+failure cannot produce unbounded wrapped output.
+
+Set `RELFLOW_VERBOSE=1` before importing RelFlow to include sparse internal
+context such as checkpoint load/rollback details. It still does not enable
+per-record, batch, step, or epoch output. If the host has already installed a
+custom `sys.excepthook`, RelFlow preserves it instead of printing a second
+traceback.
+
+Applications that want their own Rich output should create and own a console
+directly:
+
+```python
+from rich.console import Console
+
+console = Console(stderr=True)
+console.print(model)
+```
+
+An application that intentionally needs different traceback presentation may
+replace the default at its process entry point with Rich's API directly:
 
 ```python
 from rich.console import Console
 from rich.traceback import install
 
 console = Console(stderr=True)
-console.print(model)
 install(console=console, show_locals=False)
 ```
 
-Installing the hook is explicit and process-wide; importing RelFlow never
-changes it. Keep locals hidden because observations, processor arguments,
-tokens, and credentials may be present. In a notebook, use Rich's supported
-IPython integration instead of installing a process hook from a documentation
-cell. Applications that need durable, structured, JSON, or remote logs should
+Replacing the hook is process-wide and is not required for RelFlow's safe
+default. Keep locals hidden because observations, processor arguments, tokens,
+and credentials may be present. `show_locals=False` does not redact a secret
+that application code embeds directly in an exception message or source line,
+so do not put raw records or credentials there. Notebook runtimes control cell-exception
+presentation, and Rich integrates where it supports the active shell, so
+documentation cells should not install another hook. Applications that need
+durable, structured, JSON, or remote logs should
 configure their standard-library or platform logger at their own boundaries.
 
 ## Symptom Guide

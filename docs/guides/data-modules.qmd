@@ -148,6 +148,9 @@ datamodule = rf.CustomDataModule(
     persistent_workers=False,
     pin_memory=False,
 )
+
+# In a notebook, leave the module as the final expression for its safe summary.
+datamodule
 ```
 
 You may pass named splits or one split mapping:
@@ -326,6 +329,16 @@ needs to be fine-grained and record-order locality is not important.
 When `replacement=None`, training uses replacement sampling and non-training
 splits do not. Setting replacement for prediction can repeat records indefinitely,
 so leave it disabled for finite prediction jobs.
+
+Known parser/file-corruption failures skip the affected source, emit one
+credential-redacted representative warning per file type and error class, and
+summarize repeats once per split lifecycle. That finite warning budget is retained
+when Lightning recreates a loader or non-persistent data workers between epochs.
+A finite read fails when every attempted source is unreadable;
+a valid empty file or a worker with no locally assigned chunks/records simply
+produces no rows. Replacement sampling fails after a bounded run of attempts
+without producing a row so an unreadable or empty source set cannot spin
+forever. Permission, runtime, and other unexpected failures propagate normally.
 
 ::: {.callout-note}
 Split patterns are regular expressions, not glob strings. Raw regex strings

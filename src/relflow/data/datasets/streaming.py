@@ -5,14 +5,20 @@ from __future__ import annotations
 import os
 import random
 import re
+import sys
 import weakref
 from collections.abc import Iterable, Iterator
+from contextlib import suppress
 from functools import partial, partialmethod
+from multiprocessing import Manager
+from multiprocessing.managers import SyncManager
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from threading import Lock
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlparse
 
 import lightning.pytorch as lit
+import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.fs as pafs
 import torch
@@ -20,6 +26,7 @@ from beartype import beartype
 from torch.utils.data import DataLoader, IterableDataset
 
 from relflow.data.datasets.base import (
+    DataModuleDisplay,
     InterprocessEncodingContext,
     NonNegativeInt,
     Pipeline,
@@ -31,6 +38,8 @@ from relflow.data.datasets.base import (
     _is_assigned_to_worker,
     _worker_buffer_size,
     _worker_identity,
+    compact_strata,
+    display_label,
     identity,
     share_interprocess_encoding_context,
 )
@@ -46,7 +55,7 @@ from relflow.data.iterables import (
 from relflow.data.processors import Preprocessor
 from relflow.distributed import rank as distributed_rank
 from relflow.distributed import world_size as distributed_world_size
-from relflow.rich import console, record_incident
+from relflow.rich import Incident, IncidentSummary, console, log_incident_summaries
 from relflow.structs.enums import ShardingStrategy, Strata, Suffix
 from relflow.structs.experiment import Schema
 
@@ -73,6 +82,138 @@ def diagnostic_path(uri_path: str | Path, *, limit: int = 240) -> str:
     if ":" in hostname and not hostname.startswith("["):
         hostname = f"[{hostname}]"
     return parsed._replace(netloc=hostname, query="", fragment="").geturl()[:limit]
+
+
+class ReadDiagnostics:
+    """Bound streaming read diagnostics across one data-module split lifecycle."""
+
+    MAX_KEYS = 8
+    MAX_COUNT = sys.maxsize
+    OVERFLOW_KEY = ("streaming-read", "<additional-incidents>")
+
+    def __init__(self) -> None:
+        self.manager: SyncManager | None = None
+        self.counts: Any = {}
+        # overflow count, overflow notice emitted, summary emitted
+        self.state: Any = [0, False, False]
+        self.lock: Any = Lock()
+        self.shared = False
+        self.enabled = True
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["manager"] = None
+        if not self.shared:
+            state["lock"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        if self.lock is None:
+            self.lock = Lock()
+
+    def share(self) -> None:
+        """Move counters into process-safe storage before workers start."""
+
+        if self.shared:
+            return
+
+        manager: SyncManager | None = None
+        try:
+            manager = Manager()
+            counts = manager.dict(dict(self.counts))
+            state = manager.list(list(self.state))
+            lock = manager.Lock()
+        except Exception:
+            if manager is not None:
+                with suppress(Exception):
+                    manager.shutdown()
+            raise
+
+        self.counts = counts
+        self.state = state
+        self.lock = lock
+        self.manager = manager
+        self.shared = True
+
+    def disable(self) -> None:
+        """Suppress worker diagnostics when their shared budget is unavailable."""
+
+        self.enabled = False
+
+    def record(self, suffix: str, reason: str) -> Incident:
+        """Record one failed source and return whether its detail should emit."""
+
+        key = (suffix[:160], reason[:160])
+        if not self.enabled:
+            return Incident(
+                key=("streaming-read", *key),
+                count=1,
+                suppressed=0,
+                emit=False,
+            )
+
+        with self.lock:
+            previous = self.counts.get(key)
+            if previous is not None:
+                count = min(int(previous) + 1, self.MAX_COUNT)
+                self.counts[key] = count
+                return Incident(
+                    key=("streaming-read", *key),
+                    count=count,
+                    suppressed=count - 1,
+                    emit=False,
+                )
+
+            if len(self.counts) < self.MAX_KEYS:
+                self.counts[key] = 1
+                return Incident(
+                    key=("streaming-read", *key),
+                    count=1,
+                    suppressed=0,
+                    emit=True,
+                )
+
+            count = min(int(self.state[0]) + 1, self.MAX_COUNT)
+            emit = not bool(self.state[1])
+            self.state[0] = count
+            self.state[1] = True
+            return Incident(
+                key=self.OVERFLOW_KEY,
+                count=count,
+                suppressed=max(count - 1, 0),
+                emit=emit,
+                overflow=True,
+            )
+
+    def summary_for_log(self) -> tuple[IncidentSummary, ...]:
+        """Return the first useful suppression summary, then stay quiet."""
+
+        if not self.enabled:
+            return ()
+
+        with self.lock:
+            counts = [int(count) for count in self.counts.values()]
+            overflowed = int(self.state[0])
+            overflow_notice = int(bool(self.state[1]))
+            suppressed = sum(max(count - 1, 0) for count in counts) + max(
+                overflowed - overflow_notice,
+                0,
+            )
+            if not suppressed or bool(self.state[2]):
+                return ()
+
+            self.state[2] = True
+            return (
+                IncidentSummary(
+                    kind="streaming-read",
+                    occurrences=sum(counts) + overflowed,
+                    emitted=len(counts) + overflow_notice,
+                    suppressed=suppressed,
+                    unique=len(counts),
+                    overflowed=overflowed,
+                ),
+            )
 
 
 @beartype
@@ -127,6 +268,7 @@ def observe(
     replacement: bool = False,
     global_rank: int | None = None,
     world_size: int | None = None,
+    read_diagnostics: ReadDiagnostics | None = None,
 ) -> Iterator[RawObservation]:
     fetch_sharding = ShardingStrategy.chunk if replacement else sharding
     paths = fetch(
@@ -157,6 +299,8 @@ def observe(
         chunk_batch_size=chunk_batch_size,
         global_rank=global_rank,
         world_size=world_size,
+        max_consecutive_failures=32 if replacement else None,
+        read_diagnostics=read_diagnostics,
     )
 
 
@@ -168,111 +312,169 @@ def read(
     chunk_batch_size: int,
     global_rank: int | None = None,
     world_size: int | None = None,
+    max_consecutive_failures: int | None = None,
+    read_diagnostics: ReadDiagnostics | None = None,
 ) -> Iterator[RawObservation]:
+    if max_consecutive_failures is not None and max_consecutive_failures <= 0:
+        raise ValueError("max_consecutive_failures must be positive")
+
     worker_id, num_workers = _worker_identity(global_rank=global_rank, world_size=world_size)
+    context = {"worker": worker_id, "workers": num_workers} if num_workers > 1 else {}
+    diagnostics = read_diagnostics if read_diagnostics is not None else ReadDiagnostics()
+    attempts_since_yield = 0
+    total_attempts = 0
+    failed_attempts = 0
+    yielded_any = False
 
-    match suffix:
-        case Suffix.ndjson:
-            import json
+    def record_failure(uri_path: str, error: BaseException) -> None:
+        nonlocal failed_attempts
+        failed_attempts += 1
+        safe_path = diagnostic_path(uri_path)
+        reason = type(error).__qualname__
+        try:
+            incident = diagnostics.record(suffix.value, reason)
+        except Exception:
+            return
+        if not incident.emit:
+            return
+        if incident.overflow:
+            with suppress(Exception):
+                console.log(
+                    "[relflow.warning]additional unreadable streaming files are suppressed[/]",
+                    context,
+                )
+            return
+        with suppress(Exception):
+            console.log(
+                "[relflow.warning]skipping an unreadable streaming dataset file[/]",
+                {**context, "path": safe_path, "suffix": suffix.value, "reason": reason},
+            )
 
-            for uri_path in pipe:
-                record_index = 0
+    def check_progress() -> None:
+        if max_consecutive_failures is not None and attempts_since_yield >= max_consecutive_failures:
+            raise RuntimeError(
+                f"streaming reader made no progress after {max_consecutive_failures} consecutive file attempts"
+            )
 
-                with open(uri_path, "r") as file:
-                    for line in file:
-                        if not line.strip():
-                            continue
+    try:
+        match suffix:
+            case Suffix.ndjson:
+                import json
 
-                        if sharding == ShardingStrategy.chunk:
-                            chunk_index = record_index // chunk_batch_size
-                            if not _is_assigned_to_worker(
-                                shard_key=f"chunk:{uri_path}:{chunk_index}",
-                                worker_id=worker_id,
-                                num_workers=num_workers,
-                            ):
-                                record_index += 1
-                                continue
+                for uri_path in pipe:
+                    attempts_since_yield += 1
+                    total_attempts += 1
+                    record_index = 0
+                    try:
+                        with open(uri_path, "r") as file:
+                            for line in file:
+                                if not line.strip():
+                                    continue
 
-                        elif sharding == ShardingStrategy.record:
-                            if not _is_assigned_to_worker(
-                                shard_key=f"record:{uri_path}:{record_index}",
-                                worker_id=worker_id,
-                                num_workers=num_workers,
-                            ):
-                                record_index += 1
-                                continue
+                                if sharding == ShardingStrategy.chunk:
+                                    chunk_index = record_index // chunk_batch_size
+                                    if not _is_assigned_to_worker(
+                                        shard_key=f"chunk:{uri_path}:{chunk_index}",
+                                        worker_id=worker_id,
+                                        num_workers=num_workers,
+                                    ):
+                                        record_index += 1
+                                        continue
 
-                        record_index += 1
-                        yield json.loads(line)
-
-        case Suffix.feather | Suffix.parquet | Suffix.avro | Suffix.csv | Suffix.orc | Suffix.json:
-            for uri_path in pipe:
-                parsed = urlparse(uri_path)
-
-                if parsed.scheme == "s3":
-                    fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
-                elif parsed.scheme in ("", "file"):
-                    fs = pafs.LocalFileSystem()
-                else:
-                    raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
-
-                bucket = parsed.netloc
-                key = parsed.path.lstrip("/")
-
-                try:
-                    arrow_dataset = ds.dataset(
-                        f"{bucket}/{key}",
-                        format=suffix.value,
-                        filesystem=fs,
-                    )
-
-                    for chunk_index, batch in enumerate(arrow_dataset.to_batches(batch_size=chunk_batch_size)):
-                        if sharding == ShardingStrategy.chunk:
-                            if not _is_assigned_to_worker(
-                                shard_key=f"chunk:{uri_path}:{chunk_index}",
-                                worker_id=worker_id,
-                                num_workers=num_workers,
-                            ):
-                                continue
-
-                            yield from cast(list[RawObservation], batch.to_pylist())
-                            continue
-
-                        rows = cast(list[RawObservation], batch.to_pylist())
-
-                        if sharding == ShardingStrategy.record:
-                            for row_index, row in enumerate(rows):
-                                if _is_assigned_to_worker(
-                                    shard_key=f"record:{uri_path}:{chunk_index}:{row_index}",
+                                elif sharding == ShardingStrategy.record and not _is_assigned_to_worker(
+                                    shard_key=f"record:{uri_path}:{record_index}",
                                     worker_id=worker_id,
                                     num_workers=num_workers,
                                 ):
-                                    yield row
-                            continue
+                                    record_index += 1
+                                    continue
 
-                        yield from rows
-                except Exception as error:
-                    safe_path = diagnostic_path(uri_path)
-                    reason = type(error).__qualname__
-                    incident = record_incident(
-                        "streaming-read",
-                        safe_path,
-                        suffix.value,
-                        reason,
-                    )
-                    if incident.emit:
-                        console.log(
-                            "[relflow.warning]skipping an unreadable streaming dataset file[/]",
-                            {
-                                "path": safe_path,
-                                "suffix": suffix.value,
-                                "reason": reason,
-                            },
+                                record_index += 1
+                                row = json.loads(line)
+                                attempts_since_yield = 0
+                                yielded_any = True
+                                yield row
+                    except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                        record_failure(uri_path, error)
+                    check_progress()
+
+            case Suffix.feather | Suffix.parquet | Suffix.avro | Suffix.csv | Suffix.orc | Suffix.json:
+                for uri_path in pipe:
+                    attempts_since_yield += 1
+                    total_attempts += 1
+                    parsed = urlparse(uri_path)
+
+                    if parsed.scheme == "s3":
+                        fs = pafs.S3FileSystem()  # type: ignore[attr-defined]
+                    elif parsed.scheme in ("", "file"):
+                        fs = pafs.LocalFileSystem()
+                    else:
+                        raise ValueError(f"Unsupported scheme: {parsed.scheme or 'file'}")
+
+                    bucket = parsed.netloc
+                    key = parsed.path.lstrip("/")
+
+                    try:
+                        arrow_dataset = ds.dataset(
+                            f"{bucket}/{key}",
+                            format=suffix.value,
+                            filesystem=fs,
                         )
-                    continue
 
-        case _:
-            raise ValueError(f"Unsupported suffix: {suffix}")
+                        for chunk_index, batch in enumerate(arrow_dataset.to_batches(batch_size=chunk_batch_size)):
+                            if sharding == ShardingStrategy.chunk:
+                                if not _is_assigned_to_worker(
+                                    shard_key=f"chunk:{uri_path}:{chunk_index}",
+                                    worker_id=worker_id,
+                                    num_workers=num_workers,
+                                ):
+                                    continue
+
+                                for row in cast(list[RawObservation], batch.to_pylist()):
+                                    attempts_since_yield = 0
+                                    yielded_any = True
+                                    yield row
+                                continue
+
+                            rows = cast(list[RawObservation], batch.to_pylist())
+
+                            if sharding == ShardingStrategy.record:
+                                for row_index, row in enumerate(rows):
+                                    if _is_assigned_to_worker(
+                                        shard_key=f"record:{uri_path}:{chunk_index}:{row_index}",
+                                        worker_id=worker_id,
+                                        num_workers=num_workers,
+                                    ):
+                                        attempts_since_yield = 0
+                                        yielded_any = True
+                                        yield row
+                                continue
+
+                            for row in rows:
+                                attempts_since_yield = 0
+                                yielded_any = True
+                                yield row
+                    except (FileNotFoundError, UnicodeDecodeError, pa.ArrowInvalid) as error:
+                        record_failure(uri_path, error)
+                    check_progress()
+
+            case _:
+                raise ValueError(f"Unsupported suffix: {suffix}")
+
+        if (
+            max_consecutive_failures is None
+            and total_attempts > 0
+            and failed_attempts == total_attempts
+            and not yielded_any
+        ):
+            raise RuntimeError(f"streaming reader exhausted {total_attempts} file attempts without yielding a row")
+    finally:
+        with suppress(Exception):
+            log_incident_summaries(
+                diagnostics.summary_for_log(),
+                message="suppressed repeated streaming read diagnostics",
+                context=context,
+            )
 
 
 class BatchDataset(IterableDataset):
@@ -294,6 +496,7 @@ class BatchDataset(IterableDataset):
         replacement: bool = False,
         global_rank: int | None = None,
         world_size: int | None = None,
+        read_diagnostics: ReadDiagnostics | None = None,
     ):
         super().__init__()
 
@@ -313,6 +516,7 @@ class BatchDataset(IterableDataset):
         self.observation_buffer_size = observation_buffer_size
         self.sample_rate = sample_rate
         self.replacement = replacement
+        self.read_diagnostics = read_diagnostics if read_diagnostics is not None else ReadDiagnostics()
 
     def __iter__(self):
         for field_context in self.interprocess_encoding_context.values():
@@ -338,6 +542,7 @@ class BatchDataset(IterableDataset):
                 batch_size=self.batch_size,
                 global_rank=self.global_rank,
                 world_size=self.world_size,
+                read_diagnostics=self.read_diagnostics,
             )
             | observe
             | process
@@ -369,12 +574,19 @@ def dataloader(
     replacement: bool = False,
     global_rank: int | None = None,
     world_size: int | None = None,
+    read_diagnostics: ReadDiagnostics | None = None,
 ) -> DataLoader:
     workers = num_workers if num_workers is not None else (os.cpu_count() or 0)
     active_persistent_workers = persistent_workers and workers > 0
     active_pin_memory = pin_memory and strata != Strata.predict and torch.cuda.is_available()
     global_rank = distributed_rank() if global_rank is None else global_rank
     world_size = distributed_world_size() if world_size is None else world_size
+    diagnostics = read_diagnostics if read_diagnostics is not None else ReadDiagnostics()
+    if workers > 0:
+        try:
+            diagnostics.share()
+        except Exception:
+            diagnostics.disable()
 
     return DataLoader(
         dataset=BatchDataset(
@@ -394,6 +606,7 @@ def dataloader(
             replacement=replacement,
             global_rank=global_rank,
             world_size=world_size,
+            read_diagnostics=diagnostics,
         ),
         drop_last=False,
         batch_size=None,
@@ -404,7 +617,7 @@ def dataloader(
     )
 
 
-class StreamingDataModule(lit.LightningDataModule):
+class StreamingDataModule(DataModuleDisplay, lit.LightningDataModule):
     """Lightning data module for streaming records from files.
 
     Reads file-backed records, applies an optional preprocessor, batches
@@ -461,6 +674,20 @@ class StreamingDataModule(lit.LightningDataModule):
             if replacement is None
             else Strata.expand(replacement, default=False)
         )
+        self._read_diagnostics = {strata: ReadDiagnostics() for strata in Strata}
+
+    def __rich_repr__(self):
+        splits = {strata: None for strata in Strata if getattr(self, strata.value) is not None}
+        yield "root", display_label(diagnostic_path(self.root))
+        yield "suffix", self.suffix.value
+        yield from self.data_module_rich_repr(splits)
+        strata = tuple(splits)
+        if not strata:
+            return
+        yield "sharding", compact_strata(self.sharding, strata), ShardingStrategy.file
+        yield "chunk_batch_size", compact_strata(self.chunk_batch_size, strata), 4096
+        yield "file_buffer_size", compact_strata(self.file_buffer_size, strata), 1
+        yield "replacement", compact_strata(self.replacement, strata), False
 
     def _model(self) -> Model | None:
         if self._model_ref is None:
@@ -547,6 +774,7 @@ class StreamingDataModule(lit.LightningDataModule):
             replacement=self.replacement[strata],
             global_rank=global_rank,
             world_size=world_size,
+            read_diagnostics=self._read_diagnostics[strata],
         )
 
     train_dataloader = partialmethod(dataloader, strata=Strata.train, required=False)

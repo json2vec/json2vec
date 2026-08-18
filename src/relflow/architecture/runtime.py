@@ -7,6 +7,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import torch
+from lightning.pytorch import Callback, Trainer
+from lightning.pytorch.trainer.states import TrainerFn
 from tensordict import TensorDict
 
 from relflow.architecture.contracts import sanitize
@@ -16,7 +18,8 @@ from relflow.data.datasets.base import EncodedBatch, EncodedInput
 from relflow.data.iterables import encode as encode_batch
 from relflow.data.iterables import mask as apply_mask
 from relflow.data.processors import Postprocessor, Preprocessor
-from relflow.rich import console, record_incident
+from relflow.distributed import is_distributed, rank, world_size
+from relflow.rich import console, incidents, log_incident_summaries, record_incident
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -36,6 +39,112 @@ if TYPE_CHECKING:
 class Output(TypedDict):
     loss: NotRequired[torch.Tensor]
     predictions: NotRequired[list[Prediction]]
+
+
+def _rank_context() -> dict[str, int]:
+    if not is_distributed():
+        return {}
+    return {"rank": rank(), "world_size": world_size()}
+
+
+def _diagnostic_scopes(module: "Model") -> tuple[object, ...]:
+    return module, module.schema
+
+
+def flush_number_diagnostics(module: "Model") -> None:
+    """Inspect device-side Number counters at a model lifecycle boundary."""
+
+    context = _rank_context()
+    for node in module.nodes.values():
+        embedder = getattr(node, "embedder", None)
+        drain = getattr(embedder, "drain_diagnostics", None)
+        if not callable(drain):
+            continue
+
+        stats = drain()
+        for severity in ("nonfinite", "out_of_range"):
+            count = int(stats[severity])
+            if count == 0:
+                continue
+            incident = record_incident(
+                "number-clamp",
+                str(embedder.origin),
+                severity,
+                scope=module,
+            )
+            if not incident.emit:
+                continue
+            if incident.overflow:
+                console.log(
+                    "[relflow.warning]additional number-clamp diagnostics are suppressed[/]",
+                    context,
+                )
+                continue
+
+            console.log(
+                "[relflow.warning]number inputs exceed the safe Fourier range; clamping values[/]",
+                {
+                    **context,
+                    "address": embedder.origin,
+                    "severity": severity.replace("_", "-"),
+                    "count": count,
+                    "bound": float(stats["bound"]),
+                },
+            )
+
+
+def finish_diagnostics(module: "Model") -> None:
+    flush_number_diagnostics(module)
+    scopes = _diagnostic_scopes(module)
+    log_incident_summaries(
+        incidents.summary(scopes=scopes),
+        context=_rank_context(),
+    )
+    incidents.reset(scopes=scopes)
+
+
+def reset_diagnostics(module: "Model") -> None:
+    # Discard any advisory device-side counts left by a previous direct
+    # forward before beginning a newly owned lifecycle.
+    for node in module.nodes.values():
+        drain = getattr(getattr(node, "embedder", None), "drain_diagnostics", None)
+        if callable(drain):
+            drain()
+    incidents.reset(scopes=_diagnostic_scopes(module))
+
+
+class DiagnosticsLifecycleCallback(Callback):
+    """Flush and summarize bounded diagnostics at non-recurring boundaries."""
+
+    @staticmethod
+    def _start(pl_module: "Model") -> None:
+        reset_diagnostics(pl_module)
+
+    def on_fit_start(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        self._start(pl_module)
+
+    def on_fit_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        finish_diagnostics(pl_module)
+
+    def on_validation_start(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        if trainer.state.fn == TrainerFn.VALIDATING:
+            self._start(pl_module)
+
+    def on_validation_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        if trainer.state.fn == TrainerFn.VALIDATING:
+            finish_diagnostics(pl_module)
+
+    def on_test_start(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        self._start(pl_module)
+
+    def on_test_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        finish_diagnostics(pl_module)
+
+    def on_predict_start(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        self._start(pl_module)
+
+    def on_predict_end(self, trainer: Trainer, pl_module: "Model") -> None:  # ty:ignore[invalid-method-override]
+        finish_diagnostics(pl_module)
 
 
 class ModelRuntime:
@@ -151,10 +260,11 @@ class ModelRuntime:
             losses.append(loss * torch.tensor(request.weight))
 
         if len(losses) == 0:
-            if record_incident("zero-loss", id(module), str(strata)).emit:
+            incident = record_incident("zero-loss", str(strata), scope=module)
+            if incident.emit:
                 console.log(
                     "[relflow.warning]no trainable fields in the batch; returning zero loss[/]",
-                    {"strata": strata},
+                    {**_rank_context(), "strata": strata},
                 )
             loss: torch.Tensor = torch.tensor(0.0, device=batch.device, requires_grad=True)
             return Output(loss=loss)
@@ -273,6 +383,7 @@ class ModelRuntime:
             if processed is not None:
                 predictions = dict(processed)
 
+        flush_number_diagnostics(module)
         return predictions
 
 

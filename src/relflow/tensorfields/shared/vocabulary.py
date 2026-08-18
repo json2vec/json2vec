@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partialmethod
@@ -51,6 +52,7 @@ class _VocabularyStorage:
     lock: Any
     proposals: list[Any] | ListProxy[Any]
     proposal_lock: Any
+    rejections: list[int] | ListProxy[int]
 
 
 class VocabularyState:
@@ -126,14 +128,28 @@ class VocabularyState:
         return self.storage.proposal_lock
 
     @property
+    def rejections(self) -> list[int] | ListProxy[int]:
+        return self.storage.rejections
+
+    @property
+    def is_shared(self) -> bool:
+        return isinstance(self.master, ListProxy)
+
+    def drain_rejections(self) -> int:
+        with self.lock:
+            rejected = int(self.rejections[0])
+            self.rejections[0] = 0
+        return rejected
+
+    @property
     def unavailable_index(self) -> int:
         return self.size
 
-    def reserve(self, values: Any, *, learn: bool) -> None:
+    def reserve(self, values: Any, *, learn: bool) -> int:
         """Reserve every scalar token found in a JSON-like nested value."""
         if not learn:
             self.refresh()
-            return
+            return 0
 
         candidates: list[Any] = []
         seen: set[Any] = set()
@@ -145,7 +161,7 @@ class VocabularyState:
             candidates.append(word)
 
         if not candidates:
-            return
+            return 0
 
         if self.global_rank != 0:
             proposals = []
@@ -157,13 +173,14 @@ class VocabularyState:
                 proposals.append(word)
 
             if not proposals:
-                return
+                return 0
 
             with self.proposal_lock:
                 self.proposals.extend(proposals)
 
-            return
+            return 0
 
+        rejected = 0
         with self.lock:
             self.refresh()
             for word in candidates:
@@ -171,11 +188,15 @@ class VocabularyState:
                     continue
 
                 if len(self.vocab) >= self.size:
-                    break
+                    rejected += 1
+                    continue
 
                 self.index[word] = len(self.vocab)
                 self.vocab.append(word)
                 self.master.append(word)
+            if rejected:
+                self.rejections[0] = min(int(self.rejections[0]) + rejected, sys.maxsize)
+        return rejected
 
     def encode(self, word: Any) -> int | None:
         if word is None:
@@ -234,6 +255,8 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.lock: Any = _LocalLock()
         self.proposals: list[Any] | ListProxy[Any] = []
         self.proposal_lock: Any = _LocalLock()
+        self.rejections: list[int] | ListProxy[int] = [0]
+        self.near_capacity_reported = False
         self._snapshot_cache: list[Any] | None = None
         self._snapshot_size: int = -1
 
@@ -244,6 +267,7 @@ class OnlineVocabularyModel(torch.nn.Module):
             lock=self.lock,
             proposals=self.proposals,
             proposal_lock=self.proposal_lock,
+            rejections=self.rejections,
         )
 
     @property
@@ -257,11 +281,13 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         master = list(self.master)
         proposals = list(self.proposals)
+        rejections = list(self.rejections)
         self.manager = Manager()
         self.master = self.manager.list(master)
         self.lock = self.manager.Lock()
         self.proposals = self.manager.list(proposals)
         self.proposal_lock = self.manager.Lock()
+        self.rejections = self.manager.list(rejections)
         self._snapshot_cache = None
         self._snapshot_size = -1
 
@@ -275,6 +301,7 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.lock = _LocalLock()
         self.proposals = []
         self.proposal_lock = _LocalLock()
+        self.rejections = [int(self.rejections[0])]
         self.manager = None
         self._snapshot_cache = None
         self._snapshot_size = -1
@@ -342,6 +369,17 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         return proposals
 
+    def drain_rejections(self) -> int:
+        with self.lock:
+            rejected = int(self.rejections[0])
+            self.rejections[0] = 0
+        return rejected
+
+    def reset_diagnostics(self) -> None:
+        with self.lock:
+            self.rejections[0] = 0
+        self.near_capacity_reported = False
+
     def extend(self, proposals: list[Any]) -> tuple[int, int]:
         accepted = 0
         rejected = 0
@@ -362,6 +400,9 @@ class OnlineVocabularyModel(torch.nn.Module):
                 self.master.append(word)
                 accepted += 1
 
+            if rejected:
+                self.rejections[0] = min(int(self.rejections[0]) + rejected, sys.maxsize)
+
         if accepted:
             self._snapshot_cache = None
             self._snapshot_size = -1
@@ -380,11 +421,24 @@ class OnlineVocabularyModel(torch.nn.Module):
 
 
 def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -> None:
-    if not is_distributed():
-        return
-
     resources = OnlineVocabularyModel.from_model(pl_module)
     if not resources:
+        return
+
+    if reason == "fit_start":
+        for vocabulary in resources.values():
+            vocabulary.reset_diagnostics()
+
+    if not is_distributed():
+        stats = {
+            address: {
+                "rejected_full": vocabulary.drain_rejections(),
+                "size": len(vocabulary.snapshot()),
+                "max": vocabulary.size,
+            }
+            for address, vocabulary in resources.items()
+        }
+        _emit_vocabulary_diagnostics(pl_module, resources, stats)
         return
 
     if reason == "train_epoch_end":
@@ -402,13 +456,13 @@ def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -
             for rank_proposals in gathered:
                 proposals.extend(rank_proposals.get(address, []))
 
-            accepted, rejected = vocab.extend(proposals)
+            accepted, _ = vocab.extend(proposals)
             snapshot = vocab.snapshot()
             snapshots[address] = snapshot
             stats[address] = {
                 "proposed": len(proposals),
                 "accepted": accepted,
-                "rejected_full": rejected,
+                "rejected_full": vocab.drain_rejections(),
                 "size": len(snapshot),
                 "max": vocab.size,
             }
@@ -423,13 +477,58 @@ def sync(_callback: Callback, trainer: Trainer, pl_module: Model, reason: str) -
     trainer.strategy.barrier(name=f"vocabulary-sync-{reason}")
 
     if is_rank_zero():
-        for address, stats in payload["stats"].items():
-            if stats["max"] > 0 and stats["size"] / stats["max"] >= 0.95:
-                if record_incident("vocabulary-near-capacity", id(pl_module), str(address), stats["max"]).emit:
-                    console.log(
-                        "[relflow.warning]vocabulary is near capacity[/]",
-                        {"address": address, "size": stats["size"], "capacity": stats["max"]},
-                    )
+        _emit_vocabulary_diagnostics(pl_module, resources, payload["stats"])
+
+
+def _emit_vocabulary_diagnostics(
+    pl_module: Model,
+    resources: dict[Address, OnlineVocabularyModel],
+    stats_by_address: dict[Address, dict[str, int]],
+) -> None:
+    for address, stats in stats_by_address.items():
+        vocabulary = resources[address]
+        rejected = stats["rejected_full"]
+        if rejected:
+            vocabulary.near_capacity_reported = True
+            incident = record_incident(
+                "vocabulary-capacity",
+                str(address),
+                stats["max"],
+                scope=pl_module.schema,
+            )
+            if incident.emit and not incident.overflow:
+                console.log(
+                    "[relflow.warning]vocabulary reached configured capacity; unseen values are unavailable[/]",
+                    {
+                        "address": address,
+                        "size": stats["size"],
+                        "capacity": stats["max"],
+                        "rejected": rejected,
+                    },
+                )
+            elif incident.emit:
+                console.log("[relflow.warning]additional vocabulary-capacity diagnostics are suppressed[/]")
+
+        if (
+            not rejected
+            and not vocabulary.near_capacity_reported
+            and stats["max"] > 0
+            and stats["size"] / stats["max"] >= 0.95
+        ):
+            vocabulary.near_capacity_reported = True
+            incident = record_incident(
+                "vocabulary-near-capacity",
+                str(address),
+                stats["max"],
+                scope=pl_module.schema,
+            )
+            if incident.emit and not incident.overflow:
+                console.log(
+                    "[relflow.warning]vocabulary is near capacity[/]",
+                    {"address": address, "size": stats["size"], "capacity": stats["max"]},
+                )
+            elif incident.emit:
+                console.log("[relflow.warning]additional vocabulary-capacity diagnostics are suppressed[/]")
 
 
 class VocabularySyncCallback(Callback):

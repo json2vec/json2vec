@@ -151,6 +151,14 @@ Use the shared `Tokens` values exactly. Do not invent a public state for a
 condition that belongs to content. The built-ins use safe zero content for
 non-valued positions and keep original targets in a `TensorDict` before hiding.
 
+After encoding, the leading schema shape of `state` and `trainable` becomes the
+tensorclass's named structural batch dimensions: batch, generated root, then
+each ancestor branch. Content-only payload dimensions trail that structural
+shape and are not tensorclass batch dimensions. Native `TensorField` indexing
+therefore slices every structural field together without consuming payload
+width; inspect or slice `.content` explicitly when an extension needs a payload
+axis.
+
 Test `new(...)` with scalar, nested, null, padded, literal-mask, overflow, and
 prediction-missing inputs. Test `empty(...)` separately because it controls
 requests that omit a target.

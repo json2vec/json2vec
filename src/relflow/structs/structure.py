@@ -22,12 +22,13 @@ else:
 
 
 Dropout: TypeAlias = Rate
+_RICH_MASK_LIMIT = 4
 
 
 class Mask(pydantic.BaseModel):
     """Structured masking policy attached to a `Branch`."""
 
-    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)
 
     name: str | None = None
     rate: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] | None = None
@@ -37,6 +38,22 @@ class Mask(pydantic.BaseModel):
     start: bool = False
     offset: Annotated[int, pydantic.Field(ge=0)] = 0
     exclude: tuple[Address, ...] = pydantic.Field(default_factory=tuple)
+
+    def __rich_repr__(self):
+        if self.name is not None:
+            yield "name", Node._rich_value(self.name)
+        if self.rate is not None:
+            yield "rate", self.rate
+        if self.count is not None:
+            yield "count", self.count
+        if self.window is not None:
+            yield "window", self.window
+        yield "extent", "capacity" if self.branch else "occupied"
+        yield "edge", "start" if self.start else "end"
+        if self.offset:
+            yield "offset", self.offset
+        if self.exclude:
+            yield "exclude", Node._rich_value(self.exclude)
 
     @pydantic.model_validator(mode="after")
     def check_rate_or_count(self):
@@ -207,13 +224,41 @@ class Branch(Node):
         return heading
 
     def _rich_renderable(self, console: Console):
-        heading = self._rich_heading(console)
-        if self.description is None:
-            return heading
+        lines: list[Text] = [self._rich_heading(console)]
 
-        description = Text("  ")
-        description.append(self.description, style=self._rich_style(console, "relflow.dim"))
-        return Group(heading, description)
+        if self.description is not None:
+            description = Text("  ")
+            description.append(self._rich_value(self.description), style=self._rich_style(console, "relflow.dim"))
+            lines.append(description)
+
+        for mask in self.masks[:_RICH_MASK_LIMIT]:
+            text = Text("  mask ", style=self._rich_style(console, "relflow.dim"))
+            text.append(
+                self._rich_value(mask.name) if mask.name is not None else "<unnamed>",
+                style=self._rich_style(console, self.RICH_NAME_STYLE),
+            )
+            for name, value in (
+                ("rate", mask.rate),
+                ("count", mask.count),
+                ("window", mask.window),
+                ("extent", "capacity" if mask.branch else "occupied"),
+                ("edge", "start" if mask.start else "end"),
+                ("offset", mask.offset if mask.offset else None),
+                ("exclude", mask.exclude if mask.exclude else None),
+            ):
+                if value is None:
+                    continue
+                text.append(" ")
+                text.append(f"{name}=", style=self._rich_style(console, "relflow.dim"))
+                text.append(self._rich_value(value), style=self._rich_style(console, "relflow.info"))
+            lines.append(text)
+
+        omitted = len(self.masks) - min(len(self.masks), _RICH_MASK_LIMIT)
+        if omitted:
+            text = Text(f"  … +{omitted} masks", style=self._rich_style(console, "relflow.dim"))
+            lines.append(text)
+
+        return Group(*lines)
 
     def _rich_add_to_tree(self, tree: Tree, console: Console) -> Tree:
         branch = tree.add(self._rich_renderable(console))

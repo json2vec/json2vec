@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Literal
 
 import pydantic
 import pytest
 import torch
+from pydantic_core import PydanticCustomError
+from starlette.requests import Request as StarletteRequest
 from tensordict import TensorDict
 
 import relflow as rf
@@ -13,11 +16,6 @@ from relflow import Model, Number, where
 from relflow.inference.deployment import Deployment, ErrorItem, RequestItem
 from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.packages import Prediction
-
-
-@pytest.fixture(autouse=True)
-def _avoid_process_wide_traceback_hook(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(deployment_module, "install_tracebacks", lambda: None)
 
 
 class _DummyModel:
@@ -97,6 +95,119 @@ def test_fastapi_batcher_submit_many_splits_large_payload_by_max_batch_size():
     assert responses == [{"id": 1}, {"id": 2}, {"id": 3}]
 
 
+def test_fastapi_batcher_owns_one_model_diagnostic_lifecycle(monkeypatch):
+    model = Model(
+        Number(name="amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+    )
+
+    class Runtime:
+        def setup(self):
+            self.model = model
+
+    resets = []
+    finishes = []
+    monkeypatch.setattr(deployment_module, "reset_diagnostics", resets.append)
+    monkeypatch.setattr(deployment_module, "finish_diagnostics", finishes.append)
+
+    async def run():
+        batcher = deployment_module.FastAPIBatcher(
+            runtime=Runtime(),
+            max_batch_size=2,
+            batch_timeout=0.0,
+        )
+        await batcher.start()
+        await batcher.stop()
+
+    asyncio.run(run())
+
+    assert resets == [model]
+    assert finishes == [model]
+
+
+def test_fastapi_batcher_rejects_missing_runtime_responses_without_hanging(monkeypatch):
+    class ShortRuntime:
+        def setup(self):
+            return None
+
+        def predict_payloads(self, payloads):
+            return []
+
+    reported = []
+    monkeypatch.setattr(deployment_module, "print_exception", lambda exception, **kwargs: reported.append(exception))
+
+    async def run():
+        batcher = deployment_module.FastAPIBatcher(
+            runtime=ShortRuntime(),
+            max_batch_size=2,
+            batch_timeout=0.0,
+        )
+        await batcher.start()
+        try:
+            with pytest.raises(deployment_module.PredictionError, match="prediction failed"):
+                await asyncio.wait_for(batcher.submit({"id": 1}), timeout=1.0)
+        finally:
+            await batcher.stop()
+
+    asyncio.run(run())
+
+    assert len(reported) == 1
+
+
+def test_fastapi_batcher_reports_unexpected_failure_once_without_its_message(monkeypatch):
+    failure = RuntimeError("raw-request-value-must-not-leak")
+
+    class FailingRuntime:
+        def setup(self):
+            return None
+
+        def predict_payloads(self, payloads):
+            raise failure
+
+    reported = []
+    summaries = []
+
+    def capture_exception(exception, *, traceback=None):
+        reported.append((exception, traceback))
+
+    def capture_summaries(items, *, message, context=None):
+        summaries.append((items, message, context))
+
+    monkeypatch.setattr(deployment_module, "print_exception", capture_exception)
+    monkeypatch.setattr(deployment_module, "log_incident_summaries", capture_summaries)
+
+    async def run():
+        batcher = deployment_module.FastAPIBatcher(
+            runtime=FailingRuntime(),
+            max_batch_size=2,
+            batch_timeout=0.0,
+        )
+        await batcher.start()
+        try:
+            for _ in range(2):
+                with pytest.raises(deployment_module.PredictionError, match="prediction failed"):
+                    await batcher.submit_many([{"id": 1}, {"id": 2}])
+        finally:
+            await batcher.stop()
+
+    asyncio.run(run())
+
+    assert len(reported) == 1
+    exception, traceback = reported[0]
+    assert isinstance(exception, deployment_module.PredictionError)
+    assert str(exception) == "unexpected RuntimeError"
+    assert "raw-request-value-must-not-leak" not in str(exception)
+    assert traceback is not None
+    assert len(summaries) == 1
+    items, message, context = summaries[0]
+    assert message == "suppressed repeated prediction failures while serving"
+    assert context is None
+    assert len(items) == 1
+    assert items[0].suppressed == 1
+
+
 def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     model = Model(
         Number(name="amount"),
@@ -137,11 +248,12 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     assert all("predictions" in output for output in outputs)
 
 
-def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_once(monkeypatch):
+def test_fastapi_runtime_preserves_request_validation_errors_and_batches_valid_requests_once(monkeypatch):
+    class Request(pydantic.BaseModel):
+        hue: Literal["red", "blue"]
+
     @rf.preprocess
     def __deployment_preprocess(observation: dict):
-        if observation["hue"] == "bad":
-            raise ValueError("bad hue")
         return rf.Observation({"color": observation["hue"]})
 
     captured = {"calls": 0}
@@ -155,7 +267,11 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
 
     model = _DummyModel()
-    runtime = _runtime(model=model, preprocessor=__deployment_preprocess)
+    runtime = _runtime(
+        model=model,
+        request_signature=Request,
+        preprocessor=__deployment_preprocess,
+    )
 
     outputs = runtime.predict_payloads(
         [
@@ -173,8 +289,20 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
     assert outputs[0]["predictions"]["root/label"]["value"] == "ok"
     assert outputs[1]["predictions"] == {}
     assert outputs[1]["error"]["status_code"] == 422
-    assert "bad hue" in outputs[1]["error"]["message"]
+    assert outputs[1]["error"]["message"] == "request validation failed (1 issue: literal_error=1)"
+    assert "bad" not in outputs[1]["error"]["message"]
     assert outputs[2]["predictions"]["root/label"]["value"] == "ok"
+
+
+def test_fastapi_runtime_propagates_preprocessor_failures():
+    @rf.preprocess
+    def __deployment_preprocess(observation: dict):
+        raise RuntimeError("processor implementation failed")
+
+    runtime = _runtime(preprocessor=__deployment_preprocess)
+
+    with pytest.raises(RuntimeError, match="processor implementation failed"):
+        runtime.predict_payloads([{"hue": "red"}])
 
 
 def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
@@ -295,6 +423,220 @@ def test_fastapi_runtime_decode_validates_pydantic_request_model():
     assert context["request"] == {"hue": "red"}
 
 
+def test_fastapi_runtime_validation_error_does_not_echo_input_values():
+    class Request(pydantic.BaseModel):
+        count: int
+
+    secret = "must-not-leak"
+    runtime = _runtime(request_signature=Request)
+
+    decoded = runtime.decode_payload({"count": secret}, context={})
+
+    assert isinstance(decoded, ErrorItem)
+    response = runtime.encode_response(decoded, context={})
+    assert response == {
+        "predictions": {},
+        "error": {
+            "status_code": 422,
+            "message": "request validation failed (1 issue: int_parsing=1)",
+        },
+    }
+    assert secret not in repr(response)
+
+
+def test_fastapi_runtime_validation_error_does_not_echo_nested_mapping_keys():
+    class Request(pydantic.BaseModel):
+        counts: dict[int, int]
+
+    secret = "nested-key-must-not-leak"
+    runtime = _runtime(request_signature=Request)
+
+    decoded = runtime.decode_payload({"counts": {secret: "also-secret"}}, context={})
+
+    assert isinstance(decoded, ErrorItem)
+    assert secret not in decoded.message
+    assert "also-secret" not in decoded.message
+    assert decoded.message == "request validation failed (2 issues: int_parsing=2)"
+
+
+def test_fastapi_runtime_validation_error_does_not_echo_custom_error_codes():
+    secret = "custom-code-must-not-leak"
+
+    class Request(pydantic.BaseModel):
+        count: int
+
+        @pydantic.field_validator("count")
+        @classmethod
+        def reject_count(cls, value):
+            raise PydanticCustomError(secret, "also must not leak")
+
+    runtime = _runtime(request_signature=Request)
+
+    decoded = runtime.decode_payload({"count": 1}, context={})
+
+    assert isinstance(decoded, ErrorItem)
+    assert decoded.message == "request validation failed (1 issue: custom=1)"
+    assert secret not in decoded.message
+    assert "also must not leak" not in decoded.message
+
+
+def test_fastapi_endpoint_returns_static_safe_parse_and_prediction_errors(monkeypatch):
+    body_failures = []
+
+    async def fail(self, payload):
+        raise deployment_module.PredictionError("private failure")
+
+    monkeypatch.setattr(deployment_module.FastAPIBatcher, "submit", fail)
+    monkeypatch.setattr(
+        deployment_module.FastAPIBatcher,
+        "report_failure",
+        lambda self, exception: body_failures.append(exception),
+    )
+
+    app = Deployment(checkpoint="unused").app()
+    endpoint = next(route.endpoint for route in app.routes if route.path == "/predict")
+
+    def request(body: bytes) -> StarletteRequest:
+        consumed = False
+
+        async def receive():
+            nonlocal consumed
+            if consumed:
+                return {"type": "http.disconnect"}
+            consumed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        return StarletteRequest(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/predict",
+                "raw_path": b"/predict",
+                "query_string": b"",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("test", 1),
+                "server": ("test", 80),
+            },
+            receive,
+        )
+
+    async def exercise_endpoint():
+        malformed = await endpoint(request(b'{"must-not-leak"'))
+        failed = await endpoint(request(b'{"must-not-leak":true}'))
+
+        async def broken_receive():
+            raise RuntimeError("body-secret-must-not-leak")
+
+        unavailable = await endpoint(
+            StarletteRequest(
+                {
+                    "type": "http",
+                    "http_version": "1.1",
+                    "method": "POST",
+                    "scheme": "http",
+                    "path": "/predict",
+                    "raw_path": b"/predict",
+                    "query_string": b"",
+                    "headers": [(b"content-type", b"application/json")],
+                    "client": ("test", 1),
+                    "server": ("test", 80),
+                },
+                broken_receive,
+            )
+        )
+        return malformed, failed, unavailable
+
+    malformed, failed, unavailable = asyncio.run(exercise_endpoint())
+
+    assert malformed.status_code == 400
+    assert deployment_module.orjson.loads(malformed.body) == {
+        "predictions": {},
+        "error": {
+            "status_code": 400,
+            "message": "request body is not valid JSON",
+        },
+    }
+    assert failed.status_code == 500
+    assert deployment_module.orjson.loads(failed.body) == {
+        "predictions": {},
+        "error": {
+            "status_code": 500,
+            "message": "internal server error",
+        },
+    }
+    assert b"must-not-leak" not in malformed.body
+    assert b"must-not-leak" not in failed.body
+    assert unavailable.status_code == 500
+    assert b"body-secret-must-not-leak" not in unavailable.body
+    assert len(body_failures) == 1
+
+
+@pytest.mark.parametrize("backend", ["orjson", "stdlib"])
+def test_fastapi_endpoint_guards_nonserializable_prediction_output(monkeypatch, backend):
+    failures = []
+
+    async def submit(self, payload):
+        return {"value": object()}
+
+    async def submit_many(self, payloads):
+        return [{"value": object()} for _ in payloads]
+
+    monkeypatch.setattr(deployment_module.FastAPIBatcher, "submit", submit)
+    monkeypatch.setattr(deployment_module.FastAPIBatcher, "submit_many", submit_many)
+    monkeypatch.setattr(
+        deployment_module.FastAPIBatcher,
+        "report_failure",
+        lambda self, exception: failures.append(exception),
+    )
+
+    app = Deployment(checkpoint="unused", json_backend=backend).app()
+    endpoint = next(route.endpoint for route in app.routes if route.path == "/predict")
+
+    def request(body: bytes) -> StarletteRequest:
+        consumed = False
+
+        async def receive():
+            nonlocal consumed
+            if consumed:
+                return {"type": "http.disconnect"}
+            consumed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        return StarletteRequest(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/predict",
+                "raw_path": b"/predict",
+                "query_string": b"",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("test", 1),
+                "server": ("test", 80),
+            },
+            receive,
+        )
+
+    async def exercise_endpoint():
+        single = await endpoint(request(b'{"id":1}'))
+        batch = await endpoint(request(b'[{"id":1},{"id":2}]'))
+        return single, batch
+
+    single, batch = asyncio.run(exercise_endpoint())
+
+    for response in (single, batch):
+        assert response.status_code == 500
+        assert deployment_module.orjson.loads(response.body) == {
+            "predictions": {},
+            "error": {"status_code": 500, "message": "internal server error"},
+        }
+    assert len(failures) == 2
+    assert all(isinstance(error, TypeError) for error in failures)
+
+
 def test_fastapi_runtime_setup_can_enable_query_monitor():
     runtime = deployment_module.FastAPIRuntime(
         checkpoint=Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
@@ -317,7 +659,6 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
         predictions: dict = {}
 
     captured = {}
-    traceback_installs = []
 
     def fake_run(app, *, host, port, log_level):
         captured["app"] = app
@@ -326,8 +667,6 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
         captured["log_level"] = log_level
 
     monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
-    monkeypatch.setattr(deployment_module, "install_tracebacks", lambda: traceback_installs.append(True))
-
     Deployment(
         checkpoint="unused",
         max_batch_size=16,
@@ -343,7 +682,6 @@ def test_deployment_launcher_configures_fastapi_app(monkeypatch):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8765
     assert captured["log_level"] == "error"
-    assert traceback_installs == [True]
 
 
 def test_deployment_forge_registers_openapi_signatures():

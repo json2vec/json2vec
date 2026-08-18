@@ -1,12 +1,18 @@
 ---
 marimo-static-output: true
-eval: false
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "marimo>=0.23.8",
+    "relflow @ git+https://github.com/relflow/relflow.git",
+  ]
 ---
 
 # Dynamic Masking
 
-**Example status — excerpt:** masking blocks isolate selection behavior; apply
-them to a tested training workflow before comparing quality.
+**Example status — runnable:** the small masking cells execute to isolate
+selection behavior; apply the same policies to a tested training workflow
+before comparing quality.
 
 Dynamic masking hides values in non-predict loops so the model can learn and be
 evaluated on reconstruction from surrounding context. Leaf fields support local
@@ -77,7 +83,7 @@ Attach `rf.Mask(...)` to a `Branch(...)` with `mask=` or `masks=`:
 
 import relflow as rf
 
-model = rf.Model(
+branch_mask_model = rf.Model(
     name="customer",
     d_model=64,
     n_layers=2,
@@ -91,7 +97,7 @@ model = rf.Model(
     ),
 )
 
-model
+branch_mask_model
 ```
 
 For each active descendant leaf, this finds its last 10 retained, non-padded
@@ -183,17 +189,11 @@ This example masks two letters from the last two retained letters in each word:
 #| echo: true
 #| output: true
 
-from __future__ import annotations
-
 import random
 import string
 
-from rich import print
-
-import relflow as rf
-
 ALPHABET = string.ascii_uppercase
-ADDRESS = "record/words/letters/letter"
+LETTER_ADDRESS = rf.Address("record", "words", "letters", "letter")
 
 
 def consecutive_letters(rng: random.Random) -> list[dict[str, str]]:
@@ -209,7 +209,7 @@ def words(rng: random.Random) -> list[dict[str, list[dict[str, str]]]]:
 rng = random.Random(7)
 data = [{"words": words(rng)} for _ in range(5)]
 
-model = rf.Model(
+nested_mask_model = rf.Model(
     d_model=16,
     n_layers=1,
     n_heads=4,
@@ -223,39 +223,54 @@ model = rf.Model(
     ),
 )
 
-inputs = model.encode(data, strata=rf.Strata.train, mask=False)
-masked = model.encode(data, strata=rf.Strata.train, mask=True)
+inputs = nested_mask_model.encode(data, strata=rf.Strata.train, mask=False)
+masked = nested_mask_model.encode(data, strata=rf.Strata.train, mask=True)
 
-print(inputs[ADDRESS])
-print(masked[ADDRESS])
+unmasked_field = inputs[LETTER_ADDRESS]
+masked_field = masked[LETTER_ADDRESS]
 ```
 
-The tensorfield display shows the first batch item and the generated root
-singleton dimension. Nested branches are printed with one row per inner branch:
+Select one observation while preserving its generated root, `words`, and
+`letters` structural axes:
 
-```text
-TensorField [tensorfield] state=(5, 1, 3, 8) device=cpu trainable=0
- counts V=54 N=0 P=66 M=0 O=0
- state V V V V P P P P
-       V V V V V V V V
-       V V V P P P P P
+```{python .marimo}
+#| echo: true
+#| output: true
+
+unmasked_field[0]
 ```
 
-After masking, selected values become `M` and cached targets are present:
+For a compact comparison, select the generated root singleton and a bounded
+two-dimensional window of the first two words and first five letter slots:
 
-```text
-TensorField [tensorfield] state=(5, 1, 3, 8) device=cpu trainable=22
- counts V=32 N=0 P=66 M=22 O=0
- state V V M M P P P P
-       V V V V V V M M
-       V M M P P P P P
- targets=content, state
+```{python .marimo}
+#| echo: true
+#| output: true
+
+masked_field[0, 0, :2, :5]
 ```
 
+The live Rich displays show the selected state tokens. Masked positions use
+`M`; a trailing `*` marks a trainable position, so branch-selected cells appear
+as `M*`. The masked field also reports its cached `content` and `state` targets.
 Here `count=2` equals the two-coordinate candidate `window`, so every eligible
 window is fully selected and the displayed positions are deterministic for
 these records. Use a smaller `count` than `window` when you want stochastic
 selection within the window.
+
+TensorField indexing applies to named **structural axes** in order: batch, the
+generated root, then each ancestor `Branch`. An integer removes one structural
+axis; a slice retains it. The same selection is applied to `state`, `content`,
+`trainable`, and cached `targets`. Datatype payload widths—such as Vector
+features, Set vocabulary positions, Text tokens, Hash components, or DateParts
+pairs—are trailing content axes and are not consumed by TensorField indexing;
+inspect or slice `field.content` when you need those values.
+
+Rich suppresses singleton structural axes only in the visual preview. If more
+than two non-singleton structural axes remain, it shows their names and shape
+and asks for a further slice instead of silently choosing a plane. On an
+accelerator, slice first and call `.cpu()` explicitly when a token preview is
+worth the transfer.
 
 ## Debugging Encodes
 
@@ -267,12 +282,15 @@ to inspect the raw tensorized state before any dynamic masks, `p_mask`, or
 #| echo: true
 #| output: true
 
-unmasked = model.encode(records, strata=rf.Strata.train, mask=False)
-masked = model.encode(records, strata=rf.Strata.train, mask=True)
+first_encoded = inputs[0]
+first_encoded[LETTER_ADDRESS]
 ```
 
-This is most useful when validating mask windows for ragged branches. In the
-rendered tensorfield state:
+The encoded batch supports the same native batch selection: `encoded[0]`
+selects one observation across every leaf, while `encoded[:1]` retains a
+length-one batch axis. Select an exact leaf address afterward for its safe Rich
+summary. This is most useful when validating mask windows for ragged branches.
+In the rendered tensorfield state:
 
 | Symbol | Token |
 | --- | --- |
@@ -281,9 +299,10 @@ rendered tensorfield state:
 | `P` | padded slot |
 | `M` | masked hidden input |
 | `O` | other reserved state |
+| `*` | suffix marking a trainable position, such as `M*` |
 
-The first tensor dimension is batch. The second dimension is the generated root
-singleton. The display previews `state[0, 0]`.
+The display renders the current slice rather than implicitly choosing
+`state[0, 0]`.
 
 ## Excluding Leaves
 
@@ -336,7 +355,7 @@ placeholder for "decode this value":
 #| echo: true
 #| output: true
 
-model.predict(
+branch_mask_model.predict(
     [
         {
             "events": [

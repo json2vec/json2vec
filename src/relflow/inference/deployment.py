@@ -1,13 +1,15 @@
 """Realtime deployment wrappers for `relflow` checkpoints."""
 
 import asyncio
+import json
 import os
+from collections import Counter
 from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeAlias, cast
+from typing import Any, TypeAlias, cast, get_args
 
 import fastapi
 import orjson
@@ -18,13 +20,15 @@ from beartype import beartype
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic_core import ErrorType
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
 from relflow.architecture.root import Model
+from relflow.architecture.runtime import finish_diagnostics, reset_diagnostics
 from relflow.data.iterables import JMESPathResolutionMonitor, encode
 from relflow.data.processors import Postprocessor, Preprocessor
-from relflow.rich import install_tracebacks
+from relflow.rich import IncidentTracker, console, log_incident_summaries, print_exception
 from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.experiment import NodeAttribute, NodePredicate
 from relflow.structs.packages import Prediction
@@ -71,6 +75,8 @@ class JSONBackend(StrEnum):
 
 
 class ErrorItem(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(hide_input_in_errors=True)
+
     status_code: int
     message: str
 
@@ -85,6 +91,35 @@ class ResponseItem:
     predictions: list[Prediction]
     input: Input | None = None
     observations: list[Any] | None = None
+
+
+class PredictionError(RuntimeError):
+    """Safe request-facing marker for an already-reported prediction failure."""
+
+
+MAX_VALIDATION_ERROR_TYPES = 8
+KNOWN_VALIDATION_ERROR_TYPES = frozenset(get_args(ErrorType))
+
+
+def validation_error_message(exception: pydantic.ValidationError) -> str:
+    """Summarize request validation without echoing rejected input values."""
+
+    errors = exception.errors(
+        include_input=False,
+        include_context=False,
+        include_url=False,
+    )
+    counts = Counter(
+        error_type if (error_type := str(error["type"])) in KNOWN_VALIDATION_ERROR_TYPES else "custom"
+        for error in errors
+    )
+    kinds = [f"{kind}={count}" for kind, count in counts.most_common(MAX_VALIDATION_ERROR_TYPES)]
+    remaining = len(counts) - len(kinds)
+    if remaining:
+        kinds.append(f"{remaining} more types")
+
+    noun = "issue" if len(errors) == 1 else "issues"
+    return f"request validation failed ({len(errors)} {noun}: {', '.join(kinds)})"
 
 
 class FastAPIRuntime:
@@ -136,33 +171,35 @@ class FastAPIRuntime:
         )
 
     def decode_payload(self, payload: dict[str, Any], context: dict[str, Any]) -> RequestItem | ErrorItem:
-        try:
-            request: dict[str, Any] | pydantic.BaseModel
-            if self.request_signature is None:
-                request = payload
-            else:
+        request: dict[str, Any] | pydantic.BaseModel
+        if self.request_signature is None:
+            request = payload
+        else:
+            try:
                 request = self.request_signature.model_validate(payload)
-
-            if isinstance(request, pydantic.BaseModel):
-                request = request.model_dump()
-
-            context["request"] = request
-
-            if self.preprocessor is None:
-                observations: list[Any] = [[request]]
-            else:
-                model = getattr(self, "model", None)
-                observations = list(
-                    self.preprocessor.outputs(
-                        request,
-                        strata=Strata.predict,
-                        schema=model.schema if model is not None else None,
-                        encoding_context=getattr(self, "interprocess_encoding_context", {}),
-                    )
+            except pydantic.ValidationError as exception:
+                return ErrorItem(
+                    status_code=422,
+                    message=validation_error_message(exception),
                 )
 
-        except Exception as exception:
-            return ErrorItem(status_code=422, message=str(exception))
+        if isinstance(request, pydantic.BaseModel):
+            request = request.model_dump()
+
+        context["request"] = request
+
+        if self.preprocessor is None:
+            observations: list[Any] = [[request]]
+        else:
+            model = getattr(self, "model", None)
+            observations = list(
+                self.preprocessor.outputs(
+                    request,
+                    strata=Strata.predict,
+                    schema=model.schema if model is not None else None,
+                    encoding_context=getattr(self, "interprocess_encoding_context", {}),
+                )
+            )
 
         if len(observations) == 0 or any(x is None for x in observations):
             return ErrorItem(status_code=422, message="preprocessor returned no observations for request")
@@ -329,6 +366,8 @@ class _QueuedRequest:
 class FastAPIBatcher:
     """Single-model async request batcher for FastAPI endpoints."""
 
+    MAX_FAILURE_SIGNATURES = 8
+
     def __init__(
         self,
         runtime: FastAPIRuntime,
@@ -341,9 +380,13 @@ class FastAPIBatcher:
         self.batch_timeout = batch_timeout
         self.queue: asyncio.Queue[_QueuedRequest] = asyncio.Queue()
         self.task: asyncio.Task[None] | None = None
+        self.failure_incidents = IncidentTracker(max_keys=self.MAX_FAILURE_SIGNATURES, max_kinds=1)
 
     async def start(self) -> None:
         self.runtime.setup()
+        model = getattr(self.runtime, "model", None)
+        if isinstance(model, Model):
+            reset_diagnostics(model)
         self.task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -353,6 +396,11 @@ class FastAPIBatcher:
         self.task.cancel()
         with suppress(asyncio.CancelledError):
             await self.task
+        self.task = None
+        model = getattr(self.runtime, "model", None)
+        if isinstance(model, Model):
+            finish_diagnostics(model)
+        self.summarize_failures()
 
     async def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
         return (await self.submit_many([payload]))[0]
@@ -389,10 +437,15 @@ class FastAPIBatcher:
             try:
                 payloads = [item.payload for item in batch]
                 responses = await asyncio.to_thread(self.runtime.predict_payloads, payloads)
+                if len(responses) != len(batch):
+                    raise RuntimeError(
+                        f"prediction runtime returned {len(responses)} responses for {len(batch)} requests"
+                    )
             except Exception as exception:
+                self.report_failure(exception)
                 for item in batch:
                     if not item.future.cancelled():
-                        item.future.set_exception(exception)
+                        item.future.set_exception(PredictionError("prediction failed"))
                 continue
 
             for item, response in zip(batch, responses):
@@ -405,6 +458,50 @@ class FastAPIBatcher:
                 batch.append(self.queue.get_nowait())
             except asyncio.QueueEmpty:
                 return
+
+    def report_failure(self, exception: Exception) -> None:
+        """Render the first failure at each code site and bound later output."""
+
+        exception_traceback = exception.__traceback__
+        while exception_traceback is not None and exception_traceback.tb_next is not None:
+            exception_traceback = exception_traceback.tb_next
+
+        if exception_traceback is None:
+            filename, function, line = "<unknown>", "<unknown>", 0
+        else:
+            code = exception_traceback.tb_frame.f_code
+            filename, function, line = code.co_filename, code.co_name, exception_traceback.tb_lineno
+
+        incident = self.failure_incidents.record(
+            "serving-exception",
+            type(exception).__module__,
+            type(exception).__qualname__,
+            filename,
+            function,
+            line,
+        )
+        if incident.overflow and incident.emit:
+            with suppress(Exception):
+                console.log(
+                    "[relflow.warning]additional prediction failure signatures will be suppressed[/]",
+                    {"tracked_signatures": self.MAX_FAILURE_SIGNATURES},
+                )
+        elif incident.emit:
+            with suppress(Exception):
+                print_exception(
+                    PredictionError(f"unexpected {type(exception).__name__}"),
+                    traceback=exception.__traceback__,
+                )
+
+    def summarize_failures(self) -> None:
+        """Emit one bounded serving-failure summary when the batcher stops."""
+
+        with suppress(Exception):
+            log_incident_summaries(
+                self.failure_incidents.summary(),
+                message="suppressed repeated prediction failures while serving",
+            )
+        self.failure_incidents.reset()
 
 
 class Deployment(BaseSettings):
@@ -421,6 +518,7 @@ class Deployment(BaseSettings):
         validate_by_name=True,
         validate_by_alias=True,
         arbitrary_types_allowed=True,
+        hide_input_in_errors=True,
     )
 
     checkpoint: ModelSource = Field(
@@ -603,28 +701,59 @@ class Deployment(BaseSettings):
 
             return JSONResponse(content=content, status_code=status_code)
 
+        def internal_server_error() -> fastapi.Response:
+            return json_response(
+                status_code=500,
+                content={
+                    "predictions": {},
+                    "error": {
+                        "status_code": 500,
+                        "message": "internal server error",
+                    },
+                },
+            )
+
+        def prediction_response(content: Any) -> fastapi.Response:
+            try:
+                return json_response(content=content)
+            except Exception as exception:
+                batcher.report_failure(exception)
+                return internal_server_error()
+
         @app.post("/predict")
         async def predict(request: fastapi.Request) -> fastapi.Response:
             try:
-                if self.json_backend == JSONBackend.orjson:
-                    payload = orjson.loads(await request.body())
-                else:
-                    payload = await request.json()
+                body = await request.body()
             except Exception as exception:
+                batcher.report_failure(exception)
+                return internal_server_error()
+
+            try:
+                if self.json_backend == JSONBackend.orjson:
+                    payload = orjson.loads(body)
+                else:
+                    payload = json.loads(body)
+            except (json.JSONDecodeError, orjson.JSONDecodeError, UnicodeDecodeError):
                 return json_response(
                     status_code=400,
                     content={
                         "predictions": {},
                         "error": {
                             "status_code": 400,
-                            "message": str(exception),
+                            "message": "request body is not valid JSON",
                         },
                     },
                 )
+            except Exception as exception:
+                batcher.report_failure(exception)
+                return internal_server_error()
 
             if isinstance(payload, dict):
-                response = await batcher.submit(cast(dict[str, Any], payload))
-                return json_response(content=response)
+                try:
+                    response = await batcher.submit(cast(dict[str, Any], payload))
+                except PredictionError:
+                    return internal_server_error()
+                return prediction_response(response)
 
             if isinstance(payload, list):
                 for index, item in enumerate(payload):
@@ -643,8 +772,11 @@ class Deployment(BaseSettings):
                             },
                         )
 
-                responses = await batcher.submit_many(cast(list[dict[str, Any]], payload))
-                return json_response(content=responses)
+                try:
+                    responses = await batcher.submit_many(cast(list[dict[str, Any]], payload))
+                except PredictionError:
+                    return internal_server_error()
+                return prediction_response(responses)
 
             return json_response(
                 status_code=422,
@@ -744,7 +876,6 @@ class Deployment(BaseSettings):
             previous = {key: os.environ.get(key) for key in env_updates}
             try:
                 os.environ.update(env_updates)
-                install_tracebacks()
                 uvicorn.run(
                     "relflow.inference.deployment:create_app",
                     factory=True,
@@ -761,7 +892,6 @@ class Deployment(BaseSettings):
                         os.environ[key] = value
             return
 
-        install_tracebacks()
         uvicorn.run(
             self.app(),
             host=self.host,

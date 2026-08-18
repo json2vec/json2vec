@@ -14,6 +14,7 @@ from beartype import beartype
 from torch.utils.data import DataLoader, IterableDataset
 
 from relflow.data.datasets.base import (
+    DataModuleDisplay,
     InterprocessEncodingContext,
     NonNegativeInt,
     Pipeline,
@@ -23,6 +24,7 @@ from relflow.data.datasets.base import (
     SampleRate,
     StrataMap,
     _worker_buffer_size,
+    display_label,
     identity,
     share_interprocess_encoding_context,
 )
@@ -174,7 +176,7 @@ def custom_dataloader(
     )
 
 
-class CustomDataModule(lit.LightningDataModule):
+class CustomDataModule(DataModuleDisplay, lit.LightningDataModule):
     """Lightning data module for user-provided iterable datasets."""
 
     def __init__(
@@ -237,6 +239,12 @@ class CustomDataModule(lit.LightningDataModule):
         self.pin_memory = Strata.expand(pin_memory, default=True)
         self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
         self.sample_rate = {strata: float(rate) for strata, rate in Strata.expand(sample_rate, default=1.0).items()}
+
+    def __rich_repr__(self):
+        splits = {
+            strata: display_label(type(self.datasets[strata]).__name__) for strata in Strata if strata in self.datasets
+        }
+        yield from self.data_module_rich_repr(splits)
 
     def _model(self) -> Model | None:
         if self._model_ref is None:

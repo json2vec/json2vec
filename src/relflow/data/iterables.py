@@ -13,7 +13,7 @@ from typing import Annotated, Any, TypeVar, cast
 import jmespath
 import pydantic
 from beartype import beartype
-from tensordict import TensorDict
+from tensordict import is_tensorclass
 
 from relflow.data.datasets.base import (
     EncodedBatch,
@@ -180,6 +180,8 @@ def compile_query_extractor(expression: str) -> Callable[[Any], Any] | None:
 
 
 class JMESPathResolutionMonitor(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(hide_input_in_errors=True)
+
     every: Annotated[int, pydantic.Field(gt=0)] = 1000
 
     _counts: Counter[Address] = pydantic.PrivateAttr(default_factory=Counter)
@@ -208,6 +210,26 @@ class JMESPathResolutionMonitor(pydantic.BaseModel):
         raise ValueError(f"JMESPath query returned empty result for address '{address}': {expression}")
 
 
+def tensorfield_names(address: Address) -> tuple[str, ...]:
+    """Return stable names for a tensorfield's structural dimensions."""
+
+    parts = str(address).split("/")
+    ancestors = (f"/{'/'.join(parts[:index])}" for index in range(1, len(parts)))
+    return ("batch", *ancestors)
+
+
+def normalize_tensorfield(field: TensorFieldBase, address: Address) -> TensorFieldBase:
+    """Make TensorDict slicing follow every structural state dimension."""
+
+    if not is_tensorclass(field):
+        return field
+
+    tensorclass_field = cast(Any, field)
+    tensorclass_field.batch_size = field.state.shape
+    tensorclass_field.names = tensorfield_names(address)
+    return field
+
+
 def encode(
     batch: EncodedBatch,
     schema: Schema,
@@ -228,10 +250,13 @@ def encode(
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
 
         if (strata == Strata.predict) & (address in target_addresses):
-            out[address] = TensorField.empty(
-                batch_size=len(batch),
-                address=address,
-                schema=schema,
+            out[address] = normalize_tensorfield(
+                TensorField.empty(
+                    batch_size=len(batch),
+                    address=address,
+                    schema=schema,
+                ),
+                address,
             )
             continue
 
@@ -260,13 +285,17 @@ def encode(
         if "salt" in parameters:
             kwargs["salt"] = hash_salt
 
-        out[address] = TensorField.new(**kwargs)
+        out[address] = normalize_tensorfield(TensorField.new(**kwargs), address)
         out[address].check_nullable(address=address, schema=schema)
 
         if not defer_target_masking and strata != Strata.predict and address in target_addresses:
             out[address].mask(p_prune=1.0)
 
-    inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
+    inputs = EncodedInput(
+        source=cast(Any, out),
+        batch_size=[len(batch)],
+        names=["batch"],
+    )
 
     if strata == Strata.predict:
         inputs[TensorKey.metadata] = batch
@@ -377,10 +406,17 @@ def mock(schema: Schema, batch_size: int) -> EncodedInput:
 
     for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
-        out[address] = TensorField.empty(
-            batch_size=batch_size,
-            address=address,
-            schema=schema,
+        out[address] = normalize_tensorfield(
+            TensorField.empty(
+                batch_size=batch_size,
+                address=address,
+                schema=schema,
+            ),
+            address,
         )
 
-    return cast(EncodedInput, TensorDict(source=cast(Any, out), batch_size=batch_size))
+    return EncodedInput(
+        source=cast(Any, out),
+        batch_size=[batch_size],
+        names=["batch"],
+    )

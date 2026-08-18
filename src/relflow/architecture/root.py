@@ -25,7 +25,7 @@ from relflow.architecture.mutations import (
     SchemaEditor,
     immutable,
 )
-from relflow.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
+from relflow.architecture.runtime import DiagnosticsLifecycleCallback, ModelRuntime, Postprocessor, Preprocessor, step
 from relflow.data.datasets.base import EncodedBatch, EncodedInput
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata
@@ -386,6 +386,8 @@ class Model(lit.LightningModule, Renderable):
             callbacks.append(MutationLockCallback())
         if ThroughputLogger not in attached_callback_types:
             callbacks.append(ThroughputLogger())
+        if DiagnosticsLifecycleCallback not in attached_callback_types:
+            callbacks.append(DiagnosticsLifecycleCallback())
 
         for request in self.schema.active_requests.values():
             plugin: Plugin = TENSORFIELDS[request.type]

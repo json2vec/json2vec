@@ -1,5 +1,6 @@
 import enum
 import json
+import pickle
 import random
 import re
 from collections import Counter
@@ -8,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
+import pyarrow as pa
 import pytest
 from beartype.roar import BeartypeCallHintParamViolation
 from torch.utils.data import IterableDataset
@@ -365,6 +367,66 @@ def test_observe_replacement_allows_workers_to_share_files(tmp_path: Path, monke
     assert output == [{"id": 2}, {"id": 2}, {"id": 2}]
 
 
+def test_observe_replacement_routes_no_progress_limit_to_read(monkeypatch: pytest.MonkeyPatch):
+    fetch_calls = []
+    read_calls = []
+
+    def fake_fetch(**kwargs):
+        fetch_calls.append(kwargs)
+        yield "records.ndjson"
+
+    def fake_read(pipe, **kwargs):
+        read_calls.append(kwargs)
+        yield {"id": 1}
+
+    monkeypatch.setattr(streaming, "fetch", fake_fetch)
+    monkeypatch.setattr(streaming, "read", fake_read)
+
+    output = list(
+        streaming.observe.__wrapped__(
+            root="records",
+            suffix=Suffix.ndjson,
+            pattern=re.compile(r".*\.ndjson$"),
+            strata=Strata.train,
+            sharding=ShardingStrategy.file,
+            chunk_batch_size=1,
+            file_buffer_size=1,
+            replacement=True,
+            global_rank=0,
+            world_size=1,
+        )
+    )
+
+    assert output == [{"id": 1}]
+    assert "max_consecutive_failures" not in fetch_calls[0]
+    assert read_calls[0]["max_consecutive_failures"] == 32
+
+
+def test_observe_replacement_stops_after_repeated_unreadable_files(monkeypatch: pytest.MonkeyPatch):
+    missing_path = "missing.ndjson"
+
+    def fake_fetch(**kwargs):
+        yield missing_path
+
+    monkeypatch.setattr(streaming, "fetch", fake_fetch)
+
+    with pytest.raises(RuntimeError, match="made no progress after 32 consecutive file attempts"):
+        list(
+            streaming.observe.__wrapped__(
+                root="records",
+                suffix=Suffix.ndjson,
+                pattern=re.compile(r".*\.ndjson$"),
+                strata=Strata.train,
+                sharding=ShardingStrategy.file,
+                chunk_batch_size=1,
+                file_buffer_size=1,
+                replacement=True,
+                global_rank=0,
+                world_size=1,
+            )
+        )
+
+
 def test_observe_polars_yields_dataframe_rows():
     frame = pl.DataFrame({"id": [1, 2], "name": ["alpha", "beta"]})
 
@@ -463,12 +525,318 @@ def test_read_unsupported_suffix_raises_value_error():
         )
 
 
+def test_streaming_read_groups_repeated_failures_across_paths(tmp_path: Path):
+    paths = [str(tmp_path / f"missing-{index}.ndjson") for index in range(12)]
+    valid_path = tmp_path / "valid.ndjson"
+    valid_path.write_text(json.dumps({"id": "valid"}), encoding="utf-8")
+    paths.append(str(valid_path))
+
+    with console.capture() as captured:
+        output = list(
+            streaming.read.__wrapped__(
+                paths,
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+            )
+        )
+
+    rendered = captured.get()
+    assert output == [{"id": "valid"}]
+    assert rendered.count("skipping an unreadable streaming dataset file") == 1
+    assert str(tmp_path / "missing-0.ndjson") in "".join(rendered.split())
+    assert "missing-1.ndjson" not in rendered
+    assert rendered.count("suppressed repeated streaming read diagnostics") == 1
+    assert "'occurrences': 12" in rendered
+    assert "'suppressed': 11" in rendered
+    assert "'unique': 1" in rendered
+
+
+def test_streaming_read_diagnostics_stay_bounded_across_loader_recreation(tmp_path: Path):
+    (tmp_path / "invalid.ndjson").write_text("{not-json}", encoding="utf-8")
+    (tmp_path / "valid.ndjson").write_text(json.dumps({"id": "valid"}), encoding="utf-8")
+    module = StreamingDataModule(
+        model=_datamodule_model(),
+        root=tmp_path,
+        suffix=Suffix.ndjson,
+        train=re.compile(r".*\.ndjson$"),
+        num_workers=0,
+        replacement=False,
+        file_buffer_size=1,
+        observation_buffer_size=1,
+    )
+
+    rendered = []
+    for _ in range(12):
+        with console.capture() as captured:
+            loader = module.train_dataloader()
+            assert loader is not None
+            list(loader)
+        rendered.append(captured.get())
+
+    output = "".join(rendered)
+    assert output.count("skipping an unreadable streaming dataset file") == 1
+    assert output.count("suppressed repeated streaming read diagnostics") == 1
+    assert all("unreadable streaming" not in iteration for iteration in rendered[2:])
+
+
+def test_streaming_read_diagnostics_share_budget_across_worker_copies():
+    diagnostics = streaming.ReadDiagnostics()
+    diagnostics.share()
+    manager = diagnostics.manager
+    assert manager is not None
+    try:
+        first_worker = pickle.loads(pickle.dumps(diagnostics))
+        next_worker = pickle.loads(pickle.dumps(diagnostics))
+
+        assert first_worker.record("ndjson", "FileNotFoundError").emit is True
+        assert next_worker.record("ndjson", "FileNotFoundError").emit is False
+        assert first_worker.summary_for_log()[0].suppressed == 1
+        assert next_worker.summary_for_log() == ()
+    finally:
+        manager.shutdown()
+
+
+def test_streaming_loader_still_reads_when_diagnostic_sharing_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "valid.ndjson"
+    path.write_text(json.dumps({"value": 1.0}), encoding="utf-8")
+    model = rf.Model(
+        rf.Number("value"),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    module = StreamingDataModule(
+        model=model,
+        root=tmp_path,
+        suffix=Suffix.ndjson,
+        validate=re.compile(r".*\.ndjson$"),
+        num_workers={Strata.validate: 1},
+        persistent_workers=False,
+        replacement=False,
+    )
+
+    def fail_share(self):
+        raise OSError("manager unavailable")
+
+    monkeypatch.setattr(streaming.ReadDiagnostics, "share", fail_share)
+
+    loader = module.val_dataloader()
+    assert loader is not None
+    assert loader.dataset.read_diagnostics.enabled is False
+    assert loader.dataset.read_diagnostics.summary_for_log() == ()
+    assert len(list(loader)) == 1
+
+
+def test_streaming_read_finite_exhaustion_when_every_file_fails(tmp_path: Path):
+    missing = tmp_path / "missing.ndjson"
+
+    with pytest.raises(RuntimeError, match="exhausted 1 file attempts without yielding a row"):
+        list(
+            streaming.read.__wrapped__(
+                [str(missing)],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+            )
+        )
+
+
+def test_streaming_read_allows_a_valid_empty_file(tmp_path: Path):
+    empty = tmp_path / "empty.ndjson"
+    empty.write_text("", encoding="utf-8")
+
+    assert (
+        list(
+            streaming.read.__wrapped__(
+                [str(empty)],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+            )
+        )
+        == []
+    )
+
+
+def test_streaming_read_allows_a_worker_with_no_assigned_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    path = tmp_path / "records.ndjson"
+    path.write_text(json.dumps({"id": 1}), encoding="utf-8")
+    monkeypatch.setattr(streaming, "_is_assigned_to_worker", lambda **_: False)
+
+    assert (
+        list(
+            streaming.read.__wrapped__(
+                [str(path)],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.record,
+                chunk_batch_size=2,
+                global_rank=1,
+                world_size=2,
+            )
+        )
+        == []
+    )
+
+
+def test_streaming_diagnostics_cannot_mask_an_unexpected_read_error(monkeypatch: pytest.MonkeyPatch):
+    calls = 0
+
+    def fail_dataset(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise pa.ArrowInvalid("invalid parquet metadata")
+        raise PermissionError("permission denied")
+
+    def fail_log(*args, **kwargs):
+        raise RuntimeError("diagnostic output failed")
+
+    monkeypatch.setattr(streaming.ds, "dataset", fail_dataset)
+    monkeypatch.setattr(streaming.console, "log", fail_log)
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        list(
+            streaming.read.__wrapped__(
+                ["first.parquet", "second.parquet", "third.parquet"],
+                suffix=Suffix.parquet,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+            )
+        )
+
+
+def test_streaming_diagnostic_state_failure_cannot_mask_a_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    diagnostics = streaming.ReadDiagnostics()
+
+    def fail_record(*args):
+        raise RuntimeError("diagnostic state failed")
+
+    monkeypatch.setattr(diagnostics, "record", fail_record)
+
+    missing = tmp_path / "missing.ndjson"
+    with pytest.raises(RuntimeError, match="exhausted 1 file attempts"):
+        list(
+            streaming.read.__wrapped__(
+                [str(missing)],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+                read_diagnostics=diagnostics,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("missing"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ],
+    ids=["missing-file", "invalid-unicode"],
+)
+def test_streaming_read_recovers_from_known_ndjson_open_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+):
+    def fail_open(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("builtins.open", fail_open)
+
+    assert (
+        list(
+            streaming.read.__wrapped__(
+                ["records.ndjson"],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+                max_consecutive_failures=2,
+            )
+        )
+        == []
+    )
+
+
+def test_streaming_read_recovers_from_invalid_ndjson(tmp_path: Path):
+    path = tmp_path / "invalid.ndjson"
+    path.write_text("{not-json}", encoding="utf-8")
+
+    assert (
+        list(
+            streaming.read.__wrapped__(
+                [str(path)],
+                suffix=Suffix.ndjson,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+                max_consecutive_failures=2,
+            )
+        )
+        == []
+    )
+
+
+def test_streaming_read_recovers_from_arrow_invalid(monkeypatch: pytest.MonkeyPatch):
+    def fail_dataset(*args, **kwargs):
+        raise pa.ArrowInvalid("invalid parquet metadata")
+
+    monkeypatch.setattr(streaming.ds, "dataset", fail_dataset)
+
+    assert (
+        list(
+            streaming.read.__wrapped__(
+                ["records.parquet"],
+                suffix=Suffix.parquet,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+                max_consecutive_failures=2,
+            )
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [PermissionError("permission denied"), RuntimeError("unexpected failure")],
+    ids=["permission", "runtime"],
+)
+def test_streaming_read_propagates_unknown_arrow_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+):
+    def fail_dataset(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(streaming.ds, "dataset", fail_dataset)
+
+    with pytest.raises(type(error), match=str(error)):
+        list(
+            streaming.read.__wrapped__(
+                ["records.parquet"],
+                suffix=Suffix.parquet,
+                sharding=ShardingStrategy.chunk,
+                chunk_batch_size=2,
+            )
+        )
+
+
 def test_streaming_read_diagnostic_hides_rows_and_uri_credentials(monkeypatch: pytest.MonkeyPatch):
     uri = "file://reader:password@localhost/private/customers.csv?token=secret#fragment"
     raw_row = "SECRET_CUSTOMER_VALUE,3,4"
 
     def fail_dataset(*args, **kwargs):
-        raise ValueError(f"CSV parse error in row: {raw_row}")
+        raise pa.ArrowInvalid(f"CSV parse error in row: {raw_row}")
 
     monkeypatch.setattr(streaming.ds, "dataset", fail_dataset)
     incidents.reset("streaming-read")
@@ -481,6 +849,7 @@ def test_streaming_read_diagnostic_hides_rows_and_uri_credentials(monkeypatch: p
                         suffix=Suffix.csv,
                         sharding=ShardingStrategy.chunk,
                         chunk_batch_size=2,
+                        max_consecutive_failures=2,
                     )
                 )
                 == []
@@ -490,7 +859,7 @@ def test_streaming_read_diagnostic_hides_rows_and_uri_credentials(monkeypatch: p
 
     output = captured.get()
     assert "file://localhost/private/customers.csv" in output
-    assert "ValueError" in output
+    assert "ArrowInvalid" in output
     for secret in ("reader", "password", "token", "secret", raw_row):
         assert secret not in output
 

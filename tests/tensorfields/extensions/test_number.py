@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import torch
 from tensordict import TensorDict
 
+import relflow as rf
+from relflow.architecture.runtime import flush_number_diagnostics
 from relflow.rich import console, incidents
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
@@ -104,7 +106,7 @@ def test_number_normalizer_ignores_nonfinite_values_when_updating():
     assert torch.isnan(output[3])
 
 
-def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns_once_per_embedder():
+def test_number_embedder_clamps_and_defers_bounded_diagnostics_to_safe_boundary():
     structure = Schema.model_validate(_structure_payload())
     embedder = Embedder(schema=structure, address=ADDRESS)
     bound = embedder.max_fourier_input.detach()
@@ -127,31 +129,96 @@ def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns_once_per_embedde
         ],
         dtype=torch.int64,
     )
-    incidents.reset()
+    module = _TrackingModule(schema=structure, embedder=embedder, decoder=Decoder(schema=structure, address=ADDRESS))
+    incidents.reset(scopes=(module, structure))
     with console.capture() as captured:
         clamped = embedder.clamp(content=content, state=state)
-    diagnostic = captured.get()
+        embedder.clamp(content=content, state=state)
+    assert captured.get() == ""
 
     assert torch.isfinite(clamped).all()
     assert torch.allclose(clamped[:3], torch.stack([bound, -bound, bound]))
     assert clamped[3].item() == 0.0
     assert clamped[4].item() == bound.item()
+    assert "diagnostic_counts" not in dict(embedder.named_buffers())
+    assert not any(name.endswith("diagnostic_counts") for name in embedder.state_dict())
+
+    with console.capture() as captured:
+        flush_number_diagnostics(module)
+    diagnostic = captured.get()
     assert "number inputs exceed the safe Fourier range" in diagnostic
     assert ADDRESS in diagnostic
-    assert "'count': 5" in diagnostic
-    assert "'valued_count': 4" in diagnostic
-    assert "'nonfinite_count': 2" in diagnostic
+    assert "'count': 4" in diagnostic
+    assert "'severity': 'nonfinite'" in diagnostic
+    assert "'severity': 'out-of-range'" in diagnostic
 
     with console.capture() as repeated:
         embedder.clamp(content=content, state=state)
+        flush_number_diagnostics(module)
     assert repeated.get() == ""
-    assert incidents.snapshot()[("number-clamp", id(embedder), ADDRESS, "nonfinite")] == 2
+    summary = incidents.summary(scopes=(module,))
+    assert summary[0].occurrences == 4
+    assert summary[0].emitted == 2
+    assert summary[0].suppressed == 2
 
     next_embedder = Embedder(schema=structure, address=ADDRESS)
+    next_module = _TrackingModule(
+        schema=structure,
+        embedder=next_embedder,
+        decoder=Decoder(schema=structure, address=ADDRESS),
+    )
     with console.capture() as next_run:
         next_embedder.clamp(content=content, state=state)
+        flush_number_diagnostics(next_module)
     assert "number inputs exceed the safe Fourier range" in next_run.get()
-    incidents.reset()
+    incidents.reset(scopes=(module, next_module, structure))
+
+
+def test_number_diagnostic_state_reinitializes_instead_of_migrating_in_forward():
+    structure = Schema.model_validate(_structure_payload())
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    embedder.diagnostic_counts = torch.zeros(2, dtype=torch.int64, device="meta")
+
+    embedder.clamp(
+        content=torch.tensor([1.0]),
+        state=torch.tensor([Tokens.valued], dtype=torch.int64),
+    )
+
+    assert embedder.diagnostic_counts is not None
+    assert embedder.diagnostic_counts.device.type == "cpu"
+
+
+def test_direct_predict_can_drain_inference_mode_number_diagnostics() -> None:
+    model = rf.Model(
+        rf.Number(name="amount"),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+    )
+
+    with console.capture() as first:
+        model.predict([{"amount": float("inf")}])
+    with console.capture() as repeated:
+        model.predict([{"amount": float("inf")}])
+
+    assert "number inputs exceed the safe Fourier range" in first.get()
+    assert repeated.get() == ""
+
+
+def test_number_diagnostics_survive_inference_and_training_mode_transitions() -> None:
+    structure = Schema.model_validate(_structure_payload())
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    state = torch.tensor([Tokens.valued], dtype=torch.int64)
+
+    with torch.inference_mode():
+        embedder.clamp(content=torch.tensor([float("inf")]), state=state)
+
+    assert embedder.diagnostic_counts is not None
+    assert not torch.is_inference(embedder.diagnostic_counts)
+
+    embedder.clamp(content=torch.tensor([float("nan")]), state=state)
+
+    assert embedder.drain_diagnostics()["nonfinite"] == 2
 
 
 def test_number_embedder_outputs_finite_payload_for_extreme_outliers():

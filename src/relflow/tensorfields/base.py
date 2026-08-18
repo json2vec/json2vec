@@ -15,6 +15,7 @@ from rich.text import Text
 from tensordict import TensorDict
 
 from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
+from relflow.rich import bounded_path
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address, Leaf, Node, Renderable
@@ -100,6 +101,10 @@ class TensorFieldBase(Renderable):
     """Tensorized field values plus trainable target state."""
 
     STATE_PREVIEW_LIMIT: int = 80
+    STATE_PREVIEW_ROW_LIMIT: int = 10
+    STATE_PREVIEW_COLUMN_LIMIT: int = 32
+    STATE_AXIS_LIMIT: int = 8
+    STATE_AXIS_NAME_LIMIT: int = 40
     STATE_LABELS: dict[int, str] = {
         Tokens.valued.value: "V",
         Tokens.null.value: "N",
@@ -178,10 +183,21 @@ class TensorFieldBase(Renderable):
             yield "dtype", str(state.dtype).removeprefix("torch.")
             yield "device", str(state.device)
 
-    @staticmethod
-    def _tensor_shape(value: Any) -> str | None:
+    @classmethod
+    def _format_shape(cls, shape: torch.Size | tuple[int, ...]) -> str:
+        dimensions = tuple(shape)
+        if len(dimensions) <= cls.STATE_AXIS_LIMIT:
+            return str(dimensions)
+
+        head = ", ".join(str(dimension) for dimension in dimensions[:4])
+        tail = ", ".join(str(dimension) for dimension in dimensions[-3:])
+        omitted = len(dimensions) - 7
+        return f"({head}, … +{omitted} dims, {tail})"
+
+    @classmethod
+    def _tensor_shape(cls, value: Any) -> str | None:
         if torch.is_tensor(value):
-            return str(tuple(value.shape))
+            return cls._format_shape(value.shape)
         if not isinstance(value, TensorDict):
             return None
 
@@ -189,7 +205,7 @@ class TensorFieldBase(Renderable):
         keys = sorted(value.keys(), key=str)
         for key in keys[:4]:
             tensor = value.get(key)
-            shape = tuple(tensor.shape) if torch.is_tensor(tensor) else type(tensor).__name__
+            shape = cls._format_shape(tensor.shape) if torch.is_tensor(tensor) else type(tensor).__name__
             items.append(f"{key}:{shape}")
         if len(keys) > 4:
             items.append(f"+{len(keys) - 4} more")
@@ -212,7 +228,7 @@ class TensorFieldBase(Renderable):
         if torch.is_tensor(state):
             heading.append(" ")
             heading.append("state=", style=self._rich_style(console, "relflow.dim"))
-            heading.append(str(tuple(state.shape)), style=self._rich_style(console, "relflow.info"))
+            heading.append(self._format_shape(state.shape), style=self._rich_style(console, "relflow.info"))
             heading.append(" ")
             heading.append("dtype=", style=self._rich_style(console, "relflow.dim"))
             heading.append(
@@ -226,7 +242,7 @@ class TensorFieldBase(Renderable):
         if torch.is_tensor(trainable):
             heading.append(" ")
             heading.append("trainable=", style=self._rich_style(console, "relflow.dim"))
-            heading.append(str(tuple(trainable.shape)), style=self._rich_style(console, "relflow.info"))
+            heading.append(self._format_shape(trainable.shape), style=self._rich_style(console, "relflow.info"))
 
         lines: list[Text] = [heading]
 
@@ -238,15 +254,38 @@ class TensorFieldBase(Renderable):
             lines.append(text)
 
         if torch.is_tensor(state):
-            preview = self._bounded_state_preview(state)
-            if preview is None:
-                text = Text("  preview omitted for ", style=self._rich_style(console, "relflow.dim"))
-                text.append(str(state.device), style=self._rich_style(console, "relflow.info"))
-                lines.append(text)
+            display_state, display_trainable, axes, singleton_axes = self._state_display(state, trainable)
+            lines.append(self._state_axes_text(axes, singleton_axes=singleton_axes, console=console))
+
+            if display_state.numel() == 0:
+                lines.append(self._state_counts_text([], console=console, truncated=False))
+                lines.append(self._state_preview_text([], axes=axes, console=console))
+            elif display_state.ndim > 2:
+                lines.append(self._state_slice_instruction(axes, console=console))
             else:
-                rows, truncated = preview
-                lines.append(self._state_counts_text(rows, console=console, truncated=truncated))
-                lines.append(self._state_preview_text(rows, console=console, truncated=truncated))
+                preview = self._bounded_state_preview(
+                    display_state,
+                    display_trainable,
+                    column_limit=self._state_preview_column_limit(axes, options.max_width),
+                )
+                if preview is None:
+                    text = Text("  preview omitted for ", style=self._rich_style(console, "relflow.dim"))
+                    text.append(str(state.device), style=self._rich_style(console, "relflow.info"))
+                    text.append(
+                        ", slice first and call .cpu() explicitly", style=self._rich_style(console, "relflow.dim")
+                    )
+                    lines.append(text)
+                else:
+                    rows, truncated = preview
+                    lines.append(self._state_counts_text(rows, console=console, truncated=truncated))
+                    lines.append(
+                        self._state_preview_text(
+                            rows,
+                            axes=axes,
+                            console=console,
+                        )
+                    )
+                    lines.append(self._state_legend_text(console=console))
 
         if isinstance(targets, TensorDict) and targets.keys():
             text = Text("  targets=", style=self._rich_style(console, "relflow.dim"))
@@ -258,71 +297,252 @@ class TensorFieldBase(Renderable):
 
         yield Group(*lines)
 
-    def _state_counts_text(self, rows: list[list[int]], *, console: Console, truncated: bool) -> Text:
-        values = [value for row in rows for value in row]
-        text = Text("  preview counts ", style=self._rich_style(console, "relflow.dim"))
-        for token in Tokens:
-            count = values.count(token.value)
-            text.append(self.STATE_LABELS[token.value], style=self.STATE_STYLES[token.value])
-            text.append(f"={count} ", style=self._rich_style(console, "relflow.dim"))
+    @classmethod
+    def _state_axis_name(cls, value: Any, index: int) -> str:
+        if value is None:
+            return f"dim{index}"
 
-        if truncated:
-            text.append("(sample)", style=self._rich_style(console, "relflow.dim"))
+        return bounded_path(str(value), limit=cls.STATE_AXIS_NAME_LIMIT)
+
+    def _state_display(
+        self,
+        state: torch.Tensor,
+        trainable: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[str, int]], list[tuple[str, int]]]:
+        raw_names = list(getattr(self, "names", None) or ())
+        axes: list[tuple[str, int]] = []
+        for index, size in enumerate(state.shape):
+            name = raw_names[index] if index < len(raw_names) else None
+            axes.append((self._state_axis_name(name, index), size))
+
+        singleton_indexes = [index for index, (_, size) in enumerate(axes) if size == 1]
+        singleton_axes = [axes[index] for index in singleton_indexes]
+        visible_axes = [axis for index, axis in enumerate(axes) if index not in singleton_indexes]
+
+        display = state.detach()
+        display_trainable: torch.Tensor | None = None
+        if torch.is_tensor(trainable) and trainable.shape == state.shape:
+            display_trainable = trainable.detach()
+
+        for index in reversed(singleton_indexes):
+            display = display.squeeze(index)
+            if display_trainable is not None:
+                display_trainable = display_trainable.squeeze(index)
+
+        return display, display_trainable, visible_axes, singleton_axes
+
+    @classmethod
+    def _bounded_axes(
+        cls,
+        axes: list[tuple[str, int]],
+    ) -> tuple[list[tuple[str, int]], list[tuple[str, int]], int]:
+        if len(axes) <= cls.STATE_AXIS_LIMIT:
+            return axes, [], 0
+
+        head_count = cls.STATE_AXIS_LIMIT // 2
+        tail_count = cls.STATE_AXIS_LIMIT - head_count
+        return axes[:head_count], axes[-tail_count:], len(axes) - cls.STATE_AXIS_LIMIT
+
+    def _state_axes_text(
+        self,
+        axes: list[tuple[str, int]],
+        *,
+        singleton_axes: list[tuple[str, int]],
+        console: Console,
+    ) -> Text:
+        text = Text("  axes=", style=self._rich_style(console, "relflow.dim"))
+        head_axes, tail_axes, omitted = self._bounded_axes(axes)
+        if not head_axes:
+            text.append("<scalar>", style=self._rich_style(console, "relflow.info"))
+        else:
+            for index, (name, size) in enumerate(head_axes):
+                if index:
+                    text.append(" × ", style=self._rich_style(console, "relflow.dim"))
+                text.append(name, style=self._rich_style(console, "relflow.info"))
+                text.append(f"={size}", style=self._rich_style(console, "relflow.dim"))
+            if omitted:
+                text.append(f" × … +{omitted} axes", style=self._rich_style(console, "relflow.dim"))
+            for name, size in tail_axes:
+                text.append(" × ", style=self._rich_style(console, "relflow.dim"))
+                text.append(name, style=self._rich_style(console, "relflow.info"))
+                text.append(f"={size}", style=self._rich_style(console, "relflow.dim"))
+
+        if singleton_axes:
+            head_singletons, tail_singletons, omitted_singletons = self._bounded_axes(singleton_axes)
+            singleton_labels = [name for name, _ in head_singletons]
+            if omitted_singletons:
+                singleton_labels.append(f"… +{omitted_singletons}")
+            singleton_labels.extend(name for name, _ in tail_singletons)
+            text.append(" (singleton ", style=self._rich_style(console, "relflow.dim"))
+            text.append(
+                ", ".join(singleton_labels),
+                style=self._rich_style(console, "relflow.info"),
+            )
+            text.append(" hidden)", style=self._rich_style(console, "relflow.dim"))
 
         return text
 
-    def _state_preview_text(self, rows: list[list[int]], *, console: Console, truncated: bool) -> Text:
+    def _state_slice_instruction(self, axes: list[tuple[str, int]], *, console: Console) -> Text:
+        text = Text("  state preview omitted: ", style=self._rich_style(console, "relflow.dim"))
+        text.append(str(len(axes)), style=self._rich_style(console, "relflow.info"))
+        text.append(
+            " non-singleton axes remain; slice to at most 2 to preview state",
+            style=self._rich_style(console, "relflow.dim"),
+        )
+        return text
+
+    def _state_counts_text(
+        self,
+        rows: list[list[tuple[int, bool]]],
+        *,
+        console: Console,
+        truncated: bool,
+    ) -> Text:
+        cells = [cell for row in rows for cell in row]
+        values = [value for value, _ in cells]
+        text = Text("  preview counts ", style=self._rich_style(console, "relflow.dim"))
+        for index, token in enumerate(Tokens):
+            if index:
+                text.append(" ", style=self._rich_style(console, "relflow.dim"))
+            count = values.count(token.value)
+            text.append(self.STATE_LABELS[token.value], style=self.STATE_STYLES[token.value])
+            text.append(f"={count}", style=self._rich_style(console, "relflow.dim"))
+
+        if truncated:
+            text.append(" (sample)", style=self._rich_style(console, "relflow.dim"))
+
+        trainable = sum(is_trainable for _, is_trainable in cells)
+        if trainable:
+            text.append(f" *={trainable} trainable", style=self._rich_style(console, "relflow.dim"))
+
+        return text
+
+    @staticmethod
+    def _short_axis_name(name: str) -> str:
+        return name.rstrip("/").rsplit("/", maxsplit=1)[-1]
+
+    def _state_preview_column_limit(self, axes: list[tuple[str, int]], max_width: int) -> int:
+        if len(axes) == 2:
+            prefix_width = Text("          0 │ ").cell_len
+        else:
+            labels = " × ".join(self._short_axis_name(name) for name, _ in axes)
+            prefix = f"  state [{labels}] " if labels else "  state "
+            prefix_width = Text(prefix).cell_len
+
+        available = max(1, max_width - prefix_width)
+        # Every cell can be a two-character token such as ``M*`` and cells are
+        # separated by one space.
+        return max(1, min(self.STATE_PREVIEW_COLUMN_LIMIT, (available + 1) // 3))
+
+    def _state_preview_text(
+        self,
+        rows: list[list[tuple[int, bool]]],
+        *,
+        axes: list[tuple[str, int]],
+        console: Console,
+    ) -> Text:
         text = Text("  state ", style=self._rich_style(console, "relflow.dim"))
+        if axes:
+            labels = " × ".join(self._short_axis_name(name) for name, _ in axes)
+            text.append(f"[{labels}]", style=self._rich_style(console, "relflow.info"))
         if not rows:
+            if axes:
+                text.append(" ", style=self._rich_style(console, "relflow.dim"))
             text.append("<empty>", style=self._rich_style(console, "relflow.dim"))
             return text
+
+        if len(axes) == 2:
+            text.append("\n        ", style=self._rich_style(console, "relflow.dim"))
+        elif axes:
+            text.append(" ", style=self._rich_style(console, "relflow.dim"))
 
         for row_index, row in enumerate(rows):
             if row_index:
                 text.append("\n        ", style=self._rich_style(console, "relflow.dim"))
 
-            for column_index, value in enumerate(row):
+            if len(axes) == 2:
+                text.append(f"{row_index:>3} │ ", style=self._rich_style(console, "relflow.dim"))
+
+            for column_index, (value, is_trainable) in enumerate(row):
                 if column_index:
                     text.append(" ")
 
                 token = int(value)
-                text.append(self.STATE_LABELS.get(token, str(token)), style=self.STATE_STYLES.get(token, "bold red"))
-
-        if truncated:
-            text.append(" ...", style=self._rich_style(console, "relflow.dim"))
+                label = self.STATE_LABELS.get(token, str(token))
+                if is_trainable:
+                    label = f"{label}*"
+                text.append(label, style=self.STATE_STYLES.get(token, "bold red"))
 
         return text
 
-    def _bounded_state_preview(self, tensor: torch.Tensor) -> tuple[list[list[int]], bool] | None:
+    def _state_legend_text(self, *, console: Console) -> Text:
+        text = Text("  legend ", style=self._rich_style(console, "relflow.dim"))
+        descriptions = {
+            Tokens.valued: "valued",
+            Tokens.null: "null",
+            Tokens.padded: "padded",
+            Tokens.masked: "masked",
+            Tokens.other: "other",
+        }
+        for index, token in enumerate(Tokens):
+            if index:
+                text.append("  ", style=self._rich_style(console, "relflow.dim"))
+            text.append(self.STATE_LABELS[token.value], style=self.STATE_STYLES[token.value])
+            text.append(f" {descriptions[token]}", style=self._rich_style(console, "relflow.dim"))
+        text.append("  * trainable", style=self._rich_style(console, "relflow.dim"))
+        return text
+
+    def _bounded_state_preview(
+        self,
+        tensor: torch.Tensor,
+        trainable: torch.Tensor | None,
+        *,
+        column_limit: int,
+    ) -> tuple[list[list[tuple[int, bool]]], bool] | None:
         if tensor.device.type != "cpu":
             return None
 
         values = tensor.detach()
+        trainable_values: torch.Tensor | None = None
+        if trainable is not None and trainable.device.type == "cpu" and trainable.shape == tensor.shape:
+            trainable_values = trainable.detach()
+
         if values.numel() == 0:
             return [], False
 
-        if values.ndim > 0:
-            values = values[0]
-        if values.ndim > 0:
-            values = values[0]
-
-        while values.ndim > 2:
-            values = values[0]
-
         if values.ndim == 0:
-            rows = [[int(values.tolist())]]
+            is_trainable = bool(trainable_values.tolist()) if trainable_values is not None else False
+            rows = [[(int(values.tolist()), is_trainable)]]
             return rows, False
 
         if values.ndim == 1:
-            width = min(values.shape[0], self.STATE_PREVIEW_LIMIT)
+            width = min(values.shape[0], self.STATE_PREVIEW_LIMIT, column_limit)
             bounded = values[:width]
-            rows = [[int(value) for value in bounded.tolist()]]
+            bounded_trainable = trainable_values[:width].tolist() if trainable_values is not None else [False] * width
+            rows = [
+                [
+                    (int(value), bool(is_trainable))
+                    for value, is_trainable in zip(bounded.tolist(), bounded_trainable, strict=True)
+                ]
+            ]
             return rows, values.numel() > width
 
-        n_rows = min(values.shape[0], self.STATE_PREVIEW_LIMIT)
-        n_columns = min(values.shape[1], max(1, self.STATE_PREVIEW_LIMIT // max(1, n_rows)))
+        n_rows = min(values.shape[0], self.STATE_PREVIEW_ROW_LIMIT)
+        n_columns = min(
+            values.shape[1],
+            column_limit,
+            max(1, self.STATE_PREVIEW_LIMIT // max(1, n_rows)),
+        )
         bounded = values[:n_rows, :n_columns]
-        rows = [[int(value) for value in row] for row in bounded.tolist()]
+        bounded_trainable = (
+            trainable_values[:n_rows, :n_columns].tolist()
+            if trainable_values is not None
+            else [[False] * n_columns for _ in range(n_rows)]
+        )
+        rows = [
+            [(int(value), bool(is_trainable)) for value, is_trainable in zip(row, trainable_row, strict=True)]
+            for row, trainable_row in zip(bounded.tolist(), bounded_trainable, strict=True)
+        ]
         return rows, values.numel() > bounded.numel()
 
 

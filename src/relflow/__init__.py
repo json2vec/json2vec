@@ -9,6 +9,7 @@ mutation predicates, and the `@preprocess` decorator.
 from typing import TYPE_CHECKING, Any
 
 from relflow import helpers as helpers
+from relflow import rich as rich
 from relflow.architecture.checkpoint import RollbackCheckpoint
 from relflow.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
 from relflow.architecture.root import (
@@ -177,3 +178,5 @@ __all__ = [
     "preprocess",
     "where",
 ]
+
+rich.install_tracebacks()

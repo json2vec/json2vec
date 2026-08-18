@@ -8,16 +8,24 @@ compatibility surface.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
+import weakref
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from io import StringIO
 from threading import Lock
+from types import TracebackType
 from typing import Any, TypeAlias
 
+import pydantic
 from rich.console import Console
+from rich.constrain import Constrain
+from rich.segment import Segment
 from rich.theme import Theme
+from rich.traceback import Traceback
 from rich.traceback import install as rich_traceback_install
 
 ANSI_SEQUENCE = re.compile(
@@ -55,11 +63,35 @@ theme = Theme(
     }
 )
 
-console = Console(stderr=True, theme=theme)
+console = Console(
+    stderr=True,
+    theme=theme,
+    log_path=False,
+    log_time_format="[%Y-%m-%d %H:%M:%S]",
+)
 
-verbose = False
+verbose = os.environ.get("RELFLOW_VERBOSE", "").strip().lower() in {"1", "true", "yes", "on"}
 tracebacks_installed = False
 traceback_lock = Lock()
+previous_excepthook: Any = None
+
+TRACEBACK_WIDTH = 88
+TRACEBACK_CODE_WIDTH = 88
+TRACEBACK_MESSAGE_LENGTH = 1600
+TRACEBACK_MESSAGE_LINES = 20
+TRACEBACK_NOTE_LIMIT = 8
+TRACEBACK_STACK_LIMIT = 8
+TRACEBACK_GROUP_LIMIT = 8
+TRACEBACK_OPTIONS: dict[str, Any] = {
+    "width": TRACEBACK_WIDTH,
+    "code_width": TRACEBACK_CODE_WIDTH,
+    "extra_lines": 1,
+    "show_locals": False,
+    "locals_max_length": 10,
+    "locals_max_string": 80,
+    "max_frames": 50,
+    "suppress": (pydantic,),
+}
 
 
 def set_verbose(enabled: bool) -> None:
@@ -82,26 +114,119 @@ def is_verbose() -> bool:
 def install_tracebacks() -> None:
     """Install Rich rendering for uncaught exceptions once per process.
 
-    Installation is explicit because Rich also integrates with an active
-    IPython shell.  Traceback locals stay hidden to avoid exposing records,
-    predictions, credentials, or processor-bound values.
+    RelFlow calls this during package import. Traceback locals stay hidden to
+    avoid exposing records, predictions, credentials, or processor-bound
+    values.
     """
 
-    global tracebacks_installed
+    global previous_excepthook, tracebacks_installed
     if tracebacks_installed:
         return
 
     with traceback_lock:
         if tracebacks_installed:
             return
-        rich_traceback_install(
-            console=console,
-            show_locals=False,
-            locals_max_length=10,
-            locals_max_string=80,
-            max_frames=50,
-        )
+        if sys.excepthook is not sys.__excepthook__:
+            # The hosting application already owns process-level exception
+            # reporting. Replacing or chaining it risks duplicate tracebacks.
+            previous_excepthook = sys.excepthook
+            tracebacks_installed = True
+            return
+        previous_excepthook = rich_traceback_install(console=console, **TRACEBACK_OPTIONS)
+        rich_hook = sys.excepthook
+
+        # Rich installs through IPython's display hooks when a shell is active.
+        # Otherwise replace its sys hook with the whole-traceback constrained
+        # renderer below. A pre-existing application hook returned above.
+        if rich_hook is not previous_excepthook:
+
+            def excepthook(
+                exception_type: type[BaseException],
+                exception: BaseException,
+                traceback: TracebackType | None,
+            ) -> None:
+                print_exception(exception, traceback=traceback)
+
+            sys.excepthook = excepthook
         tracebacks_installed = True
+
+
+def print_exception(exception: BaseException, *, traceback: TracebackType | None = None) -> None:
+    """Render one bounded, locals-hidden exception to the shared stderr console."""
+
+    resolved_traceback = exception.__traceback__ if traceback is None else traceback
+    rendered = Traceback.from_exception(
+        type(exception),
+        exception,
+        resolved_traceback,
+        **TRACEBACK_OPTIONS,
+    )
+    bound_traceback_messages(rendered)
+    console.print(Constrain(SanitizedTraceback(rendered), width=TRACEBACK_WIDTH))
+
+
+class SanitizedTraceback:
+    """Strip untrusted terminal controls from Rich's final traceback segments."""
+
+    def __init__(self, rendered: Traceback) -> None:
+        self.rendered = rendered
+
+    def __rich_console__(self, output: Console, options: Any):
+        for segment in output.render(self.rendered, options):
+            yield Segment(strip_control_sequences(segment.text), segment.style, segment.control)
+
+
+def bound_traceback_messages(rendered: Traceback) -> None:
+    """Bound exception messages and notes without changing their traceback frames."""
+
+    def bound(value: str, *, length: int = TRACEBACK_MESSAGE_LENGTH) -> str:
+        value = strip_control_sequences(value)
+        if len(value) > length:
+            value = f"{value[: length - 1]}…"
+        lines = value.splitlines()
+        if len(lines) > TRACEBACK_MESSAGE_LINES:
+            omitted = len(lines) - TRACEBACK_MESSAGE_LINES + 1
+            lines = [*lines[: TRACEBACK_MESSAGE_LINES - 1], f"… {omitted} more lines"]
+        return "\n".join(lines)
+
+    def visit(trace: Any) -> None:
+        if len(trace.stacks) > TRACEBACK_STACK_LIMIT:
+            head = TRACEBACK_STACK_LIMIT // 2
+            tail = TRACEBACK_STACK_LIMIT - head
+            omitted = len(trace.stacks) - TRACEBACK_STACK_LIMIT
+            trace.stacks = [*trace.stacks[:head], *trace.stacks[-tail:]]
+            trace.stacks[0].notes.insert(0, f"… {omitted} chained exceptions omitted")
+
+        for stack in trace.stacks:
+            if len(stack.exceptions) > TRACEBACK_GROUP_LIMIT:
+                head = TRACEBACK_GROUP_LIMIT // 2
+                tail = TRACEBACK_GROUP_LIMIT - head
+                omitted = len(stack.exceptions) - TRACEBACK_GROUP_LIMIT
+                stack.exceptions = [*stack.exceptions[:head], *stack.exceptions[-tail:]]
+                stack.exc_value = f"{stack.exc_value}; {omitted} sub-exceptions omitted"
+
+            stack.exc_type = bound(stack.exc_type, length=160)
+            stack.exc_value = bound(stack.exc_value)
+            notes = [bound(note, length=400) for note in stack.notes[:TRACEBACK_NOTE_LIMIT]]
+            if len(stack.notes) > TRACEBACK_NOTE_LIMIT:
+                notes.append(f"… {len(stack.notes) - TRACEBACK_NOTE_LIMIT} more notes")
+            stack.notes = notes
+            for frame in stack.frames:
+                frame.filename = bound(frame.filename, length=240)
+                frame.name = bound(frame.name, length=160)
+                frame.line = bound(frame.line, length=1000)
+            if stack.syntax_error is not None:
+                stack.syntax_error.filename = bound(stack.syntax_error.filename, length=240)
+                stack.syntax_error.line = bound(stack.syntax_error.line, length=1000)
+                stack.syntax_error.msg = bound(stack.syntax_error.msg, length=400)
+                syntax_notes = [bound(note, length=400) for note in stack.syntax_error.notes[:TRACEBACK_NOTE_LIMIT]]
+                if len(stack.syntax_error.notes) > TRACEBACK_NOTE_LIMIT:
+                    syntax_notes.append(f"… {len(stack.syntax_error.notes) - TRACEBACK_NOTE_LIMIT} more notes")
+                stack.syntax_error.notes = syntax_notes
+            for nested in stack.exceptions:
+                visit(nested)
+
+    visit(rendered.trace)
 
 
 def render_text(renderable: object, *, width: int = 120) -> str:
@@ -150,6 +275,47 @@ def strip_control_sequences(value: str) -> str:
 
     without_ansi = ANSI_SEQUENCE.sub("", value)
     return CONTROL_CHARACTERS.sub("", without_ansi)
+
+
+def middle_elide(value: str, limit: int) -> str:
+    """Bound text while preserving both its identifying beginning and end."""
+
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    if limit == 1:
+        return "…"
+
+    head = (limit - 1 + 1) // 2
+    tail = limit - 1 - head
+    return f"{value[:head]}…{value[-tail:]}" if tail else f"{value[:head]}…"
+
+
+def bounded_path(value: str, *, limit: int) -> str:
+    """Return a safe bounded path that keeps its final components identifiable."""
+
+    label = " ".join(strip_control_sequences(value).split()) or "<unnamed>"
+    if len(label) <= limit:
+        return label
+
+    parts = [part for part in label.split("/") if part]
+    if len(parts) < 2 or limit < 10:
+        return middle_elide(label, limit)
+
+    parent, leaf = parts[-2:]
+    # Keep the two components nearest the selected value. The leaf receives
+    # most of the budget, and each long component is elided in its middle so
+    # sibling prefixes such as ``first_...`` and ``second_...`` stay distinct.
+    component_budget = limit - len("…//")
+    leaf_budget = min(len(leaf), max(8, component_budget * 2 // 3))
+    parent_budget = component_budget - leaf_budget
+    if parent_budget < 4:
+        shift = 4 - parent_budget
+        parent_budget += shift
+        leaf_budget = max(1, leaf_budget - shift)
+
+    return f"…/{middle_elide(parent, parent_budget)}/{middle_elide(leaf, leaf_budget)}"
 
 
 def sanitize_style_attributes(value: str) -> str:
@@ -216,21 +382,27 @@ class Incident:
     overflow: bool = False
 
 
-class IncidentTracker:
-    """Bound repeated diagnostics without retaining incident payloads.
+@dataclass(frozen=True, slots=True)
+class IncidentSummary:
+    """Bounded aggregate for one incident kind within a logical lifecycle."""
 
-    Only short scalar key parts and integer counters are retained. Each
-    incident kind has its own unique-key budget, so a noisy source cannot
-    suppress unrelated diagnostics. The number of kinds is bounded as well.
-    """
+    kind: str
+    occurrences: int
+    emitted: int
+    suppressed: int
+    unique: int
+    overflowed: int
+
+
+class IncidentTracker:
+    """Bound and summarize diagnostics for one explicit logical lifecycle."""
 
     MAX_PART_LENGTH = 160
     MAX_COUNT = sys.maxsize
-    MAX_EMISSIONS_PER_KEY = 3
     OVERFLOW_PART = "<additional-incidents>"
     KINDS_OVERFLOW_KEY: IncidentKey = ("<additional-kinds>",)
 
-    def __init__(self, *, max_keys: int = 128, max_kinds: int = 16) -> None:
+    def __init__(self, *, max_keys: int = 32, max_kinds: int = 16) -> None:
         if max_keys <= 0:
             raise ValueError("max_keys must be positive")
         if max_kinds <= 0:
@@ -239,7 +411,9 @@ class IncidentTracker:
         self.max_kinds = max_kinds
         self.counts: OrderedDict[str, OrderedDict[IncidentKey, int]] = OrderedDict()
         self.overflow_counts: dict[str, int] = {}
+        self.overflow_notices: set[str] = set()
         self.kinds_overflow_count = 0
+        self.kinds_overflow_notice = False
         self.lock = Lock()
 
     @classmethod
@@ -258,14 +432,13 @@ class IncidentTracker:
             raise TypeError("incident key parts must be short scalar values")
         return tuple(normalized)
 
-    def record(self, kind: str, *key: IncidentPart, limit: int = 1) -> Incident:
+    def record(self, kind: str, *key: IncidentPart, occurrences: int = 1) -> Incident:
         """Record an occurrence and say whether its diagnostic should emit."""
 
-        if limit <= 0:
-            raise ValueError("limit must be positive")
+        if occurrences <= 0:
+            raise ValueError("occurrences must be positive")
         if not isinstance(kind, str):
             raise TypeError("incident kind must be a string")
-        limit = min(limit, self.MAX_EMISSIONS_PER_KEY)
         normalized = self.normalize_key((kind, *key))
         normalized_kind = normalized[0]
         if not isinstance(normalized_kind, str):
@@ -275,10 +448,12 @@ class IncidentTracker:
         with self.lock:
             partition = self.counts.get(normalized_kind)
             if partition is None and len(self.counts) >= self.max_kinds:
-                self.kinds_overflow_count = min(self.kinds_overflow_count + 1, self.MAX_COUNT)
+                self.kinds_overflow_count = min(self.kinds_overflow_count + occurrences, self.MAX_COUNT)
                 count = self.kinds_overflow_count
                 stored_key = self.KINDS_OVERFLOW_KEY
                 overflow = True
+                emit = not self.kinds_overflow_notice
+                self.kinds_overflow_notice = True
             else:
                 if partition is None:
                     partition = OrderedDict()
@@ -286,21 +461,64 @@ class IncidentTracker:
 
                 overflow = partition_key not in partition and len(partition) >= self.max_keys
                 if overflow:
-                    count = min(self.overflow_counts.get(normalized_kind, 0) + 1, self.MAX_COUNT)
+                    count = min(
+                        self.overflow_counts.get(normalized_kind, 0) + occurrences,
+                        self.MAX_COUNT,
+                    )
                     self.overflow_counts[normalized_kind] = count
                     stored_key = (normalized_kind, self.OVERFLOW_PART)
+                    emit = normalized_kind not in self.overflow_notices
+                    self.overflow_notices.add(normalized_kind)
                 else:
-                    count = min(partition.get(partition_key, 0) + 1, self.MAX_COUNT)
+                    previous = partition.get(partition_key, 0)
+                    count = min(previous + occurrences, self.MAX_COUNT)
                     partition[partition_key] = count
                     stored_key = normalized
+                    emit = previous == 0
 
         return Incident(
             key=stored_key,
             count=count,
-            suppressed=count if overflow else max(count - limit, 0),
-            emit=False if overflow else count <= limit,
+            suppressed=max(count - 1, 0),
+            emit=emit,
             overflow=overflow,
         )
+
+    def summary(self) -> tuple[IncidentSummary, ...]:
+        """Return bounded aggregates without mutating this lifecycle."""
+
+        with self.lock:
+            summaries: list[IncidentSummary] = []
+            for kind, partition in self.counts.items():
+                overflowed = self.overflow_counts.get(kind, 0)
+                occurrences = sum(partition.values()) + overflowed
+                emitted = len(partition) + int(kind in self.overflow_notices)
+                summaries.append(
+                    IncidentSummary(
+                        kind=kind,
+                        occurrences=occurrences,
+                        emitted=emitted,
+                        suppressed=(
+                            sum(max(count - 1, 0) for count in partition.values())
+                            + max(overflowed - int(kind in self.overflow_notices), 0)
+                        ),
+                        unique=len(partition),
+                        overflowed=overflowed,
+                    )
+                )
+
+            if self.kinds_overflow_count:
+                summaries.append(
+                    IncidentSummary(
+                        kind=str(self.KINDS_OVERFLOW_KEY[0]),
+                        occurrences=self.kinds_overflow_count,
+                        emitted=int(self.kinds_overflow_notice),
+                        suppressed=max(self.kinds_overflow_count - int(self.kinds_overflow_notice), 0),
+                        unique=0,
+                        overflowed=self.kinds_overflow_count,
+                    )
+                )
+            return tuple(summaries)
 
     def snapshot(self) -> dict[IncidentKey, int]:
         """Return small occurrence counters for diagnostics and tests."""
@@ -322,7 +540,9 @@ class IncidentTracker:
             if kind is None:
                 self.counts.clear()
                 self.overflow_counts.clear()
+                self.overflow_notices.clear()
                 self.kinds_overflow_count = 0
+                self.kinds_overflow_notice = False
                 return
 
             normalized = self.normalize_key((kind,))[0]
@@ -330,12 +550,181 @@ class IncidentTracker:
                 raise TypeError("incident kind must be a string")
             self.counts.pop(normalized, None)
             self.overflow_counts.pop(normalized, None)
+            self.overflow_notices.discard(normalized)
 
 
-incidents = IncidentTracker()
+@dataclass(slots=True)
+class _ScopedIncidents:
+    reference: weakref.ReferenceType[Any]
+    tracker: IncidentTracker
 
 
-def record_incident(kind: str, *key: IncidentPart, limit: int = 1) -> Incident:
+class IncidentRegistry:
+    """Weakly scope bounded trackers to live owners in this process."""
+
+    SCOPE_OVERFLOW_PART = "<additional-scopes>"
+
+    def __init__(self, *, max_scopes: int = 32, max_keys: int = 32, max_kinds: int = 16) -> None:
+        self.max_scopes = max_scopes
+        self.max_keys = max_keys
+        self.max_kinds = max_kinds
+        self.global_tracker = IncidentTracker(max_keys=max_keys, max_kinds=max_kinds)
+        self.scope_overflow = IncidentTracker(max_keys=1, max_kinds=max_kinds)
+        self.scopes: OrderedDict[int, _ScopedIncidents] = OrderedDict()
+        self.lock = Lock()
+
+    def _tracker(self, scope: object, *, create: bool) -> IncidentTracker | None:
+        token = id(scope)
+        with self.lock:
+            state = self.scopes.get(token)
+            if state is not None and state.reference() is scope:
+                return state.tracker
+            if not create or len(self.scopes) >= self.max_scopes:
+                return None
+
+            def remove(reference: weakref.ReferenceType[Any]) -> None:
+                with self.lock:
+                    current = self.scopes.get(token)
+                    if current is not None and current.reference is reference:
+                        self.scopes.pop(token, None)
+
+            try:
+                reference = weakref.ref(scope, remove)
+            except TypeError as error:
+                raise TypeError("incident scopes must support weak references") from error
+            tracker = IncidentTracker(max_keys=self.max_keys, max_kinds=self.max_kinds)
+            self.scopes[token] = _ScopedIncidents(reference=reference, tracker=tracker)
+            return tracker
+
+    def record(
+        self,
+        kind: str,
+        *key: IncidentPart,
+        scope: object | None = None,
+        occurrences: int = 1,
+    ) -> Incident:
+        tracker = self.global_tracker if scope is None else self._tracker(scope, create=True)
+        if tracker is not None:
+            return tracker.record(kind, *key, occurrences=occurrences)
+
+        incident = self.scope_overflow.record(
+            kind,
+            self.SCOPE_OVERFLOW_PART,
+            occurrences=occurrences,
+        )
+        return Incident(
+            key=(kind, self.SCOPE_OVERFLOW_PART),
+            count=incident.count,
+            suppressed=incident.suppressed,
+            emit=incident.emit,
+            overflow=True,
+        )
+
+    def summary(self, *, scopes: Iterable[object] | None = None) -> tuple[IncidentSummary, ...]:
+        trackers: list[IncidentTracker]
+        include_scope_overflow = scopes is None
+        if scopes is None:
+            with self.lock:
+                trackers = [self.global_tracker, *(state.tracker for state in self.scopes.values())]
+        else:
+            trackers = []
+            for scope in scopes:
+                tracker = self._tracker(scope, create=False)
+                if tracker is not None:
+                    trackers.append(tracker)
+
+        combined: dict[str, list[int]] = {}
+        for tracker in trackers:
+            for item in tracker.summary():
+                values = combined.setdefault(item.kind, [0, 0, 0, 0, 0])
+                values[0] += item.occurrences
+                values[1] += item.emitted
+                values[2] += item.suppressed
+                values[3] += item.unique
+                values[4] += item.overflowed
+
+        if include_scope_overflow:
+            for item in self.scope_overflow.summary():
+                values = combined.setdefault(item.kind, [0, 0, 0, 0, 0])
+                values[0] += item.occurrences
+                values[1] += item.emitted
+                values[2] += item.suppressed
+                values[4] += item.occurrences
+
+        return tuple(
+            IncidentSummary(
+                kind=kind,
+                occurrences=values[0],
+                emitted=values[1],
+                suppressed=values[2],
+                unique=values[3],
+                overflowed=values[4],
+            )
+            for kind, values in sorted(combined.items())
+        )
+
+    def reset(self, kind: str | None = None, *, scopes: Iterable[object] | None = None) -> None:
+        if scopes is None:
+            with self.lock:
+                trackers = [self.global_tracker, *(state.tracker for state in self.scopes.values())]
+            trackers.append(self.scope_overflow)
+        else:
+            trackers = []
+            for scope in scopes:
+                tracker = self._tracker(scope, create=False)
+                if tracker is not None:
+                    trackers.append(tracker)
+        for tracker in trackers:
+            tracker.reset(kind)
+
+    def snapshot(self) -> dict[IncidentKey, int]:
+        """Return process-local counters for diagnostics and tests."""
+
+        snapshot = self.global_tracker.snapshot()
+        with self.lock:
+            scoped = tuple(self.scopes.items())
+        for token, state in scoped:
+            for key, count in state.tracker.snapshot().items():
+                snapshot[("scope", token, *key)] = count
+        snapshot.update(self.scope_overflow.snapshot())
+        return snapshot
+
+
+incidents = IncidentRegistry()
+
+
+def record_incident(
+    kind: str,
+    *key: IncidentPart,
+    scope: object | None = None,
+    occurrences: int = 1,
+) -> Incident:
     """Record an incident in RelFlow's shared process-local tracker."""
 
-    return incidents.record(kind, *key, limit=limit)
+    return incidents.record(kind, *key, scope=scope, occurrences=occurrences)
+
+
+def log_incident_summaries(
+    summaries: Iterable[IncidentSummary],
+    *,
+    message: str = "suppressed repeated RelFlow diagnostics",
+    context: Mapping[str, Any] | None = None,
+) -> bool:
+    """Log one bounded lifecycle summary when any repeats were suppressed."""
+
+    repeated = [item for item in summaries if item.suppressed > 0]
+    if not repeated:
+        return False
+
+    payload: dict[str, Any] = dict(context or {})
+    payload["incidents"] = {
+        item.kind: {
+            "occurrences": item.occurrences,
+            "suppressed": item.suppressed,
+            "unique": item.unique,
+            "overflowed": item.overflowed,
+        }
+        for item in repeated
+    }
+    console.log(f"[relflow.warning]{message}[/]", payload)
+    return True

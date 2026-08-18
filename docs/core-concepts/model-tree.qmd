@@ -41,6 +41,7 @@ model = rf.Model(
     line_items=rf.Branch(
         length=32,
         embed=True,
+        mask=rf.Mask(name="recent", rate=0.25, window=8),
         sku=rf.Category(size=2048),
         quantity=rf.Number,
         price=rf.Number(p_mask=0.15),
@@ -55,8 +56,9 @@ Leaving `model` as the cell's final expression asks Marimo to use RelFlow's
 Rich HTML/plain-text MIME representation. The live tree says that one order
 contains a repeated list of line items and a return target. `source_channel`
 remains in the serializable schema but is inactive. The line-item fields share
-item coordinates, and the branch can emit its own representation before the
-order is represented at the root.
+item coordinates, and the tree includes the effective `recent` masking policy
+instead of reducing it to a count. The branch can emit its own representation
+before the order is represented at the root.
 
 ## Node Kinds
 

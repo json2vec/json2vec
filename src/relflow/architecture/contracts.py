@@ -37,7 +37,7 @@ ContractScope = tuple[str, int, int, ContractSignature]
 class ContractScheduler(pydantic.BaseModel):
     """Deterministic backoff scheduler for expensive forward contract checks."""
 
-    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
+    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True, hide_input_in_errors=True)
 
     periodic_interval: int = 1024
     _counts: dict[ContractScope, int] = pydantic.PrivateAttr(default_factory=dict)

@@ -1,7 +1,7 @@
 # Rich Console, Tracebacks, And Rendering Spec
 
 - Status: Implemented
-- Date: 2026-08-16
+- Date: 2026-08-17
 - Scope owner: Runtime and rendering maintainers
 
 ## Summary
@@ -17,8 +17,11 @@ per-item debug output.
 
 The implementation is deliberately tucked inside an internal Rich support
 module. It adds no public RelFlow console, logging configuration, or traceback
-installation API. Applications that want their own console or process-wide
-traceback hook configure Rich directly.
+installation API. Importing `relflow` installs one safe, process-wide Rich
+uncaught-exception hook with locals hidden when the host still uses Python's
+default hook; an existing host hook is preserved. Applications that want their
+own console, or intentionally need to replace that traceback presentation,
+configure Rich directly.
 
 Rich remains a required core dependency. RelFlow does not introduce another
 logging abstraction, structured event schema, custom levels, or JSON sink.
@@ -29,7 +32,8 @@ logging abstraction, structured event schema, custom levels, or JSON sink.
 - concise `console.log()` messages with Rich rendering of native values;
 - bounded output for long-running jobs: routine epochs, steps, batches, and
   records never generate console logs;
-- Rich tracebacks at RelFlow-owned failure boundaries and entry points;
+- one idempotent, import-installed Rich hook for uncaught exceptions, plus Rich
+  tracebacks at RelFlow-owned failure boundaries;
 - useful direct and nested rendering for common RelFlow objects;
 - executable Quarto examples that show the same Rich object views as notebooks,
   with a plain-text fallback rather than hand-authored output;
@@ -48,7 +52,7 @@ logging abstraction, structured event schema, custom levels, or JSON sink.
 - adding public console, verbosity, or traceback-configuration exports;
 - using console logs as a heartbeat, progress stream, or metrics backend;
 - automatically replacing Lightning progress or experiment metric logging;
-- installing pretty-print or traceback hooks during `import relflow`;
+- installing a global pretty-print hook during `import relflow`;
 - rendering every private Torch or Lightning object.
 
 ## State Before This Change
@@ -120,9 +124,9 @@ the global console while being rendered.
 ### What Counts As A Log
 
 Use `console.log()` only for a human-visible operational event where the user
-can respond. Rich already adds time and source location and can render dicts,
-paths, enums, tensors, and RelFlow renderables without converting everything to
-a string.
+can respond. The shared console adds a timestamp, deliberately omits source
+paths, and can render dicts, paths, enums, tensors, and RelFlow renderables
+without converting everything to a string.
 
 Prefer:
 
@@ -153,20 +157,28 @@ additional one-time context, but recurring telemetry still belongs in metrics
 or progress callbacks.
 
 Repeated incidents must also be bounded. A callsite that can fire in a hot loop
-should log only the first few representative occurrences for a logical
-condition, count suppressed repeats, and report again only when severity or
-state materially changes. Per-address detail must also have a cap so a stream
+logs the first occurrence, at most one notice when its detail budget overflows,
+and one suppressed-count summary at a natural lifecycle boundary. Per-address
+detail must also have a cap so a stream
 of millions of unique bad keys/files cannot create millions of lines. A final
 aggregate summary may be emitted when a natural lifecycle boundary is already
 available; it must not require an epoch-by-epoch message.
 
-The incident tracker is process-local, bounded in memory, and stores only small
-keys/counters—not tensors, observations, exceptions, or model objects. Budgets
-are partitioned by a bounded set of stable incident kinds, so unique streaming
-paths cannot consume the capacity for unrelated diagnostics. Address-based
-conditions include a scalar model, schema, callback, or embedder identity so a
-new logical run can emit its own first incident. Internal verbose callsites
-check the configured flag before constructing expensive context.
+The general incident registry is process-local, bounded in memory, and stores
+only small keys/counters—not tensors, observations, exceptions, or model
+objects. Budgets are partitioned by a bounded set of stable incident kinds.
+Model/schema lifecycles use weak owner scopes, so completed jobs release their
+state without placing object IDs in keys. Streaming failures group on suffix and
+exception class while retaining only the first credential-redacted path as
+representative context. Their bounded counters belong to the data-module split
+and are shared only with that split's loader workers, so the warning budget
+survives loader and non-persistent worker recreation and emits at most one
+suppression summary for the split lifecycle. If worker-shared diagnostic state
+cannot be created, workers suppress those advisory messages rather than failing
+or duplicating them; data loading and terminal read errors are unchanged.
+`RELFLOW_VERBOSE=1` enables the sparse enhanced mode before import.
+Internal verbose callsites check the configured flag before constructing
+expensive context.
 Application-owned Rich output is independent of this internal state.
 
 ### Current Log Triage
@@ -179,8 +191,8 @@ The migration should make an editorial decision at each callsite.
 | Processor binding, normalization, provider resolution, and per-output `TRACE` | Remove; these are hot-path/internal details |
 | Schema mutation audit messages | Remove by default; make the mutated objects and selections easy to inspect |
 | Epoch lifecycle callback | Remove/deprecate; epoch repetition belongs to Lightning progress and metrics even in verbose mode |
-| Checkpoint load and rollback | Routine load is verbose-only; rollback or recovery is a default state-change warning |
-| Streaming file skipped after a recoverable read error | Keep as a warning with a credential-redacted path, suffix, and exception class; never include a parser message that may echo raw rows; deduplicate by file/error class and summarize suppression |
+| Checkpoint load and rollback | Routine load and configured best-checkpoint rollback are verbose-only |
+| Streaming file skipped after a recoverable read error | Keep as a warning with one credential-redacted representative path, suffix, and exception class; never include a parser message that may echo raw rows; deduplicate by suffix/error class and summarize suppression |
 | Vocabulary nearing/exceeding capacity | Log threshold transitions or first occurrence, not every synchronization |
 | Unsafe number inputs being clamped | Log the first incident per field and meaningful severity changes; count repeated clamps without per-batch output |
 | Cluster configuration that cannot train | Prefer a Python warning during configuration, or a concise console warning if it is truly runtime-specific |
@@ -192,44 +204,68 @@ configuration, and deprecation. Lightning's `Model.track()`,
 `LightningModule.log()`, and `ThroughputLogger` remain metric logging and are
 not routed through the Rich console.
 
+A finite streaming read raises only when every attempted source failed with a
+known recoverable read error. A valid empty file, or a chunk/record worker with
+no locally assigned rows, is a successful empty result. Replacement sampling
+instead fails after a bounded run of attempts without yielding because it
+otherwise could retry bad or empty files forever.
+
 ### Tracebacks
 
 Use the two Rich mechanisms for their intended jobs:
 
 1. `console.print_exception(show_locals=False)` inside an `except` block when
-   RelFlow owns the failure boundary.
-2. `rich.traceback.install(console=console, show_locals=False)` inside a
-   RelFlow-owned application entry point where an uncaught hook is appropriate.
+   RelFlow owns and consumes or translates the failure at that boundary.
+2. `rich.traceback.install(console=console, show_locals=False)` once during
+   package initialization, providing a safe default for uncaught exceptions.
 
 Do not wrap either mechanism in a public RelFlow convenience API. Importing
-RelFlow never installs a traceback hook. Applications that own the process and
-want a global hook use Rich's API directly.
+`relflow` installs the hook idempotently and emits no output. Applications that
+own the process and deliberately need different traceback presentation may
+replace the default with Rich's API directly.
 
 Traceback rules:
 
 - locals are hidden by default;
-- frame count and rendered values are bounded;
+- frame count, causal-chain/group cardinality, exception messages, and
+  exception notes are bounded;
+- the entire traceback and its source panels have a stable 88-column maximum,
+  while narrower terminals may constrain both;
+- repeated imports or internal initialization do not stack hooks;
+- an existing host-owned exception hook is preserved rather than chained;
+- internal Pydantic frames are suppressed while the originating user frame and
+  exception remain visible;
 - exception chaining and exception groups remain visible;
 - expected/recoverable errors get one short warning, not a traceback;
 - unexpected errors get one traceback at the boundary that handles them;
+- a boundary that re-raises an exception for the process hook does not print it
+  first;
 - HTTP responses never include tracebacks or locals;
-- raw request bodies, observations, predictions, and processor-bound values are
-  not logged alongside failures;
-- notebooks should use Rich's supported IPython extension rather than a hook
-  installed by a documentation cell.
+- RelFlow-owned failure context never adds raw request bodies, observations,
+  predictions, or processor-bound values;
+- hiding locals does not redact text already embedded in an arbitrary exception
+  message or source line; application code must not put credentials or raw
+  records there;
+- exception, path, function, and source text is stripped of untrusted terminal
+  control sequences before output;
+- notebook runtimes control how cell exceptions reach the hook, and Rich may
+  integrate with a supported active shell; docs do not install another hook in
+  a notebook cell.
 
 ### Serving
 
-`Deployment.app()` is embeddable library code and must not reconfigure process
-output. An external ASGI runner remains responsible for its own logs.
+Importing `relflow` installs the internal safe Rich traceback hook before either
+deployment API is used. `Deployment.app()` does not otherwise reconfigure
+process output, and `Deployment.serve()` does not install a second hook. An
+external ASGI runner remains responsible for its own logs and may intentionally
+replace the process-wide traceback presentation.
 
-`Deployment.serve()` owns an application entry point and installs the internal
-safe Rich traceback hook. Its shared-console output remains incident-only;
-routine startup and status messages stay with Uvicorn. Uvicorn can keep its native logging
-rather than being forced through a custom adapter. At a RelFlow-owned exception
-boundary, print one Rich traceback and return or raise according to the existing
-HTTP contract; avoid printing the same exception again through both RelFlow and
-Uvicorn.
+Shared-console output remains incident-only; routine startup and status
+messages stay with Uvicorn. Uvicorn can keep its native logging rather than
+being forced through a custom adapter. At a RelFlow-owned exception boundary,
+print one Rich traceback and return or raise according to the existing HTTP
+contract; avoid printing the same exception again through both RelFlow and
+Uvicorn or the process hook.
 
 `Deployment.log_level` continues to configure Uvicorn. It does not need to
 become a general Rich console level system.
@@ -304,7 +340,8 @@ maintained diagram for the object being documented.
 - Object examples use MIME display rather than the internal diagnostic console,
   which intentionally writes to stderr. Any executable Rich console example
   constructs and captures an application-owned, cell-local console so build
-  diagnostics stay clean and the example cannot alter process-global hooks.
+  diagnostics stay clean and the example does not replace the import-installed
+  process hook.
 - Rich output must fit the documentation content column, provide intentional
   wrapping or horizontal overflow at narrow widths, contain no ANSI escape
   sequences, and escape user-controlled text.
@@ -324,7 +361,8 @@ display during implementation.
 | --- | --- | --- |
 | P0 | `Leaf`, `Branch`, `Schema`, `Model` | Robust bound/unbound tree, meaningful flags/config, narrow-width wrapping, compact nested repr |
 | P0 | `Selection` | One compact entry per selected address; no repeated ancestor subtrees |
-| P0 | `TensorFieldBase` | Type, shape, dtype/device, and safe bounded preview; no accelerator copy/sync by default |
+| P0 | `TensorFieldBase` | Native indexing over named structural axes; preview the exact current 0D–2D slice, name/shape remaining axes and request a further slice above 2D, leave trailing payload axes untouched, and never copy/synchronize an accelerator by default |
+| P0 | `EncodedInput` | Compact bounded address, state-shape, and structural-axis inventory; report metadata presence without rendering metadata values |
 | P1 | `Mask` | Effective rate/count, window, scope, offset, and exclusions rather than only `masks=N` |
 | P1 | `NodeAttribute`, `NodePredicate` | Stable readable expression; no lambda memory address |
 | P1 | `Observation`, preprocessors, postprocessors | Bounded data shape/keys and callable signature/readiness; hide bound values by default |
@@ -332,8 +370,8 @@ display during implementation.
 | P2 | `InferenceConfig`, `Deployment`, `Writer`, plugin/vocabulary/counter diagnostics | Compact user-oriented summaries when a documented inspection job needs them |
 | Keep native | `Address`, string enums, `Tokens` | Preserve scalar behavior and style in surrounding views |
 
-P0 is part of this change. P1 may land with it if the shared rendering work
-makes it small. P2 can follow without inventing a new visual language.
+The listed P0 and P1 views are part of this change. P2 can follow without
+inventing a new visual language.
 
 ### Rendering Safety
 
@@ -374,7 +412,10 @@ The implementation can touch:
   modules.
 
 `src/relflow/logging/throughput.py` remains a Lightning metric callback despite
-its name.
+its name. It counts actual encoded-batch cardinality and, in distributed runs,
+reports the global observation count over the slowest rank's elapsed time. Its
+epoch-boundary reductions and metric emission never go through the Rich
+console.
 
 ## Dependencies And Breaking Change
 
@@ -397,7 +438,8 @@ Focused tests should cover:
 - the internal shared Rich `Console` writes to stderr and is not exported;
 - `relflow` has no `console`, `configure_console`, or `install_tracebacks`
   attributes;
-- import does not print or install a traceback/pretty hook;
+- import emits no output, installs the safe traceback hook once with locals
+  hidden, and does not install a pretty-print hook;
 - default mode emits no routine epoch, step, batch, record, construction, or
   mutation chatter;
 - verbose mode enables useful one-time context without enabling per-epoch or
@@ -408,11 +450,12 @@ Focused tests should cover:
   kinds, does not let one kind suppress another, and retains no tensors or
   observations;
 - `console.log()` renders mappings, paths, enums, and brackets safely;
-- `quiet`, redirected output, `NO_COLOR`, fixed-width capture, and no ANSI in a
+- redirected output, `NO_COLOR`, fixed-width capture, and no ANSI in a
   non-TTY;
-- handled and explicitly installed uncaught tracebacks, with locals hidden;
+- handled and import-installed uncaught tracebacks, with locals hidden;
 - expected recoverable errors do not print a traceback;
-- no raw secret/request value appears in diagnostic output;
+- no raw secret/request value is added by RelFlow-owned diagnostic context or
+  serving error handling, and traceback locals remain hidden;
 - Uvicorn and Lightning output is not duplicated;
 - unnamed/nested/narrow/overlapping object display cases;
 - no tensor device copy or synchronization during default rendering;
@@ -444,11 +487,12 @@ Document behavior without advertising a RelFlow logging API:
 - why repeated progress belongs in Lightning metrics/progress rather than
   console logs;
 - `show_locals=False` and the privacy risk of enabling locals;
-- `Deployment.serve()` versus externally hosted `Deployment.app()`;
+- the shared import-installed traceback default across `Deployment.serve()` and
+  externally hosted `Deployment.app()`;
 - the difference between Rich diagnostics and Lightning metric loggers;
 - direct Rich/IPython pretty-printing for arbitrary Python containers;
 - direct Rich configuration for applications that want their own console or
-  process-wide traceback hook;
+  intentionally need to replace the process-wide traceback presentation;
 - the lack of a machine/JSON logging contract.
 
 The object-rendering sections use executable Marimo cells and bare final
@@ -465,7 +509,8 @@ Generated documentation is updated through `make render`, not by editing
    incident tracking, with import/output tests and no public exports.
 2. Triage current Loguru callsites: delete noise, convert useful diagnostics to
    `console.log()` or `warnings.warn()`, and remove Loguru.
-3. Add handled/uncaught Rich traceback behavior at explicit boundaries.
+3. Add handled Rich traceback behavior at owned boundaries and one safe,
+   import-installed hook for uncaught exceptions.
 4. Repair P0 object rendering and shared rendering helpers.
 5. Add P1 summaries where they fall naturally out of the shared renderer.
 6. Convert representative Quarto cells to live MIME display, make the static
@@ -497,6 +542,8 @@ make render
   grow; repeated incidents are deduplicated or summarized, and recurring
   telemetry stays in Lightning metrics/progress.
 - stdout stays clean and redirected output is plain.
+- importing `relflow` installs the bounded, locals-hidden Rich traceback hook
+  once without emitting output or exposing a configuration API.
 - unexpected failures have one bounded Rich traceback with locals hidden;
   expected failures remain concise and HTTP clients never receive stacks.
 - Lightning metrics, Uvicorn ownership, Python warnings, and Rich diagnostics
@@ -520,6 +567,6 @@ make render
 ## Definition Of Done
 
 RelFlow has a small, idiomatic Rich presentation layer: one console, a handful
-of useful logs, explicit tracebacks with locals hidden, and objects that are
-pleasant to inspect. There is no Loguru dependency and no replacement logging
-framework.
+of useful logs, safe default tracebacks with locals hidden, and objects that
+are pleasant to inspect. There is no Loguru dependency and no replacement
+logging framework.

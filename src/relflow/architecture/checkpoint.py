@@ -10,7 +10,7 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 from relflow.architecture.graph import ModelGraph
-from relflow.rich import console, is_verbose, record_incident
+from relflow.rich import console, is_verbose
 from relflow.structs.experiment import Schema
 
 if TYPE_CHECKING:
@@ -50,12 +50,9 @@ class RollbackCheckpoint(ModelCheckpoint):
             checkpoint = torch.load(best_model_path, weights_only=False, map_location=pl_module.device)
 
         pl_module.restore_checkpoint_state(checkpoint)
-        if (
-            getattr(trainer, "is_global_zero", True)
-            and record_incident("checkpoint-rollback", id(self), best_model_path).emit
-        ):
+        if getattr(trainer, "is_global_zero", True) and is_verbose():
             console.log(
-                "[relflow.warning]restored the best checkpoint at fit end[/]",
+                "[relflow.info]restored the best checkpoint at fit end[/]",
                 {"checkpoint": Path(best_model_path), "score": self.best_model_score},
             )
 

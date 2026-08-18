@@ -12,7 +12,6 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.rich import console, record_incident
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -255,6 +254,9 @@ class Embedder(EmbedderBase):
         self.jitter: torch.Tensor
         self.weights: torch.Tensor
         self.max_fourier_input: torch.Tensor
+        # Deliberately not a registered buffer: DDP broadcasts buffers during
+        # forward, which would overwrite rank-local diagnostic aggregates.
+        self.diagnostic_counts: torch.Tensor | None = None
 
         self.normalizer: GlobalOnlineNormalizer = GlobalOnlineNormalizer(alpha=request.alpha)
 
@@ -263,37 +265,48 @@ class Embedder(EmbedderBase):
         valued = state.eq(Tokens.valued)
         finite = torch.isfinite(content)
         out_of_range = content.abs().gt(bound)
-        unsafe = ~finite | out_of_range
+        nonfinite = ~finite
+        finite_out_of_range = finite & out_of_range
 
-        if unsafe.any():
-            unsafe_values = content[unsafe].detach()
-            nonfinite = ~torch.isfinite(unsafe_values)
-            severity = "nonfinite" if nonfinite.any() else "out-of-range"
-            if record_incident("number-clamp", id(self), str(self.origin), severity).emit:
-                unsafe_abs = unsafe_values.abs()
-                finite_abs = unsafe_abs[torch.isfinite(unsafe_abs)]
-                if torch.isinf(unsafe_abs).any():
-                    max_abs = math.inf
-                elif finite_abs.numel() > 0:
-                    max_abs = float(finite_abs.max().cpu().item())
-                else:
-                    max_abs = math.nan
-
-                console.log(
-                    "[relflow.warning]number inputs exceed the safe Fourier range; clamping values[/]",
-                    {
-                        "address": self.origin,
-                        "count": int(unsafe.sum().cpu().item()),
-                        "valued_count": int((unsafe & valued).sum().cpu().item()),
-                        "nonfinite_count": int(nonfinite.sum().cpu().item()),
-                        "max_abs_normalized": max_abs,
-                        "bound": float(bound.detach().cpu().item()),
-                        "safe_max_angle": FOURIER_SAFE_MAX_ANGLE,
-                    },
+        # Aggregate on-device. Lifecycle callbacks inspect these counters only
+        # after model work, so diagnostics never force a per-forward host sync.
+        with torch.no_grad():
+            if self.diagnostic_counts is None or self.diagnostic_counts.device != content.device:
+                # Device placement changed between calls. Dropping advisory
+                # counts is preferable to an implicit transfer in forward.
+                # Always create ordinary tensors so a counter first seen under
+                # inference mode can still be updated by a later train/validate
+                # phase and drained outside that context.
+                with torch.inference_mode(False):
+                    self.diagnostic_counts = torch.zeros(2, dtype=torch.int64, device=content.device)
+            counts = torch.stack(
+                (
+                    (nonfinite & valued).sum(),
+                    (finite_out_of_range & valued).sum(),
                 )
+            ).to(dtype=self.diagnostic_counts.dtype)
+            self.diagnostic_counts.add_(counts)
 
         clamped = content.clamp(min=-bound, max=bound)
         return torch.where(torch.isnan(clamped), torch.zeros_like(clamped), clamped)
+
+    def drain_diagnostics(self) -> dict[str, int | float]:
+        """Collect and reset aggregate clamp counts at a safe boundary."""
+
+        if self.diagnostic_counts is None:
+            nonfinite, out_of_range = 0, 0
+        else:
+            nonfinite, out_of_range = (int(value) for value in self.diagnostic_counts.detach().cpu().tolist())
+            # A tensor created by ``torch.inference_mode`` cannot be mutated
+            # later outside that context. Replacement is safe for both
+            # inference and ordinary tensors and keeps this state advisory.
+            self.diagnostic_counts = None
+        bound = float(self.max_fourier_input.detach().cpu().item())
+        return {
+            "nonfinite": nonfinite,
+            "out_of_range": out_of_range,
+            "bound": bound,
+        }
 
     @beartype
     def forward(self, inputs: TensorFieldBase) -> Parcel:

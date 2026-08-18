@@ -108,6 +108,10 @@ def test_quarto_docs_use_current_public_api_style() -> None:
 def test_quarto_rich_examples_use_live_mime_display_and_semantic_styles() -> None:
     docs = _repo_root() / "docs"
     model_tree = (docs / "core-concepts/model-tree.qmd").read_text()
+    data_flow = (docs / "core-concepts/data-flow.qmd").read_text()
+    dynamic_masking = (docs / "core-concepts/dynamic-masking.qmd").read_text()
+    custom_tensorfields = (docs / "guides/custom-tensorfields.qmd").read_text()
+    rich_specification = (docs / "rich-logging-spec.md").read_text()
     mutation = (docs / "guides/schema-mutation.qmd").read_text()
     public_api = (docs / "reference/public-api.qmd").read_text()
     troubleshooting = (docs / "guides/troubleshooting.qmd").read_text()
@@ -116,6 +120,10 @@ def test_quarto_rich_examples_use_live_mime_display_and_semantic_styles() -> Non
     model_cells = _marimo_cells(model_tree)
     mutation_cells = _marimo_cells(mutation)
     public_cells = _marimo_cells(public_api)
+    data_flow_cells = _marimo_cells(data_flow)
+    masking_cells = _marimo_cells(dynamic_masking)
+    masking_prose = " ".join(dynamic_masking.split())
+    custom_tensorfield_prose = " ".join(custom_tensorfields.split())
 
     assert any(cell.rstrip().endswith("model") for cell in model_cells)
     assert "from rich.padding import Padding" not in model_tree
@@ -126,10 +134,45 @@ def test_quarto_rich_examples_use_live_mime_display_and_semantic_styles() -> Non
     assert '"relflow @ git+' in mutation
 
     assert any(cell.rstrip().endswith("inspection_model") for cell in public_cells)
+    assert any(cell.rstrip().endswith("inspection_datamodule") for cell in public_cells)
     assert "from rich.padding import Padding" not in public_api
     assert any(re.search(r"Pretty\(.*expand_all=True,\s*\)\s*$", cell, flags=re.DOTALL) for cell in public_cells)
     assert "print(inspection_model)" not in public_api
     assert '"relflow @ git+' in public_api
+
+    masking_setup_cell = next(
+        index for index, cell in enumerate(masking_cells) if "unmasked_field = inputs[LETTER_ADDRESS]" in cell
+    )
+    unmasked_display_cell = next(
+        index for index, cell in enumerate(masking_cells) if cell.rstrip().endswith("unmasked_field[0]")
+    )
+    masked_display_cell = next(
+        index for index, cell in enumerate(masking_cells) if cell.rstrip().endswith("masked_field[0, 0, :2, :5]")
+    )
+    assert masking_setup_cell < unmasked_display_cell < masked_display_cell
+    assert 'LETTER_ADDRESS = rf.Address("record", "words", "letters", "letter")' in dynamic_masking
+    assert "TensorField [tensorfield]" not in dynamic_masking
+    assert "structural axes" in dynamic_masking
+    assert "payload widths" in dynamic_masking
+    assert "a trailing `*` marks a trainable position" in masking_prose
+    assert "suffix marking a trainable position, such as `M*`" in dynamic_masking
+    assert "more than two non-singleton structural axes" in masking_prose
+    encoded_summary_cell = next(
+        index for index, cell in enumerate(data_flow_cells) if cell.rstrip().endswith("\nencoded")
+    )
+    selected_field_cell = next(
+        index for index, cell in enumerate(data_flow_cells) if cell.rstrip().endswith("encoded[0][PRICE_ADDRESS]")
+    )
+    assert encoded_summary_cell < selected_field_cell
+    assert 'PRICE_ADDRESS = rf.Address("order", "line_items", "price")' in data_flow
+    assert "metadata is present but deliberately hides its raw values" in " ".join(data_flow.split())
+    assert "named structural batch dimensions" in custom_tensorfield_prose
+    assert "Content-only payload dimensions trail that structural shape" in custom_tensorfield_prose
+    assert "| P0 | `EncodedInput` |" in rich_specification
+    assert "report metadata presence without rendering metadata values" in rich_specification
+    for runnable_page in (data_flow, dynamic_masking):
+        assert "eval: false" not in runnable_page
+        assert '"relflow @ git+' in runnable_page
 
     troubleshooting_prose = " ".join(troubleshooting.split())
     assert "incident-only" in troubleshooting
@@ -174,6 +217,77 @@ def test_quarto_rich_examples_use_live_mime_display_and_semantic_styles() -> Non
         _contrast_ratio(foreground, background) >= 4.5
         for foreground, background in zip(emphasis_foregrounds, emphasis_backgrounds, strict=True)
     )
+
+
+def test_documented_tensorfield_and_encoded_batch_slices_are_executable() -> None:
+    address = rf.Address("record", "words", "letters", "letter")
+    model = rf.Model(
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        words=rf.Branch(
+            length=3,
+            letters=rf.Branch(
+                length=8,
+                mask=rf.Mask(count=2, window=2),
+                letter=rf.Category(size=26, p_unavailable=0.0),
+            ),
+        ),
+    )
+    records = [
+        {
+            "words": [
+                {"letters": [{"letter": "A"}, {"letter": "B"}, {"letter": "C"}]},
+                {"letters": [{"letter": "D"}, {"letter": "E"}, {"letter": "F"}]},
+            ]
+        },
+        {
+            "words": [
+                {"letters": [{"letter": "G"}, {"letter": "H"}, {"letter": "I"}]},
+                {"letters": [{"letter": "J"}, {"letter": "K"}, {"letter": "L"}]},
+            ]
+        },
+    ]
+
+    encoded = model.encode(records, strata=rf.Strata.train, mask=True)
+    predict_records = [{**record, "private_note": "private-metadata-value"} for record in records]
+    predict_encoded = model.encode(predict_records, strata=rf.Strata.predict)
+    field = encoded[address]
+    observation = field[0]
+    window = field[0, 0, :2, :5]
+
+    assert encoded.batch_size == torch.Size([2])
+    assert encoded.names == ["batch"]
+    assert field.names == ["batch", "/record", "/record/words", "/record/words/letters"]
+    assert observation.state.shape == (1, 3, 8)
+    assert window.state.shape == window.content.shape == window.trainable.shape == (2, 5)
+    assert all(target.shape == (2, 5) for target in window.targets.values())
+    assert encoded[0][address].state.shape == observation.state.shape
+    assert encoded[:1][address].state.shape == (1, 1, 3, 8)
+
+    whole_display = field._repr_mimebundle_()["text/plain"]
+    observation_display = observation._repr_mimebundle_()["text/plain"]
+    window_display = window._repr_mimebundle_()["text/plain"]
+    encoded_display = predict_encoded._repr_mimebundle_()["text/plain"]
+    assert "3 non-singleton axes remain; slice to at most 2" in whole_display
+    assert "state [words × letters]" in observation_display
+    assert "M*" in window_display
+    assert "targets=content, state" in window_display
+    assert "EncodedInput [encoded]" in encoded_display
+    assert "metadata=hidden" in encoded_display
+    assert "record/words/letters/letter" in encoded_display
+    assert "private-metadata-value" not in encoded_display
+
+    vector_model = rf.Model(
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        embedding=rf.Vector(n_dim=4),
+    )
+    vector = vector_model.encode([{"embedding": [1.0, 2.0, 3.0, 4.0]}])["record/embedding"]
+    assert vector.batch_size == torch.Size([1, 1])
+    assert vector.content.shape == (1, 1, 4)
+    assert vector[0].content.shape == (1, 4)
 
 
 def test_workflow_guides_label_example_status() -> None:
@@ -507,5 +621,21 @@ def test_only_allowed_standalone_examples_are_present() -> None:
         "examples/dynamic-masking/run.py",
         "examples/inference-masking/run.py",
         "examples/realtime-serving/run.py",
+        "examples/rich-showcase/showcase.py",
         "examples/text-encoder/run.py",
     }
+
+
+def test_rich_showcase_uses_rich_print_and_the_default_traceback_hook() -> None:
+    source = (_repo_root() / "examples/rich-showcase/showcase.py").read_text()
+
+    assert "import relflow as rf" in source
+    assert "from rich import print" in source
+    assert 'if __name__ == "__main__":' in source
+    assert "print(model)" in source
+    assert "marimo" not in source
+    assert "rich.traceback" not in source
+    assert "from relflow.rich" not in source
+    assert "rf.console" not in source
+    assert "rf.configure_console" not in source
+    assert "rf.install_tracebacks" not in source

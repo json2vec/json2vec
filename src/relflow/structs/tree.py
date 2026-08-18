@@ -5,6 +5,7 @@ import re
 from abc import ABC
 from collections.abc import Mapping
 from enum import Enum
+from itertools import islice
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import jmespath
@@ -14,7 +15,7 @@ from jmespath.exceptions import JMESPathError
 from rich.console import Console, Group
 from rich.text import Text
 
-from relflow.rich import MimeBundleDisplay, render_html, render_text
+from relflow.rich import MimeBundleDisplay, render_html, render_text, strip_control_sequences
 from relflow.structs.enums import Overflow
 
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
@@ -123,7 +124,11 @@ class Address(str):
 class Node(NodeMixin, Renderable, pydantic.BaseModel):
     """Base schema tree node shared by branches and tensorfield requests."""
 
-    model_config = pydantic.ConfigDict(extra="forbid")
+    model_config = pydantic.ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    RICH_COLLECTION_LIMIT: ClassVar[int] = 8
+    RICH_DEPTH_LIMIT: ClassVar[int] = 3
+    RICH_STRING_LIMIT: ClassVar[int] = 80
 
     name: str | None = None
     type: str
@@ -192,13 +197,75 @@ class Node(NodeMixin, Renderable, pydantic.BaseModel):
         is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
         return "root" if is_root else self.type
 
-    @staticmethod
-    def _rich_value(value: Any) -> str:
-        if isinstance(value, float) and value.is_integer():
-            return str(int(value))
+    @classmethod
+    def _rich_value(cls, value: Any, *, depth: int = 0, nested: bool = False) -> str:
+        """Format configuration values without unbounded or implementation-heavy reprs."""
+
+        if isinstance(value, float):
+            return str(int(value)) if value.is_integer() else str(value)
         if isinstance(value, Enum):
-            return str(value.value)
-        return str(value)
+            return cls._rich_value(value.value, depth=depth, nested=False)
+        if isinstance(value, str):
+            value = strip_control_sequences(value)
+            if nested:
+                rendered = repr(value)
+                if len(rendered) > cls.RICH_STRING_LIMIT:
+                    keep = min(len(value), cls.RICH_STRING_LIMIT // 2)
+                    rendered = repr(f"{value[:keep]}…")
+                    while len(rendered) > cls.RICH_STRING_LIMIT and keep:
+                        keep -= 1
+                        rendered = repr(f"{value[:keep]}…")
+                return rendered
+
+            rendered = value.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+            if len(rendered) > cls.RICH_STRING_LIMIT:
+                rendered = f"{rendered[: cls.RICH_STRING_LIMIT - 1]}…"
+            return rendered
+        if value is None or isinstance(value, (bool, int)):
+            return str(value)
+
+        if depth >= cls.RICH_DEPTH_LIMIT and isinstance(value, (Mapping, list, tuple, set, frozenset)):
+            type_name = cls._rich_value(type(value).__name__)
+            return f"<{type_name} items={len(value)}>"
+
+        if isinstance(value, Mapping):
+            parts: list[str] = []
+            for index, (key, item) in enumerate(value.items()):
+                if index >= cls.RICH_COLLECTION_LIMIT:
+                    break
+                parts.append(
+                    f"{cls._rich_value(key, depth=depth + 1, nested=True)}: "
+                    f"{cls._rich_value(item, depth=depth + 1, nested=True)}"
+                )
+            omitted = len(value) - len(parts)
+            if omitted:
+                parts.append(f"… +{omitted}")
+            return "{" + ", ".join(parts) + "}"
+
+        if isinstance(value, (list, tuple, set, frozenset)):
+            items = [
+                cls._rich_value(item, depth=depth + 1, nested=True) for item in islice(value, cls.RICH_COLLECTION_LIMIT)
+            ]
+            if isinstance(value, (set, frozenset)):
+                items.sort()
+            omitted = len(value) - len(items)
+            if omitted:
+                items.append(f"… +{omitted}")
+
+            if isinstance(value, tuple):
+                body = ", ".join(items)
+                if len(items) == 1 and not omitted:
+                    body += ","
+                return f"({body})"
+            if isinstance(value, (set, frozenset)):
+                return "{" + ", ".join(items) + "}"
+            return "[" + ", ".join(items) + "]"
+
+        if callable(value):
+            label = getattr(value, "__qualname__", getattr(value, "__name__", type(value).__name__))
+            return cls._rich_value(str(label))
+
+        return f"<{cls._rich_value(type(value).__name__)}>"
 
     def _rich_identity(self, console: Console, *, name: str | None = None) -> Text:
         heading = Text()
@@ -213,7 +280,7 @@ class Node(NodeMixin, Renderable, pydantic.BaseModel):
             return heading
 
         description = Text("  ")
-        description.append(self.description, style=self._rich_style(console, "relflow.dim"))
+        description.append(self._rich_value(self.description), style=self._rich_style(console, "relflow.dim"))
         return Group(heading, description)
 
     def _rich_address(self) -> str:
@@ -232,7 +299,7 @@ class Node(NodeMixin, Renderable, pydantic.BaseModel):
         yield "name", self.name
         yield "type", self.type
         if self.description is not None:
-            yield "description", self.description
+            yield "description", self._rich_value(self.description)
 
 
 class Leaf(Node):
@@ -242,7 +309,7 @@ class Leaf(Node):
     from this class through their registered request models.
     """
 
-    model_config = pydantic.ConfigDict(extra="allow")
+    model_config = pydantic.ConfigDict(extra="allow", hide_input_in_errors=True)
 
     active: bool = True
     embed: bool = False
@@ -357,7 +424,7 @@ class Leaf(Node):
         yield "embed", self.embed, False
         yield "target", self.target, False
         if self.query is not None:
-            yield "query", self.query
+            yield "query", self._rich_value(self.query)
 
     def _rich_heading(self, console: Console, *, name: str | None = None) -> Text:
         flags = ["active" if self.active else "inactive"]
@@ -381,7 +448,7 @@ class Leaf(Node):
         if self.query is not None:
             heading.append(" ")
             heading.append("query=", style=self._rich_style(console, "relflow.dim"))
-            heading.append(self.query, style=self._rich_style(console, "relflow.info"))
+            heading.append(self._rich_value(self.query), style=self._rich_style(console, "relflow.info"))
         return heading
 
     def _rich_attributes(self, console: Console, names: tuple[str, ...]) -> Text:
@@ -403,7 +470,7 @@ class Leaf(Node):
 
         if self.description is not None:
             description = Text("  ")
-            description.append(self.description, style=self._rich_style(console, "relflow.dim"))
+            description.append(self._rich_value(self.description), style=self._rich_style(console, "relflow.dim"))
             lines.append(description)
 
         common_names = ("pooling", "weight", "p_mask", "p_prune", "n_heads", "n_linear", "dropout")
@@ -432,6 +499,24 @@ class Leaf(Node):
             first = False
         if specific.plain.strip():
             lines.append(specific)
+
+        extra = self.model_extra or {}
+        if extra:
+            metadata = Text("  metadata ", style=self._rich_style(console, "relflow.dim"))
+            rendered = 0
+            for name, value in extra.items():
+                if rendered >= self.RICH_COLLECTION_LIMIT:
+                    break
+                if rendered:
+                    metadata.append(" ")
+                metadata.append(f"{self._rich_value(name)}=", style=self._rich_style(console, "relflow.dim"))
+                metadata.append(self._rich_value(value), style=self._rich_style(console, "relflow.info"))
+                rendered += 1
+
+            omitted = len(extra) - rendered
+            if omitted:
+                metadata.append(f" … +{omitted} more", style=self._rich_style(console, "relflow.dim"))
+            lines.append(metadata)
 
         return Group(*lines)
 

@@ -78,7 +78,7 @@ def bind_tree_field(source: str | None, value: TreeFieldInput) -> SchemaField:
 class Schema(Node):
     """Serializable schema and training metadata used to build a `Model`."""
 
-    model_config = pydantic.ConfigDict(extra="forbid")
+    model_config = pydantic.ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     name: Literal["schema"] = pydantic.Field(default="schema", exclude=True)
     type: Literal["schema"] = pydantic.Field(default="schema", exclude=True)

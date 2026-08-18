@@ -5,12 +5,15 @@ from pathlib import Path
 
 import pytest
 import torch
+from lightning.pytorch.trainer.states import TrainerFn
 
 import relflow as rf
+import relflow.architecture.runtime as runtime_support
 from relflow.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
+from relflow.architecture.runtime import DiagnosticsLifecycleCallback
 from relflow.data.iterables import encode
 from relflow.logging.throughput import ThroughputLogger
-from relflow.rich import console, incidents
+from relflow.rich import console, incidents, set_verbose
 from relflow.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
@@ -250,12 +253,18 @@ def test_rollback_checkpoint_loads_schema_metadata_with_weights_only_disabled(tm
     callback = RollbackCheckpoint(dirpath=tmp_path)
     callback.best_model_path = str(best_path)
 
-    incidents.reset()
-    with console.capture() as captured:
+    with console.capture() as default_capture:
         callback.on_fit_end(trainer=trainer, pl_module=model)
-    diagnostic = captured.get()
-    incidents.reset()
+    assert default_capture.get() == ""
 
+    try:
+        set_verbose(True)
+        with console.capture() as verbose_capture:
+            callback.on_fit_end(trainer=trainer, pl_module=model)
+    finally:
+        set_verbose(False)
+
+    diagnostic = verbose_capture.get()
     assert "restored the best checkpoint" in diagnostic
     assert strategy.checkpoint_io.weights_only is False
 
@@ -306,6 +315,7 @@ def test_configure_callbacks_collects_active_extension_callbacks() -> None:
     assert any(isinstance(callback, RuntimePlacementCallback) for callback in callbacks)
     assert any(isinstance(callback, MutationLockCallback) for callback in callbacks)
     assert any(isinstance(callback, ThroughputLogger) for callback in callbacks)
+    assert any(isinstance(callback, DiagnosticsLifecycleCallback) for callback in callbacks)
     assert any(isinstance(callback, VocabularySyncCallback) for callback in callbacks)
     assert any(isinstance(callback, CounterUpdateCallback) for callback in callbacks)
     assert callback_types == sorted(
@@ -360,10 +370,14 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     throughput_callbacks = [
         callback for callback in model.configure_callbacks() if isinstance(callback, ThroughputLogger)
     ]
+    diagnostics_callbacks = [
+        callback for callback in model.configure_callbacks() if isinstance(callback, DiagnosticsLifecycleCallback)
+    ]
 
     assert len(runtime_placement_callbacks) == 1
     assert len(mutation_lock_callbacks) == 1
     assert len(throughput_callbacks) == 1
+    assert len(diagnostics_callbacks) == 1
     assert len(vocabulary_callbacks) == 1
     assert len(counter_callbacks) == 1
 
@@ -381,6 +395,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
                 RuntimePlacementCallback(),
                 MutationLockCallback(),
                 ThroughputLogger(),
+                DiagnosticsLifecycleCallback(),
                 VocabularySyncCallback(),
                 CounterUpdateCallback(),
             ]
@@ -388,6 +403,29 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
     )()
 
     assert model.configure_callbacks() == []
+
+
+def test_diagnostics_callback_owns_only_standalone_validation_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts: list[object] = []
+    finishes: list[object] = []
+    monkeypatch.setattr(runtime_support, "reset_diagnostics", starts.append)
+    monkeypatch.setattr(runtime_support, "finish_diagnostics", finishes.append)
+    callback = DiagnosticsLifecycleCallback()
+    module = object()
+    trainer = type("TrainerStub", (), {"state": type("State", (), {"fn": TrainerFn.FITTING})()})()
+
+    callback.on_validation_start(trainer, module)  # type: ignore[arg-type]
+    callback.on_validation_end(trainer, module)  # type: ignore[arg-type]
+    assert starts == []
+    assert finishes == []
+
+    trainer.state.fn = TrainerFn.VALIDATING
+    callback.on_validation_start(trainer, module)  # type: ignore[arg-type]
+    callback.on_validation_end(trainer, module)  # type: ignore[arg-type]
+    assert starts == [module]
+    assert finishes == [module]
 
 
 def test_builtin_resources_are_attached_to_extension_modules() -> None:
@@ -428,6 +466,25 @@ def test_online_vocabulary_model_uses_local_storage_until_shared():
     assert vocab.is_shared is False
     assert isinstance(vocab.state.master, list)
     assert vocab.snapshot() == ["ALPHA", "BETA"]
+
+
+def test_online_vocabulary_counts_and_drains_capacity_rejections():
+    vocab = OnlineVocabularyModel(size=1)
+
+    assert vocab.state.reserve(["ALPHA", "BETA", "GAMMA"], learn=True) == 2
+    assert vocab.drain_rejections() == 2
+    assert vocab.drain_rejections() == 0
+
+
+def test_shared_online_vocabulary_counts_and_drains_capacity_rejections():
+    vocab = OnlineVocabularyModel(size=1)
+    vocab.share()
+    try:
+        assert vocab.state.reserve(["ALPHA", "BETA", "GAMMA"], learn=True) == 2
+        assert vocab.drain_rejections() == 2
+        assert vocab.drain_rejections() == 0
+    finally:
+        vocab.freeze()
 
 
 def test_vocabulary_callback_freezes_model_vocabularies_on_fit_end():

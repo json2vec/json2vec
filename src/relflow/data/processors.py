@@ -9,6 +9,7 @@ from enum import StrEnum
 from types import UnionType
 from typing import Any, Self, TypeAlias, Union, get_args, get_origin, overload
 
+from relflow.rich import strip_control_sequences
 from relflow.structs.tree import Address
 
 RawObservation: TypeAlias = dict[str, Any]
@@ -18,6 +19,9 @@ Predictions: TypeAlias = dict[Address, dict[str, Any]]
 PostprocessorResult: TypeAlias = Mapping[str | Address, Any] | None
 
 _EMPTY = inspect.Signature.empty
+_DISPLAY_FIELD_LIMIT = 8
+_DISPLAY_NAME_LIMIT = 80
+_DISPLAY_SIGNATURE_LIMIT = 240
 
 
 class PreprocessorProvider(StrEnum):
@@ -46,15 +50,67 @@ PREPROCESSOR_PROVIDERS = frozenset(PreprocessorProvider)
 POSTPROCESSOR_PROVIDERS = frozenset(PostprocessorProvider)
 
 
+def _bounded_name(value: str, *, limit: int = _DISPLAY_NAME_LIMIT) -> str:
+    value = " ".join(strip_control_sequences(value).split()) or "<unnamed>"
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 1]}…"
+
+
+def _bounded_names(values: Iterable[str]) -> tuple[str, ...]:
+    names = sorted(_bounded_name(value) for value in values)
+    visible = names[:_DISPLAY_FIELD_LIMIT]
+    omitted = len(names) - len(visible)
+    if omitted:
+        visible.append(f"… +{omitted}")
+    return tuple(visible)
+
+
+def _observation_field_types(data: Mapping[str, Any]) -> tuple[dict[str, str], int]:
+    fields: dict[str, str] = {}
+    rendered = 0
+    for key, value in data.items():
+        if rendered >= _DISPLAY_FIELD_LIMIT:
+            break
+        key_label = key if isinstance(key, str) else f"<{type(key).__name__}>"
+        safe_key = _bounded_name(key_label)
+        fields[safe_key] = _bounded_name(type(value).__name__)
+        rendered += 1
+    return fields, max(0, len(data) - rendered)
+
+
 @dataclass(frozen=True)
 class Observation:
     """Processed model-facing observation emitted by a preprocessor."""
 
-    data: Mapping[str, Any]
+    data: Mapping[str, Any] = field(repr=False)
+
+    def __repr__(self) -> str:
+        fields, omitted = _observation_field_types(self.data)
+        suffix = f", omitted={omitted}" if omitted else ""
+        return f"Observation(count={len(self.data)}, fields={fields!r}{suffix})"
+
+    def __rich_repr__(self):
+        fields, omitted = _observation_field_types(self.data)
+        yield "count", len(self.data)
+        yield "fields", fields
+        if omitted:
+            yield "omitted", omitted
 
 
 def _processor_name(func: Callable[..., Any]) -> str:
-    return getattr(func, "__name__", type(func).__name__)
+    return _bounded_name(str(getattr(func, "__name__", type(func).__name__)))
+
+
+def _safe_signature(signature: inspect.Signature) -> str:
+    """Render parameter structure without exposing defaults or annotations."""
+
+    parameters = [parameter.replace(default=_EMPTY, annotation=_EMPTY) for parameter in signature.parameters.values()]
+    visible = parameters[:_DISPLAY_FIELD_LIMIT]
+    omitted = len(parameters) - len(visible)
+    rendered = str(signature.replace(parameters=visible, return_annotation=_EMPTY))
+    suffix = f" … +{omitted} parameters" if omitted else ""
+    return f"{_bounded_name(rendered, limit=_DISPLAY_SIGNATURE_LIMIT - len(suffix))}{suffix}"
 
 
 def _allows_none(annotation: Any) -> bool:
@@ -78,16 +134,43 @@ def _is_optional(parameter: inspect.Parameter) -> bool:
 class Processor:
     """Callable wrapper with explicit user parameter binding."""
 
-    func: Callable[..., Any]
+    func: Callable[..., Any] = field(repr=False)
     provider_names: frozenset[ProviderName]
     primary_name: str
     kind: str
     signature: inspect.Signature = field(init=False)
     runtime_params: frozenset[str] = field(init=False)
     user_params: frozenset[str] = field(init=False)
-    bound_params: Mapping[str, Any] = field(default_factory=dict)
+    bound_params: Mapping[str, Any] = field(default_factory=dict, repr=False)
     name: str = field(init=False)
     decorated: bool = False
+
+    def _missing_user_params(self) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in sorted(self.user_params)
+            if name not in self.bound_params and not _is_optional(self.signature.parameters[name])
+        )
+
+    def __repr__(self) -> str:
+        missing = self._missing_user_params()
+        return (
+            f"{type(self).__name__}(name={self.name!r}, signature={_safe_signature(self.signature)!r}, "
+            f"ready={not missing!r}, runtime={_bounded_names(self.runtime_params)!r}, "
+            f"bound={_bounded_names(self.bound_params)!r}, missing={_bounded_names(missing)!r})"
+        )
+
+    def __rich_repr__(self):
+        missing = self._missing_user_params()
+        yield "name", self.name
+        yield "signature", _safe_signature(self.signature)
+        yield "ready", not missing
+        if self.runtime_params:
+            yield "runtime", _bounded_names(self.runtime_params)
+        if self.bound_params:
+            yield "bound", _bounded_names(self.bound_params)
+        if missing:
+            yield "missing", _bounded_names(missing)
 
     def __post_init__(self) -> None:
         signature = inspect.signature(self.func)
@@ -150,13 +233,7 @@ class Processor:
         return replace(self, bound_params={**self.bound_params, **values})
 
     def validate_ready(self) -> None:
-        missing = []
-        for name in sorted(self.user_params):
-            if name in self.bound_params:
-                continue
-            parameter = self.signature.parameters[name]
-            if not _is_optional(parameter):
-                missing.append(name)
+        missing = self._missing_user_params()
 
         if missing:
             formatted = ", ".join(repr(name) for name in missing)
@@ -171,7 +248,7 @@ class Processor:
         return self._call(primary, runtime_values)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Preprocessor(Processor):
     """Callable preprocessor object returned by `@preprocess`."""
 
@@ -237,7 +314,7 @@ class Preprocessor(Processor):
             yield [dict(output.data)]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Postprocessor(Processor):
     """Callable postprocessor object returned by `@postprocess`."""
 

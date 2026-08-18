@@ -36,6 +36,12 @@ def _inputs(model: rf.Model, batch: list[list[dict]] | None = None, strata: Stra
     )
 
 
+def _set_invalid_shape(field, key: str, value: torch.Tensor) -> None:
+    """Bypass tensorclass shape checks to exercise RelFlow's forward contract."""
+
+    field.__dict__["_tensordict"]._set_str(key, value, inplace=False, validated=True)
+
+
 def test_forward_contract_canonicalizes_default_accelerator_device_indices(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _same_device(torch.device("mps"), torch.device("mps:0"))
 
@@ -111,7 +117,8 @@ def test_forward_contract_rejects_wrong_tensorfield_class() -> None:
 def test_forward_contract_rejects_wrong_state_shape() -> None:
     model = _model(rf.Category(name="color", size=16))
     inputs = _inputs(model)
-    inputs[Address("record/color")].state = inputs[Address("record/color")].state[:, :0]
+    field = inputs[Address("record/color")]
+    _set_invalid_shape(field, "state", field.state[:, :0])
 
     with pytest.raises(ForwardContractError, match="state must have shape"):
         model(inputs, strata=Strata.train)
@@ -129,7 +136,8 @@ def test_forward_contract_rejects_wrong_state_dtype() -> None:
 def test_forward_contract_rejects_content_without_state_shape_prefix() -> None:
     model = _model(rf.Category(name="color", size=16))
     inputs = _inputs(model)
-    inputs[Address("record/color")].content = inputs[Address("record/color")].content[:, :0]
+    field = inputs[Address("record/color")]
+    _set_invalid_shape(field, "content", field.content[:, :0])
 
     with pytest.raises(ForwardContractError, match="content.*state shape"):
         model(inputs, strata=Strata.train)
@@ -244,7 +252,8 @@ def test_forward_contract_runs_when_batch_signature_changes() -> None:
     for _ in range(3):
         model(inputs, strata=Strata.train)
 
-    inputs[Address("record/color")].content = inputs[Address("record/color")].content[:, :0]
+    field = inputs[Address("record/color")]
+    _set_invalid_shape(field, "content", field.content[:, :0])
 
     with pytest.raises(ForwardContractError, match="content.*state shape"):
         model(inputs, strata=Strata.train)

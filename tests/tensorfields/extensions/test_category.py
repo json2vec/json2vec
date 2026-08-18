@@ -4,6 +4,7 @@ import polars as pl
 import torch
 from tensordict import TensorDict
 
+from relflow.rich import console, incidents
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -19,12 +20,17 @@ from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
 ADDRESS = "root/items/category"
 
 
-def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | None = None) -> dict:
+def _structure_payload(
+    *,
+    size: int = 8,
+    topk: list[int] | None = None,
+    p_unavailable: float | None = None,
+) -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
         "query": "[*].items[*].label",
-        "size": 8,
+        "size": size,
     }
     if topk is not None:
         field["topk"] = topk
@@ -99,6 +105,28 @@ def test_category_vocabulary_batch_proposals_are_unique_per_call():
     assert state.encode("ALPHA") == state.unavailable_index
     assert vocabulary.snapshot() == []
     assert list(vocabulary.proposals) == ["ALPHA", "BETA"]
+
+
+def test_category_vocabulary_reports_single_process_capacity_rejections() -> None:
+    structure = Schema.model_validate(_structure_payload(size=2, p_unavailable=0.0))
+    state = _state(size=2)
+    incidents.reset(scopes=(structure,))
+
+    with console.capture() as captured:
+        field = TensorField.new(
+            values=[[["ALPHA", "BETA"]], [["GAMMA"]]],
+            address=ADDRESS,
+            schema=structure,
+            strata=Strata.train,
+            interprocess_encoding_context=state,
+        )
+
+    assert state.vocab == ["ALPHA", "BETA"]
+    assert state.drain_rejections() == 0
+    assert field.content[1, 0, 0].item() == 2
+    assert "category vocabulary reached configured capacity" in captured.get()
+    assert "'rejected': 1" in captured.get()
+    incidents.reset(scopes=(structure,))
 
 
 def test_category_tensorfield_separates_state_and_content():

@@ -21,6 +21,7 @@ Normal applications should import RelFlow from the package root:
 #| output: false
 
 import relflow as rf
+import polars as pl
 from rich.pretty import Pretty
 ```
 
@@ -50,7 +51,7 @@ extension internals and should be treated as more version-coupled.
 | `d_model` | Required | Shared representation width. |
 | `n_layers` | Required | Generated root self-attention depth. |
 | `n_heads` | Required | Generated root attention/pooling heads; positive, even, a divisor of `d_model`, and small enough that `d_model // n_heads >= 2`. |
-| `batch_size` | `1` | Expected batch size used by data modules, examples, and throughput accounting. |
+| `batch_size` | `1` | Expected batch size used by data-module defaults, examples, and Lightning metric weighting. |
 | `name` | `"record"` | Generated singleton root name and address prefix. |
 | `description` | `None` | Human-readable root metadata. |
 | `embed` | `False` | Emit the normalized root embedding during prediction. |
@@ -209,6 +210,31 @@ inspection_model = rf.Model(
 inspection_model
 ```
 
+Data modules provide the same safe notebook display. The summary reports split
+shape and execution settings without building a loader or exposing row values:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+inspection_data = pl.DataFrame(
+    {
+        "amount": [12.5, 8.0],
+        "merchant": ["bookstore", "grocery"],
+        "label": ["ok", "review"],
+    }
+)
+inspection_datamodule = rf.PolarsDataModule(
+    model=inspection_model,
+    train=inspection_data,
+    num_workers=0,
+    persistent_workers=False,
+    pin_memory=False,
+)
+
+inspection_datamodule
+```
+
 Rich composition also keeps RelFlow objects readable when they are nested in a
 basic Python container. `Pretty` is deliberate here: the mapping itself does
 not own RelFlow's MIME hook, while each nested request still uses its compact
@@ -222,6 +248,30 @@ Pretty(
     {
         "amount": inspection_model.schema.requests["record/amount"],
         "label": inspection_model.schema.requests["record/label"],
+    },
+    expand_all=True,
+)
+```
+
+Processor, observation, and selector summaries follow the same rule: show the
+shape of the configuration without exposing bound parameter values or raw
+observation values, and use stable selector expressions rather than callable
+memory addresses.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+@rf.preprocess
+def normalize_amount(observation: dict, *, scale: float) -> rf.Observation:
+    return rf.Observation({"amount": observation["amount"] * scale})
+
+
+Pretty(
+    {
+        "processor": normalize_amount.partial(scale=100.0),
+        "observation": rf.Observation({"amount": 12.5, "account": "example"}),
+        "selector": rf.where("type") == "number",
     },
     expand_all=True,
 )

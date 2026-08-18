@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from types import FunctionType, MethodType
 from typing import TYPE_CHECKING, TypeAlias
 
 from torch.utils.data import IterableDataset
 
-from relflow.data.datasets.base import NonNegativeInt, PositiveInt, RawObservation, SampleRate, StrataMap
+from relflow.data.datasets.base import (
+    NonNegativeInt,
+    PositiveInt,
+    RawObservation,
+    SampleRate,
+    StrataMap,
+    display_label,
+)
 from relflow.data.datasets.custom import CustomDataModule
 from relflow.data.processors import Preprocessor
+from relflow.structs.enums import Strata
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
@@ -17,6 +26,12 @@ else:
     Model = "relflow.architecture.root.Model"
 
 Generator: TypeAlias = Callable[[], Iterator[RawObservation]]
+
+
+def generator_label(generator: Generator) -> str:
+    if isinstance(generator, (FunctionType, MethodType)):
+        return display_label(generator.__qualname__)
+    return display_label(type(generator).__name__)
 
 
 class _SyntheticDataset(IterableDataset):
@@ -69,3 +84,9 @@ class SyntheticDataModule(CustomDataModule):
             observation_buffer_size=observation_buffer_size,
             sample_rate=sample_rate,
         )
+
+    def __rich_repr__(self):
+        splits = {
+            strata: generator_label(self.datasets[strata].generator) for strata in Strata if strata in self.datasets
+        }
+        yield from self.data_module_rich_repr(splits)

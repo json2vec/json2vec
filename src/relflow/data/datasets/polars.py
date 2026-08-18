@@ -16,6 +16,7 @@ from beartype import beartype
 from torch.utils.data import DataLoader, IterableDataset
 
 from relflow.data.datasets.base import (
+    DataModuleDisplay,
     InterprocessEncodingContext,
     NonNegativeInt,
     Pipeline,
@@ -27,6 +28,7 @@ from relflow.data.datasets.base import (
     _is_assigned_to_worker,
     _worker_buffer_size,
     _worker_identity,
+    compact_strata,
     identity,
     share_interprocess_encoding_context,
 )
@@ -233,7 +235,7 @@ def polars_dataloader(
     )
 
 
-class PolarsDataModule(lit.LightningDataModule):
+class PolarsDataModule(DataModuleDisplay, lit.LightningDataModule):
     """Lightning data module for in-memory Polars DataFrames."""
 
     @beartype
@@ -293,6 +295,20 @@ class PolarsDataModule(lit.LightningDataModule):
         self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
         self.sample_rate = {strata: float(rate) for strata, rate in Strata.expand(sample_rate, default=1.0).items()}
         self.replacement = Strata.expand(replacement, default=False)
+
+    def __rich_repr__(self):
+        splits = {
+            strata: {"rows": self.dataframes[strata].height, "columns": self.dataframes[strata].width}
+            for strata in Strata
+            if strata in self.dataframes
+        }
+        yield from self.data_module_rich_repr(splits)
+        strata = tuple(splits)
+        if not strata:
+            return
+        yield "sharding", compact_strata(self.sharding, strata), ShardingStrategy.chunk
+        yield "chunk_batch_size", compact_strata(self.chunk_batch_size, strata), 4096
+        yield "replacement", compact_strata(self.replacement, strata), False
 
     def _model(self) -> Model | None:
         if self._model_ref is None:

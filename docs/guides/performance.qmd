@@ -28,10 +28,11 @@ Separate four measurements:
 | End-to-end service | Queue, dynamic batching, all stages above, JSON, network | User-visible latency and saturation. |
 
 Lightning runs include RelFlow's `throughput/train`, `throughput/validate`,
-`throughput/test`, or `throughput/predict` epoch metric. It estimates processed
-observations from completed batches and configured model batch size. Use it for
-comparisons under the same setup, then confirm important results with an
-external end-to-end measurement.
+`throughput/test`, or `throughput/predict` epoch metric. It counts each completed
+encoded batch's actual leading dimension, including a partial final batch. In a
+distributed run it reports the total observations across ranks divided by the
+slowest rank's elapsed wall time. Use it for comparisons under the same setup,
+then confirm important results with an external end-to-end measurement.
 
 Train, validation, and test throughput use Lightning's module-metric path.
 Prediction has no Lightning result collection, so `throughput/predict` is kept
@@ -42,6 +43,9 @@ Internal Rich diagnostics are not part of this telemetry path. RelFlow keeps
 them incident-only, bounds repeated warnings, and does not add observation-,
 batch-, step-, or epoch-level output. Include the cost of the hosting
 application's progress and metric loggers when profiling a run.
+Number fields aggregate unsafe-input counts on their current device and inspect
+them only at fit/test/predict, direct-predict, or serving lifecycle boundaries;
+default forwards do not copy those diagnostic counters to the host.
 
 ## Control Repeated Context First
 

@@ -4,6 +4,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from relflow.rich import console, incidents
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -67,6 +68,28 @@ def _state(size: int = 8):
 
 
 # ---------- TensorField ----------
+
+
+def test_cluster_vocabulary_reports_single_process_capacity_rejections() -> None:
+    structure = Schema.model_validate(_structure_payload(capacity=2, bounds=(1, 2), p_unavailable=0.0))
+    state = _state(size=2)
+    incidents.reset(scopes=(structure,))
+
+    with console.capture() as captured:
+        field = TensorField.new(
+            values=[[["ALPHA", "BETA"]], [["GAMMA"]]],
+            address=ADDRESS,
+            schema=structure,
+            strata=Strata.train,
+            interprocess_encoding_context=state,
+        )
+
+    assert state.vocab == ["ALPHA", "BETA"]
+    assert state.drain_rejections() == 0
+    assert field.content[1, 0, 0].item() == 2
+    assert "cluster vocabulary reached configured capacity" in captured.get()
+    assert "'rejected': 1" in captured.get()
+    incidents.reset(scopes=(structure,))
 
 
 def test_cluster_tensorfield_routes_oov_to_sentinel_at_validate():

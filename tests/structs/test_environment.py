@@ -50,6 +50,16 @@ def test_deployment_environment_invalid_accelerator_raises(monkeypatch: pytest.M
         Deployment()
 
 
+def test_deployment_environment_validation_hides_input_values(monkeypatch: pytest.MonkeyPatch):
+    secret = "must-not-leak"
+    monkeypatch.setenv("RELFLOW_PORT", secret)
+
+    with pytest.raises(ValidationError) as captured:
+        Deployment()
+
+    assert secret not in str(captured.value)
+
+
 def test_deployment_environment_normalizes_accelerator(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("RELFLOW_CHECKPOINT", "s3://bucket/models/model.ckpt")
     monkeypatch.setenv("RELFLOW_ACCELERATOR", " CPU ")

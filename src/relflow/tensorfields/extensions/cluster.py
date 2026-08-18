@@ -157,15 +157,26 @@ class TensorField(TensorFieldBase):
         )
         learn = strata == Strata.train
 
-        interprocess_encoding_context.reserve(values, learn=learn)
+        rejected = interprocess_encoding_context.reserve(values, learn=learn)
         tokens = apply(values, interprocess_encoding_context.encode)
 
-        if len(interprocess_encoding_context) > (capacity := schema.requests[address].capacity):
-            if record_incident("vocabulary-capacity", id(schema), "cluster", str(address), capacity).emit:
+        if rejected and not interprocess_encoding_context.is_shared:
+            rejected = interprocess_encoding_context.drain_rejections()
+            capacity = schema.requests[address].capacity
+            incident = record_incident(
+                "vocabulary-capacity",
+                "cluster",
+                str(address),
+                capacity,
+                scope=schema,
+            )
+            if incident.emit and not incident.overflow:
                 console.log(
-                    "[relflow.warning]cluster vocabulary exceeds configured capacity[/]",
-                    {"address": address, "size": len(interprocess_encoding_context), "capacity": capacity},
+                    "[relflow.warning]cluster vocabulary reached configured capacity; unseen values are unavailable[/]",
+                    {"address": address, "capacity": capacity, "rejected": rejected},
                 )
+            elif incident.emit:
+                console.log("[relflow.warning]additional vocabulary-capacity diagnostics are suppressed[/]")
 
         data, states = pad(
             nested=tokens,

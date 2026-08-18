@@ -1,12 +1,17 @@
 ---
 marimo-static-output: true
-eval: false
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "marimo>=0.23.8",
+    "relflow @ git+https://github.com/relflow/relflow.git",
+  ]
 ---
 
 # Data Flow
 
-**Example status — excerpt:** the record and schema blocks form a conceptual
-walkthrough, not a training job.
+**Example status — runnable:** the record, schema, and encoded-inspection cells
+execute as a small inference-path walkthrough, not a training job.
 
 A RelFlow schema sits in the middle of the complete modeling path. It tells the
 input pipeline where values come from, tells tensorfields how to represent them,
@@ -139,13 +144,36 @@ Use `model.encode(...)` when debugging this boundary:
 #| echo: true
 #| output: true
 
+PRICE_ADDRESS = rf.Address("order", "line_items", "price")
 encoded = model.encode([record])
-print(encoded)
 ```
 
-Most application code should not depend on these internal tensor layouts. They
-are useful for checking that preprocessing and queries found the expected
-values and shapes.
+Display the batch itself for a compact inventory of leaf addresses, structural
+axis names, and state shapes:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+encoded
+```
+
+The summary reports that metadata is present but deliberately hides its raw
+values. Select one observation and an exact leaf address when you need the
+TensorField preview:
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+encoded[0][PRICE_ADDRESS]
+```
+
+`encoded[0]` selects the first observation across every leaf in the encoded
+batch. Use `encoded[:1]` instead when downstream code should retain the batch
+axis. Most application code should not depend on these internal tensor layouts;
+these compact displays are useful for checking that preprocessing and queries
+found the expected values and shapes.
 
 ## 4. Visible Values Become Context
 

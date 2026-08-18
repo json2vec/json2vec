@@ -390,6 +390,12 @@ Run tests:
 uv run pytest
 ```
 
+Run the Rich rendering and traceback showcase:
+
+```bash
+uv run python examples/rich-showcase/showcase.py
+```
+
 Run type and lint checks:
 
 ```bash

@@ -143,10 +143,11 @@ contract, loss composition, and model-selection advice live in
 
 Lightning metric loggers are separate from RelFlow's internal Rich diagnostics.
 Those diagnostics are bounded and incident-only; they do not mirror metrics,
-progress, epochs, steps, or batches. Applications own any additional console or
-traceback configuration. See
-[Troubleshooting](troubleshooting.qmd#diagnostics-and-tracebacks) for a safe Rich
-traceback setup at an application boundary.
+progress, epochs, steps, or batches. Importing `relflow` installs one safe Rich
+uncaught-exception hook with locals hidden; applications own any additional
+console output or intentional override of that process-wide presentation. See
+[Troubleshooting](troubleshooting.qmd#diagnostics-and-tracebacks) for the
+default and direct Rich configuration guidance.
 
 ## Select And Restore Checkpoints
 
@@ -236,11 +237,12 @@ Tune these layers independently and measure the result:
 - data-module workers, buffers, sampling, and sharding; and
 - checkpoint frequency and logger overhead.
 
-The built-in throughput measurement estimates processed observations from
-completed batches and `model.batch_size`. A short final batch can make that
-estimate slightly high, and comparisons are meaningful only with equivalent
-workload, hardware, and measurement windows. After `trainer.predict(...)`, look
-for `throughput/predict` in the attached logger rather than
+The built-in throughput measurement counts the actual leading dimension of
+each completed encoded batch, so a short final batch is counted correctly. In
+distributed runs it sums observations across ranks and divides by the slowest
+rank's elapsed wall time. Comparisons are still meaningful only with equivalent
+workloads, hardware, and measurement windows. After `trainer.predict(...)`,
+look for `throughput/predict` in the attached logger rather than
 `trainer.callback_metrics`.
 
 ## Common Failures
