@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -263,7 +263,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -399,34 +399,43 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-runtime" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cufft" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cufile" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-cupti" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-curand" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cusolver" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cusparse" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-nvjitlink" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-cuda-nvrtc" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { name = "nvidia-nvtx" },
+]
+
+[[package]]
+name = "deal"
+version = "4.24.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/da/76d4c3898ed8901116c8ad9dc1e5babd466e50289ce3808de55f72760d0f/deal-4.24.6.tar.gz", hash = "sha256:1cf4d4bbcb2e84767535e066d3888d2809662d7356dee420331380ff94210a1d", size = 723315, upload-time = "2025-11-30T10:55:43.765Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/4d/2a940ef9caa02bb3d6ca2a78ecbcaf158e98da972a54bc3fd8f29f7d86a9/deal-4.24.6-py3-none-any.whl", hash = "sha256:44afc0b11df6be5a4edd81409c7cd02ab0188ad9e90e93a71b4ef3d46d04c546", size = 204440, upload-time = "2025-11-30T10:55:40.954Z" },
 ]
 
 [[package]]
@@ -2358,6 +2367,7 @@ dependencies = [
     { name = "anytree" },
     { name = "beartype" },
     { name = "blake3" },
+    { name = "deal" },
     { name = "jmespath" },
     { name = "lightning" },
     { name = "loguru" },
@@ -2409,6 +2419,7 @@ requires-dist = [
     { name = "anytree", specifier = ">=2.13.0" },
     { name = "beartype", specifier = ">=0.21.0" },
     { name = "blake3", specifier = ">=1.0.8" },
+    { name = "deal", specifier = ">=4.24.6" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.124.0" },
     { name = "jmespath", specifier = ">=1.0.1" },
     { name = "lightning", specifier = ">=2.6.4" },

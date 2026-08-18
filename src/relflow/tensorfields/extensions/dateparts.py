@@ -164,7 +164,10 @@ def _(arr: np.ndarray) -> np.ndarray:
     return (np.sin(radians), np.cos(radians))
 
 
-dateparts: Plugin = Plugin(name="dateparts", traits=[Traits.continuous])
+dateparts: Plugin = Plugin(
+    name="dateparts",
+    traits=(Traits.continuous,),
+)
 
 
 @dateparts.register
@@ -174,6 +177,7 @@ class Request(RequestBase):
     type: Literal["dateparts"] = "dateparts"
     dateparts: list[DatePart]
     pattern: Annotated[str | None, pydantic.Field(default=None)] = None
+    tracking: frozenset[Metric] | None = frozenset({Metric.mae})
 
     @pydantic.field_validator("dateparts", mode="before", check_fields=False)
     @classmethod
@@ -400,6 +404,20 @@ class Decoder(DecoderBase):
         for datepart in schema.requests[address].dateparts:
             self.dateparts[datepart] = torch.nn.Linear(in_features=schema.d_model, out_features=2)
 
+        request = schema.requests[address]
+        self.metrics = torch.nn.ModuleDict(
+            {
+                datepart: dateparts.build_metric_registry(
+                    (Strata.train, Strata.validate, Strata.test),
+                    tracking=request.tracking,
+                )
+                for datepart in request.dateparts
+            }
+        )
+        self.state_metrics = dateparts.build_state_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+        )
+
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
         content: dict[DatePart, torch.Tensor] = {}
@@ -427,25 +445,29 @@ def loss(
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=(inputs := prediction.payload[TensorKey.state].reshape(numel, -1)),
-                target=(targets := batch.targets[TensorKey.state].reshape(numel)),
-                reduction="none",
-            )
-            .masked_select(mask=trainable)
-            .mean()
+        value=Metric.ce(
+            (inputs := prediction.payload[TensorKey.state].reshape(numel, -1)),
+            (targets := batch.targets[TensorKey.state].reshape(numel)),
+            mask=trainable,
         ),
     )
 
-    module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
-        value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(), #TODO replace with Metrics.accuracy
+    request: RequestBase = module.schema.requests[prediction.address]
+    decoder: Decoder = module.nodes[prediction.address].decoder
+
+    dateparts.track_state(
+        module,
+        decoder,
+        state_inputs=inputs,
+        state_targets=targets,
+        trainable=trainable,
+        address=prediction.address,
+        strata=strata,
     )
 
-    request: RequestBase = module.schema.requests[prediction.address]
-
     losses: list[torch.Tensor] = []
+
+    trainable_any: bool = bool(trainable.any().item())
 
     for datepart in request.dateparts:
         pred_raw: torch.Tensor = prediction.payload[TensorKey.content][datepart].reshape(numel, 2)
@@ -457,14 +479,22 @@ def loss(
         losses.append(
             module.track(
                 (prediction.address, strata, Metric.loss, TensorKey.content, datepart),
-                value=(1.0 - cosine).masked_select(trainable).mean(),
+                value=Metric.cosine_dissimilarity(pred, target, mask=trainable),
             )
         )
 
-        module.track(
-            (prediction.address, strata, Metric.mae, TensorKey.content, datepart),
-            value=cosine.clamp(min=-1.0, max=1.0).arccos().masked_select(trainable).mean(),
-        )
+        datepart_metrics = decoder.metrics[datepart]
+        angular_error = cosine.clamp(min=-1.0, max=1.0).arccos()
+        for metric, tracker in dateparts.iter_tracked(datepart_metrics, strata):
+            if trainable_any:
+                trained_error = angular_error[trainable]
+                batch_value = tracker(trained_error, torch.zeros_like(trained_error))
+                if metric in request.losses:
+                    losses.append(batch_value)
+            module.track(
+                (prediction.address, strata, metric, TensorKey.content, datepart),
+                value=tracker,
+            )
 
     loss += torch.stack(losses).mean()
 

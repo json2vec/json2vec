@@ -13,7 +13,7 @@ from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
 from relflow.structs.enums import Strata, TensorKey, Tokens
-from relflow.structs.metric import Metric
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -30,7 +30,10 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-vector: Plugin = Plugin(name="vector")
+vector: Plugin = Plugin(
+    name="vector",
+    traits=(Traits.continuous,),
+)
 
 
 class Objective(enum.StrEnum):
@@ -51,6 +54,7 @@ class Request(RequestBase):
     type: Literal["vector"] = "vector"
     n_dim: Annotated[int, pydantic.Field(gt=0)]
     objective: Objective = Objective.l2
+    tracking: frozenset[Metric] | None = frozenset({Metric.mae, Metric.rmse})
 
 
 def coerce(value: Any, *, n_dim: int, address: Address) -> np.ndarray:
@@ -243,6 +247,13 @@ class Decoder(DecoderBase):
             in_features=schema.d_model,
             out_features=request.n_dim,
         )
+        self.metrics = vector.build_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+            tracking=request.tracking,
+        )
+        self.state_metrics = vector.build_state_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+        )
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -270,44 +281,41 @@ def loss(
 
     output: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=state_inputs,
-                target=state_targets,
-                reduction="none",
-            )
-            .masked_select(trainable)
-            .mean()
-        ),
-    )
-
-    module.track(
-        (address, strata, Metric.accuracy, TensorKey.state),
-        value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
+        value=Metric.ce(state_inputs, state_targets, mask=trainable),
     )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
+    decoder: Decoder = module.nodes[address].decoder
+    vector.track_state(
+        module,
+        decoder,
+        state_inputs=state_inputs,
+        state_targets=state_targets,
+        trainable=trainable,
+        address=address,
+        strata=strata,
+    )
+
     if not valued.any():
+        for metric, tracker in vector.iter_tracked(decoder.metrics, strata):
+            module.track((address, strata, metric, TensorKey.content), value=tracker)
         return output
 
     inputs = prediction.payload[TensorKey.content].reshape(-1, request.n_dim)
     targets = batch.targets[TensorKey.content].reshape(-1, request.n_dim)
-    diff = inputs.subtract(targets)
 
     output += module.track(
         (address, strata, Metric.loss, TensorKey.content),
         value=request.objective.loss(inputs=inputs, targets=targets).masked_select(valued).mean(),
     )
 
-    module.track(
-        (address, strata, Metric.mae, TensorKey.content),
-        value=diff.absolute().mean(dim=1).masked_select(valued).mean(),
-    )
-
-    module.track(
-        (address, strata, Metric.rmse, TensorKey.content),
-        value=diff.square().mean(dim=1).sqrt().masked_select(valued).mean(),
-    )
+    valued_inputs = inputs[valued]
+    valued_targets = targets[valued]
+    for metric, tracker in vector.iter_tracked(decoder.metrics, strata):
+        batch_value = tracker(valued_inputs, valued_targets)
+        if metric in request.losses:
+            output = output + batch_value
+        module.track((address, strata, metric, TensorKey.content), value=tracker)
 
     return output
 

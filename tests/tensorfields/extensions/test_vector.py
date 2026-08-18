@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from tensordict import TensorDict
+from torchmetrics import Metric as TorchMetric
 
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
@@ -94,12 +97,18 @@ def test_vector_embedder_and_decoder_shapes():
 
 
 class _DummyModule:
-    def __init__(self, structure: Schema):
+    def __init__(self, structure: Schema, decoder: Decoder | None = None):
         self.schema = structure
         self.logged: list[tuple[tuple[str, ...], float]] = []
+        self.nodes = {
+            ADDRESS: SimpleNamespace(decoder=decoder if decoder is not None else Decoder(schema=structure, address=ADDRESS))
+        }
 
-    def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
-        self.logged.append((names, float(value.detach().cpu())))
+    def track(self, names: tuple[str, ...], value: torch.Tensor | TorchMetric) -> torch.Tensor | TorchMetric:
+        if isinstance(value, TorchMetric):
+            self.logged.append((names, float(value.compute().detach().cpu())))
+        else:
+            self.logged.append((names, float(value.detach().cpu())))
         return value
 
 

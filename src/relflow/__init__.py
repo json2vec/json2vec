@@ -43,7 +43,6 @@ from relflow.structs.enums import (
     TensorKey,
     Tokens,
 )
-from relflow.structs.metric import Metric, Traits
 from relflow.structs.experiment import (
     NodeAttribute,
     NodePredicate,
@@ -52,6 +51,7 @@ from relflow.structs.experiment import (
     predicate,
     where,
 )
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.structure import Branch, Mask
 from relflow.structs.tree import Address, Leaf
 from relflow.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase

@@ -15,7 +15,7 @@ from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
 from relflow.structs.enums import Strata, TensorKey, Tokens
-from relflow.structs.metric import Metric
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -32,7 +32,10 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Plugin = Plugin(name="hash")
+hashable: Plugin = Plugin(
+    name="hash",
+    traits=(Traits.discrete,),
+)
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
@@ -68,6 +71,7 @@ class Request(RequestBase):
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
     offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     n_buckets: Annotated[int, pydantic.Field(gt=1, default=4)] = 4
+    tracking: frozenset[Metric] | None = frozenset({Metric.accuracy})
 
 
 @hashable.register
@@ -251,6 +255,15 @@ class Decoder(DecoderBase):
             in_features=schema.d_model,
             out_features=request.n_hashes * request.n_buckets,
         )
+        self.metrics = hashable.build_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+            tracking=request.tracking,
+            ndim=2,
+            overrides={Metric.accuracy: {"num_classes": request.n_buckets}},
+        )
+        self.state_metrics = hashable.build_state_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+        )
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -276,29 +289,28 @@ def loss(
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=state_inputs,
-                target=state_targets,
-                reduction="none",
-            )
-            .masked_select(trainable)
-            .mean()
-        ),
+        value=Metric.ce(state_inputs, state_targets, mask=trainable),
     )
 
-    module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
-        value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
+    decoder: Decoder = module.nodes[prediction.address].decoder
+    hashable.track_state(
+        module,
+        decoder,
+        state_inputs=state_inputs,
+        state_targets=state_targets,
+        trainable=trainable,
+        address=prediction.address,
+        strata=strata,
     )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
-    if not valued.any():
-        return loss
-
     request: Request = module.schema.requests[prediction.address]
     n_hashes: int = request.n_hashes
     n_buckets: int = request.n_buckets
+    if not valued.any():
+        for metric, tracker in hashable.iter_tracked(decoder.metrics, strata):
+            module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
+        return loss
 
     # Per-hash categorical over deterministic quantile buckets.
     inputs = prediction.payload[TensorKey.content].reshape(N * n_hashes, n_buckets)
@@ -314,9 +326,9 @@ def loss(
         .reshape(N * n_hashes)
     )
 
-    per_hash_ce = torch.nn.functional.cross_entropy(
-        input=inputs,
-        target=bucket_targets,
+    per_hash_ce = Metric.ce(
+        inputs,
+        bucket_targets,
         reduction="none",
     )
 
@@ -325,18 +337,13 @@ def loss(
         value=(per_hash_ce.reshape(N, n_hashes).mean(dim=-1).masked_select(valued).mean()),
     )
 
-    module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=(
-            inputs.argmax(dim=-1)
-            .eq(bucket_targets)
-            .float()
-            .reshape(N, n_hashes)
-            .mean(dim=-1)
-            .masked_select(valued)
-            .mean()
-        ),
-    )
+    valued_mask = valued.unsqueeze(1).expand(N, n_hashes).reshape(N * n_hashes)
+    predicted_labels = inputs.argmax(dim=-1)
+    for metric, tracker in hashable.iter_tracked(decoder.metrics, strata):
+        batch_value = tracker(predicted_labels[valued_mask], bucket_targets[valued_mask])
+        if metric in request.losses:
+            loss = loss + batch_value
+        module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
 
     return loss
 

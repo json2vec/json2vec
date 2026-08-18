@@ -14,7 +14,7 @@ from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
 from relflow.structs.enums import Strata, TensorKey, Tokens
-from relflow.structs.metric import Metric
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -32,7 +32,10 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-number: Plugin = Plugin(name="number")
+number: Plugin = Plugin(
+    name="number",
+    traits=(Traits.continuous,),
+)
 number.callback(CounterUpdateCallback)
 
 FOURIER_SAFE_MAX_ANGLE = float(1e4)
@@ -68,6 +71,7 @@ class Request(RequestBase):
     offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     alpha: Annotated[float | None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
     objective: Objective = Objective.mae
+    tracking: frozenset[Metric] | None = frozenset({Metric.mae, Metric.rmse})
 
 
 @number.register
@@ -330,8 +334,14 @@ class Decoder(DecoderBase):
     def __init__(self, schema: Schema, address: Address):
         super().__init__(schema=schema, address=address)
 
+        request: Request = schema.requests[address]
         self.classification = torch.nn.Linear(in_features=schema.d_model, out_features=len(Tokens))
         self.regression = torch.nn.Linear(in_features=schema.d_model, out_features=1)
+        self.metrics = number.build_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+            tracking=request.tracking,
+        )
+        self.state_metrics = number.build_state_metric_registry((Strata.train, Strata.validate, Strata.test))
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -363,15 +373,11 @@ def loss(
 
     loss: torch.Tensor = module.track(
         (address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=prediction.payload[TensorKey.state].reshape(N, -1),
-                target=state_targets,
-                weight=embedder.counter.weight,
-                reduction="none",
-            )
-            .masked_select(trainable)
-            .mean()
+        value=Metric.ce(
+            prediction.payload[TensorKey.state].reshape(N, -1),
+            state_targets,
+            weight=embedder.counter.weight,
+            mask=trainable,
         ),
     )
 
@@ -390,15 +396,28 @@ def loss(
         .mean(),
     )
 
-    module.track(
-        (address, strata, Metric.mae, TensorKey.content),
-        value=diff.absolute().masked_select(trainable).float().mean(),
+    decoder: Decoder = module.nodes[address].decoder
+    number.track_state(
+        module,
+        decoder,
+        state_inputs=prediction.payload[TensorKey.state].reshape(N, -1),
+        state_targets=state_targets,
+        trainable=trainable,
+        address=address,
+        strata=strata,
     )
 
-    module.track(
-        (address, strata, Metric.rmse, TensorKey.content),
-        value=diff.square().masked_select(trainable).float().mean().sqrt(),
-    )
+    if trainable.any():
+        trained_inputs = inputs[trainable]
+        trained_targets = target[trainable]
+        for metric, tracker in number.iter_tracked(decoder.metrics, strata):
+            batch_value = tracker(trained_inputs, trained_targets)
+            if metric in request.losses:
+                loss = loss + batch_value
+            module.track((address, strata, metric, TensorKey.content), value=tracker)
+    else:
+        for metric, tracker in number.iter_tracked(decoder.metrics, strata):
+            module.track((address, strata, metric, TensorKey.content), value=tracker)
 
     return loss
 

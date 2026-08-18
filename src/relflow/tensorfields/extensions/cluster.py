@@ -18,7 +18,7 @@ from tensordict import TensorDict, tensorclass
 from relflow.data.nested import apply, extract_mask_literals, pad
 from relflow.distributed import broadcast_object
 from relflow.structs.enums import Strata, TensorKey, Tokens
-from relflow.structs.metric import Metric
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -36,7 +36,10 @@ if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
-cluster: Plugin = Plugin(name="cluster")
+cluster: Plugin = Plugin(
+    name="cluster",
+    traits=(Traits.discrete,),
+)
 
 cluster.callback(VocabularySyncCallback, CounterUpdateCallback)
 
@@ -75,6 +78,7 @@ class Request(RequestBase):
             description="(lower_bound, upper_bound) for the number of clusters. A single int is broadcast to (K, K) to specify an exact number of clusters.",
         ),
     ]
+    tracking: frozenset[Metric] | None = frozenset({Metric.accuracy})
 
     @pydantic.field_validator("n_clusters", mode="before")
     @classmethod
@@ -523,6 +527,22 @@ class Decoder(DecoderBase):
                 ),
             }
         )
+        self.metrics = cluster.build_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+            tracking=request.tracking,
+            ndim=2,
+            overrides={
+                Metric.accuracy: {"num_classes": request.capacity},
+                Metric.f1: {"num_classes": request.capacity},
+                Metric.mcc: {"num_classes": request.capacity},
+                Metric.cohen_kappa: {"num_classes": request.capacity},
+                Metric.specificity_at_sensitivity: {"num_classes": request.capacity},
+                Metric.sensitivity_at_specificity: {"num_classes": request.capacity},
+            },
+        )
+        self.state_metrics = cluster.build_state_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+        )
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -551,29 +571,33 @@ def loss(
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=state_inputs,
-                target=state_targets,
-                weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
-                reduction="none",
-            )
-            .masked_select(trainable)
-            .mean()
+        value=Metric.ce(
+            state_inputs,
+            state_targets,
+            weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
+            mask=trainable,
         ),
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
-        value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
-    )
-    module.track(
         (prediction.address, strata, "vocabulary", "size"),
         value=state_inputs.new_tensor(len(embedder.vocab.master), dtype=torch.float32),
+    )
+    decoder: Decoder = module.nodes[prediction.address].decoder
+    cluster.track_state(
+        module,
+        decoder,
+        state_inputs=state_inputs,
+        state_targets=state_targets,
+        trainable=trainable,
+        address=prediction.address,
+        strata=strata,
     )
 
     valued: torch.Tensor = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
+        for metric, tracker in cluster.iter_tracked(decoder.metrics, strata):
+            module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
         return loss
 
     cluster_logits: torch.Tensor = prediction.payload[TensorKey.cluster].reshape(N, -1)
@@ -587,18 +611,23 @@ def loss(
     if known.any():
         loss += module.track(
             (prediction.address, strata, Metric.loss, TensorKey.content),
-            value=torch.nn.functional.cross_entropy(
-                input=vocab_logits[known],
-                target=content_targets[known],
+            value=Metric.ce(
+                vocab_logits[known],
+                content_targets[known],
                 weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
                 reduction="mean",
             ),
         )
         vocab_size: int = len(embedder.vocab.master)
-        module.track(
-            (prediction.address, strata, Metric.accuracy, TensorKey.content),
-            value=vocab_logits[:, :vocab_size].argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
-        )
+        predicted_labels = vocab_logits[:, :vocab_size].argmax(dim=1)
+        for metric, tracker in cluster.iter_tracked(decoder.metrics, strata):
+            batch_value = tracker(predicted_labels[known], content_targets[known])
+            if metric in request.losses:
+                loss = loss + batch_value
+            module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
+    else:
+        for metric, tracker in cluster.iter_tracked(decoder.metrics, strata):
+            module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
 
     if strata != Strata.train:
         return loss

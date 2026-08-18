@@ -23,6 +23,7 @@ dependencies = [
     "tensordict>=0.10.0",
     "torch>=2.7.1",
     "torchmetrics>=1.9.0",
+    "deal>=4.24.6",
 ]
 
 [project.optional-dependencies]
