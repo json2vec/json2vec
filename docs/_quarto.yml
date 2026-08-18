@@ -65,6 +65,8 @@ website:
             text: Schema Mutation
           - href: guides/custom-tensorfields.qmd
             text: Experimental Tensorfields
+          - href: guides/custom-metrics.qmd
+            text: Custom Metrics & Plugins
           - href: guides/troubleshooting.qmd
             text: Troubleshooting
           - href: reference/public-api.qmd
@@ -163,6 +165,8 @@ website:
             text: Schema Mutation
           - href: guides/custom-tensorfields.qmd
             text: Experimental Tensorfields
+          - href: guides/custom-metrics.qmd
+            text: Custom Metrics & Plugins
           - href: guides/troubleshooting.qmd
             text: Troubleshooting
       - section: Reference

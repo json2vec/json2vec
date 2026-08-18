@@ -1,0 +1,179 @@
+---
+marimo-static-output: true
+eval: false
+---
+
+# Customizing Metrics And Plugins
+
+This guide covers RelFlow's public surface for adding new metrics, wiring them
+into a tensorfield's tracking set, and using them as gradient-producing losses.
+The three coordinated primitives are `rf.Metric`, `rf.Traits`, and `rf.Plugin`.
+
+For the built-in metrics reference and how validation is invoked, see
+[Evaluation & Metrics](evaluation.qmd).
+
+## The Three Primitives
+
+`rf.Metric` is a named metric singleton. It has an optional trait tag, an
+optional stateful factory (typically a `torchmetrics.Metric` subclass), and one
+or more functional implementations selected by input rank.
+
+`rf.Traits` is the compatibility tag a plugin advertises to metric consumers.
+Its values are `discrete`, `continuous`, and `embedding`. A plugin only sees
+metrics whose traits intersect its own.
+
+`rf.Plugin` is the per-tensorfield registry. Every extension declares one and
+uses it to build stateful metric trackers, drive tracking-only observations,
+and compose gradient-producing losses.
+
+## Declaring A New Metric
+
+Register a functional impl and a stateful factory on the same singleton:
+
+```{python .marimo}
+#| echo: true
+#| output: false
+
+from functools import partial
+import torch
+import torchmetrics
+import relflow as rf
+
+f1_score = rf.Metric(
+    "f1_score",
+    traits=(rf.Traits.discrete,),
+    higher_is_better=True,
+)
+
+@f1_score.register
+def _f1_functional(prediction, target, **_):
+    if prediction.ndim > target.ndim:
+        prediction = prediction.argmax(dim=-1)
+    tp = (prediction & target.bool()).sum().float()
+    fp = (prediction & ~target.bool()).sum().float()
+    fn = (~prediction.bool() & target.bool()).sum().float()
+    precision = tp / (tp + fp).clamp_min(1.0)
+    recall = tp / (tp + fn).clamp_min(1.0)
+    return 2 * precision * recall / (precision + recall).clamp_min(1.0)
+
+f1_score.factory(
+    partial(torchmetrics.classification.BinaryF1Score),
+)
+```
+
+The functional form is used when a plugin declares the metric in `tracking` but
+not in `state_tracking`. The stateful form is used when the metric appears in
+`state_tracking` and needs proper DDP-aware epoch accumulation.
+
+## Advertising Traits Through A Plugin
+
+A plugin owns three metric sets and a trait tag:
+
+```{python .marimo}
+#| echo: true
+#| output: false
+
+my_plugin = rf.Plugin(
+    name="my_bernoulli_head",
+    traits=(rf.Traits.discrete,),
+    tracking={rf.Metric.accuracy, f1_score},
+    losses={rf.Metric.bce},
+    state_tracking={rf.Metric.accuracy},
+)
+```
+
+The rules are:
+
+- `tracking` is the full observable set. Anything here is logged.
+- `state_tracking` must be a subset of `tracking`. Members are accumulated
+  through their stateful factory across the epoch.
+- `losses` must be a subset of `tracking` and must have a registered stateful
+  factory. Membership makes the tracker's per-batch forward value contribute
+  gradient to the training loop.
+- Every metric in any of the three sets must expose a trait that intersects
+  the plugin's own traits, or `Plugin.__init__` raises at construction time.
+
+## Building The State Registry
+
+Stateful trackers are epoch-scoped and must be registered inside the model so
+that Lightning drives their `.reset()` at epoch boundaries. RelFlow does this
+via a `ModuleDict` registry:
+
+```{python .marimo}
+#| echo: true
+#| output: false
+
+from relflow.structs import Strata
+
+state_metrics = my_plugin.build_state_metric_registry(
+    (Strata.train, Strata.validate, Strata.test),
+)
+```
+
+`state_metrics` is a `nn.ModuleDict` keyed by `<strata>_state_metrics` with an
+inner `ModuleDict` mapping metric name to instance. Assign it to a decoder
+attribute (`decoder.state_metrics = state_metrics`) so Lightning discovers it.
+
+Iteration during training uses `plugin.iter_state_tracked(state_metrics, strata)`
+which yields `(metric, tracker)` pairs.
+
+## Composing Gradient-Producing Losses
+
+Loss composition is driven from the same `iter_tracked` loop that logs each
+metric, so the per-batch value used for gradient and the value shown on
+dashboards are the same tensor:
+
+```python
+loss = my_own_ce_term(...)
+for metric, tracker in my_plugin.iter_tracked(decoder.metrics, strata):
+    if trainable.any():
+        batch_value = tracker(preds_masked, targets_masked)
+        if metric in request.losses:
+            loss = loss + batch_value
+    module.track((address, strata, metric, TensorKey.content), value=tracker)
+return loss
+```
+
+The loss set is carried on the request (`request.losses`), not on the plugin.
+This lets the same plugin serve different fields with different loss
+compositions. Checking `metric in request.losses` at the composition site
+keeps the code local and avoids a plugin-level helper. The
+tracker's `forward` runs at most once per step, updates internal state for the
+epoch-level `.compute()` used by `module.track(..., value=tracker)`, and
+returns the per-batch value used for gradient.
+
+Empty-mask branches must still walk `iter_tracked` on every rank so metric log
+keys stay synchronized under DDP, but should not call `tracker(...)` — logging
+the tracker instance is enough, and no loss term is contributed on ranks with
+no data.
+
+## Opting Into O(1) Accuracy
+
+`Metric.hits_total_accuracy` is a built-in alternative to `Metric.accuracy`
+for cases where even torchmetrics' per-class state metadata is unwelcome (for
+example vocabulary-scale label counts). It stores exactly two scalar
+accumulators, `hits` and `total`, regardless of the number of classes:
+
+```{python .marimo}
+#| echo: true
+#| output: false
+
+vocab_plugin = rf.Plugin(
+    name="my_vocab_head",
+    traits=(rf.Traits.discrete,),
+    tracking={rf.Metric.hits_total_accuracy},
+    state_tracking={rf.Metric.hits_total_accuracy},
+)
+```
+
+Semantically it matches `argmax.eq(target).mean()` and aggregates additively
+across batches and ranks.
+
+## Related Guides
+
+- [Evaluation & Metrics](evaluation.qmd) — how metrics surface in Lightning
+  logs and validation output.
+- [Experimental Tensorfields](custom-tensorfields.qmd) — how to build a full
+  tensorfield extension that uses a custom plugin.
+- [Public API Map](../reference/public-api.qmd) — exhaustive list of exported
+  metric, trait, and plugin names.

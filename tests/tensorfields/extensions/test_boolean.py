@@ -6,8 +6,9 @@ import torch
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
+from relflow.structs.metric import Metric
 from relflow.structs.packages import Prediction
 from relflow.tensorfields.extensions.boolean import BooleanCounter, Decoder, Embedder, TensorField, loss, write
 

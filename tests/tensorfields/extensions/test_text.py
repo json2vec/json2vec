@@ -510,8 +510,11 @@ class _DummyModule:
         self.nodes = {ADDRESS: SimpleNamespace(embedder=embedder, decoder=decoder)}
         self.logged: list[tuple[tuple[str, ...], float]] = []
 
-    def track(self, names: tuple[str, ...], value: torch.Tensor) -> torch.Tensor:
-        self.logged.append((names, float(value.detach().cpu())))
+    def track(self, names: tuple[str, ...], value):
+        if hasattr(value, "compute") and not hasattr(value, "detach"):
+            self.logged.append((names, float(value.compute().detach().cpu())))
+        else:
+            self.logged.append((names, float(value.detach().cpu())))
         return value
 
 

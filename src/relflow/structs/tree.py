@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.text import Text
 
 from relflow.structs.enums import Overflow
+from relflow.structs.metric import Metric
 
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
 PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
@@ -172,6 +173,12 @@ class Node(NodeMixin, Renderable, pydantic.BaseModel):
         normalized = value.strip()
         return normalized or None
 
+    @staticmethod
+    def _coerce_metric_set(value: Any) -> Any:
+        if value is None or isinstance(value, frozenset):
+            return value
+        return frozenset(value)
+
     def post_bind_validate(self):
         return None
 
@@ -196,6 +203,8 @@ class Leaf(Node):
     p_mask: Rate = 0.0
     p_prune: PruneRate = 0.0
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
+    tracking: frozenset[Metric] | None = None
+    losses: frozenset[Metric] = frozenset()
 
     def __init__(self, name: str | None = None, **data: Any):
         if name is not None:
@@ -272,6 +281,17 @@ class Leaf(Node):
 
         return value
 
+    @pydantic.field_validator("tracking", mode="before")
+    @classmethod
+    def coerce_tracking(cls, value: Any) -> Any:
+        return cls._coerce_metric_set(value)
+
+    @pydantic.field_validator("losses", mode="before")
+    @classmethod
+    def coerce_losses(cls, value: Any) -> Any:
+        coerced = cls._coerce_metric_set(value)
+        return frozenset() if coerced is None else coerced
+
     @pydantic.model_validator(mode="after")
     def check_jmespath_query(self):
         if self.query is None:
@@ -284,6 +304,31 @@ class Leaf(Node):
             jmespath.compile(self.query)
         except JMESPathError as e:
             raise ValueError(f"invalid jmespath query: {e}") from e
+
+        return self
+
+    @pydantic.model_validator(mode="after")
+    def check_metric_sets(self):
+        from relflow.tensorfields.base import TENSORFIELDS
+
+        plugin = TENSORFIELDS.get(self.type)
+        if plugin is None:
+            return self
+
+        eligible = plugin.trait_eligible_metrics()
+
+        if self.tracking is None:
+            self.tracking = eligible
+        else:
+            for metric in self.tracking:
+                if metric not in eligible:
+                    raise ValueError(f"request '{self.name or self.type}' cannot track metric '{metric.name}': not eligible for plugin '{plugin.name}' (traits {sorted(t.value for t in plugin.traits)})")
+
+        for metric in self.losses:
+            if metric not in eligible:
+                raise ValueError(f"request '{self.name or self.type}' cannot use metric '{metric.name}' as a loss: not eligible for plugin '{plugin.name}'")
+            if metric not in self.tracking:
+                raise ValueError(f"request '{self.name or self.type}' loss metric '{metric.name}' must also appear in tracking")
 
         return self
 
@@ -340,7 +385,7 @@ class Leaf(Node):
             line.append_text(common)
             yield line
 
-        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", *common_names}
+        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", "tracking", "losses", *common_names}
         specific = Text()
         first = True
         for name, field in type(self).model_fields.items():

@@ -5,16 +5,19 @@ from __future__ import annotations
 import re
 import warnings
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, TypeAlias, TypeVar, cast, overload
 
+import deal
 import pluggy
 import torch
 from lightning.pytorch import Callback
 from rich.text import Text
 from tensordict import TensorDict
+from torchmetrics import Metric as TorchMetric
 
 from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
+from relflow.structs.metric import Metric, Traits, TraitsInput, _coerce_traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address, Leaf, Node, Renderable
 from relflow.tensorfields.spec import PluginSpec
@@ -382,17 +385,35 @@ class Plugin:
     Register request, tensorfield, embedder, decoder, loss, and write
     components with `@plugin.register`. Creating a plugin with an existing
     name replaces the registry entry and emits a warning.
+
+    `traits` advertises which `Traits` this datatype satisfies so that
+    trait-guarded metrics can query eligibility via
+    `plugin.qualifies_for(metric)`.
     """
 
-    def __init__(self, name: str):
-        if not isinstance(name, str):
-            raise TypeError("Plugin name must be a string")
-
+    @deal.raises(TypeError, ValueError)
+    @deal.pre(
+        lambda self, name, traits=None, state_tracking=None:
+        isinstance(name, str),
+        message="Plugin name must be a string",
+    )
+    def __init__(
+        self,
+        name: str,
+        *,
+        traits: TraitsInput = None,
+        state_tracking: Iterable[Metric] | None = None,
+    ):
         # should start with a letter and contain only lowercase letters, numbers, and underscores
         if not re.match(r"^[a-z0-9_]+$", name):
             raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
 
         self.name: str = name
+        self.traits: frozenset[Traits] = _coerce_traits(traits)
+        self.state_tracking: frozenset[Metric] = (
+            frozenset(state_tracking) if state_tracking is not None else frozenset({Metric.accuracy})
+        )
+        self._validate_state_tracking()
         self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
 
@@ -404,6 +425,105 @@ class Plugin:
             )
 
         TENSORFIELDS[name] = self
+
+    def _validate_state_tracking(self) -> None:
+        for metric in self.state_tracking:
+            if not isinstance(metric, Metric):
+                raise TypeError(
+                    f"Plugin '{self.name}' state_tracking entries must be Metric instances, got {type(metric).__name__}"
+                )
+            if not metric._factories:
+                raise ValueError(
+                    f"Plugin '{self.name}' cannot state-track metric '{metric.name}': no stateful factory is registered for it"
+                )
+
+    @property
+    def trait_eligible_metrics(self) -> frozenset[Metric]:
+        return frozenset(
+            metric
+            for metric in Metric._registry.values()
+            if metric.traits and metric._factories and metric.qualifies(self)
+        )
+
+    def qualifies_for(self, metric: Metric) -> bool:
+        return metric.qualifies(self)
+
+    def build_metric_registry(
+        self,
+        strata: Iterable[Strata],
+        *,
+        tracking: Iterable[Metric],
+        ndim: int | None = None,
+        overrides: dict[Metric, dict[str, Any]] | None = None,
+    ) -> torch.nn.ModuleDict:
+        overrides = overrides or {}
+        tracked = frozenset(tracking)
+        return torch.nn.ModuleDict(
+            {
+                f"{stratum.value}_metrics": torch.nn.ModuleDict(
+                    {
+                        metric.name: metric.stateful(ndim=ndim, **overrides.get(metric, {}))
+                        for metric in sorted(tracked, key=lambda m: m.name)
+                    }
+                )
+                for stratum in strata
+            }
+        )
+
+    def build_state_metric_registry(
+        self,
+        strata: Iterable[Strata],
+    ) -> torch.nn.ModuleDict:
+        n_tokens = len(Tokens)
+        return torch.nn.ModuleDict(
+            {
+                f"{stratum.value}_state_metrics": torch.nn.ModuleDict(
+                    {
+                        metric.name: metric.stateful(ndim=2, num_classes=n_tokens)
+                        for metric in sorted(self.state_tracking, key=lambda m: m.name)
+                    }
+                )
+                for stratum in strata
+            }
+        )
+
+    def iter_tracked(
+        self,
+        registry: torch.nn.ModuleDict,
+        strata: Strata,
+    ) -> Iterator[tuple[Metric, TorchMetric]]:
+        strata_dict = cast(torch.nn.ModuleDict, registry[f"{strata.value}_metrics"])
+        for name in sorted(strata_dict.keys()):
+            yield Metric.get(name), cast(TorchMetric, strata_dict[name])
+
+    def iter_state_tracked(
+        self,
+        registry: torch.nn.ModuleDict,
+        strata: Strata,
+    ) -> Iterator[tuple[Metric, TorchMetric]]:
+        strata_dict = cast(torch.nn.ModuleDict, registry[f"{strata.value}_state_metrics"])
+        for metric in sorted(self.state_tracking, key=lambda m: m.name):
+            yield metric, cast(TorchMetric, strata_dict[metric.name])
+
+    def track_state(
+        self,
+        module: "Model",
+        decoder: DecoderBase,
+        state_inputs: torch.Tensor,
+        state_targets: torch.Tensor,
+        trainable: torch.Tensor,
+        address: Address,
+        strata: Strata,
+    ) -> None:
+        state_metrics = cast(torch.nn.ModuleDict, decoder.state_metrics)
+        if trainable.any():
+            predicted = state_inputs.argmax(dim=-1)
+            for metric, tracker in self.iter_state_tracked(state_metrics, strata):
+                tracker.update(predicted[trainable], state_targets[trainable])
+                module.track((address, strata, metric, TensorKey.state), value=tracker)
+        else:
+            for metric, tracker in self.iter_state_tracked(state_metrics, strata):
+                module.track((address, strata, metric, TensorKey.state), value=tracker)
 
     @overload
     def register(self, obj: None, component: Component | str) -> None: ...

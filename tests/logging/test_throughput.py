@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import torch
 
 from relflow.logging.throughput import ThroughputLogger
-from relflow.structs.enums import Metric, Strata
+from relflow.structs.enums import Strata
+from relflow.structs.metric import Metric
 
 
 def test_throughput_logger_tracks_once_per_epoch():

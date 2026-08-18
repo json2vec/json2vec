@@ -12,7 +12,8 @@ from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -30,7 +31,10 @@ if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
-category: Plugin = Plugin(name="category")
+category: Plugin = Plugin(
+    name="category",
+    traits=(Traits.discrete,),
+)
 
 category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
@@ -48,6 +52,7 @@ class Request(RequestBase):
     ] = 1024
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
     topk: list[int] | None = None
+    tracking: frozenset[Metric] | None = frozenset({Metric.accuracy})
 
     @property
     def size(self) -> int:
@@ -298,6 +303,22 @@ class Decoder(DecoderBase):
                 ),
             }
         )
+        self.metrics = category.build_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+            tracking=request.tracking,
+            ndim=2,
+            overrides={
+                Metric.accuracy: {"num_classes": request.size},
+                Metric.f1: {"num_classes": request.size},
+                Metric.mcc: {"num_classes": request.size},
+                Metric.cohen_kappa: {"num_classes": request.size},
+                Metric.specificity_at_sensitivity: {"num_classes": request.size},
+                Metric.sensitivity_at_specificity: {"num_classes": request.size},
+            },
+        )
+        self.state_metrics = category.build_state_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+        )
 
     @beartype
     def decode(self, pooled: torch.Tensor) -> TensorDict[TensorKey, torch.Tensor]:
@@ -317,6 +338,7 @@ def loss(
     strata: Strata,
 ) -> torch.Tensor:
     embedder: Embedder = module.nodes[prediction.address].embedder
+    request: Request = module.schema.requests[prediction.address]
     N: int = batch.targets[TensorKey.state].numel()
     trainable = batch.trainable.reshape(N)
 
@@ -325,29 +347,33 @@ def loss(
 
     loss: torch.Tensor = module.track(
         (prediction.address, strata, Metric.loss, TensorKey.state),
-        value=(
-            torch.nn.functional.cross_entropy(
-                input=state_inputs,
-                target=state_targets,
-                weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
-                reduction="none",
-            )
-            .masked_select(trainable)
-            .mean()
+        value=Metric.ce(
+            state_inputs,
+            state_targets,
+            weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
+            mask=trainable,
         ),
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
-        value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
-    )
-    module.track(
         (prediction.address, strata, "vocabulary", "size"),
         value=state_inputs.new_tensor(len(embedder.vocab.master), dtype=torch.float32),
+    )
+    decoder: Decoder = module.nodes[prediction.address].decoder
+    category.track_state(
+        module,
+        decoder,
+        state_inputs=state_inputs,
+        state_targets=state_targets,
+        trainable=trainable,
+        address=prediction.address,
+        strata=strata,
     )
 
     valued = trainable & state_targets.eq(Tokens.valued.value)
     if not valued.any():
+        for metric, tracker in category.iter_tracked(decoder.metrics, strata):
+            module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
         return loss
 
     content_inputs = prediction.payload[TensorKey.content].reshape(N, -1)
@@ -362,9 +388,9 @@ def loss(
 
     content_loss_sum = content_inputs.new_zeros(())
     if known.any():
-        known_losses = torch.nn.functional.cross_entropy(
-            input=content_inputs[known],
-            target=content_targets[known],
+        known_losses = Metric.ce(
+            content_inputs[known],
+            content_targets[known],
             weight=cast(Counter, embedder.counters[TensorKey.content.name]).weight,
             reduction="none",
         )
@@ -381,6 +407,8 @@ def loss(
     loss += content_loss
 
     if not known.any():
+        for metric, tracker in category.iter_tracked(decoder.metrics, strata):
+            module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
         return loss
 
     for topk in module.schema.requests[prediction.address].topk:
@@ -396,10 +424,13 @@ def loss(
             ),
         )
 
-    module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.content),
-        value=content_inputs.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
-    )
+    known_inputs = content_inputs[known]
+    known_targets = content_targets[known]
+    for metric, tracker in category.iter_tracked(decoder.metrics, strata):
+        batch_value = tracker(known_inputs, known_targets)
+        if metric in request.losses:
+            loss = loss + batch_value
+        module.track((prediction.address, strata, metric, TensorKey.content), value=tracker)
 
     return loss
 

@@ -9,17 +9,10 @@ import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
-from torchmetrics import Metric as TorchMetric
-from torchmetrics.classification import (
-    BinaryAccuracy,
-    BinaryAUROC,
-    BinaryPrecision,
-    BinaryRecall,
-    BinarySpecificity,
-)
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import Strata, TensorKey, Tokens
+from relflow.structs.metric import Metric, Traits
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -37,7 +30,10 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-boolean: Plugin = Plugin(name="boolean")
+boolean: Plugin = Plugin(
+    name="boolean",
+    traits=(Traits.discrete,),
+)
 boolean.callback(CounterUpdateCallback)
 BOOLEAN_VALUES = (-1.0, 0.0, 1.0)
 Threshold = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
@@ -56,6 +52,9 @@ class Request(RequestBase):
 
     type: Literal["boolean"] = "boolean"
     threshold: Threshold | Thresholds = 0.5
+    tracking: frozenset[Metric] | None = frozenset(
+        {Metric.accuracy, Metric.precision, Metric.recall, Metric.auc}
+    )
 
     @pydantic.field_validator("threshold", mode="after")
     @classmethod
@@ -201,28 +200,17 @@ class Decoder(DecoderBase):
         request: Request = schema.requests[address]
         self.state = torch.nn.Linear(schema.d_model, len(Tokens))
         self.content = torch.nn.Linear(schema.d_model, 1)
-        self.thresholds = request.thresholds
-        self.metrics = torch.nn.ModuleDict(
-            {
-                f"{strata.value}_metrics": torch.nn.ModuleDict(
-                    {
-                        Metric.auc.value: BinaryAUROC(),
-                        **{
-                            f"threshold_{index}": torch.nn.ModuleDict(
-                                {
-                                    Metric.accuracy.value: BinaryAccuracy(threshold=threshold),
-                                    Metric.precision.value: BinaryPrecision(threshold=threshold),
-                                    Metric.recall.value: BinaryRecall(threshold=threshold),
-                                    Metric.specificity.value: BinarySpecificity(threshold=threshold),
-                                }
-                            )
-                            for index, threshold in enumerate(self.thresholds)
-                        },
-                    }
-                )
-                for strata in (Strata.train, Strata.validate, Strata.test)
-            }
+        self.metrics = boolean.build_metric_registry(
+            (Strata.train, Strata.validate, Strata.test),
+            tracking=request.tracking,
+            ndim=1,
+            overrides={
+                Metric.accuracy: {"threshold": request.threshold},
+                Metric.precision: {"threshold": request.threshold},
+                Metric.recall: {"threshold": request.threshold},
+            },
         )
+        self.state_metrics = boolean.build_state_metric_registry((Strata.train, Strata.validate, Strata.test))
 
     def content_metrics(self, strata: Strata) -> Iterator[tuple[str, TorchMetric]]:
         metrics = cast(torch.nn.ModuleDict, self.metrics[f"{strata.value}_metrics"])
@@ -245,6 +233,7 @@ class Decoder(DecoderBase):
 @boolean.register
 def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: Strata) -> torch.Tensor:
     address = prediction.address
+    request: Request = module.schema.requests[address]
     embedder: Embedder = module.nodes[address].embedder
     trainable = batch.trainable.reshape(-1)
     state_targets = batch.targets[TensorKey.state].reshape(-1)
@@ -252,41 +241,51 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
 
     total = module.track(
         (address, strata, Metric.loss, TensorKey.state),
-        value=torch.nn.functional.cross_entropy(
+        value=Metric.ce(
             state_logits[trainable],
             state_targets[trainable],
             weight=cast(Counter, embedder.counters[TensorKey.state.name]).weight,
         ),
     )
-    module.track(
-        (address, strata, Metric.accuracy, TensorKey.state),
-        value=state_logits[trainable].argmax(dim=-1).eq(state_targets[trainable]).float().mean(),
+    decoder: Decoder = module.nodes[address].decoder
+    boolean.track_state(
+        module,
+        decoder,
+        state_inputs=state_logits,
+        state_targets=state_targets,
+        trainable=trainable,
+        address=address,
+        strata=strata,
     )
 
-    decoder: Decoder = module.nodes[address].decoder
-    metrics = tuple(decoder.content_metrics(strata))
     valued = trainable & state_targets.eq(Tokens.valued.value)
+    content_inputs = prediction.payload[TensorKey.content].reshape(-1)
+    content_targets = batch.targets[TensorKey.content].reshape(-1).gt(0).long()
     if not valued.any():
         # Every rank must log the same stateful metrics even when this rank's
         # batch has no valued targets. The metrics remain unchanged here.
-        for metric_name, metric in metrics:
-            module.track((address, strata, metric_name, TensorKey.content), value=metric)
+        for metric, tracker in boolean.iter_tracked(decoder.metrics, strata):
+            module.track((address, strata, metric, TensorKey.content), value=tracker)
         return total
 
-    logits = prediction.payload[TensorKey.content].reshape(-1)[valued]
-    targets = batch.targets[TensorKey.content].reshape(-1)[valued].gt(0).long()
+    logits = content_inputs[valued]
+    targets = content_targets[valued]
     total += module.track(
         (address, strata, Metric.loss, TensorKey.content),
-        value=(
-            torch.nn.functional.binary_cross_entropy_with_logits(logits, targets.float(), reduction="none")
-            * cast(BooleanCounter, embedder.counters[TensorKey.content.name]).weight[targets]
-        ).mean(),
+        value=Metric.bce(
+            logits,
+            targets,
+            weight=cast(BooleanCounter, embedder.counters[TensorKey.content.name]).weight,
+        ),
     )
 
     probabilities = logits.sigmoid()
-    for metric_name, metric in metrics:
-        metric.update(probabilities, targets)
-        module.track((address, strata, metric_name, TensorKey.content), value=metric)
+    for metric, tracker in boolean.iter_tracked(decoder.metrics, strata):
+        batch_value = tracker(probabilities, targets)
+        if metric in request.losses:
+            total = total + batch_value
+        module.track((address, strata, metric, TensorKey.content), value=tracker)
+
     return total
 
 
