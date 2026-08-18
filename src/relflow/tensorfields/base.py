@@ -437,6 +437,7 @@ class Plugin:
                     f"Plugin '{self.name}' cannot state-track metric '{metric.name}': no stateful factory is registered for it"
                 )
 
+    @property
     def trait_eligible_metrics(self) -> frozenset[Metric]:
         return frozenset(
             metric
