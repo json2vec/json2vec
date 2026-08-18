@@ -73,66 +73,6 @@ if TYPE_CHECKING:
     from relflow.tensorfields.base import Plugin
 
 
-class HitsTotalAccuracy(TorchMetric):
-    is_differentiable: bool = False
-    higher_is_better: bool = True
-    full_state_update: bool = False
-
-    hits: torch.Tensor
-    total: torch.Tensor
-
-    def __init__(self, num_classes: int | None = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        del num_classes
-        self.add_state("hits", default=torch.zeros((), dtype=torch.long), dist_reduce_fx="sum")
-        self.add_state("total", default=torch.zeros((), dtype=torch.long), dist_reduce_fx="sum")
-
-    def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
-        if preds.ndim > target.ndim:
-            preds = preds.argmax(dim=-1)
-        self.hits += preds.eq(target).sum().to(torch.long)
-        self.total += target.new_tensor(target.numel(), dtype=torch.long)
-
-    def compute(self) -> torch.Tensor:
-        return self.hits.float() / self.total.clamp_min(1).float()
-
-
-class BinarySpecificityAtSensitivityScalar(BinarySpecificityAtSensitivity):
-    def __init__(self, *, min_sensitivity: float = 0.9, **kwargs: Any) -> None:
-        super().__init__(min_sensitivity=min_sensitivity, **kwargs)
-
-    def compute(self) -> torch.Tensor:
-        specificity, _ = super().compute()
-        return specificity
-
-
-class MulticlassSpecificityAtSensitivityScalar(MulticlassSpecificityAtSensitivity):
-    def __init__(self, *, min_sensitivity: float = 0.9, **kwargs: Any) -> None:
-        super().__init__(min_sensitivity=min_sensitivity, **kwargs)
-
-    def compute(self) -> torch.Tensor:
-        specificity, _ = super().compute()
-        return specificity.mean()
-
-
-class BinarySensitivityAtSpecificityScalar(BinarySensitivityAtSpecificity):
-    def __init__(self, *, min_specificity: float = 0.9, **kwargs: Any) -> None:
-        super().__init__(min_specificity=min_specificity, **kwargs)
-
-    def compute(self) -> torch.Tensor:
-        sensitivity, _ = super().compute()
-        return sensitivity
-
-
-class MulticlassSensitivityAtSpecificityScalar(MulticlassSensitivityAtSpecificity):
-    def __init__(self, *, min_specificity: float = 0.9, **kwargs: Any) -> None:
-        super().__init__(min_specificity=min_specificity, **kwargs)
-
-    def compute(self) -> torch.Tensor:
-        sensitivity, _ = super().compute()
-        return sensitivity.mean()
-
-
 class Traits(enum.StrEnum):
     discrete = "discrete"
     continuous = "continuous"
@@ -427,6 +367,66 @@ def _register_binary_multiclass_pair(
         partial(multiclass_stateful, average=average) if average is not None else multiclass_stateful
     )
     metric.factory(multiclass_stateful_factory, ndim=2)
+
+
+class HitsTotalAccuracy(TorchMetric):
+    is_differentiable: bool = False
+    higher_is_better: bool = True
+    full_state_update: bool = False
+
+    hits: torch.Tensor
+    total: torch.Tensor
+
+    def __init__(self, num_classes: int | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        del num_classes
+        self.add_state("hits", default=torch.zeros((), dtype=torch.long), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.zeros((), dtype=torch.long), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
+        if preds.ndim > target.ndim:
+            preds = preds.argmax(dim=-1)
+        self.hits += preds.eq(target).sum().to(torch.long)
+        self.total += target.new_tensor(target.numel(), dtype=torch.long)
+
+    def compute(self) -> torch.Tensor:
+        return self.hits.float() / self.total.clamp_min(1).float()
+
+
+class BinarySpecificityAtSensitivityScalar(BinarySpecificityAtSensitivity):
+    def __init__(self, *, min_sensitivity: float = 0.9, **kwargs: Any) -> None:
+        super().__init__(min_sensitivity=min_sensitivity, **kwargs)
+
+    def compute(self) -> torch.Tensor:
+        specificity, _ = super().compute()
+        return specificity
+
+
+class MulticlassSpecificityAtSensitivityScalar(MulticlassSpecificityAtSensitivity):
+    def __init__(self, *, min_sensitivity: float = 0.9, **kwargs: Any) -> None:
+        super().__init__(min_sensitivity=min_sensitivity, **kwargs)
+
+    def compute(self) -> torch.Tensor:
+        specificity, _ = super().compute()
+        return specificity.mean()
+
+
+class BinarySensitivityAtSpecificityScalar(BinarySensitivityAtSpecificity):
+    def __init__(self, *, min_specificity: float = 0.9, **kwargs: Any) -> None:
+        super().__init__(min_specificity=min_specificity, **kwargs)
+
+    def compute(self) -> torch.Tensor:
+        sensitivity, _ = super().compute()
+        return sensitivity
+
+
+class MulticlassSensitivityAtSpecificityScalar(MulticlassSensitivityAtSpecificity):
+    def __init__(self, *, min_specificity: float = 0.9, **kwargs: Any) -> None:
+        super().__init__(min_specificity=min_specificity, **kwargs)
+
+    def compute(self) -> torch.Tensor:
+        sensitivity, _ = super().compute()
+        return sensitivity.mean()
 
 
 Metric.loss = Metric("loss")
