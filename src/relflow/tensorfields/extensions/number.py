@@ -13,7 +13,8 @@ from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-number: Plugin = Plugin(name="number")
+number: Plugin = Plugin(name="number", traits=(Trait.regression,))
 number.callback(CounterUpdateCallback)
 
 FOURIER_SAFE_MAX_ANGLE = float(1e4)
@@ -361,7 +362,7 @@ def loss(
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
     loss: torch.Tensor = module.track(
-        (address, strata, Metric.loss, TensorKey.state),
+        (address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=prediction.payload[TensorKey.state].reshape(N, -1),
@@ -379,7 +380,7 @@ def loss(
     diff: torch.Tensor = inputs.subtract(target)
 
     loss += module.track(
-        (address, strata, Metric.loss, TensorKey.content),
+        (address, strata, LogKey.loss, TensorKey.content),
         value=request.objective.loss(
             input=diff / normalizer.var.sqrt().clamp_min(normalizer.epsilon),
             target=torch.zeros_like(diff),
@@ -390,12 +391,12 @@ def loss(
     )
 
     module.track(
-        (address, strata, Metric.mae, TensorKey.content),
+        (address, strata, LogKey.mae, TensorKey.content),
         value=diff.absolute().masked_select(trainable).float().mean(),
     )
 
     module.track(
-        (address, strata, Metric.rmse, TensorKey.content),
+        (address, strata, LogKey.rmse, TensorKey.content),
         value=diff.square().masked_select(trainable).float().mean().sqrt(),
     )
 

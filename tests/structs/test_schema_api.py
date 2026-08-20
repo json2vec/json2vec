@@ -14,7 +14,13 @@ def test_model_constructor_builds_record_branch_and_infers_queries():
             source="openml",
         ),
         rf.Number("amount"),
-        rf.Category("label", target=True, embed=False, metric="roc_auc", topk=[2, 3]),
+        rf.Category(
+            "label",
+            target=True,
+            embed=False,
+            metrics=[rf.metrics.Accuracy(0.5)],
+            topk=[2, 3],
+        ),
         d_model=32,
         n_layers=2,
         n_heads=4,
@@ -47,7 +53,7 @@ def test_model_constructor_builds_record_branch_and_infers_queries():
     label = params.requests["record/label"]
     assert label.p_prune == 1.0
     assert label.embed is False
-    assert label.metric == "roc_auc"
+    assert label.metrics == [rf.metrics.Accuracy(0.5)]
     assert label.topk == [2, 3]
     assert params.target == ["record/label"]
 

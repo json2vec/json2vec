@@ -15,7 +15,8 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -163,7 +164,7 @@ def _(arr: np.ndarray) -> np.ndarray:
     return (np.sin(radians), np.cos(radians))
 
 
-dateparts: Plugin = Plugin(name="dateparts")
+dateparts: Plugin = Plugin(name="dateparts", traits=(Trait.cyclic,))
 
 
 @dateparts.register
@@ -425,7 +426,7 @@ def loss(
     trainable = batch.trainable.reshape(numel)
 
     loss: torch.Tensor = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.state),
+        (prediction.address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=(inputs := prediction.payload[TensorKey.state].reshape(numel, -1)),
@@ -438,7 +439,7 @@ def loss(
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.state),
         value=inputs.argmax(dim=1).eq(targets).masked_select(trainable).float().mean(),
     )
 
@@ -455,13 +456,13 @@ def loss(
 
         losses.append(
             module.track(
-                (prediction.address, strata, Metric.loss, TensorKey.content, datepart),
+                (prediction.address, strata, LogKey.loss, TensorKey.content, datepart),
                 value=(1.0 - cosine).masked_select(trainable).mean(),
             )
         )
 
         module.track(
-            (prediction.address, strata, Metric.mae, TensorKey.content, datepart),
+            (prediction.address, strata, LogKey.mae, TensorKey.content, datepart),
             value=cosine.clamp(min=-1.0, max=1.0).arccos().masked_select(trainable).mean(),
         )
 

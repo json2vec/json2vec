@@ -186,6 +186,7 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
         "p_mask",
         "p_prune",
         "n_linear",
+        "metrics",
     }
     pages = {
         rf.Boolean: docs / "boolean.qmd",

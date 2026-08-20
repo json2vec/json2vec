@@ -6,7 +6,7 @@ import torch
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
 from relflow.tensorfields.extensions.boolean import BooleanCounter, Decoder, Embedder, TensorField, loss, write
@@ -152,15 +152,15 @@ def test_boolean_loss_tracks_binary_torchmetrics():
         torch.ones(2, dtype=torch.int64),
     )
     expected_names = {
-        Metric.auc.value,
+        LogKey.auc.value,
         *(
             f"{metric.value}@{threshold}"
             for threshold in (0.25, 0.75)
             for metric in (
-                Metric.accuracy,
-                Metric.precision,
-                Metric.recall,
-                Metric.specificity,
+                LogKey.accuracy,
+                LogKey.precision,
+                LogKey.recall,
+                LogKey.specificity,
             )
         ),
     }
@@ -205,13 +205,13 @@ def test_boolean_thresholds_configure_unique_metrics_and_one_auc():
     decoder = Decoder(_schema(threshold=[0.8, 0.2, 0.8]), ADDRESS)
 
     metrics = decoder.metrics[f"{Strata.train.value}_metrics"]
-    assert set(metrics) == {Metric.auc.value, "threshold_0", "threshold_1"}
+    assert set(metrics) == {LogKey.auc.value, "threshold_0", "threshold_1"}
 
     expected_metric_names = {
-        Metric.accuracy.value,
-        Metric.precision.value,
-        Metric.recall.value,
-        Metric.specificity.value,
+        LogKey.accuracy.value,
+        LogKey.precision.value,
+        LogKey.recall.value,
+        LogKey.specificity.value,
     }
     for index, threshold in enumerate((0.8, 0.2)):
         threshold_metrics = metrics[f"threshold_{index}"]
@@ -220,10 +220,10 @@ def test_boolean_thresholds_configure_unique_metrics_and_one_auc():
 
     named_metrics = list(decoder.content_metrics(Strata.train))
     names = [name for name, _ in named_metrics]
-    assert names.count(Metric.auc.value) == 1
+    assert names.count(LogKey.auc.value) == 1
     assert len(names) == len(set(names)) == 9
     assert set(names) == {
-        Metric.auc.value,
+        LogKey.auc.value,
         *(f"{name}@{threshold}" for threshold in (0.8, 0.2) for name in expected_metric_names),
     }
     assert all(isinstance(metric, TorchMetric) for _, metric in named_metrics)
@@ -257,11 +257,11 @@ def test_boolean_metrics_ignore_null_and_padded_targets():
 
     metrics: dict[str, TorchMetric] = dict(decoder.content_metrics(Strata.train))
     assert set(metrics) == {
-        Metric.auc.value,
-        f"{Metric.accuracy.value}@0.5",
-        f"{Metric.precision.value}@0.5",
-        f"{Metric.recall.value}@0.5",
-        f"{Metric.specificity.value}@0.5",
+        LogKey.auc.value,
+        f"{LogKey.accuracy.value}@0.5",
+        f"{LogKey.precision.value}@0.5",
+        f"{LogKey.recall.value}@0.5",
+        f"{LogKey.specificity.value}@0.5",
     }
     assert all(metric.compute().item() == 1.0 for metric in metrics.values())  # ty: ignore[missing-argument]
 
@@ -291,7 +291,7 @@ def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_
     result = loss(module, prediction, field, Strata.train)
 
     assert torch.isfinite(result)
-    assert (ADDRESS, Strata.train, Metric.loss, TensorKey.content) not in module.tracked
+    assert (ADDRESS, Strata.train, LogKey.loss, TensorKey.content) not in module.tracked
     metrics = tuple(decoder.content_metrics(Strata.train))
     assert len(metrics) == 9
     assert all(metric.update_count == 0 for _, metric in metrics)

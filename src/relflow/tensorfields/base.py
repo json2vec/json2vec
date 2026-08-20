@@ -5,18 +5,21 @@ from __future__ import annotations
 import re
 import warnings
 from abc import abstractmethod
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overload
 
 import pluggy
+import pydantic
 import torch
 from lightning.pytorch import Callback
 from rich.text import Text
 from tensordict import TensorDict
 
 from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
+from relflow.metrics.base import Metric, Trait, registry
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
-from relflow.structs.tree import Address, Leaf, Node, Renderable
+from relflow.structs.tree import Address, Leaf, Renderable
 from relflow.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
@@ -28,11 +31,50 @@ pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
 
 pm.add_hookspecs(module_or_class=PluginSpec)
 
-RequestBase: TypeAlias = Leaf
 CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
 RegisterT = TypeVar("RegisterT", bound=ComponentValue)
 BranchMaskApplication: TypeAlias = tuple[Address, "Mask"]
+
+
+class RequestBase(Leaf):
+    """Common configuration shared by every tensorfield request."""
+
+    metrics: list[Metric] = pydantic.Field(default_factory=list)
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def reject_singular_metric(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
+
+        if "metric" in data:
+            raise ValueError("metric was removed; use metrics=[...]")
+
+        kwargs = data.get("kwargs")
+        if isinstance(kwargs, Mapping) and "metric" in kwargs:
+            raise ValueError("metric was removed; use metrics=[...]")
+
+        return data
+
+    @pydantic.model_validator(mode="after")
+    def validate_metrics(self) -> RequestBase:
+        plugin = TENSORFIELDS[self.type]
+        registry.validate_request(
+            self.metrics,
+            data_type=self.type,
+            traits=plugin.traits,
+        )
+        return self
+
+    def post_bind_validate(self) -> None:
+        super().post_bind_validate()
+        plugin = TENSORFIELDS[self.type]
+        registry.validate_request(
+            self.metrics,
+            data_type=self.type,
+            traits=plugin.traits,
+        )
 
 
 def default_write(module: "Model", prediction: Prediction) -> None:
@@ -384,7 +426,7 @@ class Plugin:
     name replaces the registry entry and emits a warning.
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, *, traits: Iterable[Trait] = ()):
         if not isinstance(name, str):
             raise TypeError("Plugin name must be a string")
 
@@ -393,6 +435,7 @@ class Plugin:
             raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
 
         self.name: str = name
+        self.traits: frozenset[Trait] = self._normalize_traits(traits)
         self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
 
@@ -404,6 +447,21 @@ class Plugin:
             )
 
         TENSORFIELDS[name] = self
+
+    @staticmethod
+    def _normalize_traits(traits: Iterable[Trait]) -> frozenset[Trait]:
+        if isinstance(traits, (str, bytes)):
+            raise TypeError("Plugin traits must be Trait members")
+
+        try:
+            normalized = frozenset(traits)
+        except TypeError as error:
+            raise TypeError("Plugin traits must be an iterable of Trait members") from error
+
+        if any(not isinstance(trait, Trait) for trait in normalized):
+            raise TypeError("Plugin traits must be Trait members")
+
+        return normalized
 
     @overload
     def register(self, obj: None, component: Component | str) -> None: ...
@@ -448,8 +506,8 @@ class Plugin:
                 if not isinstance(obj, type):
                     raise TypeError("Request must be a class type")
 
-                if not issubclass(obj, Node):
-                    raise TypeError("Request must be a subclass of Node")
+                if not issubclass(obj, RequestBase):
+                    raise TypeError("Request must be a subclass of RequestBase")
 
             case Component.TensorField:
                 if not isinstance(obj, type):
