@@ -12,7 +12,8 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-text: Plugin = Plugin(name="text")
+text: Plugin = Plugin(name="text", traits=(Trait.regression,))
 text.callback(CounterUpdateCallback)
 
 INPUT_IDS = "input_ids"
@@ -463,7 +464,7 @@ def loss(
     state_inputs = prediction.payload[TensorKey.state].reshape(-1, len(Tokens))
 
     loss: torch.Tensor = module.track(
-        (address, strata, Metric.loss, TensorKey.state),
+        (address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
@@ -477,7 +478,7 @@ def loss(
     )
 
     module.track(
-        (address, strata, Metric.accuracy, TensorKey.state),
+        (address, strata, LogKey.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
 
@@ -490,17 +491,17 @@ def loss(
     diff = inputs.subtract(targets)
 
     loss += module.track(
-        (address, strata, Metric.loss, TensorKey.content),
+        (address, strata, LogKey.loss, TensorKey.content),
         value=request.objective.loss(diff).masked_select(valued).mean(),
     )
 
     module.track(
-        (address, strata, Metric.mae, TensorKey.content),
+        (address, strata, LogKey.mae, TensorKey.content),
         value=diff.absolute().mean(dim=1).masked_select(valued).mean(),
     )
 
     module.track(
-        (address, strata, Metric.rmse, TensorKey.content),
+        (address, strata, LogKey.rmse, TensorKey.content),
         value=diff.square().mean(dim=1).sqrt().masked_select(valued).mean(),
     )
 

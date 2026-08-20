@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 from lightning import Callback, Trainer
 
-from relflow.structs.enums import Metric, Strata
+from relflow.structs.enums import LogKey, Strata
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
@@ -45,7 +45,7 @@ class ThroughputLogger(Callback):
             logger = getattr(trainer, "logger", None)
             if logger is not None and getattr(trainer, "is_global_zero", True):
                 logger.log_metrics(
-                    {f"{Metric.throughput.value}/{strata.value}": throughput},
+                    {f"{LogKey.throughput.value}/{strata.value}": throughput},
                     step=getattr(trainer, "global_step", None),
                 )
             return
@@ -53,7 +53,7 @@ class ThroughputLogger(Callback):
         device = getattr(pl_module, "device", None)
 
         pl_module.track(
-            (Metric.throughput, strata),
+            (LogKey.throughput, strata),
             value=torch.tensor(throughput, device=device) if device is not None else torch.tensor(throughput),
         )
 

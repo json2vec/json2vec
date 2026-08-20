@@ -12,7 +12,8 @@ from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
-category: Plugin = Plugin(name="category")
+category: Plugin = Plugin(name="category", traits=(Trait.classification,))
 
 category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
@@ -324,7 +325,7 @@ def loss(
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
     loss: torch.Tensor = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.state),
+        (prediction.address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
@@ -338,7 +339,7 @@ def loss(
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
     module.track(
@@ -375,7 +376,7 @@ def loss(
         content_loss_sum = content_loss_sum + unavailable_losses.sum()
 
     content_loss = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.content),
+        (prediction.address, strata, LogKey.loss, TensorKey.content),
         value=content_loss_sum / valued.float().sum().clamp_min(1.0),
     )
     loss += content_loss
@@ -385,7 +386,7 @@ def loss(
 
     for topk in module.schema.requests[prediction.address].topk:
         module.track(
-            (prediction.address, strata, Metric.accuracy, f"top{topk}"),
+            (prediction.address, strata, LogKey.accuracy, f"top{topk}"),
             value=(
                 content_inputs.topk(k=topk, dim=1)
                 .indices.eq(content_targets.unsqueeze(1))
@@ -397,7 +398,7 @@ def loss(
         )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.content),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.content),
         value=content_inputs.argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
     )
 

@@ -3,6 +3,10 @@ import relflow
 
 def test_common_resources_are_available_from_package_root():
     assert relflow.Model.__name__ == "Model"
+    assert relflow.Metric is relflow.metrics.Metric
+    assert relflow.metrics.METRICS is relflow.metrics.registry.metrics
+    assert relflow.metrics.register.__self__ is relflow.metrics.registry
+    assert relflow.metrics.Trait.classification.value == "classification"
     assert relflow.AttentionMode.mha == "mha"
     assert not hasattr(relflow, "Dataset")
     assert relflow.CustomDataModule.__name__ == "CustomDataModule"

@@ -146,7 +146,6 @@ installation error with the required command.
 | `Tokens` | `valued`, `null`, `padded`, `masked`, reserved `other` |
 | `TensorKey` | Shared tensor/payload keys such as state, content, targets, embedding, and inferred |
 | `Strata` | train, validate, test, predict |
-| `Metric` | Shared metric labels such as loss, accuracy, MAE, RMSE, and throughput |
 | `AttentionMode` | mha, gqa, mqa, none |
 | `Overflow` | head, tail, error |
 | `ShardingStrategy` | file, chunk, record |
@@ -157,6 +156,8 @@ installation error with the required command.
 
 | Export | Purpose |
 | --- | --- |
+| `metrics` | Namespace containing the stateless metric registry, traits, decorator, and built-in metric configurations. |
+| `Metric` | Frozen Pydantic base for registered stateless metric configurations. |
 | `Plugin`, `TENSORFIELDS` | Register and inspect tensorfield implementations. |
 | `RequestBase` | Base request/schema leaf. |
 | `TensorFieldBase` | Base state/content tensor container contract. |

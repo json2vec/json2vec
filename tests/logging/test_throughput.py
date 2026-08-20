@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import torch
 
 from relflow.logging.throughput import ThroughputLogger
-from relflow.structs.enums import Metric, Strata
+from relflow.structs.enums import LogKey, Strata
 
 
 def test_throughput_logger_tracks_once_per_epoch():
@@ -26,7 +26,7 @@ def test_throughput_logger_tracks_once_per_epoch():
 
     assert len(tracked) == 1
     names, value = tracked[0]
-    assert names == (Metric.throughput, Strata.train)
+    assert names == (LogKey.throughput, Strata.train)
     assert value.item() > 0.0
 
 

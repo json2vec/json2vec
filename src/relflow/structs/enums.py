@@ -65,7 +65,7 @@ class TensorKey(enum.StrEnum):
     inferred = "inferred"
 
 
-class Metric(enum.StrEnum):
+class LogKey(enum.StrEnum):
     accuracy = "accuracy"
     auc = "auc"
     precision = "precision"

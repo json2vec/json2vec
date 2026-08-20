@@ -19,7 +19,8 @@ from torchmetrics.classification import (
 )
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-boolean: Plugin = Plugin(name="boolean")
+boolean: Plugin = Plugin(name="boolean", traits=(Trait.classification,))
 boolean.callback(CounterUpdateCallback)
 BOOLEAN_VALUES = (-1.0, 0.0, 1.0)
 Threshold = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
@@ -206,14 +207,14 @@ class Decoder(DecoderBase):
             {
                 f"{strata.value}_metrics": torch.nn.ModuleDict(
                     {
-                        Metric.auc.value: BinaryAUROC(),
+                        LogKey.auc.value: BinaryAUROC(),
                         **{
                             f"threshold_{index}": torch.nn.ModuleDict(
                                 {
-                                    Metric.accuracy.value: BinaryAccuracy(threshold=threshold),
-                                    Metric.precision.value: BinaryPrecision(threshold=threshold),
-                                    Metric.recall.value: BinaryRecall(threshold=threshold),
-                                    Metric.specificity.value: BinarySpecificity(threshold=threshold),
+                                    LogKey.accuracy.value: BinaryAccuracy(threshold=threshold),
+                                    LogKey.precision.value: BinaryPrecision(threshold=threshold),
+                                    LogKey.recall.value: BinaryRecall(threshold=threshold),
+                                    LogKey.specificity.value: BinarySpecificity(threshold=threshold),
                                 }
                             )
                             for index, threshold in enumerate(self.thresholds)
@@ -226,7 +227,7 @@ class Decoder(DecoderBase):
 
     def content_metrics(self, strata: Strata) -> Iterator[tuple[str, TorchMetric]]:
         metrics = cast(torch.nn.ModuleDict, self.metrics[f"{strata.value}_metrics"])
-        yield Metric.auc.value, cast(TorchMetric, metrics[Metric.auc.value])
+        yield LogKey.auc.value, cast(TorchMetric, metrics[LogKey.auc.value])
         for index, threshold in enumerate(self.thresholds):
             threshold_metrics = cast(torch.nn.ModuleDict, metrics[f"threshold_{index}"])
             for name, metric in threshold_metrics.items():
@@ -251,7 +252,7 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
     state_logits = prediction.payload[TensorKey.state].reshape(state_targets.numel(), -1)
 
     total = module.track(
-        (address, strata, Metric.loss, TensorKey.state),
+        (address, strata, LogKey.loss, TensorKey.state),
         value=torch.nn.functional.cross_entropy(
             state_logits[trainable],
             state_targets[trainable],
@@ -259,7 +260,7 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
         ),
     )
     module.track(
-        (address, strata, Metric.accuracy, TensorKey.state),
+        (address, strata, LogKey.accuracy, TensorKey.state),
         value=state_logits[trainable].argmax(dim=-1).eq(state_targets[trainable]).float().mean(),
     )
 
@@ -276,7 +277,7 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
     logits = prediction.payload[TensorKey.content].reshape(-1)[valued]
     targets = batch.targets[TensorKey.content].reshape(-1)[valued].gt(0).long()
     total += module.track(
-        (address, strata, Metric.loss, TensorKey.content),
+        (address, strata, LogKey.loss, TensorKey.content),
         value=(
             torch.nn.functional.binary_cross_entropy_with_logits(logits, targets.float(), reduction="none")
             * cast(BooleanCounter, embedder.counters[TensorKey.content.name]).weight[targets]

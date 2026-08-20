@@ -3,6 +3,7 @@ import uuid
 import pytest
 from lightning.pytorch import Callback
 
+from relflow.metrics import Trait
 from relflow.structs.enums import Component, Strata
 from relflow.structs.tree import Node
 from relflow.tensorfields.base import (
@@ -10,6 +11,7 @@ from relflow.tensorfields.base import (
     DecoderBase,
     EmbedderBase,
     Plugin,
+    RequestBase,
     TensorFieldBase,
 )
 
@@ -21,7 +23,7 @@ def _plugin_name(prefix: str = "plug") -> str:
 def _build_plugin() -> Plugin:
     plugin = Plugin(name=_plugin_name())
 
-    class Request(Node):
+    class Request(RequestBase):
         pass
 
     class TensorField(TensorFieldBase):
@@ -63,6 +65,33 @@ def _build_plugin() -> Plugin:
 def test_plugin_rejects_invalid_name():
     with pytest.raises(ValueError, match="lowercase letters"):
         Plugin(name="Bad-Name")
+
+
+def test_plugin_stores_immutable_traits():
+    plugin = Plugin(name=_plugin_name("traits"), traits=(Trait.classification,))
+    try:
+        assert plugin.traits == frozenset({Trait.classification})
+        assert isinstance(plugin.traits, frozenset)
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_rejects_invalid_traits():
+    with pytest.raises(TypeError, match="Trait members"):
+        Plugin(name=_plugin_name("badtraits"), traits=("classification",))
+
+
+def test_plugin_request_must_inherit_request_base():
+    plugin = Plugin(name=_plugin_name("badrequest"))
+
+    class Request(Node):
+        pass
+
+    try:
+        with pytest.raises(TypeError, match="subclass of RequestBase"):
+            plugin.register(Request)
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
 
 
 def test_plugin_warns_and_overwrites_duplicate_name():

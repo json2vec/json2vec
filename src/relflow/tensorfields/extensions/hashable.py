@@ -14,7 +14,8 @@ from blake3 import blake3
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Plugin = Plugin(name="hash")
+hashable: Plugin = Plugin(name="hash", traits=(Trait.classification,))
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
@@ -274,7 +275,7 @@ def loss(
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
     loss: torch.Tensor = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.state),
+        (prediction.address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
@@ -287,7 +288,7 @@ def loss(
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
 
@@ -320,12 +321,12 @@ def loss(
     )
 
     loss += module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.content),
+        (prediction.address, strata, LogKey.loss, TensorKey.content),
         value=(per_hash_ce.reshape(N, n_hashes).mean(dim=-1).masked_select(valued).mean()),
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.content),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.content),
         value=(
             inputs.argmax(dim=-1)
             .eq(bucket_targets)

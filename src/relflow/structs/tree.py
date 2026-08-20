@@ -340,7 +340,7 @@ class Leaf(Node):
             line.append_text(common)
             yield line
 
-        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", *common_names}
+        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", "metrics", *common_names}
         specific = Text()
         first = True
         for name, field in type(self).model_fields.items():

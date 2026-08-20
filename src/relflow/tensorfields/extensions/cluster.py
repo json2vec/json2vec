@@ -17,7 +17,8 @@ from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import apply, extract_mask_literals, pad
 from relflow.distributed import broadcast_object
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
-cluster: Plugin = Plugin(name="cluster")
+cluster: Plugin = Plugin(name="cluster", traits=(Trait.classification,))
 
 cluster.callback(VocabularySyncCallback, CounterUpdateCallback)
 
@@ -549,7 +550,7 @@ def loss(
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
     loss: torch.Tensor = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.state),
+        (prediction.address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
@@ -563,7 +564,7 @@ def loss(
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
     module.track(
@@ -585,7 +586,7 @@ def loss(
     known = valued & content_targets.lt(embedder.capacity)
     if known.any():
         loss += module.track(
-            (prediction.address, strata, Metric.loss, TensorKey.content),
+            (prediction.address, strata, LogKey.loss, TensorKey.content),
             value=torch.nn.functional.cross_entropy(
                 input=vocab_logits[known],
                 target=content_targets[known],
@@ -595,7 +596,7 @@ def loss(
         )
         vocab_size: int = len(embedder.vocab.master)
         module.track(
-            (prediction.address, strata, Metric.accuracy, TensorKey.content),
+            (prediction.address, strata, LogKey.accuracy, TensorKey.content),
             value=vocab_logits[:, :vocab_size].argmax(dim=1).eq(content_targets).masked_select(known).float().mean(),
         )
 
@@ -643,7 +644,7 @@ def loss(
     balance_loss = -(Q * committed_log_probs).sum(dim=-1).mean()
 
     loss += module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.cluster),
+        (prediction.address, strata, LogKey.loss, TensorKey.cluster),
         value=balance_loss,
     )
     module.track(

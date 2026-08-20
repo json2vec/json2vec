@@ -11,7 +11,8 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.nested import extract_mask_literals, pad
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.metrics.base import Trait
+from relflow.structs.enums import LogKey, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
-sets: Plugin = Plugin(name="set")
+sets: Plugin = Plugin(name="set", traits=(Trait.classification,))
 sets.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
@@ -316,7 +317,7 @@ def loss(
     state_targets = batch.targets[TensorKey.state].reshape(N)
 
     loss: torch.Tensor = module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.state),
+        (prediction.address, strata, LogKey.loss, TensorKey.state),
         value=(
             torch.nn.functional.cross_entropy(
                 input=state_inputs,
@@ -330,7 +331,7 @@ def loss(
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.state),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.state),
         value=state_inputs.argmax(dim=1).eq(state_targets).masked_select(trainable).float().mean(),
     )
 
@@ -342,7 +343,7 @@ def loss(
     content_targets = batch.targets[TensorKey.content].reshape(N, -1)
 
     loss += module.track(
-        (prediction.address, strata, Metric.loss, TensorKey.content),
+        (prediction.address, strata, LogKey.loss, TensorKey.content),
         value=torch.nn.functional.binary_cross_entropy_with_logits(
             input=content_inputs.masked_select(valued.unsqueeze(1)).reshape(-1, content_inputs.shape[-1]),
             target=content_targets.masked_select(valued.unsqueeze(1)).reshape(-1, content_targets.shape[-1]),
@@ -350,7 +351,7 @@ def loss(
     )
 
     module.track(
-        (prediction.address, strata, Metric.accuracy, TensorKey.content),
+        (prediction.address, strata, LogKey.accuracy, TensorKey.content),
         value=(
             content_inputs.sigmoid()
             .ge(0.5)

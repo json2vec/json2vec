@@ -9,6 +9,7 @@ mutation predicates, and the `@preprocess` decorator.
 from typing import TYPE_CHECKING, Any
 
 from relflow import helpers as helpers
+from relflow import metrics as metrics
 from relflow.architecture.checkpoint import RollbackCheckpoint
 from relflow.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
 from relflow.architecture.root import (
@@ -33,10 +34,10 @@ from relflow.data.processors import (
     preprocess,
 )
 from relflow.inference.callback import Writer
+from relflow.metrics import Metric
 from relflow.structs.enums import (
     AttentionMode,
     Component,
-    Metric,
     Overflow,
     ShardingStrategy,
     Strata,
@@ -124,6 +125,7 @@ __all__ = [
     "EmbedderBase",
     "Hash",
     "helpers",
+    "metrics",
     "Schema",
     "Input",
     "JSONBackend",
