@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
@@ -49,6 +50,7 @@ class ModelRuntime:
         strata: Strata | str,
         dataloader_idx: int = 0,
     ) -> list[Prediction]:
+        strata = Strata.normalize(strata)
         sanitize(module, inputs, strata=strata, dataloader_idx=dataloader_idx)
 
         processed: dict[Address, list[Parcel]] = defaultdict(list)
@@ -62,7 +64,11 @@ class ModelRuntime:
 
             node_module = cast(NodeModule, module.nodes[address])
             embedder: EmbedderBase = node_module.embedder
-            embedding: Parcel = embedder(tensorfield)
+            embedder_kwargs: dict[str, Any] = {}
+            embedder_parameters = inspect.signature(embedder.forward).parameters
+            if "strata" in embedder_parameters:
+                embedder_kwargs["strata"] = strata
+            embedding: Parcel = embedder(tensorfield, **embedder_kwargs)
             if embedding.destination is None:
                 raise ValueError(f"parcel from '{embedding.origin}' has no destination")
             processed[embedding.destination].append(embedding)
@@ -147,7 +153,12 @@ class ModelRuntime:
             extension: Plugin = TENSORFIELDS[request.type]
             loss_fn = cast(Callable[..., torch.Tensor], getattr(extension, "loss"))
 
-            loss: torch.Tensor = loss_fn(module=module, prediction=prediction, batch=batch[address], strata=strata)
+            loss: torch.Tensor = loss_fn(
+                module=module,
+                prediction=prediction,
+                batch=batch[address],
+                strata=strata,
+            )
             losses.append(loss * torch.tensor(request.weight))
 
         if len(losses) == 0:

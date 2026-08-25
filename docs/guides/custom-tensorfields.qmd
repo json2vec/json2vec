@@ -191,6 +191,14 @@ property. The encoding runtime injects that field-owned state into
 `interprocess_encoding_context`; omit the parameter for a stateless tensorfield.
 Register a synchronization callback when distributed updates require one.
 
+An embedder or decoder constructor may also opt into the current root model by
+declaring an exact `module` parameter. Graph construction injects it when
+present. If the component retains that reference, use
+`object.__setattr__(self, "_module", module)` so PyTorch does not register the
+parent as a child and create a recursive module graph. The root graph is still
+being assembled during component construction, so defer access to `module.nodes`
+until runtime.
+
 ## Decode Heritage
 
 `DecoderBase` provides query or mean pooling across the field's heritage. The

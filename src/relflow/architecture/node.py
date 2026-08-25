@@ -19,21 +19,30 @@ if TYPE_CHECKING:
 
 
 class NodeModule(torch.nn.Module):
-    def __init__(self, schema: Schema, address: Address, batch_size: int):
+    embedder: EmbedderBase
+    decoder: DecoderBase
+    encoder: BranchEncoder
+
+    def __init__(
+        self,
+        schema: Schema,
+        address: Address,
+        **kwargs: Any,
+    ):
         super().__init__()
 
         if address in schema.requests:
             request: Node = schema.requests[address]
             plugin: Plugin = TENSORFIELDS[request.type]
-            embedder_kwargs: dict[str, Any] = dict(schema=schema, address=address)
-            if "batch_size" in inspect.signature(plugin.Embedder.__init__).parameters:
-                embedder_kwargs["batch_size"] = batch_size
+            component_context = dict(kwargs, schema=schema, address=address)
 
-            self.embedder: EmbedderBase = plugin.Embedder(**embedder_kwargs)
-            self.decoder: DecoderBase = plugin.Decoder(schema=schema, address=address)
+            for component in [plugin.Embedder, plugin.Decoder]:
+                parameters = inspect.signature(component.__init__).parameters
+                component_kwargs = {name: value for name, value in component_context.items() if name in parameters}
+                setattr(self, component.__name__.lower(), component(**component_kwargs))
 
         elif address in schema.branches:
-            self.encoder: BranchEncoder = BranchEncoder(schema=schema, address=address)
+            self.encoder = BranchEncoder(schema=schema, address=address)
 
         else:
             raise ValueError("how did we get here?")

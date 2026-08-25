@@ -111,10 +111,10 @@ model = rf.Model(
 model
 ```
 
-Within one encoded batch, equal `events/device_id` values receive the same
-salted hash representation. Repeated device IDs can therefore attend to one
-another before branch pooling. `source` keeps those roles distinguishable after
-stacking.
+Within one model batch, equal `events/device_id` values receive the same salted
+hash representation across Hash leaves. Repeated device IDs can therefore
+attend to one another before branch pooling. `source` keeps those roles
+distinguishable after stacking.
 
 The preprocessor below writes every sparse key on every event. RelFlow's direct
 extractor for these simple inferred paths preserves the explicit `None`
@@ -301,10 +301,14 @@ by networks. Fraud labels may be delayed and policy-dependent. Governance,
 retention, consent, and protected-class proxy review remain product
 requirements.
 
-Training-time Hash representations are salted per batch and therefore are
-not durable identifiers across batches or checkpoints. They capture equality
-structure, not global facts about a device. Test and prediction use a fixed salt
-for deterministic inference.
+Training-time Hash representations are salted from Lightning `global_step` and
+therefore are not durable identifiers across optimizer steps. The sequence
+continues across epoch boundaries; gradient-accumulated microbatches share a
+salt. These representations capture equality structure, not global facts about
+a device. Test and prediction bypass the step salt for deterministic inference.
+A Hash field can set `deterministic=True` to retain a persistent training
+representation, but that stronger identifier signal also increases the risk of
+memorizing devices and overfitting.
 
 ## Where Next
 

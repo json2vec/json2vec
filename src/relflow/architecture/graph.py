@@ -33,6 +33,7 @@ class ModelGraph:
     def build(
         schema: Schema,
         batch_size: int,
+        module: "Model | None" = None,
     ) -> tuple[torch.nn.ModuleDict, dict[str, EncodedInput | Strata]]:
         nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
@@ -41,6 +42,7 @@ class ModelGraph:
                 schema=schema,
                 address=address,
                 batch_size=batch_size,
+                module=module,
             )
 
         return nodes, ModelGraph.example_forward_kwargs(schema=schema, batch_size=batch_size)
@@ -50,6 +52,7 @@ class ModelGraph:
         module.nodes, module.example_input_array = ModelGraph.build(
             schema=module.schema,
             batch_size=module.batch_size,
+            module=module,
         )
 
     @staticmethod
@@ -102,6 +105,7 @@ class ModelGraph:
                 schema=module.schema,
                 address=address,
                 batch_size=module.batch_size,
+                module=module,
             )
 
         module.example_input_array = ModelGraph.example_forward_kwargs(

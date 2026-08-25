@@ -812,7 +812,7 @@ Examples include devices inside login sessions, accounts inside a transfer graph
 
 These values are usually high-cardinality and unstable. Treating them as ordinary categories can waste vocabulary capacity, while treating them as raw strings can make generalization brittle.
 
-The `hash` datatype instead maps scalar values through several keyed 64-bit hashes and sinusoidal encodings. Equal values receive equal representations across Hash leaves in the same encoded batch. Training and validation rotate the key per batch to prevent persistent value memorization, while test and prediction use a fixed key for deterministic inference.
+The `hash` datatype instead maps scalar values through several deterministic 64-bit hashes and sinusoidal encodings. Equal values receive equal representations across Hash leaves that use the same salting policy. CPU tensorization is static; by default, training and validation mix each hash lane on the model device with a salt derived from Lightning `global_step`. The sequence advances with optimizer steps across epoch boundaries; gradient-accumulated microbatches and validation batches at a frozen step share a salt. Setting `deterministic: true` disables that rotation for a persistent identifier representation, which can be powerful but increases overfitting risk. Test and prediction always bypass the step salt.
 
 This gives the model a way to learn sameness, repetition, and co-occurrence patterns without maintaining an enormous global identifier vocabulary. Matching values share a code space across fields, but sibling branches still pool their tokens before interacting. Cross-collection correspondence may therefore require restructuring or stacking both roles into one repeated branch.
 

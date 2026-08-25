@@ -1,3 +1,7 @@
+from copy import deepcopy
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 import torch
 
@@ -8,6 +12,7 @@ from relflow.tensorfields.extensions.hashable import (
     Decoder,
     Embedder,
     TensorField,
+    salt,
 )
 
 ADDRESS = "root/items/identifier"
@@ -20,6 +25,7 @@ def _structure_payload(
     n_bands: int = 4,
     offset: int = 2,
     n_buckets: int = 4,
+    deterministic: bool = False,
 ) -> dict:
     field: dict = {
         "name": "identifier",
@@ -29,6 +35,7 @@ def _structure_payload(
         "n_bands": n_bands,
         "offset": offset,
         "n_buckets": n_buckets,
+        "deterministic": deterministic,
     }
     return {
         "d_model": 16,
@@ -57,6 +64,7 @@ def test_hashable_request_defaults_load_without_extra_config():
     del payload["fields"]["fields"][0]["fields"][0]["n_bands"]
     del payload["fields"]["fields"][0]["fields"][0]["offset"]
     del payload["fields"]["fields"][0]["fields"][0]["n_buckets"]
+    del payload["fields"]["fields"][0]["fields"][0]["deterministic"]
 
     schema = Schema.model_validate(payload)
     request = schema.requests[ADDRESS]
@@ -66,6 +74,15 @@ def test_hashable_request_defaults_load_without_extra_config():
     assert request.n_bands == 8
     assert request.offset == 4
     assert request.n_buckets == 4
+    assert request.deterministic is False
+
+
+def test_hashable_request_accepts_deterministic_mode():
+    schema = Schema.model_validate(_structure_payload(deterministic=True))
+    restored = Schema.model_validate(schema.model_dump())
+
+    assert schema.requests[ADDRESS].deterministic is True
+    assert restored.requests[ADDRESS].deterministic is True
 
 
 def test_hashable_request_rejects_non_positive_config():
@@ -197,7 +214,7 @@ def test_hashable_mask_caches_targets_before_zeroing():
 # --- injectivity probes -----------------------------------------------------------
 
 
-def _hash_matrix(values, n_hashes: int, *, salt: int = 0) -> torch.Tensor:
+def _hash_matrix(values, n_hashes: int) -> torch.Tensor:
     """Tensorize values into a `(len(values), n_hashes)` integer matrix."""
     schema = Schema.model_validate(_structure_payload(length=len(values), n_hashes=n_hashes))
     field = TensorField.new(
@@ -205,7 +222,6 @@ def _hash_matrix(values, n_hashes: int, *, salt: int = 0) -> torch.Tensor:
         address=ADDRESS,
         schema=schema,
         strata=Strata.test,
-        salt=salt,
     )
     return field.content.reshape(len(values), n_hashes)
 
@@ -484,67 +500,289 @@ def test_hashable_gives_same_input_value_identical_raw_embeddings_across_fields(
     assert torch.allclose(items_projection[1, 0, 0], owner_projection[1, 0])
 
 
-# --- batch salt rotation ----------------------------------------------------------
+# --- device-side optimizer-step salt ---------------------------------------------
 
 
-def test_hash_matrix_rotates_with_salt():
-    baseline = _hash_matrix(["alice", "bob"], n_hashes=4)
-    rotated = _hash_matrix(["alice", "bob"], n_hashes=4, salt=1)
-    assert not torch.equal(baseline, rotated)
-    assert torch.equal(baseline, _hash_matrix(["alice", "bob"], n_hashes=4, salt=0))
-
-
-def test_tensorfield_content_reflects_explicit_salt():
-    schema = Schema.model_validate(_structure_payload(length=2, n_hashes=4))
-    values = [[["alice", "bob"]]]
-
-    field_a = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=0)
-    field_b = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=1)
-    field_c = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=0)
-
-    assert not torch.equal(field_a.content, field_b.content)
-    assert torch.equal(field_a.content, field_c.content)
-
-
-def test_equal_values_stay_matched_within_each_rotating_batch(monkeypatch: pytest.MonkeyPatch):
+def test_cpu_hashes_are_static_across_calls_and_strata(monkeypatch: pytest.MonkeyPatch):
     from relflow.data import iterables
 
     model = _hashable_model()
-    records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
-    salts = iter((1, 2, 3))
-    monkeypatch.setattr(iterables.random, "getrandbits", lambda bits: next(salts))
-
-    projections_by_batch: list[tuple[torch.Tensor, torch.Tensor]] = []
-    for _ in range(3):
-        inputs = model.encode(records, strata=Strata.train, mask=False)
-        items_projection = model.nodes["record/items/id"].embedder(inputs["record/items/id"]).payload
-        owner_projection = model.nodes["record/owner"].embedder(inputs["record/owner"]).payload
-        projections_by_batch.append((items_projection[0, 0, 0].detach(), owner_projection[0, 0].detach()))
-
-    for items_alice, owner_alice in projections_by_batch:
-        assert torch.allclose(items_alice, owner_alice)
-
-    for later in projections_by_batch[1:]:
-        assert not torch.allclose(projections_by_batch[0][0], later[0])
-
-
-@pytest.mark.parametrize("strata", [Strata.test, Strata.predict])
-def test_inference_uses_stable_unsalted_hashes(strata: Strata, monkeypatch: pytest.MonkeyPatch):
-    from relflow.data import iterables
-
-    model = _hashable_model()
+    deterministic_model = _hashable_model(deterministic=True)
     records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
 
     def unexpected_random_salt(bits: int) -> int:
-        raise AssertionError("inference must not generate a random salt")
+        raise AssertionError("CPU encoding must not generate a random hash salt")
 
     monkeypatch.setattr(iterables.random, "getrandbits", unexpected_random_salt)
 
-    first = model.encode(records, strata=strata, mask=False)
-    second = model.encode(records, strata=strata, mask=False)
+    baseline = model.encode(records, strata=Strata.train, mask=False)
+    deterministic = deterministic_model.encode(records, strata=Strata.train, mask=False)
+    for strata in Strata:
+        first = model.encode(records, strata=strata, mask=False)
+        second = model.encode(records, strata=strata, mask=False)
 
-    assert torch.equal(first["record/items/id"].content, second["record/items/id"].content)
-    assert torch.equal(first["record/owner"].content, second["record/owner"].content)
+        for address in ("record/items/id", "record/owner"):
+            assert torch.equal(deterministic[address].content, baseline[address].content)
+            assert torch.equal(first[address].content, baseline[address].content)
+            assert torch.equal(second[address].content, baseline[address].content)
+
+
+def test_global_step_hash_is_deterministic_per_lane_and_does_not_mutate_content():
+    content = torch.zeros(3, 4, dtype=torch.int64)
+    original = content.clone()
+    module = SimpleNamespace(global_step=0)
+
+    first_salted = salt(
+        module,
+        deterministic=False,
+        strata=Strata.train,
+        n_hashes=4,
+        device=content.device,
+    )
+    repeated_salted = salt(
+        module,
+        deterministic=False,
+        strata=Strata.train,
+        n_hashes=4,
+        device=content.device,
+    )
+    module.global_step = 1
+    next_salted = salt(
+        module,
+        deterministic=False,
+        strata=Strata.train,
+        n_hashes=4,
+        device=content.device,
+    )
+
+    assert first_salted is not None
+    assert repeated_salted is not None
+    assert next_salted is not None
+    first = torch.bitwise_xor(content, first_salted)
+
+    assert first.shape == content.shape
+    assert first.dtype == content.dtype
+    assert first.device == content.device
+    assert first[0].unique().numel() == content.shape[-1]
+    assert torch.equal(first_salted, repeated_salted)
+    assert not torch.equal(first_salted, next_salted)
+    assert torch.equal(content, original)
+
+
+def test_reconstruction_buckets_use_the_same_global_step_salt_as_embeddings():
+    content = _hash_matrix([f"value-{index}" for index in range(64)], n_hashes=4)
+    module = SimpleNamespace(global_step=0)
+    first_salted = salt(
+        module,
+        deterministic=False,
+        strata=Strata.train,
+        n_hashes=4,
+        device=content.device,
+    )
+    module.global_step = 1
+    next_salted = salt(
+        module,
+        deterministic=False,
+        strata=Strata.train,
+        n_hashes=4,
+        device=content.device,
+    )
+
+    assert first_salted is not None
+    assert next_salted is not None
+    first = _bucket_ids(torch.bitwise_xor(content, first_salted), n_buckets=4)
+    following = _bucket_ids(torch.bitwise_xor(content, next_salted), n_buckets=4)
+
+    assert not torch.equal(first, following)
+
+
+def test_hashable_embedder_rotates_valued_content_by_global_step():
+    schema = Schema.model_validate(_structure_payload(length=2, n_hashes=4))
+    module = SimpleNamespace(global_step=0)
+    embedder = Embedder(schema=schema, address=ADDRESS, module=module)
+    field = TensorField.new(
+        values=[[["alice", None]]],
+        address=ADDRESS,
+        schema=schema,
+        strata=Strata.train,
+    )
+    original = field.content.clone()
+
+    unsalted = embedder(field).payload
+    module.global_step = 99
+    test = embedder(field, strata=Strata.test).payload
+    predict = embedder(field, strata=Strata.predict).payload
+
+    valued_index = (0, 0, 0)
+    null_index = (0, 0, 1)
+    for strata in (Strata.train, Strata.validate):
+        module.global_step = 0
+        first = embedder(field, strata=strata).payload
+        repeated = embedder(field, strata=strata).payload
+        module.global_step = 1
+        following = embedder(field, strata=strata).payload
+        module.global_step = 0
+        repeated_first_step = embedder(field, strata=strata).payload
+
+        assert not torch.allclose(first[valued_index], unsalted[valued_index])
+        assert torch.allclose(first[valued_index], repeated[valued_index])
+        assert not torch.allclose(first[valued_index], following[valued_index])
+        assert torch.allclose(first, repeated_first_step)
+        assert torch.allclose(first[null_index], following[null_index])
+
+    assert torch.allclose(test, unsalted)
+    assert torch.allclose(predict, unsalted)
+    assert torch.equal(field.content, original)
+
+
+def test_deterministic_hashable_embedder_disables_training_and_validation_salt():
+    schema = Schema.model_validate(_structure_payload(length=2, n_hashes=4, deterministic=True))
+    module = SimpleNamespace(global_step=0)
+    embedder = Embedder(schema=schema, address=ADDRESS, module=module)
+    field = TensorField.new(
+        values=[[["alice", "bob"]]],
+        address=ADDRESS,
+        schema=schema,
+        strata=Strata.train,
+    )
+
+    expected = embedder(field).payload
+    for strata in Strata:
+        module.global_step = 0
+        assert torch.allclose(embedder(field, strata=strata).payload, expected)
+        module.global_step = 99
+        assert torch.allclose(embedder(field, strata=strata).payload, expected)
+
+    assert not hasattr(embedder, "_salt")
+
+
+@pytest.mark.parametrize("deterministic", [False, True])
+def test_equal_values_stay_matched_across_fields_at_each_global_step(deterministic: bool):
+    model = _hashable_model(deterministic=deterministic)
+    trainer = SimpleNamespace(global_step=0)
+    model.trainer = trainer
+    inputs = model.encode(
+        [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}],
+        strata=Strata.train,
+        mask=False,
+    )
+
+    projections_by_step: list[torch.Tensor] = []
+    for global_step in range(3):
+        trainer.global_step = global_step
+        items_embedder = model.nodes["record/items/id"].embedder
+        owner_embedder = model.nodes["record/owner"].embedder
+        items_projection = items_embedder(inputs["record/items/id"], strata=Strata.train).payload
+        owner_projection = owner_embedder(inputs["record/owner"], strata=Strata.train).payload
+
+        assert torch.allclose(items_projection[0, 0, 0], owner_projection[0, 0])
+        projections_by_step.append(items_projection[0, 0, 0].detach())
+
+    if deterministic:
+        assert torch.allclose(projections_by_step[0], projections_by_step[1])
+        assert torch.allclose(projections_by_step[1], projections_by_step[2])
+    else:
+        assert not torch.allclose(projections_by_step[0], projections_by_step[1])
+        assert not torch.allclose(projections_by_step[1], projections_by_step[2])
+
+
+def test_model_runtime_uses_global_step_salt_and_disables_it_for_inference():
+    model = _hashable_model()
+    trainer = SimpleNamespace(global_step=0)
+    model.trainer = trainer
+    inputs = model.encode(
+        [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}],
+        strata=Strata.train,
+        mask=False,
+    )
+    captured: list[torch.Tensor] = []
+    handle = model.nodes["record/items/id"].embedder.register_forward_hook(
+        lambda _module, _args, output: captured.append(output.payload.detach().clone())
+    )
+    try:
+        model(inputs, strata=Strata.train)
+        trainer.global_step = 1
+        model(inputs, strata=Strata.train)
+        trainer.global_step = 100
+        model(inputs, strata=Strata.predict)
+        trainer.global_step = 200
+        model(inputs, strata=Strata.predict)
+    finally:
+        handle.remove()
+
+    assert not torch.allclose(captured[0], captured[1])
+    assert torch.allclose(captured[2], captured[3])
+
+
+def test_hashable_embedder_root_reference_is_not_a_registered_submodule():
+    model = _hashable_model()
+    embedder = model.nodes["record/items/id"].embedder
+
+    assert model.global_step == 0
+    assert embedder._module is model
+    assert "_module" not in embedder._modules
+    assert all(not key.startswith("nodes.record/items/id.embedder._module") for key in model.state_dict())
+
+    copied = deepcopy(model)
+    assert copied.nodes["record/items/id"].embedder._module is copied
+
+    model._rebuild()
+    assert model.nodes["record/items/id"].embedder._module is model
+
+
+@pytest.mark.parametrize(("deterministic", "expects_salt"), [(False, True), (True, False)])
+def test_hashable_loss_obeys_deterministic_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    deterministic: bool,
+    expects_salt: bool,
+):
+    model = rf.Model(
+        rf.Hash("context", n_hashes=4, deterministic=deterministic),
+        rf.Hash("label", n_hashes=4, target=True, deterministic=deterministic),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        batch_size=2,
+    )
+    trainer = SimpleNamespace(global_step=3)
+    model.trainer = trainer
+    monkeypatch.setattr(model, "log", lambda *args, **kwargs: None)
+    inputs = model.encode(
+        [{"context": "alice", "label": "alice"}, {"context": "bob", "label": "bob"}],
+        strata=Strata.train,
+    )
+
+    expected_salted = salt(
+        model,
+        deterministic=deterministic,
+        strata=Strata.train,
+        n_hashes=4,
+        device=inputs["record/label"].content.device,
+    )
+    raw_targets = inputs["record/label"].targets[TensorKey.content]
+    salted_targets = raw_targets if expected_salted is None else torch.bitwise_xor(raw_targets, expected_salted)
+    expected_buckets = _bucket_ids(salted_targets.reshape(-1, 4), n_buckets=4).reshape(-1)
+
+    captured_targets: list[torch.Tensor] = []
+    original_cross_entropy = torch.nn.functional.cross_entropy
+
+    def capture_targets(
+        input: torch.Tensor,
+        target: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        captured_targets.append(target.detach().clone())
+        return original_cross_entropy(input=input, target=target, **kwargs)
+
+    monkeypatch.setattr(torch.nn.functional, "cross_entropy", capture_targets)
+    output = model.training_step(inputs, batch_idx=99)
+
+    assert torch.isfinite(output["loss"])
+    assert torch.equal(captured_targets[-1], expected_buckets)
+    if expects_salt:
+        assert expected_salted is not None
+    else:
+        assert expected_salted is None
 
 
 def test_hashable_does_not_register_a_salt_callback():

@@ -219,8 +219,6 @@ def encode(
     out: dict[Address, TensorFieldBase] = {}
     target_addresses = set(schema.target)
 
-    hash_salt = random.getrandbits(64) if strata in {Strata.train, Strata.validate} else 0
-
     if strata != Strata.predict and contains_mask_literal(batch):
         raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata")
 
@@ -256,9 +254,6 @@ def encode(
         parameters = inspect.signature(TensorField.new).parameters
         if "interprocess_encoding_context" in parameters:
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
-
-        if "salt" in parameters:
-            kwargs["salt"] = hash_salt
 
         out[address] = TensorField.new(**kwargs)
         out[address].check_nullable(address=address, schema=schema)

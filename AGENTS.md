@@ -69,7 +69,7 @@ model = rf.Model(
 - `Branch(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root branch uses internal `Overflow.error`.
 - `target=True` is shorthand for `p_prune=1.0`; the field is hidden from input and decoded as a supervised target.
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
-- `Hash` represents large identifiers with batch-salted hashes, preserving equality across fields in one encoded batch without learning a persistent vocabulary.
+- `Hash` represents large identifiers with static CPU hashes and, by default, device-side salts derived from Lightning `global_step` during training and validation. `deterministic=True` disables that rotation for a persistent representation, which can increase overfitting. Test and prediction are always unsalted.
 - `DateParts` is for calendar parts. If elapsed time or recency matters, derive a `Number`.
 - Preprocessors run before tensorization. Use them for Python logic, windowing, normalization, or splitting one raw record into multiple observations.
 - Postprocessors run after prediction writing. Use them to reshape address-keyed outputs for APIs or warehouses.

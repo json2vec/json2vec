@@ -43,11 +43,24 @@ strings, integers, floats, booleans, and bytes. `None` has state `null`, and a
 missing branch slot has state `padded`. Lists, mappings, and unsupported Python
 objects are rejected.
 
-The same value receives the same representation everywhere in one encoded
-batch, including across different `Hash` leaves. Training and validation
-use a fresh random salt for each batch, preventing persistent value
-memorization while preserving batch-local equality. Test and prediction use a
-fixed zero salt, making inference deterministic.
+CPU tensorization gives the same value the same static hash everywhere,
+including across different `Hash` leaves. During training and validation, the
+model hashes Lightning's `global_step` into one salt per lane after the batch
+reaches the model device. This preserves equality while rotating the
+representation as optimizer steps advance across epoch boundaries. Gradient-
+accumulated microbatches share a salt, as do validation batches while the
+optimizer step is frozen. Test and prediction bypass that device-side salt,
+making inference deterministic.
+
+Set `deterministic=True` when a field must retain the same representation in
+training and validation too. This persistent identifier signal can be
+powerful, but it also makes memorizing individual identifiers easier and can
+increase overfitting. During training and validation, equal values match across
+`Hash` leaves only when those leaves use the same `deterministic` setting and
+compatible hash-lane configuration.
+
+This option controls only the Hash representation. It does not make masking,
+dropout, data loading, or the rest of model training deterministic.
 
 ## Configuration
 
@@ -57,6 +70,7 @@ fixed zero salt, making inference deterministic.
 | `n_bands` | `8` | Number of octaves spanned below the base sinusoidal frequency. |
 | `offset` | `4` | Upper octave of the sinusoidal frequency range. |
 | `n_buckets` | `4` | Number of reconstruction classes per hash lane. Must be greater than one. Effective target capacity is `n_buckets ** n_hashes`. |
+| `deterministic` | `False` | Disable train/validation optimizer-step salting. This gives each identifier a persistent representation, which can be useful but increases overfitting risk. |
 
 Shared leaf options are documented in
 [Built-In Data Types](../core-concepts/data-types.qmd).
@@ -79,8 +93,9 @@ compressed into a pooled representation.
 ## Prediction Output
 
 `Hash` has no decoded writer payload. Configure `embed=True` only when a
-normalized representation at the field address is useful; it is not a durable
-identifier across separately tensorized training batches.
+normalized representation at the field address is useful. By default it is
+not a durable identifier across different optimizer steps;
+`deterministic=True` deliberately opts into that persistent behavior.
 
 ## Where Next
 
