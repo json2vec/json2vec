@@ -98,6 +98,36 @@ The encoder averages embeddings for active known labels and adds the separate
 state embedding. Zero set content therefore contributes no label embedding but
 still retains its `valued` state embedding.
 
+### Reading The Vocabulary
+
+After training or loading a checkpoint, retrieve the populated labels in
+categorical-index order:
+
+```python
+known_tags = rf.Set.vocabulary(model, "record/tags")
+```
+
+The result is an immutable tuple snapshot. It excludes unused capacity, and a
+tuple already returned does not change if the online vocabulary later grows.
+Like `Category.vocabulary(...)`, `Set.vocabulary(...)` accepts either a `Model`
+or the `encoding_context` supplied to a preprocessor. The context form is the
+appropriate way to consult a trained vocabulary during inference
+preprocessing:
+
+```python
+@rf.preprocess
+def keep_known_tags(record: dict, *, encoding_context) -> rf.Observation:
+    vocabulary = rf.Set.vocabulary(encoding_context, "record/tags")
+    return rf.Observation({
+        **record,
+        "tags": [tag for tag in record["tags"] if tag in vocabulary],
+    })
+```
+
+Avoid making training-preprocessor decisions from the current learned
+vocabulary. Preprocessing precedes vocabulary reservation, so the result can
+otherwise depend on traversal order, batching, and worker timing.
+
 ## Loss And Metrics
 
 When a `Set` is masked, pruned, or used as a target, its decoder produces:

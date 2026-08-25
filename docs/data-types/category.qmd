@@ -105,6 +105,85 @@ field-level `vocabulary/size` metric and the upstream rate of unseen labels. A
 vocabulary at capacity is not automatically a problem, but frequent unavailable
 values may indicate insufficient capacity, drift, or inconsistent preprocessing.
 
+### Reading The Vocabulary
+
+After training or loading a checkpoint, read the populated labels directly from
+the model:
+
+```python
+known_categories = rf.Category.vocabulary(
+    model,
+    "record/merchant_category",
+)
+```
+
+`Category.vocabulary(...)` accepts either a `Model` or an
+`InterprocessEncodingContext` as its first argument. It returns an immutable
+tuple of populated labels in categorical-index order. The unavailable sentinel
+and unused capacity are not included. Each call returns a snapshot: later
+vocabulary growth does not change a tuple that was already returned.
+
+Training exposure counts are available from the model:
+
+```python
+category_counts = rf.Category.counts(
+    model,
+    "record/merchant_category",
+)
+```
+
+The result is a new dictionary from each populated label to its observed
+training count. It excludes unused capacity, the unavailable sentinel, nulls,
+and padded positions. These are model-training exposures, not source-dataset
+frequencies: presenting the same observation in another epoch or through
+repeated sampling increments its count again. The counter's internal smoothing
+prior is removed from the public values. When a valued input is masked during
+training, its original target label still counts as an exposure.
+
+`Category.counts(...)` requires a model because counters are model state. In a
+distributed run, a snapshot taken during an epoch can still be rank-local;
+counter updates are folded together at epoch end.
+
+The pipeline supplies its `InterprocessEncodingContext` to a preprocessor
+through the keyword-only `encoding_context` parameter. This makes the trained
+vocabulary available without binding the model itself. For example, an
+inference-only preprocessor can deliberately turn unseen values into `null`
+instead of leaving them as valued-but-unavailable content:
+
+```python
+@rf.preprocess
+def null_unseen_category(
+    record: dict,
+    *,
+    encoding_context,
+) -> rf.Observation:
+    vocabulary = rf.Category.vocabulary(
+        encoding_context,
+        "record/merchant_category",
+    )
+    value = record["merchant_category"].strip().lower()
+
+    return rf.Observation({
+        **record,
+        "merchant_category": value if value in vocabulary else None,
+    })
+
+
+predictions = model.predict(
+    records,
+    preprocess=null_unseen_category,
+)
+```
+
+::: {.callout-warning}
+Do not use the current vocabulary to make training-preprocessor decisions.
+Preprocessing runs before the current observation is tensorized and reserved in
+the online vocabulary, so a training observation sees only labels learned from
+earlier work. The resulting bootstrap behavior can depend on traversal order,
+batching, and worker timing. Restrict vocabulary-dependent preprocessing to
+inference after the training or checkpoint vocabulary is established.
+:::
+
 ## State, Content, And Encoder Input
 
 State and categorical content make separate contributions to the encoder:

@@ -33,6 +33,7 @@ from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabu
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
+    from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
 cluster: Plugin = Plugin(name="cluster")
@@ -116,6 +117,82 @@ class Request(RequestBase):
     ) -> int:
         """Persistently assign one token to a cluster or cluster distribution."""
         return _ClusterRuntime(model=model, address=address).assign(token, assignment)
+
+    @classmethod
+    def vocabulary(
+        cls,
+        source: "Model | InterprocessEncodingContext",
+        address: Address | str,
+        /,
+    ) -> tuple[Any, ...]:
+        """Return an immutable snapshot of one Cluster vocabulary."""
+        from relflow.architecture.root import Model
+
+        normalized = Address(str(address))
+        if isinstance(source, Model):
+            embedder = _resolve_cluster_embedder(source, normalized)
+            with embedder.vocab.lock:
+                return tuple(embedder.vocab.master)
+        elif isinstance(source, Mapping):
+            if normalized not in source:
+                raise KeyError(f"no encoding context at address {str(normalized)!r}")
+
+            state = source[normalized]
+            if not isinstance(state, VocabularyState):
+                raise TypeError(
+                    f"encoding context at {str(normalized)!r} is not a VocabularyState (got {type(state).__name__})"
+                )
+        else:
+            raise TypeError(
+                f"Cluster.vocabulary source must be a Model or InterprocessEncodingContext, got {type(source).__name__}"
+            )
+
+        with state.lock:
+            return tuple(state.master)
+
+    @classmethod
+    def assignments(
+        cls,
+        model: "Model",
+        address: Address | str,
+        /,
+    ) -> dict[Any, dict[str, int | tuple[float, ...]]]:
+        """Return evaluation-time assignments for every populated token."""
+        embedder = _resolve_cluster_embedder(model, address)
+        with embedder.vocab.lock:
+            vocabulary = tuple(embedder.vocab.master)
+            logits = embedder.embeddings[TensorKey.cluster.name].weight[: len(vocabulary)].detach().clone()
+
+        if not vocabulary:
+            return {}
+
+        probabilities = torch.softmax(logits, dim=-1)
+        clusters: list[int] = logits.argmax(dim=-1).cpu().tolist()
+        rows: list[list[float]] = probabilities.cpu().tolist()
+        return {
+            token: {
+                "cluster": int(cluster_id),
+                "probabilities": tuple(float(probability) for probability in row),
+            }
+            for token, cluster_id, row in zip(vocabulary, clusters, rows, strict=True)
+        }
+
+    @classmethod
+    def status(
+        cls,
+        model: "Model",
+        address: Address | str,
+        /,
+    ) -> dict[str, tuple[int, ...] | tuple[float, ...]]:
+        """Return committed cluster IDs and their usage EMA snapshot."""
+        embedder = _resolve_cluster_embedder(model, address)
+        committed = embedder.committed.detach().cpu().clone()
+        usage = embedder.usage_ema.detach().cpu().clone()
+
+        return {
+            "committed": tuple(index for index, value in enumerate(committed.tolist()) if value),
+            "usage": tuple(float(value) for value in usage.tolist()),
+        }
 
     @classmethod
     def override(
@@ -448,6 +525,23 @@ class Embedder(EmbedderBase):
         if self._override_depth:
             raise RuntimeError("cannot save or rebuild a model while Cluster assignment overrides are active")
         super()._save_to_state_dict(state_dict, prefix, keep_vars)
+
+
+def _resolve_cluster_embedder(model: "Model", address: Address | str) -> Embedder:
+    """Resolve a live Cluster embedder without importing Model at module load."""
+    from relflow.architecture.root import Model
+
+    if not isinstance(model, Model):
+        raise TypeError(f"Cluster binding model must be a Model, got {type(model).__name__}")
+
+    normalized = Address(str(address))
+    if normalized not in model.nodes:
+        raise KeyError(f"no field at address {str(normalized)!r}")
+
+    embedder = getattr(model.nodes[normalized], "embedder", None)
+    if not isinstance(embedder, Embedder):
+        raise TypeError(f"address {str(normalized)!r} is not a Cluster field (got {type(embedder).__name__})")
+    return embedder
 
 
 class _ClusterRuntime:

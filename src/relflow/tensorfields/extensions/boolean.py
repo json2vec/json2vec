@@ -57,6 +57,30 @@ class Request(RequestBase):
     type: Literal["boolean"] = "boolean"
     threshold: Threshold | Thresholds = 0.5
 
+    @classmethod
+    def counts(
+        cls,
+        model: "Model",
+        address: Address | str,
+        /,
+    ) -> dict[bool, int]:
+        """Return observed training counts for false and true values."""
+        from relflow.architecture.root import Model
+
+        if not isinstance(model, Model):
+            raise TypeError(f"Boolean.counts model must be a Model, got {type(model).__name__}")
+
+        address = Address(str(address))
+        if address not in model.nodes:
+            raise KeyError(f"no field at address {str(address)!r}")
+
+        embedder = getattr(model.nodes[address], "embedder", None)
+        if not isinstance(embedder, Embedder):
+            raise TypeError(f"address {str(address)!r} is not a Boolean field (got {type(embedder).__name__})")
+
+        counts = embedder.counters[TensorKey.content.name].counts.detach().cpu().sub(1).clamp_min(0).tolist()
+        return {False: int(counts[0]), True: int(counts[1])}
+
     @pydantic.field_validator("threshold", mode="after")
     @classmethod
     def deduplicate_thresholds(cls, value: float | list[float]) -> float | list[float]:

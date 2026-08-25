@@ -203,6 +203,7 @@ class ModelRuntime:
     ) -> EncodedInput:
         strata = Strata.normalize(strata)
         resolved_preprocessor = Preprocessor.normalize(preprocess)
+        encoding_context = module.interprocess_encoding_context
 
         if resolved_preprocessor is not None:
             observations: EncodedBatch = []
@@ -212,7 +213,7 @@ class ModelRuntime:
                         request,
                         strata=strata,
                         schema=module.schema,
-                        encoding_context=module.interprocess_encoding_context,
+                        encoding_context=encoding_context,
                     )
                 )
 
@@ -224,7 +225,7 @@ class ModelRuntime:
             batch=cast(EncodedBatch, batch),
             schema=module.schema,
             strata=strata,
-            interprocess_encoding_context=module.interprocess_encoding_context,
+            interprocess_encoding_context=encoding_context,
             defer_target_masking=True,
         )
         if mask:

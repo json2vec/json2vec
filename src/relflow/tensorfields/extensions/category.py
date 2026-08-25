@@ -28,6 +28,7 @@ from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabu
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
+    from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
 category: Plugin = Plugin(name="category")
@@ -48,6 +49,77 @@ class Request(RequestBase):
     ] = 1024
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
     topk: list[int] | None = None
+
+    @classmethod
+    def vocabulary(
+        cls,
+        source: "Model | InterprocessEncodingContext",
+        address: Address | str,
+        /,
+    ) -> tuple[Any, ...]:
+        """Return an immutable snapshot of one categorical vocabulary."""
+        from relflow.architecture.root import Model
+
+        address = Address(str(address))
+        if isinstance(source, Model):
+            if address not in source.nodes:
+                raise KeyError(f"no field at address {str(address)!r}")
+
+            embedder = getattr(source.nodes[address], "embedder", None)
+            if not isinstance(embedder, Embedder):
+                raise TypeError(f"address {str(address)!r} is not a Category field (got {type(embedder).__name__})")
+            with embedder.vocab.lock:
+                return tuple(embedder.vocab.master)
+        elif isinstance(source, Mapping):
+            if address not in source:
+                raise KeyError(f"no encoding context at address {str(address)!r}")
+
+            state = source[address]
+            if not isinstance(state, VocabularyState):
+                raise TypeError(
+                    f"encoding context at {str(address)!r} is not a VocabularyState (got {type(state).__name__})"
+                )
+        else:
+            raise TypeError(
+                "Category.vocabulary source must be a Model or InterprocessEncodingContext, "
+                f"got {type(source).__name__}"
+            )
+
+        with state.lock:
+            return tuple(state.master)
+
+    @classmethod
+    def counts(
+        cls,
+        model: "Model",
+        address: Address | str,
+        /,
+    ) -> dict[Any, int]:
+        """Return observed training counts for the populated vocabulary."""
+        from relflow.architecture.root import Model
+
+        if not isinstance(model, Model):
+            raise TypeError(f"Category.counts model must be a Model, got {type(model).__name__}")
+
+        address = Address(str(address))
+        if address not in model.nodes:
+            raise KeyError(f"no field at address {str(address)!r}")
+
+        embedder = getattr(model.nodes[address], "embedder", None)
+        if not isinstance(embedder, Embedder):
+            raise TypeError(f"address {str(address)!r} is not a Category field (got {type(embedder).__name__})")
+
+        vocabulary = cls.vocabulary(model, address)
+        counts = (
+            embedder.counters[TensorKey.content.name]
+            .counts[: len(vocabulary)]
+            .detach()
+            .cpu()
+            .sub(1)
+            .clamp_min(0)
+            .tolist()
+        )
+        return {label: int(count) for label, count in zip(vocabulary, counts, strict=True)}
 
     @property
     def size(self) -> int:

@@ -71,9 +71,9 @@ The online vocabulary distinguishes two kinds of valued input:
 | Label in the learned vocabulary | `valued` | Its index from `0` through `capacity - 1` |
 | Label outside the learned vocabulary | `valued` | Internal unavailable sentinel `capacity` |
 
-The sentinel is not a vocabulary label, embedding-table row, decoder class, or
-prediction candidate. It only records that a source value was present but its
-categorical content is unavailable.
+The sentinel is not a vocabulary label, decoder class, or prediction candidate.
+It uses the reserved assignment-table row at `capacity` to record that a source
+value was present but its categorical content is unavailable.
 
 ## Configuration
 
@@ -136,7 +136,75 @@ embedding returned by `embed=True`; see
 training. It does not create a new state or teach the model to emit an
 unavailable class.
 
-## Runtime Assignments
+## Runtime State And Assignments
+
+Read the populated vocabulary from either the model or the pipeline's
+`InterprocessEncodingContext`:
+
+```python
+vocabulary = rf.Cluster.vocabulary(model, "record/merchant_id")
+
+@rf.preprocess
+def preprocess_merchant(record: dict, *, encoding_context) -> rf.Observation:
+    vocabulary = rf.Cluster.vocabulary(
+        encoding_context,
+        "record/merchant_id",
+    )
+    merchant_id = record["merchant_id"].strip().upper()
+
+    return rf.Observation({
+        **record,
+        "merchant_id": merchant_id if merchant_id in vocabulary else None,
+    })
+
+
+predictions = model.predict(records, preprocess=preprocess_merchant)
+```
+
+The result is an immutable tuple in categorical-index order. It contains only
+populated labels, not the unavailable sentinel or unused capacity. Each call is
+a snapshot, so later vocabulary changes do not alter a previously returned
+tuple. Vocabulary-dependent preprocessing should run only at inference time:
+during training, the current observation is not reserved until after
+preprocessing, making such decisions dependent on data and worker order.
+
+Two model-only bindings expose the learned clustering state:
+
+```python
+assignments = rf.Cluster.assignments(model, "record/merchant_id")
+status = rf.Cluster.status(model, "record/merchant_id")
+```
+
+`assignments` maps every populated label to its softmax assignment
+probabilities and evaluation-time cluster ID. Each probability tuple covers all
+configured cluster columns, including columns that are currently uncommitted:
+
+```python
+{
+    "ACC-55412-X": {
+        "cluster": 3,
+        "probabilities": (0.02, 0.05, 0.08, 0.75, 0.05, 0.05),
+    },
+}
+```
+
+The cluster ID is the `argmax` used by the encoder in evaluation mode. The
+unavailable sentinel assignment is excluded. `status` returns the currently
+committed cluster IDs and the usage EMA aligned by cluster ID:
+
+```python
+{
+    "committed": (0, 1, 3),
+    "usage": (0.31, 0.27, 0.04, 0.28, 0.05, 0.05),
+}
+```
+
+Usage is the training-time EMA of the decoder's predicted cluster activity. It
+is not a count or distribution of vocabulary labels assigned to each cluster.
+During distributed training, usage and commitment reflect the local rank; these
+bindings do not aggregate the buffers. Both results contain detached CPU-native
+snapshots rather than live tensors. Call them again after training to observe
+new state; `assignments` also reflects subsequent runtime assignments.
 
 The sentinel row gives every OOV label the same average cluster. When a
 specific new label should route to a specific cluster, add a persistent

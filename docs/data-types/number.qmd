@@ -99,6 +99,27 @@ With `alpha=None`, updates are cumulative over observed training values. With an
 buffers are part of the model state and are used again after loading a
 checkpoint.
 
+Read a defensive snapshot of those values from a trained or loaded model:
+
+```python
+normalization = rf.Number.normalization(model, "record/amount")
+# {
+#     "mean": ...,
+#     "variance": ...,
+#     "std": ...,
+#     "count": ...,
+#     "alpha": None,
+# }
+```
+
+`std` is the exact normalization divisor, including the normalizer's numerical
+epsilon. With cumulative normalization (`alpha=None`), `count` is the number of
+finite, valued training presentations observed by the model. Presenting a value
+again in another epoch counts it again. With exponential normalization,
+`count` is `None` because the moving average does not maintain a meaningful
+cumulative sample count. Numeric normalizer state is local to each distributed
+rank rather than synchronized across ranks.
+
 ## Target Behavior
 
 When a `Number` is masked or used as a target, the decoder predicts:

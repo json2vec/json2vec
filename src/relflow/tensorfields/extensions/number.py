@@ -68,6 +68,40 @@ class Request(RequestBase):
     alpha: Annotated[float | None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
     objective: Objective = Objective.mae
 
+    @classmethod
+    def normalization(
+        cls,
+        model: "Model",
+        address: Address | str,
+        /,
+    ) -> dict[str, float | int | None]:
+        """Return a CPU-native snapshot of one Number field's normalizer."""
+        from relflow.architecture.root import Model
+
+        if not isinstance(model, Model):
+            raise TypeError(f"Number.normalization model must be a Model, got {type(model).__name__}")
+
+        address = Address(str(address))
+        if address not in model.nodes:
+            raise KeyError(f"no field at address {str(address)!r}")
+
+        embedder = getattr(model.nodes[address], "embedder", None)
+        if not isinstance(embedder, Embedder):
+            raise TypeError(f"address {str(address)!r} is not a Number field (got {type(embedder).__name__})")
+
+        normalizer = embedder.normalizer
+        mean = float(normalizer.mean.detach().cpu().item())
+        variance = float(normalizer.var.detach().cpu().item())
+        count = None if normalizer.alpha is not None else int(normalizer.count.detach().cpu().item())
+
+        return {
+            "mean": mean,
+            "variance": variance,
+            "std": math.sqrt(variance + normalizer.epsilon),
+            "count": count,
+            "alpha": normalizer.alpha,
+        }
+
 
 @number.register
 @tensorclass
@@ -178,7 +212,7 @@ class GlobalOnlineNormalizer(torch.nn.Module):
 
         self.register_buffer("mean", torch.zeros(1))
         self.register_buffer("var", torch.ones(1))
-        self.register_buffer("count", torch.zeros(1))
+        self.register_buffer("count", torch.zeros(1, dtype=torch.int64))
 
     @torch.no_grad()
     def update(self, values: torch.Tensor):

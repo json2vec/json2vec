@@ -85,6 +85,21 @@ Thresholds control discrete decision metrics, but AUC and binary cross entropy
 continue to use unthresholded probabilities or logits. Tune thresholds using
 held-out data when false positives and false negatives have different costs.
 
+Read the content counter from a trained or loaded model with:
+
+```python
+counts = rf.Boolean.counts(model, "record/converted")
+# {False: ..., True: ...}
+```
+
+The returned dictionary contains valued training presentations only; null and
+padded content do not count. When a valued input is masked during training, its
+original target still counts as an exposure. Counts accumulate again when
+observations are presented in later epochs or through repeated sampling, so
+they are not necessarily source-dataset frequencies. The internal smoothing
+prior is removed. During distributed training, mid-epoch snapshots can be
+rank-local because counters synchronize at epoch end.
+
 ## Prediction Output
 
 Predictions contain the probability of `True`, without a thresholded Boolean

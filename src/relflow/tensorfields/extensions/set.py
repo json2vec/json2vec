@@ -27,6 +27,7 @@ from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, Vocabu
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
+    from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
 sets: Plugin = Plugin(name="set")
@@ -46,6 +47,43 @@ class Request(RequestBase):
     ] = 10_000
     p_unavailable: Annotated[float, pydantic.Field(ge=0.0, le=1.0, default=0.01)] = 0.01
     threshold: Annotated[float | None, pydantic.Field(ge=0.0, le=1.0, default=None)] = None
+
+    @classmethod
+    def vocabulary(
+        cls,
+        source: "Model | InterprocessEncodingContext",
+        address: Address | str,
+        /,
+    ) -> tuple[Any, ...]:
+        """Return an immutable snapshot of one set vocabulary."""
+        from relflow.architecture.root import Model
+
+        address = Address(str(address))
+        if isinstance(source, Model):
+            if address not in source.nodes:
+                raise KeyError(f"no field at address {str(address)!r}")
+
+            embedder = getattr(source.nodes[address], "embedder", None)
+            if not isinstance(embedder, Embedder):
+                raise TypeError(f"address {str(address)!r} is not a Set field (got {type(embedder).__name__})")
+            with embedder.vocab.lock:
+                return tuple(embedder.vocab.master)
+        elif isinstance(source, Mapping):
+            if address not in source:
+                raise KeyError(f"no encoding context at address {str(address)!r}")
+
+            state = source[address]
+            if not isinstance(state, VocabularyState):
+                raise TypeError(
+                    f"encoding context at {str(address)!r} is not a VocabularyState (got {type(state).__name__})"
+                )
+        else:
+            raise TypeError(
+                f"Set.vocabulary source must be a Model or InterprocessEncodingContext, got {type(source).__name__}"
+            )
+
+        with state.lock:
+            return tuple(state.master)
 
     @property
     def size(self) -> int:
