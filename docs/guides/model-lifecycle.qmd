@@ -45,6 +45,15 @@ The saved artifact contains:
 - persistent tensorfield state, including online vocabularies, numeric
   normalizers, and counters stored in the model state dictionary.
 
+::: {.callout-note title="Checkpoint Version Metadata"}
+New models expose an immutable `model.version` initialized from `rf.__version__`.
+Compact artifacts and full Lightning checkpoints persist that provenance in the
+reserved top-level `version` field; when present, `Model.load(...)` restores it.
+Version metadata is informational for now, so loading is not version-gated.
+Legacy checkpoints without version metadata remain loadable and report
+`model.version == "0+unknown"`.
+:::
+
 It does not contain the Python preprocessor or postprocessor callable, raw
 datasets, logger history, optimizer factory, scheduler factory, or application
 configuration. Version and deploy those alongside the checkpoint.

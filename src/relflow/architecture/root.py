@@ -16,6 +16,7 @@ from rich.text import Text
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
+from relflow._version import __version__
 from relflow.architecture.checkpoint import CheckpointState, RollbackCheckpoint
 from relflow.architecture.contracts import ContractScheduler
 from relflow.architecture.graph import ModelGraph
@@ -203,6 +204,7 @@ class Model(lit.LightningModule, Renderable):
         if batch_size <= 0:
             raise ValueError("batch_size must be > 0")
 
+        self._version: str = __version__
         self.schema: Schema = schema
         self.batch_size: int = batch_size
         self.optimizer: OptimizerConfig | None = optimizer
@@ -222,6 +224,11 @@ class Model(lit.LightningModule, Renderable):
             branches=len(self.schema.branches),
             embeds=len(self.schema.embed),
         ).info("initialized Model module")
+
+    @property
+    def version(self) -> str:
+        """RelFlow version associated with this model's checkpoint provenance."""
+        return self._version
 
     def _build(self) -> None:
         ModelGraph.install(self)
@@ -480,6 +487,9 @@ class Model(lit.LightningModule, Renderable):
 
     def on_save_checkpoint(self, checkpoint):
         CheckpointState.dump(self, checkpoint)
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        CheckpointState.restore_version(self, checkpoint)
 
     def restore_checkpoint_state(self, checkpoint: dict[str, Any]) -> None:
         """Restore this model in place from a `relflow` checkpoint dictionary."""

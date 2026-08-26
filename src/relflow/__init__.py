@@ -9,6 +9,7 @@ mutation predicates, and the `@preprocess` decorator.
 from typing import TYPE_CHECKING, Any
 
 from relflow import helpers as helpers
+from relflow._version import __version__
 from relflow.architecture.checkpoint import RollbackCheckpoint
 from relflow.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
 from relflow.architecture.root import (
@@ -109,6 +110,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "__version__",
     "Address",
     "Accelerator",
     "Branch",

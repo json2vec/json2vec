@@ -56,6 +56,10 @@ extension internals and should be treated as more version-coupled.
 Passing `schema=...` is a lower-level/load integration and cannot be combined
 with tree fields or root architecture arguments.
 
+`model.version` is immutable checkpoint provenance. New models initialize it
+from `rf.__version__`; loaded models retain the checkpoint's top-level `version`
+when available.
+
 ## Built-In Datatypes
 
 | Export | Source value | Public decoded content |
@@ -134,6 +138,7 @@ installation error with the required command.
 
 | Export | Purpose | Guide |
 | --- | --- | --- |
+| `__version__` | Report the installed RelFlow distribution version used to initialize new models. | [Model Lifecycle](../guides/model-lifecycle.qmd) |
 | `RollbackCheckpoint` | Save/select Lightning checkpoints and restore the best full model state at fit end. | [Model Lifecycle](../guides/model-lifecycle.qmd) |
 | `OptimizerConfig`, `SchedulerConfig` | Public typing aliases for model optimizer/scheduler inputs. | [Model Configuration](../guides/model-configuration.qmd) |
 | `VocabularySyncCallback` | Synchronize supported online vocabularies in distributed training. Normally auto-configured. | [Performance And Scaling](../guides/performance.qmd) |

@@ -74,7 +74,7 @@ output in process memory after the callback has written it.
 
 ## Output Files And Rows
 
-`Writer` opens one file per **local** rank:
+`Writer` opens one file per **global** rank:
 
 ```text
 predictions/run-2026-08-01/
@@ -89,6 +89,9 @@ contains:
   and
 - `predictions`: a nested struct keyed by schema address.
 
+The `inputs` struct preserves the processed metadata record's keys and values;
+it does not flatten them into top-level Parquet columns.
+
 Targets and reconstructed masked fields contain their decoded payloads. Nodes
 configured with `embed=True` also contain embeddings. Read
 [Prediction Output](prediction-output.qmd) for the canonical `state`, `content`,
@@ -98,12 +101,9 @@ Use a new output directory for each run. Opening the same rank pathname again
 replaces that file; `Writer` does not create a run manifest, merge rank files,
 or publish an atomic success marker.
 
-::: {.callout-warning}
-File names use `trainer.local_rank`. In a multi-node job, different nodes can
-have the same local rank. Do not point all nodes at one shared directory unless
-the job supplies node-specific output paths; otherwise writers can collide.
-On node-local filesystems, collect every node's rank files downstream.
-:::
+Global-rank filenames remain unique across nodes when every process writes to a
+shared output directory. On node-local filesystems, collect every node's rank
+files downstream.
 
 ## Writer Options
 
@@ -170,8 +170,12 @@ writer = rf.Writer(
 
 Every returned column must have the same number of rows. The values under each
 top-level address/string key must form a mapping that Polars can turn into a
-frame. If the first batch establishes one Arrow schema and a later batch has an
-incompatible shape, writing or schema casting fails.
+frame. `Writer` rejects an address payload whose row count differs from the
+processed input batch, preventing Polars from silently padding either side with
+nulls. If the first batch establishes one Arrow schema and a later batch has an
+incompatible field structure, `Writer` rejects it before schema casting so new
+fields cannot be silently discarded. Safe leaf-value casts to the first schema
+remain supported.
 
 Writer postprocessors can request these runtime values by name:
 

@@ -10,6 +10,7 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from loguru import logger
 
+from relflow._version import UNKNOWN_VERSION
 from relflow.architecture.graph import ModelGraph
 from relflow.structs.experiment import Schema
 
@@ -64,8 +65,16 @@ class CheckpointState:
 
     @staticmethod
     def dump(module: "Model", checkpoint: dict[str, Any]) -> None:
+        checkpoint["version"] = module.version
         checkpoint["schema"] = module.schema.model_dump(mode="python")
         checkpoint["batch_size"] = module.batch_size
+
+    @staticmethod
+    def restore_version(module: "Model", checkpoint: dict[str, Any]) -> None:
+        saved = checkpoint.get("version", UNKNOWN_VERSION)
+        if not isinstance(saved, str):
+            raise ValueError("checkpoint version must be a string")
+        object.__setattr__(module, "_version", saved)
 
     @staticmethod
     def save(module: "Model", pathname: str | Path) -> None:
@@ -92,6 +101,7 @@ class CheckpointState:
             module.to(device=device)
         module.load_state_dict(state_dict=checkpoint["state_dict"])
         module.train(was_training)
+        CheckpointState.restore_version(module, checkpoint)
 
     @staticmethod
     def load(model_cls: type["Model"], checkpoint: str | Path) -> "Model":

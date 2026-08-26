@@ -110,6 +110,7 @@ def _prediction_schema() -> Schema:
                     "type": "category",
                     "query": "[*].color",
                     "embed": False,
+                    "p_unavailable": 0.0,
                     "size": 16,
                 },
                 {
@@ -118,6 +119,7 @@ def _prediction_schema() -> Schema:
                     "query": "[*].label",
                     "embed": False,
                     "p_prune": 1.0,
+                    "p_unavailable": 0.0,
                     "size": 16,
                     "topk": [2],
                 },
