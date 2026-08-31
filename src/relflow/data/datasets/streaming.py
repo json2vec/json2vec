@@ -36,7 +36,6 @@ from relflow.data.datasets.base import (
     share_interprocess_encoding_context,
 )
 from relflow.data.iterables import (
-    JMESPathResolutionMonitor,
     batch,
     mask,
     process,
@@ -304,7 +303,6 @@ class BatchDataset(IterableDataset):
                 preprocessor=self.preprocessor,
                 strata=self.strata,
                 interprocess_encoding_context=self.interprocess_encoding_context,
-                jmespath_resolution_monitor=JMESPathResolutionMonitor(),
                 sharding=self.sharding,
                 chunk_batch_size=self.chunk_batch_size,
                 file_buffer_size=self.file_buffer_size,

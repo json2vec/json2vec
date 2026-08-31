@@ -147,54 +147,6 @@ def test_pipeline_binds_matching_arguments():
     assert list(pipe) == [2, 4, 6, 8, 10]
 
 
-def test_query_prepends_outer_batch_selector():
-    expr = iterables.query("[*].foo.bar")
-    assert expr.expression == "[*][*].foo.bar"
-
-    result = expr.search([[{"foo": {"bar": 42}}]])
-    assert result == [[42]]
-
-    over_nested = iterables.query("[*][*].foo.bar")
-    assert over_nested.expression == "[*][*][*].foo.bar"
-    assert over_nested.search([[{"foo": {"bar": 42}}]]) == [[]]
-
-
-def test_simple_query_extractor_matches_jmespath_for_supported_expressions():
-    cases = [
-        (
-            "[*].amount",
-            [[{"amount": 1.0}], [{"missing": 2.0}]],
-        ),
-        (
-            "[*].transactions[*].amount",
-            [[{"transactions": [{"amount": 1.0}, {"missing": 2.0}]}], [{"transactions": []}]],
-        ),
-        (
-            "[*].transactions[*].amount",
-            [[{"transactions": None}], [{"transactions": [None, {"amount": 3.0}]}]],
-        ),
-    ]
-
-    for expression, batch in cases:
-        extractor = iterables.compile_query_extractor(expression)
-
-        assert extractor is not None
-        assert extractor(batch) == iterables.query(expression).search(batch)
-
-
-def test_simple_query_extractor_preserves_explicit_null_leaf_values():
-    extractor = iterables.compile_query_extractor("[*].amount")
-
-    assert extractor is not None
-    assert extractor([[{"amount": None}], [{"missing": 2.0}], [{"amount": 1.0}]]) == [[None], [], [1.0]]
-
-
-def test_simple_query_extractor_falls_back_for_unsupported_expressions():
-    assert iterables.compile_query_extractor("[*].items[?amount > `1`].amount") is None
-    assert iterables.compile_query_extractor("[*].items[0].amount") is None
-    assert iterables.compile_query_extractor('[*]."hyphen-name"') is None
-
-
 def test_read_ndjson_chunk_sharding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     path = tmp_path / "records.ndjson"
     records = [{"id": i} for i in range(5)]
@@ -606,26 +558,6 @@ def test_shuffle_stops_refilling_after_source_exhausted():
     output = list(iterables.shuffle.__wrapped__(iterator, size=3, strata=Strata.train))
     assert sorted(output) == [0, 1, 2, 3, 4]
     assert iterator.stop_count == 1
-
-
-def test_jmespath_resolution_monitor_raises_for_empty_result():
-    monitor = iterables.JMESPathResolutionMonitor(every=1)
-
-    with pytest.raises(ValueError, match="JMESPath query returned empty result"):
-        monitor.observe(address="root/id", expression="[*].id", result=[])
-
-
-def test_jmespath_resolution_monitor_ignores_empty_result_until_threshold():
-    monitor = iterables.JMESPathResolutionMonitor(every=3)
-
-    monitor.observe(address="root/id", expression="[*].id", result=[])
-    monitor.observe(address="root/id", expression="[*].id", result=[])
-
-
-def test_jmespath_resolution_monitor_accepts_nested_observed_value():
-    monitor = iterables.JMESPathResolutionMonitor(every=1)
-
-    monitor.observe(address="root/id", expression="[*].id", result=[[None, {"id": 0}]])
 
 
 def test_streaming_datamodule_accepts_named_loader_configuration_per_strata():

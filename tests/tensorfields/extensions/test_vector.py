@@ -2,6 +2,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -14,7 +15,6 @@ def _structure_payload(*, n_dim: int = 3, objective: str = "l2") -> dict:
     field: dict = {
         "name": "embedding",
         "type": "vector",
-        "query": "[*].items[*].embedding",
         "n_dim": n_dim,
         "objective": objective,
     }
@@ -43,6 +43,13 @@ def _values() -> list:
     ]
 
 
+def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
+    batch = [[{"items": [{"embedding": value} for value in root]}] for (root,) in values]
+    ragged_batch = RaggedBatch.new(batch, schema=schema)
+    field = RaggedField.new(ragged_batch, address=ADDRESS, strata=strata)
+    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
+
+
 def test_vector_request_is_available_in_structure():
     structure = Schema.model_validate(_structure_payload())
     request = structure.requests[ADDRESS]
@@ -64,9 +71,8 @@ def test_vector_tensorfield_new_rejects_wrong_embedding_length():
     ]
 
     with pytest.raises(ValueError, match="expects embeddings with length 3"):
-        TensorField.new(
+        _new_tensorfield(
             values=bad_values,
-            address=ADDRESS,
             schema=schema,
             strata=Strata.train,
         )
@@ -76,9 +82,8 @@ def test_vector_embedder_and_decoder_shapes():
     structure = Schema.model_validate(_structure_payload(n_dim=3))
     schema = structure
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -108,9 +113,8 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
     structure = Schema.model_validate(_structure_payload(objective=objective))
     schema = structure
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )

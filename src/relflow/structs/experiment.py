@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import functools
-import json
-import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
@@ -111,23 +109,6 @@ class Schema(Node):
         return normalized
 
     @classmethod
-    def jmespath_member(cls, value: str) -> str:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
-            return value
-        return json.dumps(value)
-
-    @classmethod
-    def query_for_source(cls, branch_path: tuple[str, ...], source: str) -> str:
-        """Infer a request-level query for a leaf source field.
-
-        The encoder prepends the outer batch selector during search. Inferred
-        queries therefore start at the processed-observation level: `[*].amount`,
-        not `[*][*].amount`.
-        """
-        selectors = "".join(f".{cls.jmespath_member(branch)}[*]" for branch in branch_path)
-        return f"[*]{selectors}.{cls.jmespath_member(source)}"
-
-    @classmethod
     def request_from_leaf(cls, leaf: Leaf) -> RequestTypes:
         from relflow.tensorfields.base import TENSORFIELDS
 
@@ -135,7 +116,7 @@ class Schema(Node):
         return request_cls.model_validate(leaf.model_dump(mode="python", round_trip=True))
 
     @classmethod
-    def from_tree_node(cls, node: SchemaField, *, branch_path: tuple[str, ...] = ()) -> Branch | RequestTypes:
+    def from_tree_node(cls, node: SchemaField) -> Branch | RequestTypes:
         if isinstance(node, Leaf):
             if node.name is None:
                 raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
@@ -148,16 +129,12 @@ class Schema(Node):
                 if node.description is None:
                     updates["description"] = source
 
-            if node.query is None:
-                updates["query"] = cls.query_for_source(branch_path, source)
-
             return cls.request_from_leaf(node.model_copy(update=updates))
 
         if isinstance(node, Branch):
             if node.name is None:
                 raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
-            child_path = (*branch_path, node.name)
-            fields = [cls.from_tree_node(field, branch_path=child_path) for field in node.fields]
+            fields = [cls.from_tree_node(field) for field in node.fields]
             payload = node.model_dump(mode="python", round_trip=True, exclude={"fields", "masks"})
             return Branch(*fields, masks=list(node.masks), **payload)
 
@@ -458,8 +435,7 @@ class Schema(Node):
             raise ValueError(f"extend requires exactly one matching branch node, found {len(candidates)}")
 
         parent = candidates[0]
-        branch_path = tuple(node.name for node in parent.path[2:] if isinstance(node, Branch) and node.name is not None)
-        new_fields = [self.from_tree_node(field, branch_path=branch_path) for field in fields]
+        new_fields = [self.from_tree_node(field) for field in fields]
         existing_names = {field.name for field in parent.fields}
         duplicate_names = sorted({field.name for field in new_fields if field.name in existing_names})
         duplicate_names.extend(

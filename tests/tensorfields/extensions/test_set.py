@@ -1,6 +1,7 @@
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -18,7 +19,6 @@ def _structure_payload(
     field: dict = {
         "name": "tags",
         "type": "set",
-        "query": "[*].items[*].tags",
         "size": 8,
     }
     if p_unavailable is not None:
@@ -48,6 +48,25 @@ def _state(size: int = 8):
     return OnlineVocabularyModel(size=size).state
 
 
+def _new_tensorfield(
+    *,
+    values: list,
+    schema: Schema,
+    strata: Strata,
+    interprocess_encoding_context,
+) -> TensorField:
+    batch = [[{"items": [{"tags": value} for value in root]}] for (root,) in values]
+    ragged_batch = RaggedBatch.new(batch, schema=schema)
+    field = RaggedField.new(ragged_batch, address=ADDRESS, strata=strata)
+    return TensorField.new(
+        field=field,
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        interprocess_encoding_context=interprocess_encoding_context,
+    )
+
+
 def test_set_request_is_available_in_schema():
     structure = Schema.model_validate(_structure_payload())
     request = structure.requests[ADDRESS]
@@ -66,9 +85,8 @@ def test_set_tensorfield_encodes_multi_hot_content():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state()
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -91,13 +109,28 @@ def test_set_tensorfield_encodes_multi_hot_content():
     assert field.content[1, 0, 0, 1] == 1.0
 
 
+def test_set_nested_mask_string_is_an_ordinary_label():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    state = _state()
+
+    field = _new_tensorfield(
+        values=[[[["<MASK>", "ALPHA"]]]],
+        schema=structure,
+        strata=Strata.train,
+        interprocess_encoding_context=state,
+    )
+
+    assert state.vocab == ["<MASK>", "ALPHA"]
+    assert field.state.tolist() == [[[Tokens.valued.value, Tokens.padded.value]]]
+    assert field.content[0, 0, 0, :2].tolist() == [1.0, 1.0]
+
+
 def test_set_tensorfield_reserves_real_vocabulary_in_batch():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     vocabulary = OnlineVocabularyModel(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
+    _new_tensorfield(
         values=[[[["ALPHA", "BETA"], ["ALPHA"]]], [[["BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=vocabulary.state,
@@ -110,17 +143,15 @@ def test_set_tensorfield_zeros_oov_content_without_changing_state():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
+    _new_tensorfield(
         values=[[[["ALPHA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["OMEGA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.validate,
         interprocess_encoding_context=state,
@@ -134,9 +165,8 @@ def test_set_tensorfield_simulated_unavailable_zeros_content():
     structure = Schema.model_validate(_structure_payload(p_unavailable=1.0))
     state = _state(size=structure.requests[ADDRESS].size)
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["ALPHA", "BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -235,9 +265,8 @@ def test_set_write_filters_content_when_threshold_is_configured():
 def test_set_loss_does_not_mutate_counter():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state()
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,

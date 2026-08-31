@@ -12,7 +12,6 @@ import torch
 from lightning.pytorch import Callback, Trainer
 from loguru import logger
 
-from relflow.data.nested import MASK_LITERAL
 from relflow.distributed import (
     all_gather_object,
     broadcast_object,
@@ -194,9 +193,6 @@ class VocabularyState:
             return
 
         if isinstance(values, str | bytes):
-            if values == MASK_LITERAL:
-                return
-
             yield values
             return
 

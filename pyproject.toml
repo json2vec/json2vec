@@ -10,11 +10,12 @@ authors = [
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
+    "awkward>=2.13.0",
     "beartype>=0.21.0",
+    "jmespath>=1.0.1",
     "pluggy>=1.6.0",
     "rich>=14.0.0",
     "pydantic>=2.11.7",
-    "jmespath>=1.0.1",
     "loguru>=0.7.3",
     "anytree>=2.13.0",
     "pyarrow>=21.0.0",

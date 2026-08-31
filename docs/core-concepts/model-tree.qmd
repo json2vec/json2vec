@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -78,9 +79,11 @@ The generated root is named `record` by default. `Model(name="order", ...)`
 renames it, but it remains a singleton with internal length 1. Repeated root
 data belongs in a child `Branch(length=...)`.
 
-Only leaves bind source values. A branch gives descendants shape and context;
-it does not run a branch-level source query. See
-[Binding Data](binding-data.qmd) for inferred leaf paths and explicit queries.
+Only leaves encode typed values. A branch gives descendants shape and context;
+by default, its name selects the same-named child collection from the processed
+observation. An explicit leaf `query` can select a different full source path;
+branches do not own queries. See [Binding Data](binding-data.qmd) for direct,
+query, and preprocessor input contracts.
 
 ## Addresses Are Stable Locations
 
@@ -94,8 +97,9 @@ Every node has a slash-delimited `rf.Address` derived from its schema path:
 | target leaf | `rf.Address("order", "returned")` | `order/returned` |
 
 Addresses identify nodes in displays, metric names, mutation predicates, and
-prediction dictionaries. They describe the model contract. A leaf's query can
-read a differently named source path without changing its address.
+prediction dictionaries. They describe the model contract. A preprocessor or
+explicit leaf query can select a differently named source value without
+changing its address.
 
 ## Branches Define Alignment And Context
 
@@ -160,8 +164,8 @@ compatible. They are blocked while Lightning owns an active train, validation,
 test, or prediction loop.
 
 Compatibility is mechanical, not semantic: reusing a tensor of the same shape
-does not prove that a changed query or field meaning is safe. Validate and save
-schema mutations as new model artifacts.
+does not prove that a changed query, preprocessor contract, or field meaning is
+safe. Validate and save schema mutations as new model artifacts.
 
 ## Architecture Internals
 
@@ -211,8 +215,8 @@ The repeated dimensions before `d_model` come from branch ancestors.
 A forward pass traverses the tree from leaves upward, then decodes selected
 leaves from the context available along their path.
 
-1. Raw records have already been preprocessed, queried, and encoded into active
-   leaf tensorfields.
+1. Raw records have already been preprocessed, bound directly or explicitly
+   queried, and encoded into active leaf tensorfields.
 2. Masking and pruning mark hidden input positions as `masked`, retain original
    values in targets, and mark trainable reconstruction positions.
 3. Active visible leaves embed state and content and send vector parcels to

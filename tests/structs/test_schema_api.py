@@ -4,11 +4,11 @@ import relflow as rf
 from relflow.structs.enums import TensorKey
 
 
-def test_model_constructor_builds_record_branch_and_infers_queries():
+def test_model_constructor_supports_direct_binding_and_opt_in_queries():
     model = rf.Model(
         rf.Category(
             "job_code",
-            query='[*]."job code"',
+            query='[*].source."job code"',
             description="job code",
             size=128,
             source="openml",
@@ -32,15 +32,12 @@ def test_model_constructor_builds_record_branch_and_infers_queries():
     job = params.requests["record/job_code"]
     assert job.name == "job_code"
     assert job.description == "job code"
-    assert job.query == '[*]."job code"'
+    assert job.query == '[*].source."job code"'
     assert job.size == 128
     assert job.source == "openml"
 
     amount = params.requests["record/amount"]
-    # Inferred queries are request-level expressions. The encoder prepends the
-    # outer batch selector at search time, so this intentionally is not
-    # `[*][*].amount`.
-    assert amount.query == "[*].amount"
+    assert amount.query is None
     assert amount.active is True
     assert amount.embed is False
 
@@ -70,13 +67,13 @@ def test_model_constructor_rejects_duplicate_sources():
         )
 
 
-def test_model_constructor_accepts_branch_nodes_and_infers_nested_queries():
+def test_model_constructor_accepts_branch_nodes_with_optional_leaf_queries():
     model = rf.Model(
         rf.Branch(
             rf.Number("amount"),
             rf.Category(
                 "merchant_code",
-                query='[*].transactions[*]."merchant code"',
+                query='[*].source.transactions[*]."merchant code"',
                 description="merchant code",
                 size=32,
             ),
@@ -92,15 +89,13 @@ def test_model_constructor_accepts_branch_nodes_and_infers_nested_queries():
     assert "record/transactions" in params.branches
 
     amount = params.requests["record/transactions/amount"]
-    # Nested defaults follow the same convention: one leading selector here,
-    # with the outer batch selector added by the encoder.
-    assert amount.query == "[*].transactions[*].amount"
+    assert amount.query is None
     assert params.shapes["record/transactions/amount"] == (1, 4)
 
     merchant = params.requests["record/transactions/merchant_code"]
     assert merchant.name == "merchant_code"
     assert merchant.description == "merchant code"
-    assert merchant.query == '[*].transactions[*]."merchant code"'
+    assert merchant.query == '[*].source.transactions[*]."merchant code"'
     assert merchant.size == 32
 
 
@@ -130,7 +125,7 @@ def test_branch_mask_validation_rejects_invalid_bound_configs():
                     "type": "branch",
                     "length": 1,
                     "masks": [{"count": 1}],
-                    "fields": [{"name": "amount", "type": "number", "query": "[*].amount"}],
+                    "fields": [{"name": "amount", "type": "number"}],
                 },
             }
         )
@@ -381,7 +376,6 @@ def test_model_extend_appends_fields_under_one_selected_array_and_rebuilds_modul
 
     assert "record/transactions/risk_score" in params.requests
     assert "record/transactions/risk_score" in model.nodes
-    assert params.requests["record/transactions/risk_score"].query == "[*].transactions[*].risk_score"
 
 
 def test_model_extend_appends_category_field_and_preserves_existing_vocabulary():
@@ -399,7 +393,6 @@ def test_model_extend_appends_category_field_and_preserves_existing_vocabulary()
 
     assert "record/caretaker" in model.schema.requests
     assert "record/caretaker" in model.nodes
-    assert model.schema.requests["record/caretaker"].query == "[*].caretaker"
     assert model.nodes["record/label"].embedder.vocab.snapshot() == ["alpha", "beta"]
     assert model.nodes["record/caretaker"].embedder.vocab.snapshot() == []
 

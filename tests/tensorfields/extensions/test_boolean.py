@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -6,6 +7,7 @@ import torch
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -35,7 +37,6 @@ def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
                                     {
                                         "name": "enabled",
                                         "type": "boolean",
-                                        "query": "[*].groups[*].items[*].enabled",
                                         "threshold": threshold,
                                     }
                                 ],
@@ -48,11 +49,22 @@ def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
     )
 
 
+def _tensorfield(groups: list[list[list[Any]]], *, schema: Schema, strata: Strata) -> TensorField:
+    batch = RaggedBatch.new(
+        [
+            [{"groups": [{"items": [{"enabled": value} for value in items]} for items in observation]}]
+            for observation in groups
+        ],
+        schema=schema,
+    )
+    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
+
+
 def test_boolean_tensorfield_encodes_nested_values_without_vocabulary():
     schema = _schema()
-    field = TensorField.new(
-        values=[[[[False, True, None], [np.bool_(True)]]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        groups=[[[False, True, None], [np.bool_(True)]]],
         schema=schema,
         strata=Strata.train,
     )
@@ -69,10 +81,9 @@ def test_boolean_tensorfield_encodes_nested_values_without_vocabulary():
 
 
 def test_boolean_tensorfield_rejects_integer_lookalikes():
-    with pytest.raises(TypeError, match="bool or None"):
-        TensorField.new(
-            values=[[[[1]]]],
-            address=ADDRESS,
+    with pytest.raises(TypeError, match="unsupported int.*expected bool"):
+        _tensorfield(
+            groups=[[[1]]],
             schema=_schema(),
             strata=Strata.train,
         )
@@ -95,9 +106,8 @@ def test_boolean_embedder_is_vocabulary_free_and_registers_fixed_value_buffer():
 def test_boolean_embedder_maps_false_zero_and_true_to_initialized_rows():
     schema = _schema()
     embedder = Embedder(schema=schema, address=ADDRESS)
-    field = TensorField.new(
-        values=[[[[False, True, None]]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        groups=[[[False, True, None]]],
         schema=schema,
         strata=Strata.train,
     )
@@ -122,9 +132,8 @@ class _TrackingModule:
 
 def test_boolean_loss_tracks_binary_torchmetrics():
     schema = _schema(threshold=[0.25, 0.75])
-    field = TensorField.new(
-        values=[[[[False, True]]], [[[True, False]]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        groups=[[[False, True]], [[True, False]]],
         schema=schema,
         strata=Strata.train,
     )
@@ -231,9 +240,8 @@ def test_boolean_thresholds_configure_unique_metrics_and_one_auc():
 
 def test_boolean_metrics_ignore_null_and_padded_targets():
     schema = _schema()
-    field = TensorField.new(
-        values=[[[[False, True, None]]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        groups=[[[False, True, None]]],
         schema=schema,
         strata=Strata.train,
     )
@@ -268,9 +276,8 @@ def test_boolean_metrics_ignore_null_and_padded_targets():
 
 def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_metrics():
     schema = _schema(threshold=[0.25, 0.75])
-    field = TensorField.new(
-        values=[[[[None]]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        groups=[[[None]]],
         schema=schema,
         strata=Strata.train,
     )

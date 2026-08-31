@@ -6,12 +6,14 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
+import awkward as ak
+import numpy as np
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-text: Plugin = Plugin(name="text")
+text: Plugin = Plugin(name="text", types=(str,))
 text.callback(CounterUpdateCallback)
 
 INPUT_IDS = "input_ids"
@@ -145,61 +147,35 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
+        values = ak.to_list(field.values)
+        invalid = next((value for value in values if not isinstance(value, str)), None)
+        if invalid is not None:
+            raise ValueError(f"text field at '{address}' expects string values, got {type(invalid).__name__}")
 
-        data, state = pad(
-            nested=values,
-            shape=leading_shape,
-            dtype=object,
-            pad_value=None,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        token_ids = torch.zeros((*leading_shape, request.max_length), dtype=torch.int64)
-        attention_mask = torch.zeros_like(token_ids)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = torch.tensor(state, dtype=torch.int64).masked_fill(literal_mask_tensor, Tokens.masked.value)
-
-        valued = state == Tokens.valued.value
-        if valued.any():
-            invalid = next((value for value in data[valued].flat if not isinstance(value, str)), None)
-            if invalid is not None:
-                raise ValueError(f"text field at '{address}' expects string values, got {type(invalid).__name__}")
-
+        if values:
             tokenizer = CachedModel.get_tokenizer(request.model)
             encoded = tokenizer(
-                data[valued].tolist(),
+                values,
                 padding="max_length",
                 truncation=True,
                 max_length=request.max_length,
                 return_tensors="pt",
             )
+            encoded_ids = encoded[INPUT_IDS].to(dtype=torch.int64).numpy()
+            encoded_mask = encoded[ATTENTION_MASK].to(dtype=torch.int64).numpy()
+        else:
+            encoded_ids = np.empty((0, request.max_length), dtype=np.int64)
+            encoded_mask = np.empty((0, request.max_length), dtype=np.int64)
 
-            valued_index = torch.from_numpy(valued.astype(bool))
-            token_ids[valued_index] = encoded[INPUT_IDS].to(dtype=torch.int64)
-            attention_mask[valued_index] = encoded[ATTENTION_MASK].to(dtype=torch.int64)
+        token_ids = torch.from_numpy(field.place(encoded_ids, fill=0, value_shape=(request.max_length,)))
+        attention_mask = torch.from_numpy(field.place(encoded_mask, fill=0, value_shape=(request.max_length,)))
+        state_tensor = torch.from_numpy(field.state)
 
         return cls(
             state=state_tensor,
@@ -208,11 +184,11 @@ class TensorField(TensorFieldBase):
                     INPUT_IDS: token_ids,
                     ATTENTION_MASK: attention_mask,
                 },
-                batch_size=leading_shape,
+                batch_size=field.shape,
             ),
-            trainable=torch.zeros(leading_shape, dtype=torch.bool),
+            trainable=torch.zeros(field.shape, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):

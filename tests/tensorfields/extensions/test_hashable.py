@@ -2,6 +2,7 @@ import pytest
 import torch
 
 import relflow as rf
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.tensorfields.extensions.hashable import (
@@ -24,7 +25,6 @@ def _structure_payload(
     field: dict = {
         "name": "identifier",
         "type": "hash",
-        "query": "[*].items[*].id",
         "n_hashes": n_hashes,
         "n_bands": n_bands,
         "offset": offset,
@@ -46,6 +46,25 @@ def _structure_payload(
             ],
         },
     }
+
+
+def _new_tensorfield(
+    *,
+    values: list,
+    schema: Schema,
+    strata: Strata,
+    salt: int = 0,
+) -> TensorField:
+    batch = [[{"items": [{"identifier": value} for value in root]}] for (root,) in values]
+    ragged_batch = RaggedBatch.new(batch, schema=schema)
+    field = RaggedField.new(ragged_batch, address=ADDRESS, strata=strata)
+    return TensorField.new(
+        field=field,
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        salt=salt,
+    )
 
 
 # --- request / schema validation --------------------------------------------------
@@ -101,11 +120,20 @@ def test_hash_vector_channels_are_independent():
     assert outputs.unique().numel() == outputs.numel()
 
 
-def test_hash_value_distinguishes_common_python_types():
-    integer, string, boolean, floating = _hash_matrix([1, "1", True, 1.0], n_hashes=4)
+def test_hash_value_preserves_python_scalar_identity_across_batches():
+    integer = _hash_matrix([1], n_hashes=4)[0]
+    string = _hash_matrix(["1"], n_hashes=4)[0]
+    boolean = _hash_matrix([True], n_hashes=4)[0]
+    floating = _hash_matrix([1.0], n_hashes=4)[0]
+
     assert not torch.equal(integer, string)
     assert not torch.equal(boolean, integer)
     assert not torch.equal(floating, integer)
+
+
+def test_hash_value_rejects_mixed_python_identity_types():
+    with pytest.raises(TypeError, match="mixes Python value types"):
+        _hash_matrix([1, 1.0], n_hashes=4)
 
 
 # --- tensorfield content behaviour ------------------------------------------------
@@ -118,9 +146,8 @@ def test_hashable_tensorfield_content_is_deterministic_across_observations():
         [["alice", "carol"]],
     ]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -138,9 +165,8 @@ def test_hashable_tensorfield_zero_pads_nulls_and_padding():
         [["alice"]],
     ]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -153,21 +179,27 @@ def test_hashable_tensorfield_zero_pads_nulls_and_padding():
     assert torch.all(field.content[1, 0, 1] == 0.0)
 
 
-@pytest.mark.parametrize("unsupported", [[1, 2], object()])
-def test_hashable_tensorfield_rejects_unsupported_values(unsupported):
+def test_hashable_tensorfield_rejects_non_scalar_values():
     schema = Schema.model_validate(_structure_payload())
     values = [
-        [[unsupported, "ok"]],
-        [["x", "y"]],
+        [[[1, 2], [3, 4]]],
+        [[[5, 6], [7, 8]]],
     ]
 
     with pytest.raises(ValueError, match="only accepts MessagePack-compatible hashable scalar values"):
-        TensorField.new(
+        _new_tensorfield(
             values=values,
-            address=ADDRESS,
             schema=schema,
             strata=Strata.train,
         )
+
+
+def test_hashable_ragged_batch_rejects_opaque_values():
+    schema = Schema.model_validate(_structure_payload())
+    values = [[[object(), object()]], [[object(), object()]]]
+
+    with pytest.raises(TypeError, match="root/items/identifier.*normalize it in a preprocessor"):
+        _new_tensorfield(values=values, schema=schema, strata=Strata.train)
 
 
 def test_hashable_mask_caches_targets_before_zeroing():
@@ -177,9 +209,8 @@ def test_hashable_mask_caches_targets_before_zeroing():
         [["c", "d"]],
     ]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -200,9 +231,8 @@ def test_hashable_mask_caches_targets_before_zeroing():
 def _hash_matrix(values, n_hashes: int, *, salt: int = 0) -> torch.Tensor:
     """Tensorize values into a `(len(values), n_hashes)` integer matrix."""
     schema = Schema.model_validate(_structure_payload(length=len(values), n_hashes=n_hashes))
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[values]],
-        address=ADDRESS,
         schema=schema,
         strata=Strata.test,
         salt=salt,
@@ -387,9 +417,8 @@ def test_hashable_content_target_matches_deterministic_recomputation():
     schema = Schema.model_validate(_structure_payload(n_hashes=5, length=2))
     values = [[["alice", "bob"]], [["carol", "dave"]]]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -397,9 +426,8 @@ def test_hashable_content_target_matches_deterministic_recomputation():
     # Cache targets then re-derive from a fresh TensorField and compare.
     field.mask(1.0)
 
-    fresh = TensorField.new(
+    fresh = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -420,9 +448,8 @@ def test_hashable_decoder_content_head_width_matches_n_hashes():
 def test_hashable_embedder_uses_raw_sinusoidal_content_and_state_embeddings():
     schema = Schema.model_validate(_structure_payload(n_hashes=3, n_bands=4, offset=2))
     embedder = Embedder(schema=schema, address=ADDRESS)
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[["alice", "bob"]]],
-        address=ADDRESS,
         schema=schema,
         strata=Strata.test,
     )
@@ -498,9 +525,9 @@ def test_tensorfield_content_reflects_explicit_salt():
     schema = Schema.model_validate(_structure_payload(length=2, n_hashes=4))
     values = [[["alice", "bob"]]]
 
-    field_a = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=0)
-    field_b = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=1)
-    field_c = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=0)
+    field_a = _new_tensorfield(values=values, schema=schema, strata=Strata.train, salt=0)
+    field_b = _new_tensorfield(values=values, schema=schema, strata=Strata.train, salt=1)
+    field_c = _new_tensorfield(values=values, schema=schema, strata=Strata.train, salt=0)
 
     assert not torch.equal(field_a.content, field_b.content)
     assert torch.equal(field_a.content, field_c.content)

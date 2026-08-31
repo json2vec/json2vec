@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 import warnings
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, overload
+from types import UnionType
+from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, get_args, overload
 
+import numpy as np
 import pluggy
 import torch
 from lightning.pytorch import Callback
@@ -16,11 +19,12 @@ from tensordict import TensorDict
 from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
-from relflow.structs.tree import Address, Leaf, Node, Renderable
+from relflow.structs.tree import Address, Leaf, Renderable
 from relflow.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
+    from relflow.data.ragged import RaggedField
     from relflow.structs.experiment import Schema
     from relflow.structs.structure import Mask
 
@@ -33,6 +37,9 @@ CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
 ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
 RegisterT = TypeVar("RegisterT", bound=ComponentValue)
 BranchMaskApplication: TypeAlias = tuple[Address, "Mask"]
+ValueTypeFamily: TypeAlias = type[Any] | UnionType
+ValueTypeObservation: TypeAlias = tuple[int, type[Any]]
+ValueTypeObservations: TypeAlias = set[ValueTypeObservation] | None
 
 
 def default_write(module: "Model", prediction: Prediction) -> None:
@@ -123,7 +130,7 @@ class TensorFieldBase(Renderable):
     @abstractmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
@@ -380,11 +387,14 @@ class Plugin:
     """Registry object for a tensorfield implementation.
 
     Register request, tensorfield, embedder, decoder, loss, and write
-    components with `@plugin.register`. Creating a plugin with an existing
-    name replaces the registry entry and emits a warning.
+    components with `@plugin.register`. ``types`` declares the raw terminal
+    Python types the plugin accepts. Separate tuple entries are incompatible
+    families; types joined in one PEP 604 union may safely share an Awkward
+    carrier. Creating a plugin with an existing name replaces the registry
+    entry and emits a warning.
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, *, types: tuple[ValueTypeFamily, ...]):
         if not isinstance(name, str):
             raise TypeError("Plugin name must be a string")
 
@@ -392,7 +402,37 @@ class Plugin:
         if not re.match(r"^[a-z0-9_]+$", name):
             raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
 
+        if not isinstance(types, tuple):
+            raise TypeError("Plugin types must be a tuple of types or PEP 604 unions")
+        if not types:
+            raise ValueError("Plugin types must contain at least one value type family")
+
+        families: list[tuple[type[Any], ...]] = []
+        type_to_family: dict[type[Any], int] = {}
+        for family_index, family in enumerate(types):
+            members = get_args(family) if isinstance(family, UnionType) else (family,)
+            if not members or any(member is Any or not isinstance(member, type) for member in members):
+                raise TypeError("Plugin types must contain only concrete types or PEP 604 unions of concrete types")
+            if type(None) in members:
+                raise TypeError("Plugin types must not include NoneType; null is represented by field state")
+            if any(issubclass(member, (list, tuple, np.ndarray, np.generic)) for member in members):
+                raise TypeError(
+                    "Plugin types declare canonical terminal Python atoms; "
+                    "list, tuple, ndarray, and NumPy scalar classes are prepared structurally"
+                )
+
+            for member in members:
+                if member in type_to_family:
+                    raise ValueError(
+                        f"Plugin value type {member.__name__} appears in more than one compatibility family"
+                    )
+                type_to_family[member] = family_index
+            families.append(cast(tuple[type[Any], ...], tuple(members)))
+
         self.name: str = name
+        self._types: tuple[ValueTypeFamily, ...] = types
+        self._type_families: tuple[tuple[type[Any], ...], ...] = tuple(families)
+        self._type_to_family: dict[type[Any], int] = type_to_family
         self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
 
@@ -404,6 +444,120 @@ class Plugin:
             )
 
         TENSORFIELDS[name] = self
+
+    @property
+    def types(self) -> tuple[ValueTypeFamily, ...]:
+        """Registered raw atom compatibility families."""
+        return self._types
+
+    def _expected_types(self) -> str:
+        families = [" | ".join(member.__name__ for member in family) for family in self._type_families]
+        return ", ".join(families)
+
+    def _family_for(self, value: Any, *, address: Address) -> int:
+        value_type = type(value)
+        if value_type in self._type_to_family:
+            return self._type_to_family[value_type]
+
+        raise TypeError(
+            f"field at address '{address}' contains unsupported {value_type.__name__} values for plugin "
+            f"'{self.name}'; expected {self._expected_types()}; normalize it in a preprocessor"
+        )
+
+    @staticmethod
+    def _canonical_numpy_scalar(value: np.generic) -> Any:
+        if isinstance(value, np.datetime64):
+            if np.isnat(value):
+                return None
+            return value.astype("datetime64[us]").item()
+        if isinstance(value, np.timedelta64):
+            if np.isnat(value):
+                return None
+            return value.astype("timedelta64[us]").item()
+
+        canonical = value.item()
+        if not isinstance(canonical, np.generic):
+            return canonical
+
+        match value.dtype.kind:
+            case "b":
+                return bool(value)
+            case "i" | "u":
+                return int(value)
+            case "f":
+                return float(value)
+            case "c":
+                return complex(value)
+            case "U":
+                return str(value)
+            case "S":
+                return bytes(value)
+            case _:
+                return canonical
+
+    def _prepare_value(
+        self,
+        value: Any,
+        *,
+        address: Address,
+        observed: set[ValueTypeObservation],
+    ) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, np.generic):
+            canonical = self._canonical_numpy_scalar(value)
+            if isinstance(canonical, np.generic):
+                self._family_for(canonical, address=address)
+                raise AssertionError("unreachable")
+            return self._prepare_value(canonical, address=address, observed=observed)
+        if isinstance(value, np.ndarray):
+            if value.ndim == 0:
+                return self._prepare_value(value[()], address=address, observed=observed)
+            if value.dtype.hasobject:
+                return [self._prepare_value(child, address=address, observed=observed) for child in value]
+            if value.size:
+                representative = np.zeros((), dtype=value.dtype)[()]
+                self._prepare_value(representative, address=address, observed=observed)
+            if value.dtype.kind == "M":
+                return value.astype("datetime64[us]")
+            if value.dtype.kind == "m":
+                return value.astype("timedelta64[us]")
+            return value
+        if isinstance(value, (list, tuple)):
+            return [self._prepare_value(child, address=address, observed=observed) for child in value]
+
+        family = self._family_for(value, address=address)
+        if len(self._type_families) > 1:
+            observed.add((family, type(value)))
+        return value
+
+    def prepare_value(self, value: Any, *, address: Address) -> tuple[Any, ValueTypeObservations]:
+        """Canonicalize one raw leaf value and record its compatibility family."""
+        if value is None:
+            return None, None
+
+        value_type = type(value)
+        if not isinstance(value, (np.generic, np.ndarray, list, tuple)):
+            family = self._type_to_family.get(value_type)
+            if family is not None:
+                observed = {(family, value_type)} if len(self._type_families) > 1 else None
+                return value, observed
+
+        observed: set[ValueTypeObservation] = set()
+        prepared = self._prepare_value(value, address=address, observed=observed)
+        self.validate_value_types(observed, address=address)
+        return prepared, observed or None
+
+    def validate_value_types(self, observed: ValueTypeObservations, *, address: Address) -> None:
+        """Reject values from incompatible registered families in one field batch."""
+        if observed is None or len({family for family, _ in observed}) <= 1:
+            return
+
+        names = ", ".join(sorted(value_type.__name__ for _, value_type in observed))
+        raise TypeError(
+            f"field at address '{address}' mixes Python value types from incompatible families ({names}); "
+            "normalize it in a preprocessor so it uses one registered compatibility family"
+        )
 
     @overload
     def register(self, obj: None, component: Component | str) -> None: ...
@@ -448,8 +602,8 @@ class Plugin:
                 if not isinstance(obj, type):
                     raise TypeError("Request must be a class type")
 
-                if not issubclass(obj, Node):
-                    raise TypeError("Request must be a subclass of Node")
+                if not issubclass(obj, Leaf):
+                    raise TypeError("Request must be a subclass of RequestBase")
 
             case Component.TensorField:
                 if not isinstance(obj, type):
@@ -457,6 +611,11 @@ class Plugin:
 
                 if not issubclass(obj, TensorFieldBase):
                     raise TypeError("TensorField must be a subclass of TensorFieldBase")
+
+                new_params = inspect.signature(obj.new).parameters
+                required = {"field", "address", "schema", "strata"}
+                if not required.issubset(new_params):
+                    raise TypeError("TensorField.new must accept 'field', 'address', 'schema', and 'strata' parameters")
 
             case Component.Embedder:
                 if not isinstance(obj, type):

@@ -74,10 +74,12 @@ record = {
 }
 ```
 
-Same-named fields infer queries such as `[*].customer_tier` and
-`[*].line_items[*].sku`. Use an explicit `query=...` for stable source-path
-differences and a `@rf.preprocess` object for Python logic, normalization,
-sorting, or windowing. See [Binding Data](core-concepts/binding-data.qmd) and
+Processed observation keys and nesting match the schema: `customer_tier` is a
+root key and `sku` is a key on each `line_items` child. This direct binding is
+the default; RelFlow does not infer JMESPath. Opt a leaf into `query=...` for a
+stable selection expression, or use an `@rf.preprocess` object for Python
+logic, coordinated reshaping, normalization, sorting, filtering, or windowing.
+See [Binding Data](core-concepts/binding-data.qmd) and
 [Advanced Query Paths](core-concepts/querypaths.qmd).
 
 ## Assign Learning Roles

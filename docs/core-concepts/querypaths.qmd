@@ -5,26 +5,33 @@ eval: false
 
 # Advanced Query Paths
 
-This is the JMESPath reference for schemas whose source paths cannot be handled
-by ordinary field and branch names. Start with [Binding Data](binding-data.qmd):
-it owns default inference and the decision between a query and a preprocessor.
+RelFlow normally binds a leaf by its schema address. That direct path projects
+same-named fields from one shared Awkward batch and is the simplest, fastest
+input contract.
 
-Use the patterns here for renamed or quoted keys, nested source paths, filters,
-indexes, slices, and temporary query changes. For JMESPath language details,
-see the upstream [tutorial](https://jmespath.org/tutorial.html),
+Set a leaf's `query=...` only when a stable source shape is easier to select
+with JMESPath—for example, a renamed or quoted key, a nested source path, a
+filter, an index, a slice, or field stacking. An explicit query replaces direct
+lookup for that leaf; RelFlow never generates or infers a JMESPath expression
+when `query` is omitted.
+
+After evaluating an explicit query, RelFlow sends its result through the same
+canonical `RaggedField` preparation as direct fields. Branch overflow, missing
+state, explicit nulls, prediction masks, plugin-declared atom compatibility, and
+dense placement therefore follow one contract. The query itself is still an
+extra per-field Python/JMESPath extraction pass, so prefer direct binding when
+the source already matches the schema.
+
+For JMESPath language details, see the upstream
+[tutorial](https://jmespath.org/tutorial.html),
 [examples](https://jmespath.org/examples.html), and
 [specification](https://jmespath.org/specification.html).
 
-::: {.callout-note}
-Code blocks on this reference page are independent excerpts. The query
-assertions under [Test Before Encoding](#test-before-encoding) are directly
-runnable.
-:::
-
 ## The Request-Level Contract
 
-RelFlow runs each leaf query against one processed observation. One ordinary
-raw record is wrapped as a one-item observation:
+RelFlow evaluates each explicit leaf query relative to one processed
+observation. One ordinary record is represented at that boundary by the
+singleton generated root:
 
 ```python
 processed_observation = [
@@ -32,7 +39,7 @@ processed_observation = [
 ]
 ```
 
-The request query for `amount` is:
+The configured request query for `amount` would be:
 
 ```python
 request_query = "[*].amount"
@@ -46,21 +53,10 @@ configured request: [*].amount
 internal search:    [*][*].amount
 ```
 
-The three boundaries are:
+This syntax applies only to explicit queries. With plain `amount=rf.Number`,
+RelFlow projects the `amount` key directly and does not create `[*].amount`.
 
-| Boundary | Example | Owned by |
-| --- | --- | --- |
-| Raw record | `{"amount": 12.50}` | source system / caller |
-| Processed observation | `[{"amount": 12.50}]` | preprocessor contract and automatic wrapping |
-| Encoded batch | `[[{"amount": 12.50}], [{"amount": 8.25}]]` | data module or `model.encode(...)` |
-
-Public prediction accepts raw dictionaries:
-
-```python
-predictions = model.predict([{"amount": 12.50}])
-```
-
-The full request-level rules are:
+The request-level rules are:
 
 - begin at the processed observation, normally with `[*].`;
 - write a full source path—an explicit query is not relative to its parent
@@ -71,7 +67,8 @@ The full request-level rules are:
 
 ## Renamed And Nested Source Keys
 
-A stable schema may read a versioned or nested source path:
+A stable schema may read a versioned or nested source path without a
+preprocessor:
 
 ```python
 import relflow as rf
@@ -89,7 +86,7 @@ model = rf.Model(
 )
 ```
 
-For this source record:
+For this record:
 
 ```python
 record = {
@@ -102,12 +99,12 @@ record = {
 ```
 
 the model addresses remain `record/amount`, `record/merchant`, and
-`record/label`. Queries change source lookup, not schema identity.
+`record/label`. Queries change source selection, not schema identity.
 
 ## Quoted Source Keys
 
-Use quoted JMESPath members when keys contain spaces, punctuation, or characters
-that are not valid bare identifiers:
+Use quoted JMESPath members when source keys contain spaces, punctuation, or
+characters that are not valid bare identifiers:
 
 ```python
 model = rf.Model(
@@ -120,14 +117,12 @@ model = rf.Model(
 ```
 
 Single-quoted Python strings are convenient when the query contains
-double-quoted object members. Schema names themselves may contain letters,
-digits, `_`, and `-`; inferred paths quote a schema name containing `-`
-automatically.
+double-quoted object members.
 
 ## Explicit Paths Under A Branch
 
-When a schema branch name differs from the source array path, every child leaf
-receives a full request-level query:
+When a schema branch name differs from the source array path, every queried
+child leaf receives a full request-level expression:
 
 ```python
 record = {
@@ -161,10 +156,11 @@ sku       -> [["A12", "B07"]]
 quantity  -> [[2, 1]]
 ```
 
-Do not shorten these to paths relative to `line_items`; branches do not run a
-source query of their own.
+Do not shorten these to paths relative to `line_items`; `Branch` does not have
+a source query of its own. RelFlow applies the branch's `length` and `overflow`
+policy after query extraction and before datatype codecs update their state.
 
-## Filters And Alignment
+## Filters And Coordinate Alignment
 
 JMESPath filters can select a subset of child objects:
 
@@ -185,20 +181,19 @@ model = rf.Model(
 )
 ```
 
-Every sibling uses the same filter, and `map` preserves a result—including
-`None`—for every selected event. A direct projection such as
-`events[?event_type == 'login'].risk_score` drops null or missing scores; even
-with an identical filter, that can shift later scores onto earlier device
-coordinates. If one query returns three devices and another returns two scores,
-the branch no longer describes coherent event rows.
+Every sibling uses the same filter, and `map` preserves one result—including
+`None`—for every selected event. A projection such as
+`events[?event_type == 'login'].risk_score` may drop null or missing scores.
+Even with the same filter, that can shift later scores onto earlier device
+coordinates.
 
-Use a [preprocessor](../guides/data-modules.qmd#preprocessors) when filtering
-depends on sorting, an `as_of` timestamp, multi-step business rules, or anything
-that should be tested on child objects as a unit.
+Use a [preprocessor](../guides/data-modules.qmd#preprocessors) when selection
+depends on sorting, an `as_of` timestamp, multi-step business rules, or any
+operation that should transform sibling child fields together.
 
 ## Indexes And Slices
 
-Indexes read a fixed position; slices retain a bounded portion of an array:
+Indexes read a fixed position; slices retain a bounded part of an array:
 
 ```python
 model = rf.Model(
@@ -217,18 +212,41 @@ model = rf.Model(
 ```
 
 The slice returns up to ten event amounts while preserving the root dimension.
-The name `recent_events` is only correct if source ordering is guaranteed to put
-newest events last. If ordering must be established or the cutoff is temporal,
-sort and filter in a preprocessor instead.
+If ordering must be established or the cutoff is temporal, sort and filter in
+a preprocessor instead. A branch-level `overflow="tail"` is often clearer than
+repeating a slice across every child query.
 
-Branch `length` and `overflow` are often clearer than hard-coding a slice in
-every child query: they keep one retention rule on the shared context. Use a
-query slice when source selection itself is intentionally different.
+## Stack Fields With A Query
+
+An explicit multiselect can turn sibling source roles into one shared repeated
+field:
+
+```python
+model = rf.Model(
+    name="itinerary",
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    locations=rf.Branch(
+        length=2,
+        overflow="error",
+        location=rf.Category(
+            query="[*].[origin, destination]",
+            size=4096,
+        ),
+    ),
+)
+```
+
+For `{"origin": "IAD", "destination": "SFO"}`, the query yields
+`[["IAD", "SFO"]]`. Both values occupy `itinerary/locations/location` and
+share one vocabulary. See [Field Stacking](../guides/field-stacking.qmd) for
+query and preprocessor variants, including explicit role labels.
 
 ## Update Or Temporarily Override A Query
 
-`query` is a leaf schema attribute. Update it when a source contract changes but
-the schema identity remains valid:
+`query` is a serializable leaf schema attribute. Update it when a source
+contract changes but the schema identity remains valid:
 
 ```python
 model.update(
@@ -237,8 +255,7 @@ model.update(
 )
 ```
 
-Use `override(...)` for an experiment or compatibility check that should restore
-the original schema afterward:
+Use `override(...)` for a temporary experiment:
 
 ```python
 with model.override(
@@ -248,36 +265,13 @@ with model.override(
     predictions = model.predict(records)
 ```
 
-Select leaf tensorfields when changing queries. A different query can change
-the meaning of a field even if tensor shapes remain compatible, so validate the
-result and version the changed artifact.
-
-## Common Patterns
-
-| Input shape | Query | Result for one processed observation |
-| --- | --- | --- |
-| `{"amount": 12.5}` | `[*].amount` | `[12.5]` |
-| `{"device-id": "D1"}` | `[*]."device-id"` | `["D1"]` |
-| `{"job code": "ENG-2"}` | `[*]."job code"` | `["ENG-2"]` |
-| `{"customer": {"tier": "gold"}}` | `[*].customer.tier` | `["gold"]` |
-| `{"tags": ["new", "vip"]}` | `[*].tags` | `[["new", "vip"]]` |
-| `{"items": [{"sku": "A"}, {"sku": "B"}]}` | `[*].items[*].sku` | `[["A", "B"]]` |
-| `{"events": [{"type": "login"}, {"type": "buy"}]}` | `[*].events[?type == 'login'].type` | `[["login"]]` |
-| `{"events": [{"score": 1}, {"score": 2}]}` | `[*].events[:1].score` | `[[1]]` |
-| `{"legs": [{"origin": "IAD"}]}` | `[*].legs[0].origin` | `["IAD"]` |
-| `{"accounts": [{"txns": [{"amount": 1}]}]}` | `[*].accounts[*].txns[*].amount` | `[[[1]]]` |
-
-The flattening distinction is easy to miss:
-
-| Intent | Query | Result |
-| --- | --- | --- |
-| Preserve `items` under one root record | `[*].items[*].sku` | `[["A", "B"]]` |
-| Flatten away the item dimension | `[*].items[].sku` | `["A", "B"]` |
+Changing a query can change field meaning even when tensor shapes remain
+compatible. Validate the result and version the changed artifact.
 
 ## Test Before Encoding
 
-Test an expression against a one-item processed observation before involving the
-model:
+Test an expression against a one-item processed observation before involving
+the model:
 
 ```{python .marimo}
 #| echo: true
@@ -301,30 +295,39 @@ assert jmespath.search(query, observation) == [["A12", "B07"]]
 ```
 
 If this assertion works, use the same string as `query=...`; do not add another
-leading `[*]`.
+leading `[*]`. Then call `model.encode(records)` to check all leaf results,
+branch geometry, state, and sibling alignment together.
 
-Then use `model.encode(records)` to inspect what all leaf queries produced
-together. Encoding is the right diagnostic when each expression works alone but
-branch shapes or sibling alignment are still wrong.
+## Performance And Carrier Rules
+
+Direct fields share one schema-aware Awkward construction and column
+projection. Each explicit JMESPath field instead evaluates its own expression,
+materializes that result, and rejoins canonical `RaggedField` preparation.
+Queries are therefore an opt-in expressiveness tradeoff, not the fast default.
+
+The extracted result must be compatible with the leaf's schema rank and with
+Awkward. Directly bound modeled values follow the same Awkward-compatible input
+contract. Unmodeled metadata remains untouched and need not be compatible;
+normalize opaque Python objects only when a modeled field or explicit query
+selects them. Keep business-specific transformations in a preprocessor.
 
 ## Troubleshooting
 
 | Symptom | Likely issue | Fix |
 | --- | --- | --- |
 | Query is rejected while building the model | Invalid JMESPath | Compile with `jmespath.compile(...)` or test against one observation. |
-| Query repeatedly returns empty results | Source path or key does not exist | Check exact keys on a representative processed observation. |
+| Query returns empty results | Source path or key does not exist | Check exact keys on a representative processed observation. |
 | Query starts with `[*][*]` | Internal batch selector was configured manually | Remove one leading selector. |
-| Branch child values are misaligned | Sibling paths filter, slice, or flatten differently, or a projection elides null leaf results | Apply one coordinated preprocessor; for stable sparse siblings, use identical selection plus null-preserving `map(&field, array)` queries. |
+| Branch children are misaligned | Sibling expressions filter, flatten, or compact nulls differently | Use the same selection plus `map(&field, collection)`, or transform the child objects together in a preprocessor. |
 | Result is flatter than the schema | `[]` flattened an array or a `[*]` level is missing | Preserve one array dimension for each parent branch. |
-| “Recent” slice selects old values | Source ordering assumption is wrong | Sort in a preprocessor and test the cutoff rule. |
-| Values are selected correctly but encoded state/content is unexpected | Datatype conversion, vocabulary, or missing-value rule | Inspect `model.encode(...)`, then use the relevant datatype reference. |
+| Values select correctly but state/content is unexpected | The result violates branch, nullability, or datatype rules | Inspect `model.encode(...)`, then use the relevant datatype reference. |
 
 ## Where Next
 
-- Return to [Binding Data](binding-data.qmd) for default inference and
-  preprocessor decisions.
-- Use [Data Flow](data-flow.qmd) to understand what happens after query
-  selection.
+- Return to [Binding Data](binding-data.qmd) to choose direct binding, a query,
+  or a preprocessor.
+- Use [Data Flow](data-flow.qmd) to see where query extraction rejoins Awkward
+  tensorization.
 - Use [Data Modules](../guides/data-modules.qmd) for preprocessor wiring.
 - Use [Temporal Validation](../guides/temporal-validation.qmd) for tested
   point-in-time windows.

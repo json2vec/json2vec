@@ -8,25 +8,24 @@ eval: false
 **Example status — excerpt:** blocks show reusable schema and preprocessor
 patterns; adapt them inside a complete train/evaluate workflow.
 
-Field stacking is a schema and query pattern for repeated semantic roles. It
-maps multiple source fields into one repeated schema field so they share
-datatype parameters, vocabulary, decoder behavior, and embedding behavior.
+Field stacking maps several source roles into one repeated schema field so
+they share datatype parameters, vocabulary, decoder behavior, and embedding
+behavior. A concise explicit JMESPath query can stack stable source fields;
+a preprocessor is better when the reshape carries logic or must add aligned
+role metadata.
 
-Use it when source fields represent the same kind of thing in different roles:
-origin and destination, buyer and seller, payer and payee, source and target, or
-before and after values.
+Use stacking when source fields represent the same kind of thing in different
+roles: origin and destination, buyer and seller, payer and payee, source and
+target, or before and after values.
 
 ## Basic Pattern
 
-Without stacking, two locations become two separate categorical fields:
+Without stacking, two locations become separate categorical fields:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 import relflow as rf
 
-model = rf.Model(
+separate_model = rf.Model(
     name="itinerary",
     d_model=64,
     n_layers=2,
@@ -34,106 +33,85 @@ model = rf.Model(
     origin=rf.Category(size=4096),
     destination=rf.Category(size=4096),
 )
-
-model
 ```
 
-That is simple, but the model learns separate parameters for
-`itinerary/origin` and `itinerary/destination`.
+With a stable two-key source, opt one leaf into a JMESPath multiselect:
 
-With stacking, the source fields become repeated values under one schema field:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = rf.Model(
+```python
+itinerary_model = rf.Model(
     name="itinerary",
     d_model=64,
     n_layers=2,
     n_heads=4,
     locations=rf.Branch(
         length=2,
-        location=rf.Category(query="[*].[origin, destination]", size=4096),
+        overflow="error",
+        location=rf.Category(
+            query="[*].[origin, destination]",
+            size=4096,
+        ),
     ),
 )
-
-model
 ```
 
-For a raw record like:
+For `{"origin": "IAD", "destination": "SFO"}`, the explicit query returns
+`[["IAD", "SFO"]]`: one root containing the two `locations` positions. Both
+positions bind to `itinerary/locations/location` and therefore share one
+vocabulary. No query is inferred for ordinary fields; this leaf deliberately
+pays JMESPath extraction before rejoining canonical ragged preparation.
 
-```json
-{
-  "origin": "IAD",
-  "destination": "SFO"
-}
-```
+The equivalent preprocessor makes the transformed collection visible and easy
+to extend:
 
-the query `[*].[origin, destination]` produces two location values for the
-`locations` branch. The modeled field is `itinerary/locations/location`, so both
-positions share one categorical vocabulary.
+```python
+@rf.preprocess
+def stack_locations(record: dict) -> rf.Observation:
+    return rf.Observation(
+        {
+            "locations": [
+                {"location": record["origin"]},
+                {"location": record["destination"]},
+            ]
+        }
+    )
 
-```{python .marimo}
-#| echo: true
-#| output: true
 
-import jmespath
-
-observation = [{"origin": "IAD", "destination": "SFO"}]
-assert jmespath.search("[*].[origin, destination]", observation) == [["IAD", "SFO"]]
-```
-
-## Buyer And Seller Accounts
-
-Stacking also works for repeated identity roles.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model = rf.Model(
-    name="payment",
+preprocessed_itinerary_model = rf.Model(
+    name="itinerary",
     d_model=64,
     n_layers=2,
     n_heads=4,
-    parties=rf.Branch(
+    locations=rf.Branch(
         length=2,
-        account_id=rf.Hash(query="[*].[buyer_account_id, seller_account_id]"),
+        overflow="error",
+        location=rf.Category(size=4096),
     ),
-    amount=rf.Number,
 )
-
-model
 ```
 
-Use `Hash` when the useful signal is local equality inside the observation,
-for example whether the same account appears in multiple roles or events. Use
-`Category` for bounded labels or codes that should be learned as a persistent
-global vocabulary.
+Pass `preprocessor=stack_locations` to the data module for this variant.
 
 ## Preserve Roles When They Matter
 
-Stacking removes role-specific field names. If the role carries important
-meaning, add it back explicitly. A short RelFlow preprocessor is often clearer
-than a dense query.
+Stacking removes role-specific field addresses. Add the role explicitly when
+it carries signal:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import relflow as rf
-
-
+```python
 @rf.preprocess
-def stack_parties(record):
+def stack_parties(record: dict) -> rf.Observation:
     return rf.Observation(
         {
-            **record,
             "parties": [
-                {"party_id": record["buyer_account_id"], "role": "buyer"},
-                {"party_id": record["seller_account_id"], "role": "seller"},
+                {
+                    "account_id": record["buyer_account_id"],
+                    "role": "buyer",
+                },
+                {
+                    "account_id": record["seller_account_id"],
+                    "role": "seller",
+                },
             ],
+            "amount": record["amount"],
         }
     )
 
@@ -145,35 +123,36 @@ model = rf.Model(
     n_heads=4,
     parties=rf.Branch(
         length=2,
-        party_id=rf.Hash,
+        overflow="error",
+        account_id=rf.Hash,
         role=rf.Category(size=8),
     ),
     amount=rf.Number,
 )
-
-model
 ```
 
-This keeps the shared identity representation while letting the model distinguish
-buyer from seller.
+Use `Hash` when local equality is useful without a persistent vocabulary. Use
+`Category` for bounded labels or codes that should be learned globally.
 
 Pass `preprocessor=stack_parties` to a data module or
-`preprocess=stack_parties` to `model.predict(...)`. A plain function returning a
-dictionary can be used as an upstream transformation, but it is not the
-RelFlow preprocessor contract.
-
-Stacking shares parameters by design, but it also removes the original
-role-specific field names from the address. Add an explicit role field whenever
-origin vs destination, buyer vs seller, or before vs after is part of the
-signal.
+`preprocess=stack_parties` to `model.predict(...)`.
 
 ## Before And After Values
 
-Stacking can represent state changes:
+The same pattern represents a transition:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+@rf.preprocess
+def stack_status(record: dict) -> rf.Observation:
+    return rf.Observation(
+        {
+            "status_values": [
+                {"status": record["previous_status"], "phase": "before"},
+                {"status": record["new_status"], "phase": "after"},
+            ]
+        }
+    )
+
 
 model = rf.Model(
     name="profile_change",
@@ -182,64 +161,103 @@ model = rf.Model(
     n_heads=4,
     status_values=rf.Branch(
         length=2,
-        status=rf.Category(query="[*].[previous_status, new_status]", size=64),
+        overflow="error",
+        status=rf.Category(size=64),
+        phase=rf.Category(size=2),
     ),
 )
-
-model
 ```
 
-Add a role marker such as `before` and `after` if direction matters.
+The explicit `phase` preserves direction while `status` shares one vocabulary.
 
-## Check The Shape
+## Stack Roles Inside Existing Repetition
 
-Before training, validate that the query produces the repeated shape expected by
-the schema. For top-level stacking, the request query usually looks like:
+When each source child has several roles, expand each child as one coordinated
+operation:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-query = "[*].[origin, destination]"
+```python
+@rf.preprocess
+def stack_segments(record: dict) -> rf.Observation:
+    locations = []
+    for segment_index, segment in enumerate(record["segments"]):
+        locations.extend(
+            [
+                {
+                    "location": segment["origin"],
+                    "role": "origin",
+                    "segment": segment_index,
+                },
+                {
+                    "location": segment["destination"],
+                    "role": "destination",
+                    "segment": segment_index,
+                },
+            ]
+        )
+    return rf.Observation({"locations": locations})
 ```
 
-For values inside an array, include the parent path:
+Choose `Branch.length` for the expanded collection, and use
+`overflow="error"` while validating the contract. If grouping by original
+segment is part of the architecture, preserve it with nested branches instead
+of flattening it in preprocessing.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+## Verify Either Contract
 
-query = "[*].segments[*].[origin, destination]"
+For the preprocessor version, test the transformed observation directly:
+
+```python
+prepared = stack_locations({"origin": "IAD", "destination": "SFO"})
+assert prepared.data == {
+    "locations": [{"location": "IAD"}, {"location": "SFO"}]
+}
+
+encoded = preprocessed_itinerary_model.encode(
+    [{"origin": "IAD", "destination": "SFO"}],
+    preprocess=stack_locations,
+    mask=False,
+)
 ```
 
-The resulting values should line up with the `Branch(length=...)` that owns
-the stacked field.
+For the query version, test the exact request-level expression against the
+singleton processed-observation wrapper:
+
+```python
+import jmespath
+
+assert jmespath.search(
+    "[*].[origin, destination]",
+    [{"origin": "IAD", "destination": "SFO"}],
+) == [["IAD", "SFO"]]
+```
+
+Then call `itinerary_model.encode(...)` without the preprocessor. In both
+variants, `Branch(length=2, overflow="error")` verifies the expected capacity.
 
 ## When To Use It
 
 Use field stacking when:
 
-- The values have the same datatype and should share parameters.
-- You want one vocabulary for a concept that appears in multiple roles.
-- Role-specific meaning is optional or can be modeled with an explicit role
-  field.
-- You want embeddings at the shared concept level.
+- values have the same meaning and should share parameters;
+- one vocabulary should cover a concept appearing in several roles;
+- role-specific meaning is optional or modeled with an explicit role field;
+- embeddings are useful at the shared-concept level.
 
-## When Not To Use It
+Prefer the explicit query when stacking is a small, stable selection. Prefer a
+preprocessor when roles need labels, siblings must be transformed together,
+or selection includes sorting, temporal rules, or business logic.
 
-Do not stack fields just because their storage types match. Airport locations,
-merchant categories, and fraud labels may all be strings, but they are not the
-same semantic field. Do not stack values if sharing a vocabulary would hide
-meaning that the model needs. Do not use a clever query when a preprocessor
-would be easier to test and maintain.
+Do not stack values merely because their storage types match. Airport
+locations, merchant categories, and fraud labels may all be strings without
+being one semantic field. Keep separate fields when shared parameters would
+erase meaning the model needs.
 
 ## Where Next
 
-- Use [Binding Data](../core-concepts/binding-data.qmd) to choose between
-  defaults, queries, and preprocessors.
-- Use [Query Paths](../core-concepts/querypaths.qmd) for advanced request query conventions.
+- Use [Binding Data](../core-concepts/binding-data.qmd) for the processed input
+  contract.
+- Use [Advanced Query Paths](../core-concepts/querypaths.qmd) for the explicit
+  query contract and shape rules.
 - Use [Branch](../data-types/branch.qmd) for repeated context behavior.
-- Use [preprocessors](data-modules.qmd#preprocessors) when role-aware stacking
-  needs Python logic.
 - See the [Device Tenure case study](../case-studies/device-tenure.qmd) for a
   repeated-identity pattern in event histories.

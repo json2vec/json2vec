@@ -8,7 +8,6 @@ mutation predicates, and the `@preprocess` decorator.
 
 from typing import TYPE_CHECKING, Any
 
-from relflow import helpers as helpers
 from relflow._version import __version__
 from relflow.architecture.checkpoint import RollbackCheckpoint
 from relflow.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
@@ -18,7 +17,6 @@ from relflow.architecture.root import (
     SchedulerConfig,
 )
 from relflow.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule, SyntheticDataModule
-from relflow.data.nested import MASK_LITERAL, MaskLiteral
 from relflow.data.processors import (
     Metadata,
     Observation,
@@ -33,6 +31,7 @@ from relflow.data.processors import (
     postprocess,
     preprocess,
 )
+from relflow.data.ragged import MASK_LITERAL, MaskLiteral, RaggedField
 from relflow.inference.callback import Writer
 from relflow.structs.enums import (
     AttentionMode,
@@ -125,7 +124,6 @@ __all__ = [
     "Deployment",
     "EmbedderBase",
     "Hash",
-    "helpers",
     "Schema",
     "Input",
     "JSONBackend",
@@ -154,6 +152,7 @@ __all__ = [
     "PreprocessorProvider",
     "RawBatch",
     "RawObservation",
+    "RaggedField",
     "RequestBase",
     "RollbackCheckpoint",
     "RuntimePlacementCallback",

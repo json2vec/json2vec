@@ -22,7 +22,7 @@ Separate four measurements:
 
 | Measurement | Includes | Use it to diagnose |
 | --- | --- | --- |
-| Data preparation | Read, decode, preprocess, query, vocabulary/normalizer work | File format, workers, remote I/O, and Python transforms. |
+| Data preparation | Read, decode, preprocess, Awkward schema projection, optional JMESPath extraction, vocabulary/normalizer work | File format, workers, source binding, remote I/O, and Python transforms. |
 | Encode + forward | Tensorization and model execution | Branch lengths, datatype capacity, model width/depth, device utilization. |
 | Write/postprocess | CPU transfer, probability conversion, embeddings, top-k, reshaping | Oversized output contracts and Python serialization. |
 | End-to-end service | Queue, dynamic batching, all stages above, JSON, network | User-visible latency and saturation. |
@@ -135,8 +135,36 @@ Important controls include:
   split.
 
 Run a data-only or CPU baseline when the accelerator is idle. If increasing
-batch size does not improve device utilization, the bottleneck may be query,
-preprocessing, or I/O.
+batch size does not improve device utilization, the bottleneck may be
+preprocessing, explicit queries, tensorization, or I/O.
+
+## Understand Ragged Preparation
+
+RelFlow constructs one schema-shaped Awkward `RaggedBatch` for each processed
+batch. Individual fields project from that shared carrier; they do not each
+recursively walk the original Python records. The structural pass owns missing
+versus null, branch overflow, padding, prediction literals, and dense placement.
+Before construction, each plugin enforces its declared raw atom compatibility
+families; the ragged core does not name concrete leaf types. Datatype codecs
+still perform the work that is inherently field-specific, such as vocabulary
+updates, date parsing, hashing, or tokenization, after overflow selects
+retained values.
+
+That shared projection is the default when a leaf's `query` is `None`. An
+explicit `query=...` opts the leaf into JMESPath evaluation and materializes a
+separate result before it rejoins canonical `RaggedField` preparation. This is
+valuable for concise source extraction and stacking, but the extraction cost
+is paid per queried leaf. Do not add queries that merely restate schema names;
+none are inferred or required.
+
+Ordinary Awkward operations execute through its compiled kernels; users do not
+need to enable a JIT. Python preprocessors remain Python and can dominate when
+they perform large per-value transformations. Prefer simple transformations
+over whole child collections, measure them separately, and increase the batch
+size only within the worker memory budget. Direct Arrow/Polars-to-Awkward
+adapters are a separate optimization from the canonical Python-record path;
+do not assume a source conversion is zero-copy without profiling the actual
+data module.
 
 ## Use Precision And Batch Size Deliberately
 

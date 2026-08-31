@@ -22,7 +22,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from tensordict import TensorDict
 
 from relflow.architecture.root import Model
-from relflow.data.iterables import JMESPathResolutionMonitor, encode
+from relflow.data.iterables import encode
 from relflow.data.processors import Postprocessor, Preprocessor
 from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.experiment import NodeAttribute, NodePredicate
@@ -99,8 +99,6 @@ class FastAPIRuntime:
         update_operations: list[UpdateOperation] | None = None,
         request_signature: type[pydantic.BaseModel] | None = None,
         response_signature: type[pydantic.BaseModel] | None = None,
-        monitor_queries: bool = False,
-        query_monitor_every: int = 1000,
     ) -> None:
         self.model_source: ModelSource = checkpoint
         self.accelerator = accelerator
@@ -109,8 +107,6 @@ class FastAPIRuntime:
         self.update_operations = list(update_operations or [])
         self.request_signature = request_signature
         self.response_signature = response_signature
-        self.monitor_queries = monitor_queries
-        self.query_monitor_every = query_monitor_every
         self.device: torch.device = torch.device("cpu")
 
     def setup(self) -> None:
@@ -130,9 +126,6 @@ class FastAPIRuntime:
         self.model: Model = model.to(self.device)
         self.model.eval()
         self.interprocess_encoding_context = self.model.interprocess_encoding_context
-        self.jmespath_resolution_monitor = (
-            JMESPathResolutionMonitor(every=self.query_monitor_every) if self.monitor_queries else None
-        )
 
     def decode_payload(self, payload: dict[str, Any], context: dict[str, Any]) -> RequestItem | ErrorItem:
         try:
@@ -269,7 +262,6 @@ class FastAPIRuntime:
                 schema=self.model.schema,
                 strata=Strata.predict,
                 interprocess_encoding_context=self.interprocess_encoding_context,
-                jmespath_resolution_monitor=getattr(self, "jmespath_resolution_monitor", None),
             )
 
             model_input = encoded
@@ -460,15 +452,6 @@ class Deployment(BaseSettings):
         default="info",
         validation_alias=AliasChoices("RELFLOW_LOG_LEVEL", "LOG_LEVEL"),
     )
-    monitor_queries: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("RELFLOW_MONITOR_QUERIES", "MONITOR_QUERIES"),
-    )
-    query_monitor_every: int = Field(
-        default=1000,
-        gt=0,
-        validation_alias=AliasChoices("RELFLOW_QUERY_MONITOR_EVERY", "QUERY_MONITOR_EVERY"),
-    )
     json_backend: JSONBackend = Field(
         default=JSONBackend.orjson,
         validation_alias=AliasChoices("RELFLOW_JSON_BACKEND", "JSON_BACKEND"),
@@ -567,8 +550,6 @@ class Deployment(BaseSettings):
             update_operations=self._update_operations,
             request_signature=self._request_signature,
             response_signature=self._response_signature,
-            monitor_queries=self.monitor_queries,
-            query_monitor_every=self.query_monitor_every,
         )
         batcher = FastAPIBatcher(
             runtime=runtime,
@@ -736,8 +717,6 @@ class Deployment(BaseSettings):
                 "RELFLOW_MAX_BATCH_SIZE": str(self.max_batch_size),
                 "RELFLOW_BATCH_TIMEOUT": str(self.batch_timeout),
                 "RELFLOW_ACCELERATOR": self.accelerator.value,
-                "RELFLOW_MONITOR_QUERIES": str(self.monitor_queries),
-                "RELFLOW_QUERY_MONITOR_EVERY": str(self.query_monitor_every),
                 "RELFLOW_JSON_BACKEND": self.json_backend.value,
             }
             previous = {key: os.environ.get(key) for key in env_updates}

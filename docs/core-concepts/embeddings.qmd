@@ -330,7 +330,9 @@ anomaly detection, weak supervision, transfer learning, or diagnostics.
 ## Where Next
 
 - Use [Built-In Data Types](data-types.qmd) to choose leaf fields.
-- Use [Query Paths](querypaths.qmd) to bind source data to schema nodes.
+- Use [Binding Data](binding-data.qmd) to choose direct binding, an explicit
+  query, or preprocessing, and [Advanced Query Paths](querypaths.qmd) for
+  JMESPath expressions.
 - Use [Dynamic Masking](dynamic-masking.qmd) for windowed reconstruction inside
   repeated contexts.
 - Use [Batch Inference](../guides/batch-inference.qmd) to write embedding jobs to

@@ -16,6 +16,7 @@ from relflow.data.processors import (
     postprocess,
     preprocess,
 )
+from relflow.data.ragged import RaggedField
 
 __all__ = [
     "Metadata",
@@ -28,6 +29,7 @@ __all__ = [
     "PreprocessorProvider",
     "RawBatch",
     "RawObservation",
+    "RaggedField",
     "postprocess",
     "preprocess",
 ]

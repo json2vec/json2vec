@@ -7,7 +7,6 @@ def _structure_payload() -> dict:
     field: dict = {
         "name": "identifier",
         "type": "hash",
-        "query": "[*].items[*].id",
     }
     return {
         "d_model": 16,

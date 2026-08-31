@@ -31,8 +31,8 @@ One plugin registers six named components:
 
 | Component | Responsibility |
 | --- | --- |
-| `Request` | Pydantic schema options and validation for the leaf. |
-| `TensorField` | Convert queried values to fixed-shape state/content tensors; implement empty prediction input, hiding, masking, and targeting. |
+| `Request` | Pydantic schema options and bound-tree validation. |
+| `TensorField` | Encode one `RaggedField` projection into fixed-shape content; implement empty prediction input, hiding, masking, and targeting. |
 | `Embedder` | Convert visible state/content into a `d_model` parcel sent to the parent branch. |
 | `Decoder` | Pool heritage context and produce raw state/content predictions. |
 | `loss` | Compare decoded tensors with cached targets and log address-qualified metrics. |
@@ -43,8 +43,9 @@ Callbacks are optional and are registered separately with `plugin.callback(...)`
 The runtime path is:
 
 ```text
-queried values
-→ TensorField.new / TensorField.empty
+processed observations → schema binding or explicit JMESPath
+→ Plugin(types=...) atom preparation → canonical Awkward field preparation
+→ RaggedField projection → TensorField.new / TensorField.empty
 → masking and target caching
 → Embedder.forward → Parcel
 → parent branch encoders
@@ -64,13 +65,47 @@ duplicate name replaces the registry entry with a warning.
 
 import relflow as rf
 
-signed_scalar = rf.Plugin(name="signed_scalar")
+signed_scalar = rf.Plugin(name="signed_scalar", types=(int | float,))
 ```
 
 Registration is an import-time side effect. Import the implementation before
 constructing a same-process model that uses the custom request. Importing it
 before `rf.Model.load(...)` does not currently make serialized custom request
 types valid; durable checkpoint, batch, and serving workflows are unsupported.
+
+### Declare Raw Atom Compatibility
+
+`types` is a required tuple of the raw atom families that the plugin accepts.
+Each tuple entry is a separate, incompatible family. A PEP 604 union groups
+types that may safely promote together:
+
+```python
+# Either all str or all bytes at one field address; mixing is rejected.
+identity = rf.Plugin(name="identity", types=(str, bytes))
+
+# int and float are one compatible numeric family and may mix.
+numeric = rf.Plugin(name="numeric", types=(int | float,))
+```
+
+RelFlow matches the exact registered runtime type after canonicalization. This
+keeps pairs such as `bool`/`int` and `datetime`/`date` distinct; register a
+custom subclass explicitly when the plugin accepts it. RelFlow converts NumPy scalar atoms to their Python
+equivalents, recursively prepares atoms inside list, tuple, and NumPy-array leaf
+values, and collects the compatibility families observed at each field
+address. More than one family at one address is an error. Do not declare a type
+in more than one family, as in `types=(int, int | float)`. Structural
+containers and NumPy scalar classes are prepared by the shared carrier and are
+not valid family entries.
+
+The declaration is an atom contract, not a semantic shape schema. For example,
+a Vector plugin may accept the numeric family while its `TensorField.new(...)`
+still enforces list rank, fixed width, and finite values after branch overflow.
+One-shot iterators are rejected rather than consumed implicitly.
+
+`None` and a whole-leaf prediction `"<MASK>"` are handled by the shared routing
+layer and do not need entries in `types`. Inside a structured leaf, the string
+`"<MASK>"` is an ordinary `str` atom and must be allowed if the datatype accepts
+it.
 
 ## Define The Request
 
@@ -92,9 +127,13 @@ class Request(rf.RequestBase):
 
 `RequestBase` provides common options such as `name`, `query`, `nullable`,
 `active`, `embed`, `weight`, `p_mask`, `p_prune`, pooling, heads, linear depth,
-and dropout. Add only datatype-specific options and validate combinations in
-Pydantic validators or `post_bind_validate()` when the check requires the bound
-tree shape.
+and dropout. With `query=None`, a request reads its schema location directly
+from the shared Awkward batch. An explicit JMESPath query is evaluated by the
+core before the result rejoins `RaggedField`; custom tensorfields therefore
+receive the same `field` contract in either case and do not implement querying.
+Add only datatype-specific options and validate combinations in Pydantic
+validators or `post_bind_validate()` when the check requires the bound tree
+shape.
 
 ## Define State And Content
 
@@ -102,8 +141,12 @@ Use a tensorclass with the four runtime fields. State shape is the leading
 schema shape; content may add datatype-specific trailing dimensions.
 
 ```python
+import awkward as ak
+import numpy as np
 import torch
 from tensordict import TensorDict, tensorclass
+
+from relflow.data.ragged import RaggedField
 
 
 @signed_scalar.register
@@ -117,18 +160,31 @@ class TensorField(rf.TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values,
+        field: RaggedField,
         address,
         schema,
         strata,
         interprocess_encoding_context=None,
     ):
-        # Parse and pad values to (batch, *schema.shapes[address], ...).
-        # Preserve valued/null/padded/masked/reserved-other state independently
-        # from content.
+        # field.values contains only retained, valued leaf values. Encode that
+        # flat Awkward view, then scatter it into the dense schema shape.
+        encoded = np.fromiter(
+            (encode(value) for value in ak.to_list(field.values)),
+            dtype=np.float32,
+            count=len(field.values),
+        )
+        content = torch.from_numpy(field.place(encoded, fill=0.0))
+        state = torch.from_numpy(field.state)
+
         # Use interprocess_encoding_context for field-owned mutable state such
         # as a vocabulary; stateless tensorfields can omit this parameter.
-        ...
+        return cls(
+            content=content,
+            state=state,
+            trainable=torch.zeros_like(state, dtype=torch.bool),
+            targets=TensorDict({}),
+            batch_size=field.batch_size,
+        )
 
     @classmethod
     def empty(cls, batch_size, address, schema):
@@ -151,9 +207,16 @@ Use the shared `Tokens` values exactly. Do not invent a public state for a
 condition that belongs to content. The built-ins use safe zero content for
 non-valued positions and keep original targets in a `TensorDict` before hiding.
 
-Test `new(...)` with scalar, nested, null, padded, literal-mask, overflow, and
-prediction-missing inputs. Test `empty(...)` separately because it controls
-requests that omit a target.
+The shared projection owns schema traversal, missing/null/padded state,
+prediction-literal placement, and branch overflow. The plugin declaration owns
+raw atom compatibility; the tensorfield owns semantic validation and encoding
+of retained values. `field.place(...)` requires one encoded row per retained
+value and preserves any datatype-specific trailing dimensions.
+
+Test `new(...)` with scalar, nested, null, padded, whole-leaf prediction masks,
+overflow, and prediction-missing inputs. For structured leaves, also prove that
+a nested `"<MASK>"` string is ordinary codec input. Test `empty(...)` separately
+because it controls requests that omit a target.
 
 ## Embed Visible Input
 
@@ -283,7 +346,7 @@ same callback factories in the same imported plugin version.
 A custom datatype test suite should cover:
 
 1. request validation and schema inspection within the creating process;
-2. scalar and every supported nested shape;
+2. scalar and every supported schema nesting shape;
 3. null, padded, masked, unavailable/malformed, and overflow behavior;
 4. `p_mask`, `p_prune`, `target=True`, literal masks, and missing prediction
    input;
@@ -295,7 +358,10 @@ A custom datatype test suite should cover:
    integration;
 10. Lightning train/validate/test/predict and multi-rank state synchronization;
 11. mutation rebuild/reset behavior for every shape-changing option;
-12. optional dependency error behavior.
+12. optional dependency error behavior;
+13. direct and explicit-query coverage for every declared atom family,
+    including compatible unions, incompatible-family rejection, NumPy scalar
+    canonicalization, and structured values without a ragged-core type case.
 
 Start from the closest built-in implementation and its tests. Boolean is a
 small vocabulary-free scalar; Number demonstrates learned normalization;

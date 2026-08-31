@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 from loguru import logger
 from tensordict import TensorDict
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -16,7 +18,6 @@ def _structure_payload() -> dict:
     field: dict = {
         "name": "amount",
         "type": "number",
-        "query": "[*].items[*].amount",
     }
     return {
         "d_model": 16,
@@ -34,6 +35,15 @@ def _structure_payload() -> dict:
             ],
         },
     }
+
+
+def _tensorfield(rows: list[list[Any]], *, schema: Schema, strata: Strata) -> TensorField:
+    batch = RaggedBatch.new(
+        [[{"items": [{"amount": value} for value in row]}] for row in rows],
+        schema=schema,
+    )
+    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 
 def test_number_request_allows_jitter_above_one():
@@ -58,9 +68,8 @@ def test_number_loss_does_not_mutate_counter():
     structure = Schema.model_validate(_structure_payload())
     schema = structure
 
-    field = TensorField.new(
-        values=[[[1.0, None]], [[2.0]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[[1.0, None], [2.0]],
         schema=schema,
         strata=Strata.train,
     )
@@ -160,9 +169,8 @@ def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
 
 def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
     structure = Schema.model_validate(_structure_payload())
-    field = TensorField.new(
-        values=[[[1.0, 2.0]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[[1.0, 2.0]],
         schema=structure,
         strata=Strata.train,
     )

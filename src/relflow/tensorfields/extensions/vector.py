@@ -5,13 +5,14 @@ import enum
 import math
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+import awkward as ak
 import numpy as np
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-vector: Plugin = Plugin(name="vector")
+vector: Plugin = Plugin(name="vector", types=(int | float,))
 
 
 class Objective(enum.StrEnum):
@@ -57,15 +58,11 @@ def coerce(value: Any, *, n_dim: int, address: Address) -> np.ndarray:
         if value.ndim != 1:
             raise ValueError(f"vector field at '{address}' expects 1D embeddings, got array with ndim={value.ndim}")
         raw: list[Any] = value.tolist()
-    elif isinstance(value, torch.Tensor):
-        if value.ndim != 1:
-            raise ValueError(f"vector field at '{address}' expects 1D embeddings, got tensor with ndim={value.ndim}")
-        raw = value.detach().cpu().tolist()
     elif isinstance(value, (list, tuple)):
         raw = list(value)
     else:
         raise ValueError(
-            f"vector field at '{address}' expects embeddings as list/tuple/1D tensor/1D ndarray, got {type(value).__name__}"
+            f"vector field at '{address}' expects embeddings as list/tuple/1D ndarray, got {type(value).__name__}"
         )
 
     if len(raw) != n_dim:
@@ -88,63 +85,23 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = schema.shapes[address]
         request: Request = schema.requests[address]
-
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-
-        coerced = apply(
-            values,
-            coerce,
-            n_dim=request.n_dim,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-
-        data, state = pad(
-            nested=coerced,
-            shape=leading_shape,
-            dtype=object,
-            pad_value=None,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        content = np.zeros((*leading_shape, request.n_dim), dtype=np.float32)
-        valued = state == Tokens.valued.value
-
-        if valued.any():
-            vectors: list[np.ndarray] = data[valued].tolist()
-            content[valued] = np.stack(vectors, axis=0)
+        vectors = [coerce(value, n_dim=request.n_dim, address=address) for value in ak.to_list(field.values)]
+        encoded = np.stack(vectors, axis=0) if vectors else np.empty((0, request.n_dim), dtype=np.float32)
+        content = field.place(encoded, fill=0.0, value_shape=(request.n_dim,))
+        state = torch.from_numpy(field.state)
 
         return cls(
-            content=torch.tensor(content, dtype=torch.float32),
-            state=torch.tensor(state, dtype=torch.int64).masked_fill(
-                torch.tensor(literal_data, dtype=torch.bool),
-                Tokens.masked.value,
-            ),
-            trainable=torch.zeros(leading_shape, dtype=torch.bool),
+            content=torch.from_numpy(content),
+            state=state,
+            trainable=torch.zeros(field.shape, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):

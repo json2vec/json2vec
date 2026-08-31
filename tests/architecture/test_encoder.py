@@ -12,7 +12,6 @@ def _payload(*, attention: str = "mha", pooling: str = "query") -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
-        "query": "[*].items[*].label",
         "pooling": pooling,
         "size": 8,
     }

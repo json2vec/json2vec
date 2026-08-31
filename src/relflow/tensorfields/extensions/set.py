@@ -4,13 +4,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
+import awkward as ak
 import numpy as np
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
-sets: Plugin = Plugin(name="set")
+sets: Plugin = Plugin(name="set", types=(bool, int, float, str, bytes))
 sets.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
@@ -109,10 +110,12 @@ def _encode_set_content(value: Any, state: VocabularyState, n_tokens: int) -> np
     if value is None:
         return encoded
 
-    if isinstance(value, str):
+    if isinstance(value, str | bytes):
         items = (value,)
-    elif isinstance(value, Iterable):
+    elif isinstance(value, list | tuple | np.ndarray):
         items = value
+    elif isinstance(value, Iterable):
+        raise ValueError("set values must use a list, tuple, NumPy array, or singleton label")
     else:
         items = (value,)
 
@@ -138,53 +141,35 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
-        shape: tuple[int, ...] = (len(values), *schema.shapes[address])
         n_tokens: int = request.size
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(shape),
-        )
+        values = ak.to_list(field.values)
         learn = strata == Strata.train
 
         interprocess_encoding_context.reserve(values, learn=learn)
 
-        data, states = pad(
-            nested=values,
-            shape=shape,
+        encoded = np.asarray(
+            [
+                _encode_set_content(
+                    value=value,
+                    state=interprocess_encoding_context,
+                    n_tokens=n_tokens,
+                )
+                for value in values
+            ],
             dtype=np.float32,
-            pad_value=0.0,
-            overflows=schema.overflows(address),
-            address=address,
-            value_shape=(n_tokens,),
-            encode=lambda value: _encode_set_content(
-                value=value,
-                state=interprocess_encoding_context,
-                n_tokens=n_tokens,
-            ),
         )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
+        if not values:
+            encoded = np.empty((0, n_tokens), dtype=np.float32)
 
-        state_tensor = torch.tensor(states, dtype=torch.int64)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = state_tensor.masked_fill(literal_mask_tensor, Tokens.masked.value)
-        content = torch.tensor(data=data, dtype=torch.float32)
-        content = content.masked_fill(literal_mask_tensor.unsqueeze(-1), 0.0)
+        state_tensor = torch.from_numpy(field.state)
+        content = torch.from_numpy(field.place(encoded, fill=0.0, value_shape=(n_tokens,)))
 
         if strata == Strata.train and request.p_unavailable > 0.0:
             # Training learns vocabulary online, so known set labels rarely look OOV.
@@ -199,7 +184,7 @@ class TensorField(TensorFieldBase):
             content=content,
             trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):

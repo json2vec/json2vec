@@ -282,14 +282,12 @@ class Leaf(Node):
 
         try:
             jmespath.compile(self.query)
-        except JMESPathError as e:
-            raise ValueError(f"invalid jmespath query: {e}") from e
+        except JMESPathError as error:
+            raise ValueError(f"invalid jmespath query: {error}") from error
+        if not self.query.startswith("[*]"):
+            raise ValueError("query must begin with '[*]' at the processed-observation root")
 
         return self
-
-    def post_bind_validate(self):
-        if self.query is None:
-            raise ValueError(f"request '{self.address}' must define query")
 
     def __rich_console__(self, console, options):
         flags = ["active" if self.active else "inactive"]

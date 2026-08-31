@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import jmespath
 import lightning.pytorch as lit
 import polars as pl
 import pytest
@@ -41,7 +40,6 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/core-concepts/binding-data.qmd",
         "docs/core-concepts/data-flow.qmd",
         "docs/core-concepts/model-tree.qmd",
-        "docs/core-concepts/querypaths.qmd",
         "docs/core-concepts/data-types.qmd",
         "docs/core-concepts/embeddings.qmd",
         "docs/core-concepts/dynamic-masking.qmd",
@@ -175,11 +173,11 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
         "name",
         "type",
         "description",
+        "query",
         "embed",
         "n_heads",
         "dropout",
         "active",
-        "query",
         "nullable",
         "pooling",
         "weight",
@@ -211,7 +209,7 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
     assert missing == []
 
 
-def test_documented_sparse_stacking_and_map_queries_preserve_coordinates() -> None:
+def test_documented_schema_binding_preserves_sparse_coordinates() -> None:
     observation = [
         {
             "events": [
@@ -221,11 +219,6 @@ def test_documented_sparse_stacking_and_map_queries_preserve_coordinates() -> No
             ]
         }
     ]
-
-    assert jmespath.search("[*].events[*].ip_country", observation) == [["US", "CA"]]
-    assert jmespath.search("[*].events[*].amount", observation) == [[950.0]]
-    assert jmespath.search("[*].map(&ip_country, events)", observation) == [["US", None, "CA"]]
-    assert jmespath.search("[*].map(&amount, events)", observation) == [[None, 950.0, None]]
 
     model = rf.Model(
         d_model=8,
@@ -241,7 +234,7 @@ def test_documented_sparse_stacking_and_map_queries_preserve_coordinates() -> No
     assert encoded[rf.Address("record", "events", "ip_country")].state.tolist() == [[[0, 1, 0]]]
     assert encoded[rf.Address("record", "events", "amount")].state.tolist() == [[[1, 0, 1]]]
 
-    filtered = [
+    source = [
         {
             "events": [
                 {"event_type": "login", "device_id": "a", "risk_score": None},
@@ -250,9 +243,25 @@ def test_documented_sparse_stacking_and_map_queries_preserve_coordinates() -> No
             ]
         }
     ]
-    selection = "events[?event_type == 'login']"
-    assert jmespath.search(f"[*].map(&device_id, {selection})", filtered) == [["a", "c"]]
-    assert jmespath.search(f"[*].map(&risk_score, {selection})", filtered) == [[None, 2.0]]
+    filtered = [
+        {
+            "login_events": [event for event in record["events"] if event["event_type"] == "login"],
+        }
+        for record in source
+    ]
+    filtered_model = rf.Model(
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+        login_events=rf.Branch(
+            length=2,
+            device_id=rf.Category(size=4),
+            risk_score=rf.Number,
+        ),
+    )
+    filtered_encoded = filtered_model.encode(filtered)
+    assert filtered_encoded[rf.Address("record", "login_events", "device_id")].state.tolist() == [[[0, 0]]]
+    assert filtered_encoded[rf.Address("record", "login_events", "risk_score")].state.tolist() == [[[1, 0]]]
 
 
 def test_documented_prediction_envelope_is_executable() -> None:

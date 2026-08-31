@@ -26,7 +26,6 @@ def _payload() -> dict:
                             "name": "category_leaf",
                             "type": "category",
                             "description": "category docs",
-                            "query": "[*].code",
                         }
                     ],
                 }
@@ -37,7 +36,7 @@ def _payload() -> dict:
 
 def test_branch_accepts_positional_children():
     branch = Branch(
-        Category(name="category_leaf", query="[*].code"),
+        Category(name="category_leaf"),
         name="branch",
     )
 
@@ -47,7 +46,7 @@ def test_branch_accepts_positional_children():
 def test_branch_rejects_positional_and_keyword_children():
     with pytest.raises(TypeError, match="both positionally and by keyword"):
         Branch(
-            Category(name="category_leaf", query="[*].code"),
+            Category(name="category_leaf"),
             name="branch",
             fields=[],
         )
@@ -56,7 +55,7 @@ def test_branch_rejects_positional_and_keyword_children():
 def test_branch_rejects_leaf_mask_and_target_options():
     with pytest.raises(TypeError, match="tree field 'p_mask'"):
         Branch(
-            Category(name="category_leaf", query="[*].code"),
+            Category(name="category_leaf"),
             name="branch",
             p_mask=0.1,
         )
@@ -76,7 +75,7 @@ def test_schema_derives_branches_requests_and_shapes():
 
 def test_branch_accepts_overflow_policy():
     branch = Branch(
-        Category(name="category_leaf", query="[*].code"),
+        Category(name="category_leaf"),
         name="branch",
         overflow="tail",
     )
@@ -87,7 +86,7 @@ def test_branch_accepts_overflow_policy():
 def test_branch_rejects_invalid_overflow_policy():
     with pytest.raises(ValueError):
         Branch(
-            Category(name="category_leaf", query="[*].code"),
+            Category(name="category_leaf"),
             name="branch",
             overflow="middle",
         )
@@ -104,7 +103,7 @@ def test_schema_converts_leaf_instances_nested_in_branches():
                     "name": "branch",
                     "type": "branch",
                     "fields": [
-                        Category(name="category_leaf", query="[*].code"),
+                        Category(name="category_leaf"),
                     ],
                 }
             ],

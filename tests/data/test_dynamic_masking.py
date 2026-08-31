@@ -184,5 +184,5 @@ def test_mask_literal_can_mask_whole_structured_leaf_but_not_leaf_items():
     inputs = model.encode([{"embedding": "<MASK>"}], strata=Strata.predict)
     assert inputs["record/embedding"].state.tolist() == [[Tokens.masked.value]]
 
-    with pytest.raises(ValueError, match="whole field value"):
+    with pytest.raises(TypeError, match=r"unsupported str.*expected int \| float"):
         model.encode([{"embedding": [1.0, "<MASK>"]}], strata=Strata.predict)

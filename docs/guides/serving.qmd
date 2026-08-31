@@ -261,13 +261,7 @@ environment variables:
 | `host` | `RELFLOW_HOST`, `HOST` |
 | `port` | `RELFLOW_PORT`, `PORT` |
 | `log_level` | `RELFLOW_LOG_LEVEL`, `LOG_LEVEL` |
-| `monitor_queries` | `RELFLOW_MONITOR_QUERIES`, `MONITOR_QUERIES` |
-| `query_monitor_every` | `RELFLOW_QUERY_MONITOR_EVERY`, `QUERY_MONITOR_EVERY` |
 | `json_backend` | `RELFLOW_JSON_BACKEND`, `JSON_BACKEND` |
-
-`monitor_queries=True` periodically checks for schema queries that resolve only
-to empty or null-like results and raises a diagnostic error. It is useful while
-validating an integration, but it is not full drift monitoring.
 
 ## Failure Behavior
 

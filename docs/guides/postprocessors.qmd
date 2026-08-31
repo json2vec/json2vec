@@ -281,8 +281,8 @@ remove `embed=True` from the schema when avoiding that computation is the goal.
 
 Do not use a postprocessor to repair a model input or learning problem.
 
-- If a field reads the wrong source value, fix its query or the RelFlow
-  preprocessor.
+- If a field reads the wrong source value, fix its explicit query or the
+  model-facing observation emitted by the RelFlow preprocessor.
 - If the wrong thing is trained or embedded, change `target`, `p_mask`,
   `p_prune`, or `embed` in the schema.
 - If the model is poorly calibrated, evaluate and retrain it; renaming a score

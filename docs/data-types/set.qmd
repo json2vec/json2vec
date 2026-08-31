@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -49,14 +50,21 @@ or item-level fields matter.
 `Set` accepts common multi-label shapes:
 
 - `None` becomes state `null`.
-- A string becomes a one-item valued set.
-- Another iterable becomes a valued multi-item set.
+- A scalar string or bytes value becomes a one-item valued set; it is not
+  iterated into characters or byte integers.
+- A list, tuple, or NumPy array becomes a valued multi-item set.
 - A non-iterable scalar becomes a one-item valued set.
-- An empty iterable becomes a valued set with no active labels.
+- An empty list, tuple, or NumPy array becomes a valued set with no active
+  labels.
+
+Other iterable containers—including `set`, `range`, generators, and mappings—
+are rejected rather than interpreted ambiguously. Normalize them to a list,
+tuple, or NumPy array in a preprocessor.
 
 Repeated known labels collapse into one active entry. `None` items inside an
 otherwise valued iterable are ignored. A missing repeated branch slot has state
-`padded`.
+`padded`. All labels observed for one Set field within a batch must have the
+same exact Python type. Normalize mixed label types in a preprocessor.
 
 ## Configuration
 

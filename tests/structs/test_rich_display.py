@@ -34,6 +34,14 @@ def test_leaf_rich_display_uses_schema_summary() -> None:
     assert lines[2].startswith(" jitter=")
 
 
+def test_leaf_rich_display_shows_only_explicit_query() -> None:
+    direct = render_text(rf.Number("amount"))
+    queried = render_text(rf.Number("amount", query="[*].payload.amount"))
+
+    assert "query=" not in direct
+    assert "amount [number] active query=[*].payload.amount" in queried
+
+
 def test_leaf_display_flags() -> None:
     target = render_text(rf.Category("returned", target=True, size=2)).splitlines()[0].split()
     embedded = render_text(rf.Number("amount", embed=True)).splitlines()[0].split()
@@ -209,8 +217,9 @@ def test_schema_rich_display_uses_root_schema_tree() -> None:
     assert "length=" not in root_line
     assert "overflow=" not in root_line
     assert "embed=False" not in root_line
-    assert "    |-- amount [number] active query=[*].amount" in rendered
-    assert "    `-- label [category] active target query=[*].label" in rendered
+    assert "    |-- amount [number] active" in rendered
+    assert "    `-- label [category] active target" in rendered
+    assert "query=" not in rendered
 
 
 def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
@@ -234,8 +243,9 @@ def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
     assert "length=" not in root_line
     assert "overflow=" not in root_line
     assert "embed=False" not in root_line
-    assert "    |-- amount [number] active query=[*].amount" in rendered
-    assert "    `-- label [category] active target query=[*].label" in rendered
+    assert "    |-- amount [number] active" in rendered
+    assert "    `-- label [category] active target" in rendered
+    assert "query=" not in rendered
 
 
 def test_model_select_pprint_uses_rich_node_display() -> None:
@@ -256,7 +266,8 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
 
     assert isinstance(selection, list)
     for output in (rendered, rich_rendered):
-        assert "species [category] active target query=[*].species" in output
+        assert "species [category] active target" in output
+        assert "query=" not in output
         assert " pooling=query weight=1 p_mask=0 p_prune=1 n_heads=4 n_linear=1" in output
         assert " size=4 p_unavailable=0.01 topk=[]" in output
         assert "Request(name=" not in output

@@ -7,6 +7,7 @@ from contextlib import AbstractContextManager, contextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from weakref import ReferenceType, ref
 
+import awkward as ak
 import numpy as np
 import pydantic
 import torch
@@ -15,7 +16,7 @@ from lightning.pytorch import Callback, Trainer
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.distributed import broadcast_object
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
-cluster: Plugin = Plugin(name="cluster")
+cluster: Plugin = Plugin(name="cluster", types=(bool, int, float, str, bytes))
 
 cluster.callback(VocabularySyncCallback, CounterUpdateCallback)
 
@@ -217,52 +218,29 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
+        values = ak.to_list(field.values)
         learn = strata == Strata.train
 
         interprocess_encoding_context.reserve(values, learn=learn)
-        tokens = apply(values, interprocess_encoding_context.encode)
+        tokens = np.fromiter(
+            (interprocess_encoding_context.encode(value) for value in values),
+            dtype=np.int64,
+            count=len(values),
+        )
 
         if len(interprocess_encoding_context) > (capacity := schema.requests[address].capacity):
             logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
                 "vocabulary exceeds size={}", capacity
             )
 
-        data, states = pad(
-            nested=tokens,
-            shape=leading_shape,
-            dtype=np.int64,
-            pad_value=0,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        state_tensor = torch.tensor(states, dtype=torch.int64)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = state_tensor.masked_fill(literal_mask_tensor, Tokens.masked.value)
-        content = torch.tensor(data=data, dtype=torch.int64)
-        content = content.masked_fill(literal_mask_tensor, 0)
+        state_tensor = torch.from_numpy(field.state)
+        content = torch.from_numpy(field.place(tokens, fill=0))
         if strata == Strata.train:
             p_unavailable: float = schema.requests[address].p_unavailable
             unavailable_index: int = schema.requests[address].capacity
@@ -285,7 +263,7 @@ class TensorField(TensorFieldBase):
             content=content,
             trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):

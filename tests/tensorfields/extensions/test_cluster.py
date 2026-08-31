@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -17,7 +19,7 @@ from relflow.tensorfields.extensions.cluster import (
     write,
 )
 from relflow.tensorfields.shared.counter import Counter
-from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
+from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState
 
 ADDRESS = "root/items/cluster"
 
@@ -33,7 +35,6 @@ def _structure_payload(
     field: dict = {
         "name": "cluster",
         "type": "cluster",
-        "query": "[*].items[*].label",
         "capacity": capacity,
         "bounds": bounds,
     }
@@ -66,6 +67,27 @@ def _state(size: int = 8):
     return OnlineVocabularyModel(size=size).state
 
 
+def _tensorfield(
+    rows: list[list[Any]],
+    *,
+    schema: Schema,
+    strata: Strata,
+    interprocess_encoding_context: VocabularyState,
+) -> TensorField:
+    batch = RaggedBatch.new(
+        [[{"items": [{"cluster": value} for value in row]}] for row in rows],
+        schema=schema,
+    )
+    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    return TensorField.new(
+        field=field,
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        interprocess_encoding_context=interprocess_encoding_context,
+    )
+
+
 # ---------- TensorField ----------
 
 
@@ -73,16 +95,14 @@ def test_cluster_tensorfield_routes_oov_to_sentinel_at_validate():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state(size=structure.requests[ADDRESS].capacity)
 
-    TensorField.new(
-        values=[[["ALPHA"]]],
-        address=ADDRESS,
+    _tensorfield(
+        rows=[["ALPHA"]],
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
-    field = TensorField.new(
-        values=[[["OMEGA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["OMEGA"]],
         schema=structure,
         strata=Strata.validate,
         interprocess_encoding_context=state,
@@ -103,9 +123,8 @@ def test_cluster_tensorfield_simulates_unavailable_during_training():
     structure = Schema.model_validate(_structure_payload(p_unavailable=1.0))
     state = _state(size=structure.requests[ADDRESS].capacity)
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -405,11 +424,10 @@ class _TrackingModule:
         return value
 
 
-def _prepared_train_batch(structure: Schema, *, values: list) -> TensorField:
+def _prepared_train_batch(structure: Schema, *, rows: list[list[Any]]) -> TensorField:
     state = _state(size=structure.requests[ADDRESS].capacity)
-    field = TensorField.new(
-        values=values,
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=rows,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -421,7 +439,7 @@ def _prepared_train_batch(structure: Schema, *, values: list) -> TensorField:
 def test_cluster_loss_sinkhorn_pushes_gradient_toward_spread():
     # Logits must be commensurate with ε=0.05 so Sinkhorn's Boltzmann map is not saturated.
     structure = Schema.model_validate(_structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0))
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    field = _prepared_train_batch(structure, rows=[["ALPHA", "BETA"]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(structure, embedder, decoder)
@@ -462,7 +480,7 @@ def test_cluster_loss_balance_penalizes_uncommitted_mass():
     # donor row into a dead column) must INCREASE balance loss, which is exactly the signal
     # the model needs to eventually push those uncommitted rows back down.
     structure = Schema.model_validate(_structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0))
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    field = _prepared_train_batch(structure, rows=[["ALPHA", "BETA"]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     K = structure.requests[ADDRESS].size
@@ -510,7 +528,7 @@ def test_cluster_loss_balance_gradient_reaches_uncommitted_columns():
     # gradient on uncommitted logits (push them down) while committed logits still get pulled
     # up. This is the mechanism that lets ``adherence_ema`` decay once the true K is reached.
     structure = Schema.model_validate(_structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0))
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    field = _prepared_train_batch(structure, rows=[["ALPHA", "BETA"]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(structure, embedder, decoder)
@@ -555,7 +573,7 @@ def test_cluster_loss_balance_gradient_reaches_uncommitted_columns():
 
 def test_cluster_loss_sentinel_share_reflects_target_content():
     structure = Schema.model_validate(_structure_payload(bounds=(2, 4), capacity=8, p_unavailable=1.0))
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]], [["BETA", "ALPHA"]]])
+    field = _prepared_train_batch(structure, rows=[["ALPHA", "BETA"], ["BETA", "ALPHA"]])
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(structure, embedder, decoder)
@@ -592,9 +610,8 @@ def test_cluster_content_counter_rebalances_content_loss_by_inverse_frequency():
 
     # Encode the batch through the embedder's own vocab so the vocab-size gated accuracy
     # metric can evaluate under known content targets.
-    field = TensorField.new(
-        values=[[["ALPHA", "BETA"]]] * 4,
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", "BETA"]] * 4,
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=embedder.vocab.state,
@@ -630,7 +647,7 @@ def test_cluster_content_counter_rebalances_content_loss_by_inverse_frequency():
 
 def test_cluster_loss_usage_ema_updates_toward_batch_distribution():
     structure = Schema.model_validate(_structure_payload(bounds=(4, 4), capacity=8, p_unavailable=1.0))
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    field = _prepared_train_batch(structure, rows=[["ALPHA", "BETA"]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(structure, embedder, decoder)
@@ -678,7 +695,7 @@ def _seed_uncommitted_batch(*, revive_temperature: float | None = None):
             revive_temperature=revive_temperature,
         )
     )
-    field = _prepared_train_batch(structure, values=[[["ALPHA", "BETA"]]] * 4)
+    field = _prepared_train_batch(structure, rows=[["ALPHA", "BETA"]] * 4)
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     K = structure.requests[ADDRESS].size

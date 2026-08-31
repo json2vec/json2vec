@@ -8,36 +8,25 @@ eval: false
 **Example status — excerpt:** blocks compare binding choices; use the tested
 [Getting Started](../getting-started.qmd) lifecycle for complete execution.
 
-Binding is the decision between letting schema names read source keys directly,
-writing an explicit JMESPath query, and reshaping the record with a
-preprocessor.
-
-Start with the simplest option that expresses the input contract:
+RelFlow supports three input-binding choices: direct schema-address projection,
+an explicit per-leaf JMESPath query, and a preprocessor. Start with the simplest
+one that expresses the source contract.
 
 | Source relationship | Use |
 | --- | --- |
-| Field and branch names already match the record | inferred query |
-| The source shape is stable, but a key or path differs | explicit `query=...` |
-| Values require Python logic, sorting, windowing, coercion, or derivation | `@rf.preprocess` |
-| One raw record should produce zero, one, or several model observations | yielding preprocessor |
+| Keys and nesting already match the schema | Direct binding; omit `query`. |
+| A stable key, path, filter, slice, or stacking expression differs | Explicit leaf `query=...`. |
+| Values need Python logic, coordinated reshaping, ordering, or derivation | `@rf.preprocess`. |
+| One raw record should produce zero, one, or several observations | A yielding preprocessor. |
 
-Queries select values. Preprocessors change observations. Keeping that boundary
-clear makes the input path easier to test and reuse.
+Omitting `query` does not infer a JMESPath expression. It selects the leaf by
+its bound schema address from the shared Awkward batch. Setting `query` is an
+explicit opt-in to a separate extraction step for that leaf; its result then
+rejoins the same canonical ragged preparation and datatype codec.
 
-## Same Names Need No Configuration
+## Direct Schema Binding
 
-For flat records, a schema leaf reads the same-named source key:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-record = {
-    "amount": 12.50,
-    "merchant": "bookshop",
-    "approved": "true",
-}
-```
+For flat records, each leaf reads its same-named key:
 
 ```{python .marimo}
 #| echo: true
@@ -46,6 +35,7 @@ record = {
 import relflow as rf
 
 model = rf.Model(
+    name="transaction",
     d_model=32,
     n_layers=1,
     n_heads=4,
@@ -53,52 +43,18 @@ model = rf.Model(
     merchant=rf.Category(size=4096),
     approved=rf.Category(target=True, size=2),
 )
-```
 
-The inferred bindings are:
-
-| Address | Request-level query |
-| --- | --- |
-| `record/amount` | `[*].amount` |
-| `record/merchant` | `[*].merchant` |
-| `record/approved` | `[*].approved` |
-
-The leading `[*]` selects from one processed observation. Public methods accept
-raw dictionaries and create that observation wrapper automatically.
-
-Changing the root name changes addresses, not source keys:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-named_model = rf.Model(
-    name="transaction",
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    amount=rf.Number,
-)
-```
-
-The address becomes `transaction/amount`; its query remains `[*].amount`.
-
-## Branch Names Infer Repeated Paths
-
-Use `Branch` when sibling fields share positions in a repeated child list:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-order = {
-    "order_source": "web",
-    "line_items": [
-        {"sku": "A12", "quantity": 2, "price": 19.99},
-        {"sku": "B07", "quantity": 1, "price": 45.50},
-    ],
+record = {
+    "amount": 12.50,
+    "merchant": "bookshop",
+    "approved": "true",
 }
 ```
+
+The root name changes addresses—such as `transaction/amount`—but does not add
+a wrapper to `record`.
+
+Repeated child mappings match a `Branch` with the same name:
 
 ```{python .marimo}
 #| echo: true
@@ -116,27 +72,25 @@ order_model = rf.Model(
         price=rf.Number,
     ),
 )
+
+order = {
+    "order_source": "web",
+    "line_items": [
+        {"sku": "A12", "quantity": 2, "price": 19.99},
+        {"sku": "B07", "quantity": 1, "price": 45.50},
+    ],
+}
 ```
 
-| Address | Request-level query |
-| --- | --- |
-| `record/order_source` | `[*].order_source` |
-| `record/line_items/sku` | `[*].line_items[*].sku` |
-| `record/line_items/quantity` | `[*].line_items[*].quantity` |
-| `record/line_items/price` | `[*].line_items[*].price` |
+All leaves below `line_items` share each item's coordinate. Branch overflow is
+applied to the child collection before stateful or semantic datatype codecs
+observe retained values. A plugin's pure carrier-safety inspection necessarily
+runs before the shared Awkward carrier is constructed.
 
-The child selector preserves the repeated dimension. Against one processed
-observation, `[*].line_items[*].sku` returns `[["A12", "B07"]]`: one root item
-containing two line-item values.
+## Opt In To A Query For Stable Selection
 
-Every additional nested `Branch` contributes another `.<name>[*]` segment.
-Branch overflow is applied after selection, in query-result order. Use
-`overflow="tail"` for histories whose newest items are last, or
-`overflow="error"` when silent truncation would violate the data contract.
-
-## Use A Query For Stable Selection
-
-An explicit query lets a stable schema use a differently shaped source:
+An explicit query can bind a stable schema to differently named or nested
+source values without writing a preprocessor:
 
 ```{python .marimo}
 #| echo: true
@@ -149,11 +103,6 @@ source_record = {
     },
     "outcome": "approved",
 }
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
 
 queried_model = rf.Model(
     d_model=32,
@@ -161,28 +110,26 @@ queried_model = rf.Model(
     n_heads=4,
     amount=rf.Number(query="[*].transaction.amount_usd"),
     merchant=rf.Category(query="[*].transaction.merchant_name", size=4096),
-    label=rf.Category(query="[*].outcome", target=True, size=2),
+    approved=rf.Category(query="[*].outcome", target=True, size=2),
 )
 ```
 
-Keep these rules in mind:
+Explicit request queries are written from the singleton processed-observation
+wrapper, normally beginning with `[*].`. RelFlow adds the outer batch selector;
+do not configure `[*][*]`. A query on a child leaf is a full source path, not a
+path relative to its `Branch`, and its result must preserve one dimension per
+schema branch.
 
-- write a full request-level query from the processed observation, usually
-  beginning with `[*].`;
-- do not add the outer batch selector—`[*][*].amount` is normally one level too
-  deep;
-- explicit leaf queries are not relative to their parent `Branch`;
-- preserve one result dimension for every branch in the schema path;
-- use JMESPath syntax, not JSONPath syntax.
+This path pays JMESPath evaluation and result materialization once per queried
+leaf. Direct fields continue to share one schema-aware Awkward projection pass,
+so use `query` for selection value rather than as routine boilerplate. See
+[Advanced Query Paths](querypaths.qmd) for filters, quoted keys, slices, null
+preservation, and field stacking.
 
-The schema address remains `record/merchant` even though its value comes from
-`transaction.merchant_name`. Addresses describe the model contract; queries
-describe the source contract.
+## Normalize Raw Input
 
-## Use A Preprocessor For Logic
-
-JMESPath is a selection language. Use a RelFlow `Preprocessor` when the
-transformation needs business logic or needs to be unit tested as Python:
+Use a preprocessor when the transformation is clearer or safer as coordinated
+Python logic:
 
 ```{python .marimo}
 #| echo: true
@@ -190,112 +137,136 @@ transformation needs business logic or needs to be unit tested as Python:
 
 @rf.preprocess
 def normalize_transaction(record: dict) -> rf.Observation:
+    transaction = record["transaction"]
     return rf.Observation(
         {
-            "amount": float(record["amount_usd"]),
-            "merchant": record["merchant"].strip().lower(),
+            "amount": float(transaction["amount_usd"]),
+            "merchant": transaction["merchant_name"].strip().lower(),
+            "approved": record.get("outcome"),
         }
     )
 ```
 
-Pass the returned `Preprocessor` object to every path that consumes the raw
-shape:
+Pass the decorated object to every consumer of the raw shape:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+datamodule = rf.PolarsDataModule(
+    model=model,
+    train=train_records,
+    validate=validation_records,
+    preprocessor=normalize_transaction,
+)
 
-raw_requests = [{"amount_usd": "12.50", "merchant": " Bookshop "}]
 predictions = model.predict(raw_requests, preprocess=normalize_transaction)
 ```
 
-Data modules also accept a preprocessor for training, validation, test, and
-predict splits. The same object should travel with the model workflow; changing
-normalization or time-window rules between splits changes the effective data
-contract.
-
 Use a preprocessor for:
 
-- type coercion and source-version normalization;
-- sorting before head/tail selection;
+- renaming, nesting, type coercion, and source-version normalization;
+- sorting before head/tail overflow;
 - point-in-time or `as_of` filtering;
 - derived values such as elapsed time or recency;
-- coordinated filtering of several sibling fields;
-- yielding multiple model observations or discarding a raw record.
+- coordinated filtering or stacking of sibling fields;
+- yielding several observations or discarding a raw record.
 
 See [Data Modules: Preprocessors](../guides/data-modules.qmd#preprocessors) for
-the return contract, provider arguments, and yielding preprocessors.
+provider arguments and yielding preprocessors.
 
-## Keep Sibling Fields Aligned
+## Missing, Null, Padding, And Masks
 
-Leaves under one branch describe the same repeated coordinates. If custom
-queries filter siblings differently, the first value in one field may no longer
-describe the same child object as the first value in another.
+These conditions remain distinct after the observation becomes an Awkward
+batch:
 
-RelFlow uses a direct extractor for simple projection paths such as
-`[*].events[*].amount`. It preserves explicit `None` values when every child
-mapping contains the key. A stacking preprocessor should therefore write each
-nullable sibling key on every child object.
+| Processed input | State |
+| --- | --- |
+| Same-named key with a valid value | `valued` |
+| Same-named key with `None` | `null` |
+| Missing key or unfilled fixed branch slot | `padded` |
+| Whole leaf equal to `"<MASK>"` during prediction | `masked` |
 
-More complex explicit JMESPath expressions—filters, functions, or quoted
-paths—fall back to standard JMESPath evaluation, whose projections can omit
-null results. Preserve positions with `map`:
+`nullable=False` rejects explicit null, not padding. A structured leaf may
+contain the string `"<MASK>"` as ordinary codec input; only the whole leaf
+literal is a prediction instruction.
+
+## Keep Siblings Aligned
+
+Filter, sort, and reshape repeated child objects together. This retains one
+coordinate for every sibling value, including an explicit `None`:
 
 ```python
-device_id=rf.Hash(
-    query="[*].map(&device_id, events[?event_type == 'login'])"
-)
-risk_score=rf.Number(
-    query="[*].map(&risk_score, events[?event_type == 'login'])"
-)
+@rf.preprocess
+def login_events(record: dict) -> rf.Observation:
+    selected = [event for event in record["events"] if event["type"] == "login"]
+    return rf.Observation(
+        {
+            "logins": [
+                {
+                    "device_id": event.get("device_id"),
+                    "risk_score": event.get("risk_score"),
+                }
+                for event in selected
+            ]
+        }
+    )
 ```
 
-These queries apply the same filter and retain a `None` placeholder when a
-selected login has no risk score.
+The schema can then declare a `logins=rf.Branch(...)`. No leaf independently
+filters the source, so sparse risk scores cannot shift onto the wrong device.
 
-For sorting, time windows, or multi-step rules, preprocess the child objects as
-one list before leaf queries run. That keeps alignment explicit and testable.
-
-Avoid JMESPath's flattening operator `[]` unless dropping an array dimension is
-intentional. A branch field commonly needs `[*].items[*].sku`, not
-`[*].items[].sku`.
+Direct schema projection preserves missing, explicit-null, and valued child
+coordinates. JMESPath projection expressions can compact missing or null leaf
+results. When an explicit query filters repeated objects, give every sibling
+the same selection and use a null-preserving expression such as
+`map(&risk_score, events[?type == 'login'])`. Prefer a preprocessor whenever
+alignment requires several dependent steps.
 
 ## Verify The Boundary
 
-Test a custom expression against one processed observation:
+Test preprocessing as ordinary Python, then inspect tensorization:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+prepared = normalize_transaction(raw_record)
+assert set(prepared.data) == {"amount", "merchant", "approved"}
 
-import jmespath
-
-observation = [source_record]
-assert jmespath.search("[*].transaction.amount_usd", observation) == [12.50]
-```
-
-Then inspect tensorization when a field is still empty or has the wrong shape:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-encoded = queried_model.encode([source_record])
+encoded = model.encode(
+    [raw_record],
+    preprocess=normalize_transaction,
+    mask=False,
+)
 print(encoded)
 ```
 
-`model.encode(...)` is a diagnostic boundary: it confirms what preprocessing
-and queries supplied before architecture behavior is involved.
+For an explicit query, test the same configured expression against a one-item
+processed observation:
+
+```python
+import jmespath
+
+assert jmespath.search(
+    "[*].transaction.amount_usd",
+    [source_record],
+) == [12.50]
+```
+
+`model.encode(...)` confirms the state, content, and fixed schema shape before
+architecture behavior is involved. For a failing field, compare the processed
+observation with its schema address one name and branch level at a time.
 
 ## Decision Checklist
 
 Before training, verify that:
 
-- every inferred field name exists in representative source records;
-- every explicit query starts at the processed-observation level;
-- query result dimensions match the branch path;
+- representative processed observations match schema names and nesting;
+- each explicit query starts at the processed-observation level and its result
+  shape matches the leaf's branch path;
 - sibling queries preserve coordinate alignment;
+- each repeated branch is a sequence of mappings, except mapping shorthand for
+  `Branch(length=1)`;
+- sibling values remain on the same child objects;
 - branch length and overflow match ordering semantics;
+- directly bound modeled values and explicit query results are supported by the
+  Awkward carrier and satisfy their datatype codec; unmodeled metadata may stay
+  opaque because it is preserved separately;
 - the same preprocessor is used for train, validate, test, batch, and online
   prediction;
 - target fields are present where loss is computed and may be omitted from
@@ -303,8 +274,8 @@ Before training, verify that:
 
 ## Where Next
 
-- Use [Advanced Query Paths](querypaths.qmd) for quoted keys, filters, indexes,
-  slices, mutations, and troubleshooting.
+- Use [Advanced Query Paths](querypaths.qmd) for opt-in JMESPath selection,
+  result-shape rules, and diagnostics.
 - Use [Data Flow](data-flow.qmd) to place binding in the full model lifecycle.
 - Use [Model Tree](model-tree.qmd) for branch shapes and addresses.
 - Use [Temporal Validation](../guides/temporal-validation.qmd) for point-in-time

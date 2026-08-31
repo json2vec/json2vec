@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -20,7 +21,7 @@ measurements: the child leaves are the attributes of each item in that
 collection.
 
 A branch gives those leaves one coordinate system. `length`, `overflow`, and
-branch-mask windows are defined over that collection; child queries stay aligned
+branch-mask windows are defined over that collection; child values stay aligned
 under the branch address; and branch embeddings represent the grouped context.
 At runtime, child leaf embeddings are gathered into the branch. If
 `attention!="none"`, a transformer encoder lets items in the context interact;
@@ -61,9 +62,10 @@ efficient.
 ## Input Values
 
 For the common repeated-collection case, `Branch` expects a list of child
-objects at the source path named by `name`, unless the child fields use
-explicit `query` expressions. Each child tensorfield is padded to the configured
-`length`, and overlong inputs are handled by the branch's `overflow` policy.
+objects at the processed-observation key named by the branch. A
+`Branch(length=1)` also accepts one child mapping directly. Each child
+tensorfield is padded to the configured `length`, and overlong inputs are
+handled by the branch's `overflow` policy.
 
 ::: {.callout-note}
 Set `length` deliberately for real repeated data. The default is `1`,
@@ -82,11 +84,10 @@ retained, extra items are truncated, and missing slots are padded:
 ```
 
 The first record keeps `a` and `b`; `c` is truncated. The second record keeps
-`a` and adds one padded slot. Branch order is the order returned by the query.
-Sort, window, or filter in a preprocessor when
-order matters.
+`a` and adds one padded slot. Branch order is processed-observation order. Sort,
+window, or filter in a preprocessor when order matters.
 
-Use `overflow="tail"` when the query result is ordered oldest-to-newest and the
+Use `overflow="tail"` when the child collection is ordered oldest-to-newest and the
 most recent records should be retained:
 
 ```{python .marimo}
@@ -104,8 +105,8 @@ events = rf.Branch(
 events
 ```
 
-Use `overflow="error"` when any truncated input would indicate a bad schema,
-bad query, or upstream data contract failure.
+Use `overflow="error"` when any truncated input would indicate a bad schema or
+upstream data contract failure.
 
 For a top-level schema like:
 
@@ -127,33 +128,54 @@ model = rf.Model(
 model
 ```
 
-`relflow` infers child queries like `[*].measurements[*].name` and
-`[*].measurements[*].value`.
+With the default direct path, `relflow` reads each `measurements` child mapping
+and binds its `name` and `value` keys at the same repeated coordinate.
 
-::: {.callout-note}
-Field `name` controls the public schema name. `query` controls where values
-are read. When omitted, `relflow` infers the request query from the field and
-parent branch names. `Branch` itself does not read a value with `query`; its
-child leaves do.
-:::
+For stable path differences, a child leaf can opt into a full JMESPath query:
 
-Use explicit queries when the source keys do not match the public schema names:
+```python
+items = rf.Branch(
+    name="items",
+    length=32,
+    sku=rf.Category(
+        query="[*].line_items[*].product_sku",
+        size=2048,
+    ),
+    quantity=rf.Number(query="[*].line_items[*].qty"),
+)
+```
+
+Queries belong to leaves, not to `Branch`, and are not relative to the branch
+name. Every sibling query must preserve the same repeated coordinates. Use a
+preprocessor when source conversion or coordinated reshaping is clearer:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
+@rf.preprocess
+def prepare_items(record: dict) -> rf.Observation:
+    return rf.Observation(
+        {
+            "items": [
+                {"sku": item["product_sku"], "quantity": item["qty"]}
+                for item in record["line_items"]
+            ]
+        }
+    )
+
+
 items = rf.Branch(
     name="items",
     length=32,
-    sku=rf.Category(query="[*].line_items[*].product_sku", size=2048),
-    quantity=rf.Number(query="[*].line_items[*].qty"),
+    sku=rf.Category(size=2048),
+    quantity=rf.Number,
 )
 
 items
 ```
 
-Explicit queries can also stack repeated semantic roles, such as origin and
+Preprocessing can also stack repeated semantic roles, such as origin and
 destination, into one shared field. See [Field Stacking](../guides/field-stacking.qmd).
 
 ## Examples
@@ -170,7 +192,7 @@ Common branch contexts include:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `name` | `None`; inferred when bound | Public schema name and inferred source key. A parent keyword normally supplies it; an unbound branch must acquire a name before schema compilation. |
+| `name` | `None`; inferred when bound | Public schema name and default processed-observation key. A parent keyword normally supplies it; an unbound branch must acquire a name before schema compilation. |
 | `fields` | `[]` | Child branches or tensorfields. Positional constructor arguments become `fields`. |
 | `length` | `1` | Number of repeated slots retained per observation. Must be positive. |
 | `overflow` | `"head"` | How to handle more than `length` child records: `"head"` keeps the first records, `"tail"` keeps the last records, and `"error"` raises. |
@@ -241,8 +263,8 @@ on `Branch`. To apply the same masking or pruning rate to every child field, use
 
 Configure `mask=` or `masks=` on a branch when the candidate window is about
 repeated coordinates rather than independent leaf values. Branch masks are
-resolved after query extraction, overflow handling, and padding. Padding is
-excluded, but null positions remain eligible.
+resolved after direct projection or explicit query extraction, overflow
+handling, and padding. Padding is excluded, but null positions remain eligible.
 
 The current implementation samples each affected descendant leaf independently;
 a single branch policy does not guarantee that sibling fields hide the same row.
@@ -275,7 +297,8 @@ and profiling guidance.
 - Use [Model Tree](../core-concepts/model-tree.qmd) for branch addresses and
   hierarchical context flow.
 - Use [Binding Data](../core-concepts/binding-data.qmd) and
-  [Query Paths](../core-concepts/querypaths.qmd) for child source binding.
+  [Advanced Query Paths](../core-concepts/querypaths.qmd) for child source
+  binding and extraction.
 - Use [Dynamic Masking](../core-concepts/dynamic-masking.qmd) for the exact
   repeated-coordinate mask contract.
 - Use [Model Configuration](../guides/model-configuration.qmd) to size branch

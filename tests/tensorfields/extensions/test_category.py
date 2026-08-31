@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -14,7 +16,7 @@ from relflow.tensorfields.extensions.category import (
     loss,
     write,
 )
-from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
+from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState
 
 ADDRESS = "root/items/category"
 
@@ -23,7 +25,6 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
     field: dict = {
         "name": "category",
         "type": "category",
-        "query": "[*].items[*].label",
         "size": 8,
     }
     if topk is not None:
@@ -51,6 +52,27 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
 
 def _state(size: int = 8):
     return OnlineVocabularyModel(size=size).state
+
+
+def _tensorfield(
+    rows: list[list[Any]],
+    *,
+    schema: Schema,
+    strata: Strata,
+    interprocess_encoding_context: VocabularyState,
+) -> TensorField:
+    batch = RaggedBatch.new(
+        [[{"items": [{"category": value} for value in row]}] for row in rows],
+        schema=schema,
+    )
+    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    return TensorField.new(
+        field=field,
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        interprocess_encoding_context=interprocess_encoding_context,
+    )
 
 
 def test_category_vocabulary_refreshes_stale_validation_snapshot():
@@ -106,9 +128,8 @@ def test_category_tensorfield_separates_state_and_content():
     schema = structure
     state = _state()
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -141,17 +162,15 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     schema = structure
     state = _state(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
-        values=[[["ALPHA"]]],
-        address=ADDRESS,
+    _tensorfield(
+        rows=[["ALPHA"]],
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
 
-    field = TensorField.new(
-        values=[[["OMEGA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["OMEGA"]],
         schema=schema,
         strata=Strata.validate,
         interprocess_encoding_context=state,
@@ -172,9 +191,8 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
     schema = structure
     state = _state(size=structure.requests[ADDRESS].size)
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -339,9 +357,8 @@ def test_category_loss_does_not_mutate_counters():
     schema = structure
     state = _state()
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=state,
@@ -382,16 +399,14 @@ def test_category_loss_uses_uniform_target_for_unavailable_content():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
-        values=[[["ALPHA"]]],
-        address=ADDRESS,
+    _tensorfield(
+        rows=[["ALPHA"]],
         schema=structure,
         strata=Strata.train,
         interprocess_encoding_context=state,
     )
-    field = TensorField.new(
-        values=[[["OMEGA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["OMEGA"]],
         schema=structure,
         strata=Strata.validate,
         interprocess_encoding_context=state,

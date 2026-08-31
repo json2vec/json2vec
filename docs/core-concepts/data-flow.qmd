@@ -8,9 +8,9 @@ eval: false
 **Example status — excerpt:** the record and schema blocks form a conceptual
 walkthrough, not a training job.
 
-A RelFlow schema sits in the middle of the complete modeling path. It tells the
-input pipeline where values come from, tells tensorfields how to represent them,
-and tells the model which contexts and predictions to build.
+A RelFlow schema sits in the middle of the complete modeling path. It defines
+the model-facing input shape, tells tensorfields how to represent values, and
+tells the model which contexts and predictions to build.
 
 This page follows one record from raw input to public output. It introduces the
 user-facing terms needed by the rest of the docs; architecture internals come
@@ -20,9 +20,13 @@ later in [Model Tree](model-tree.qmd#architecture-internals).
 flowchart LR
     A[Raw record] --> B[Optional preprocessor]
     B --> C[Processed observation]
-    C --> D[Leaf queries]
-    D --> E[State + typed content]
-    E --> F[Leaf embeddings]
+    C --> D[Awkward ragged batch]
+    D --> E[Direct schema projection]
+    C -. explicit leaf query .-> Q[JMESPath extraction]
+    Q --> R[Canonical ragged field]
+    E --> R
+    R --> S[Leaf state + typed content]
+    S --> F[Leaf embeddings]
     F --> G[Branch and root contexts]
     G --> H[Decoders, losses, embeddings]
     H --> I[Address-keyed prediction]
@@ -80,16 +84,16 @@ Public convenience methods such as `model.predict(...)` accept a list of raw
 dictionaries. A data module reads the same kind of records for training,
 validation, testing, and batch prediction.
 
-An optional `Preprocessor` runs before schema queries. Use one when selection is
-not enough—for example, to coerce inconsistent types, sort events, apply an
-`as_of` time window, derive elapsed time, or turn one source object into several
-model observations.
+An optional `Preprocessor` runs before schema binding. Use one to rename or
+nest source keys, coerce inconsistent types, sort events, apply an `as_of` time
+window, derive elapsed time, or turn one source object into several model
+observations.
 
 The result is a **processed observation**: one model-facing mapping wrapped in
 `rf.Observation`. A preprocessor may yield several observations from one raw
 record, but each output is an independent example with its own singleton root.
-Internally, RelFlow wraps each observation as a one-record list so inferred
-queries can start with `[*]`; that list does not create multiple root items.
+Internally, RelFlow wraps each observation as a one-record root before building
+the shared Awkward batch; that wrapper does not create multiple root items.
 
 ::: {.callout-important}
 Use the same preprocessor contract for every data split and inference path.
@@ -97,26 +101,35 @@ Reimplementing normalization separately at serving time creates
 training-serving skew even when the model weights are identical.
 :::
 
-## 2. Bind Leaves To Values
+## 2. Bind Values Directly Or With An Explicit Query
 
-Only leaf tensorfields read values from the observation. Each leaf has a
-JMESPath `query`:
+By default, field and branch names select same-named keys from the processed
+observation:
 
-| Address | Inferred query |
+| Address | Processed input location |
 | --- | --- |
-| `order/customer_tier` | `[*].customer_tier` |
-| `order/line_items/sku` | `[*].line_items[*].sku` |
-| `order/line_items/price` | `[*].line_items[*].price` |
-| `order/returned` | `[*].returned` |
+| `order/customer_tier` | `customer_tier` |
+| `order/line_items/sku` | each `line_items` child's `sku` |
+| `order/line_items/price` | each `line_items` child's `price` |
+| `order/returned` | `returned` |
 
-Field and branch names provide these defaults. The root name affects addresses,
-not source lookup. Use [Binding Data](binding-data.qmd) to choose among an
-inferred query, an explicit query, and preprocessing. Use
-[Advanced Query Paths](querypaths.qmd) for filters, slices, and quoted keys.
+The root name affects addresses, not source lookup. All processed observations
+become one schema-aware Awkward batch. Each directly bound leaf receives a
+column projection that already owns its fixed shape, value state, retained flat
+values, and dense destinations.
+
+A leaf with an explicit `query=...` instead evaluates that JMESPath expression
+against the processed observation. The extracted result rejoins the same
+canonical ragged-field preparation, so overflow, state, prediction literals,
+and datatype encoding do not fork into a second engine. Queries are never
+inferred: omitting `query` always chooses direct schema-address projection.
+
+Use a preprocessor for Python logic or coordinated child transformations. See
+[Binding Data](binding-data.qmd) and [Advanced Query Paths](querypaths.qmd).
 
 ## 3. Tensorfields Separate State From Content
 
-A tensorfield converts query results into typed arrays. Every leaf keeps the
+A tensorfield converts its ragged field projection into typed arrays. Every leaf keeps the
 value's **state** separate from its **content**:
 
 - state answers whether a position is valued, null, padded, masked, or in the
@@ -144,8 +157,8 @@ print(encoded)
 ```
 
 Most application code should not depend on these internal tensor layouts. They
-are useful for checking that preprocessing and queries found the expected
-values and shapes.
+are useful for checking that preprocessing and schema binding found the
+expected values and shapes.
 
 ## 4. Visible Values Become Context
 
@@ -218,7 +231,7 @@ The major difference between the two paths is what happens after encoding:
 | Stage | Training / validation | Prediction |
 | --- | --- | --- |
 | Raw input and preprocessing | Read records for a named split | Read request or prediction records |
-| Query and tensorization | Bind both context and available answers | Bind visible context; targets may be absent |
+| Schema binding and tensorization | Directly project or explicitly query both context and available answers | Directly project or explicitly query visible context; targets may be absent |
 | Masking / pruning | Select trainable answers and retain targets | Create inference positions for configured targets or masks |
 | Model tree | Encode visible context | Encode visible context |
 | Decoder | Produce predictions used by losses and metrics | Produce public predictions |
@@ -239,14 +252,14 @@ not prevent data leakage.
 | Branch | A bounded child context, usually corresponding to a repeated list of objects. |
 | Leaf / tensorfield | A typed field that binds source values, tensorizes them, embeds visible input, and optionally decodes predictions. |
 | Request | The configuration object created by `rf.Number`, `rf.Category(...)`, and the other leaf constructors. |
-| Query | A JMESPath expression that selects one leaf's values from a processed observation. |
 | Address | A stable slash-delimited location in the schema and prediction output. |
+| Query | An optional, explicit JMESPath expression that replaces direct source lookup for one leaf. |
 | State | The value condition at a position, separate from type-specific content. |
 | Content | The datatype-specific representation or decoded value. |
 | Context | The aligned vectors that may interact inside a root or branch. |
 | Target | The original answer retained when a value is hidden for learning. |
 | Embedding | A learned vector emitted internally between nodes or publicly when `embed=True`. |
-| Preprocessor / postprocessor | Optional transformations immediately before query binding or after prediction writing. |
+| Preprocessor / postprocessor | Optional transformations immediately before schema binding or after prediction writing. |
 
 Terms such as *parcel* and *heritage* describe internal routing. They are useful
 when extending the architecture, but they are not required to build and operate
@@ -257,7 +270,8 @@ a model through the public API.
 - Read [Model Tree](model-tree.qmd) for branches, leaves, and addresses.
 - Use [Built-In Data Types](data-types.qmd) for state/content semantics and
   field selection.
-- Read [Binding Data](binding-data.qmd) before writing custom queries.
+- Read [Binding Data](binding-data.qmd) when raw records do not already match
+  the schema.
 - Use [Data Modules](../guides/data-modules.qmd) for split ingestion and
   preprocessors.
 - Use [Postprocessors](../guides/postprocessors.qmd) for application output.

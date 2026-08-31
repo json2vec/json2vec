@@ -195,7 +195,7 @@ Use them as diagnostics alongside held-out outcomes.
 
 | Signal | Diagnostic | Likely fix |
 | --- | --- | --- |
-| Validation is implausibly strong | Search visible nested events and derived fields for post-`as_of` information | Rebuild windows before query/tensorization and regenerate splits. |
+| Validation is implausibly strong | Search visible nested events and derived fields for post-`as_of` information | Rebuild windows before query/binding and tensorization, then regenerate splits. |
 | Validation vocabulary grows | Inspect which strata populated encoding state | Fit vocabulary/normalization only from training, then encode validation and test without updates. |
 | The same entity appears across splits | Join split membership by customer/account/device/session key | Split by the identity unit that can leak, not individual rows. |
 | Serving records differ from validation | Run the same raw example through both processor bindings | Version and deploy processor code and bound parameters with the artifact. |

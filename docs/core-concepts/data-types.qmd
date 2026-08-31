@@ -19,8 +19,11 @@ Every leaf follows the same high-level path while owning its type-specific
 content contract:
 
 ```text
-query -> validate -> tensorize state/content -> embed visible input
-      -> optionally decode selected targets -> write a public payload
+direct schema projection OR explicit JMESPath query
+  -> canonical ragged field -> validate -> tensorize state/content
+  -> embed visible input
+  -> optionally decode selected targets
+  -> write a public payload
 ```
 
 ## Choose A Data Type
@@ -46,6 +49,28 @@ The same raw shape can have different meaning:
 - `["red", "sale"]` is a `Set` if membership is unordered.
 - `[{"name": "red"}, {"name": "sale"}]` is a `Branch` if each item has
   fields or position.
+
+## Keep Python Value Types Stable
+
+Identity-backed `Category`, `Cluster`, and `Hash` fields require one declared
+Python compatibility family per field within a batch. `Set` applies the same
+rule to its member labels across all valued sets. Their built-in declarations
+place `str` and `bytes` in separate families. This prevents order-dependent
+Awkward coercion from silently changing label identity; normalize source values
+in a preprocessor. For `Set`, a scalar `str` or `bytes` is one label rather than
+an iterable of characters or byte integers.
+
+These rules are owned by each datatype plugin through `Plugin(types=...)`; the
+ragged engine does not contain a list of built-in leaf names. Tuple entries are
+separate compatibility families, so `types=(str, bytes)` accepts either type
+but rejects a batch that mixes them. A union is one compatible family, so
+`types=(int | float,)` permits numeric promotion within a field.
+
+RelFlow recursively prepares atoms inside list, tuple, and NumPy-array leaf
+values and converts NumPy scalars to their Python equivalents before matching
+the declared families. `None` and a whole-leaf prediction `"<MASK>"` are core
+routing states, not plugin atom types. Container shape and datatype meaning
+remain the tensorfield's responsibility.
 
 ## Value State And Content {#value-state}
 
@@ -87,7 +112,7 @@ its label” from `null`, padding, or an intentionally hidden input.
 
 For `Set("tags")`, `["vip"]` and `[]` are both valued. `null` is a null field
 state. A missing repeated slot inside a `Branch` is padded. If a leaf has
-`nullable=False`, encoding raises when its extracted input contains an explicit
+`nullable=False`, encoding raises when its projected input contains an explicit
 null.
 
 Do not infer state from a numeric or categorical content sentinel. Neutral zero
@@ -106,8 +131,8 @@ children instead of reading one leaf value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `name` | `None`; inferred when bound | Public schema name. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. If `query` is omitted, the bound name is also the inferred source key. |
-| `query` | inferred | JMESPath expression for the source value. See [Query Paths](querypaths.qmd). |
+| `name` | `None`; inferred when bound | Public schema name and default processed-observation key. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. |
+| `query` | `None` | Optional JMESPath source expression. `None` uses direct schema-address projection; no query is inferred. An explicit result rejoins canonical ragged preparation. See [Advanced Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields remain in the schema but are ignored by encoding, loss, and prediction. |
 | `nullable` | `True` | Allows explicit `None` input. `False` raises whenever the encoded leaf contains state `null`. |
@@ -195,4 +220,6 @@ datatype's internal input embedding. See
   pruning, and exported embeddings.
 - Use [Dynamic Masking](dynamic-masking.qmd) for exact leaf and repeated-branch
   selection behavior.
-- Use [Query Paths](querypaths.qmd) when source keys and schema names differ.
+- Use [Binding Data](binding-data.qmd) to choose direct projection, an explicit
+  query, or preprocessing.
+- Use [Advanced Query Paths](querypaths.qmd) for opt-in JMESPath expressions.

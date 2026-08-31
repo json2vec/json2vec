@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
+import awkward as ak
 import numpy as np
 import pydantic
 import torch
@@ -18,7 +19,7 @@ from torchmetrics.classification import (
     BinarySpecificity,
 )
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-boolean: Plugin = Plugin(name="boolean")
+boolean: Plugin = Plugin(name="boolean", types=(bool,))
 boolean.callback(CounterUpdateCallback)
 BOOLEAN_VALUES = (-1.0, 0.0, 1.0)
 Threshold = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
@@ -114,45 +115,24 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        leading_shape = (len(values), *schema.shapes[address])
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-        data, states = pad(
-            nested=values,
-            shape=leading_shape,
+        encoded = np.fromiter(
+            (_encode(value) for value in ak.to_list(field.values)),
             dtype=np.float32,
-            pad_value=0.0,
-            overflows=schema.overflows(address),
-            address=address,
-            encode=_encode,
+            count=len(field.values),
         )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        literal_mask = torch.tensor(literal_data, dtype=torch.bool)
-        content = torch.tensor(data, dtype=torch.float32).masked_fill(literal_mask, 0.0)
-        state = torch.tensor(states, dtype=torch.int64).masked_fill(literal_mask, Tokens.masked.value)
+        content = torch.from_numpy(field.place(encoded, fill=0.0))
+        state = torch.from_numpy(field.state)
         return cls(
             content=content,
             state=state,
             trainable=torch.zeros_like(state, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):

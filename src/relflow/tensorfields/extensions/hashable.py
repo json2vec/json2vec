@@ -5,6 +5,7 @@ import math
 from collections.abc import Hashable as HashableValue
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+import awkward as ak
 import msgspec
 import numpy as np
 import pydantic
@@ -13,7 +14,7 @@ from beartype import beartype
 from blake3 import blake3
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Plugin = Plugin(name="hash")
+hashable: Plugin = Plugin(name="hash", types=(bool, int, float, str, bytes))
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
@@ -80,7 +81,7 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
@@ -89,38 +90,9 @@ class TensorField(TensorFieldBase):
         request: Request = schema.requests[address]
         n_hashes: int = request.n_hashes
 
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-
-        data, states = pad(
-            nested=values,
-            shape=leading_shape,
-            dtype=object,
-            pad_value=None,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        hashes = np.zeros((*data.shape, n_hashes), dtype=np.int64)
-        flat_hashes = hashes.reshape(-1, n_hashes)
+        hashes = np.empty((len(field.values), n_hashes), dtype=np.int64)
         key = salt.to_bytes(32, "big", signed=False)
-        for index, (value, state) in enumerate(zip(data.reshape(-1), states.reshape(-1), strict=True)):
-            if state != Tokens.valued.value:
-                continue
+        for index, value in enumerate(ak.to_list(field.values)):
             if not isinstance(value, HashableValue):
                 raise ValueError(
                     f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
@@ -132,18 +104,17 @@ class TensorField(TensorFieldBase):
                     f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
                 ) from error
             digest = blake3(payload, key=key).digest(length=n_hashes * 8)
-            flat_hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
+            hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
 
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = torch.tensor(states, dtype=torch.int64).masked_fill(literal_mask_tensor, Tokens.masked.value)
-        content = torch.from_numpy(hashes).masked_fill(literal_mask_tensor.unsqueeze(-1), 0)
+        state_tensor = torch.from_numpy(field.state)
+        content = torch.from_numpy(field.place(hashes, fill=0, value_shape=(n_hashes,)))
 
         return cls(
             state=state_tensor,
             content=content,
             trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):

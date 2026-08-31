@@ -20,10 +20,6 @@ ENV_VARS = (
     "PORT",
     "RELFLOW_LOG_LEVEL",
     "LOG_LEVEL",
-    "RELFLOW_MONITOR_QUERIES",
-    "MONITOR_QUERIES",
-    "RELFLOW_QUERY_MONITOR_EVERY",
-    "QUERY_MONITOR_EVERY",
     "RELFLOW_JSON_BACKEND",
     "JSON_BACKEND",
 )
@@ -60,13 +56,9 @@ def test_deployment_environment_normalizes_accelerator(monkeypatch: pytest.Monke
 def test_deployment_environment_accepts_realtime_serving_knobs(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("RELFLOW_CHECKPOINT", "s3://bucket/models/model.ckpt")
     monkeypatch.setenv("RELFLOW_WORKERS", "2")
-    monkeypatch.setenv("RELFLOW_MONITOR_QUERIES", "true")
-    monkeypatch.setenv("RELFLOW_QUERY_MONITOR_EVERY", "7")
     monkeypatch.setenv("RELFLOW_JSON_BACKEND", "stdlib")
 
     env = Deployment()
 
     assert env.workers == 2
-    assert env.monitor_queries is True
-    assert env.query_monitor_every == 7
     assert env.json_backend is JSONBackend.stdlib

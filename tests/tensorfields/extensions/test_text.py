@@ -6,6 +6,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -28,7 +29,6 @@ def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", e
     field: dict = {
         "name": "body",
         "type": "text",
-        "query": "[*].items[*].body",
         "model": "bert-base-uncased",
         "max_length": 4,
         "encoder_batch_size": encoder_batch_size,
@@ -58,6 +58,13 @@ def _values() -> list:
         [["alpha", "beta"]],
         [["gamma", "delta"]],
     ]
+
+
+def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
+    batch = [[{"items": [{"body": value} for value in root]}] for (root,) in values]
+    ragged_batch = RaggedBatch.new(batch, schema=schema)
+    field = RaggedField.new(ragged_batch, address=ADDRESS, strata=strata)
+    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 
 class FakeTokenizer:
@@ -267,9 +274,8 @@ def test_text_tensorfield_tokenizes_strings(monkeypatch: pytest.MonkeyPatch):
 
     structure = Schema.model_validate(_structure_payload())
     schema = structure
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -285,9 +291,8 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
 
     structure = Schema.model_validate(_structure_payload(encoder_batch_size=1))
     schema = structure
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -309,9 +314,8 @@ def test_text_partial_mask_reuses_target_embeddings_for_visible_input_and_loss(
     fake_model = _patch_hf(monkeypatch)
 
     structure = Schema.model_validate(_structure_payload(encoder_batch_size=2))
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -359,13 +363,12 @@ def test_text_encoder_buckets_by_length_trims_batches_and_restores_order(
     payload = _structure_payload(encoder_batch_size=2, encoder_pooling=encoder_pooling)
     payload["fields"]["fields"][0]["fields"][0]["max_length"] = 5
     structure = Schema.model_validate(payload)
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[
             [["a", "abcde"]],
             [["ab", "abcd"]],
             [["abc", None]],
         ],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -427,9 +430,8 @@ def test_text_encoder_keeps_full_width_for_left_padding(monkeypatch: pytest.Monk
     payload = _structure_payload(encoder_batch_size=2, encoder_pooling="mean")
     payload["fields"]["fields"][0]["fields"][0]["max_length"] = 5
     structure = Schema.model_validate(payload)
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -473,9 +475,8 @@ def test_text_encoder_keeps_full_width_for_valued_row_without_attended_tokens(
 ):
     fake_model = _patch_hf(monkeypatch)
     structure = Schema.model_validate(_structure_payload())
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -521,9 +522,8 @@ def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch
 
     structure = Schema.model_validate(_structure_payload(objective=objective))
     schema = structure
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )

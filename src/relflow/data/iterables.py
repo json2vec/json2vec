@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import inspect
 import random
-import re
-from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
-from functools import cache
-from typing import Annotated, Any, TypeVar, cast
+from collections.abc import Iterable, Iterator
+from typing import Any, TypeVar, cast
 
-import jmespath
-import pydantic
 from beartype import beartype
 from tensordict import TensorDict
 
@@ -23,15 +18,14 @@ from relflow.data.datasets.base import (
     ProcessedObservation,
     RawObservation,
 )
-from relflow.data.nested import MASK_LITERAL, contains_mask_literal
 from relflow.data.processors import Preprocessor
+from relflow.data.ragged import RaggedBatch, RaggedField
 from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import TENSORFIELDS, TensorFieldBase
 
 T = TypeVar("T")
-MISSING = object()
 
 
 @beartype
@@ -116,104 +110,11 @@ def shuffle(pipe: Iterable[T], size: int, strata: Strata) -> Iterator[T]:
         yield item
 
 
-@beartype
-@cache
-def query(expression: str) -> jmespath.parser.ParsedResult:
-    """Compile a request-level JMESPath query for an encoded batch.
-
-    Request queries are written relative to one processed observation, not the
-    whole batch. This helper prepends the outer batch selector, so a request
-    query like `[*].amount` is searched as `[*][*].amount` at encode time.
-    Do not include both leading selectors in request definitions.
-    """
-    return jmespath.compile(expression=f"[*]{expression}")
-
-
-@cache
-def compile_query_extractor(expression: str) -> Callable[[Any], Any] | None:
-    """Compile a direct extractor for simple JMESPath projection queries."""
-    if not expression.startswith("[*]"):
-        return None
-
-    operations: list[tuple[str, str | None]] = [("projection", None), ("projection", None)]
-    index = 3
-    while index < len(expression):
-        if expression.startswith("[*]", index):
-            operations.append(("projection", None))
-            index += 3
-            continue
-
-        if not expression.startswith(".", index):
-            return None
-
-        match = re.match(r"\.([A-Za-z_][A-Za-z0-9_]*)", expression[index:])
-        if match is None:
-            return None
-
-        operations.append(("field", match.group(1)))
-        index += len(match.group(0))
-
-    def search(value: Any) -> Any:
-        def apply(item: Any, operation_index: int) -> Any:
-            if operation_index == len(operations):
-                return item
-
-            operation, key = operations[operation_index]
-            if operation == "field":
-                if not isinstance(item, dict) or key not in item:
-                    return MISSING
-                return apply(item[key], operation_index + 1)
-
-            if not isinstance(item, list):
-                return MISSING
-
-            out = []
-            for child in item:
-                result = apply(child, operation_index + 1)
-                if result is not MISSING:
-                    out.append(result)
-            return out
-
-        return apply(value, 0)
-
-    return search
-
-
-class JMESPathResolutionMonitor(pydantic.BaseModel):
-    every: Annotated[int, pydantic.Field(gt=0)] = 1000
-
-    _counts: Counter[Address] = pydantic.PrivateAttr(default_factory=Counter)
-
-    def observe(self, *, address: Address, expression: str, result: Any) -> None:
-        self._counts[address] += 1
-        count = self._counts[address]
-
-        if count % self.every != 0:
-            return
-
-        stack = [result]
-        while stack:
-            item = stack.pop()
-            if isinstance(item, list):
-                stack.extend(item)
-            elif isinstance(item, dict):
-                stack.extend(item.values())
-            elif item is None:
-                continue
-            elif isinstance(item, str) and item == "":
-                continue
-            else:
-                return
-
-        raise ValueError(f"JMESPath query returned empty result for address '{address}': {expression}")
-
-
 def encode(
     batch: EncodedBatch,
     schema: Schema,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
-    jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
     defer_target_masking: bool = False,
 ) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
@@ -221,8 +122,7 @@ def encode(
 
     hash_salt = random.getrandbits(64) if strata in {Strata.train, Strata.validate} else 0
 
-    if strata != Strata.predict and contains_mask_literal(batch):
-        raise ValueError(f"{MASK_LITERAL!r} is only valid during predict strata")
+    ragged_batch = RaggedBatch.new(batch, schema=schema)
 
     for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
@@ -235,20 +135,8 @@ def encode(
             )
             continue
 
-        expression = request.query
-        if expression is None:
-            raise ValueError(f"request '{address}' must define query")
-
-        # `request.query` is relative to a processed observation. Direct
-        # extractors add the outer batch selector; `query(...)` does the same
-        # before JMESPath searches `batch`.
-        extractor = compile_query_extractor(expression)
-        result = extractor(batch) if extractor is not None else query(expression).search(batch)
-        if jmespath_resolution_monitor is not None:
-            jmespath_resolution_monitor.observe(address=address, expression=expression, result=result)
-
         kwargs: dict[str, Any] = dict(
-            values=result,
+            field=RaggedField.new(ragged_batch, address=address, strata=strata),
             address=address,
             schema=schema,
             strata=strata,
@@ -280,7 +168,6 @@ def transform(
     schema: Schema,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
-    jmespath_resolution_monitor: JMESPathResolutionMonitor | None = None,
 ) -> Iterator[EncodedInput]:
     for item in pipe:
         yield encode(
@@ -288,7 +175,6 @@ def transform(
             schema=schema,
             strata=strata,
             interprocess_encoding_context=interprocess_encoding_context,
-            jmespath_resolution_monitor=jmespath_resolution_monitor,
             defer_target_masking=True,
         )
 

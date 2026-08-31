@@ -57,7 +57,6 @@ def _runtime(model=None, **kwargs) -> deployment_module.FastAPIRuntime:
     runtime.model = _DummyModel() if model is None else model
     runtime.device = torch.device("cpu")
     runtime.interprocess_encoding_context = {}
-    runtime.jmespath_resolution_monitor = None
     return runtime
 
 
@@ -108,18 +107,15 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     runtime.setup()
 
     captured_batches = []
-    captured_monitors = []
     real_encode = deployment_module.encode
 
-    def spy_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def spy_encode(batch, schema, strata, interprocess_encoding_context):
         captured_batches.append(batch)
-        captured_monitors.append(jmespath_resolution_monitor)
         return real_encode(
             batch=batch,
             schema=schema,
             strata=strata,
             interprocess_encoding_context=interprocess_encoding_context,
-            jmespath_resolution_monitor=jmespath_resolution_monitor,
         )
 
     monkeypatch.setattr(deployment_module, "encode", spy_encode)
@@ -127,7 +123,6 @@ def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
     outputs = runtime.predict_payloads([{"amount": 1.5}, {"amount": 2.5}])
 
     assert captured_batches == [[[{"amount": 1.5}], [{"amount": 2.5}]]]
-    assert captured_monitors == [None]
     assert len(outputs) == 2
     assert all("predictions" in output for output in outputs)
 
@@ -141,7 +136,7 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
 
     captured = {"calls": 0}
 
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context):
         captured["calls"] += 1
         captured["batch"] = batch
         captured["strata"] = strata
@@ -175,7 +170,7 @@ def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_on
 def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
     seen = {}
 
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     @rf.postprocess
@@ -210,7 +205,7 @@ def test_fastapi_runtime_postprocess_receives_device_moved_input(monkeypatch):
             assert data["dummy"].device == torch.device("meta")
             return super().__call__(data, strata=strata)
 
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     @rf.postprocess
@@ -240,7 +235,7 @@ def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch)
             assert predictions == []
             return {}
 
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
+    def fake_encode(batch, schema, strata, interprocess_encoding_context):
         return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
 
     monkeypatch.setattr(deployment_module, "encode", fake_encode)
@@ -288,20 +283,6 @@ def test_fastapi_runtime_decode_validates_pydantic_request_model():
     assert isinstance(decoded, RequestItem)
     assert decoded.observations == [[{"color": "red"}]]
     assert context["request"] == {"hue": "red"}
-
-
-def test_fastapi_runtime_setup_can_enable_query_monitor():
-    runtime = deployment_module.FastAPIRuntime(
-        checkpoint=Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
-        accelerator=deployment_module.Accelerator.cpu,
-        monitor_queries=True,
-        query_monitor_every=7,
-    )
-
-    runtime.setup()
-
-    assert runtime.jmespath_resolution_monitor is not None
-    assert runtime.jmespath_resolution_monitor.every == 7
 
 
 def test_deployment_launcher_configures_fastapi_app(monkeypatch):

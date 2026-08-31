@@ -214,6 +214,8 @@ returned from prediction.
 Data modules load raw records, apply optional preprocessing, batch
 observations, tensorize values from the model schema, apply configured masking
 and target pruning in non-predict loops, and hand encoded batches to Lightning.
+Same-named schema fields use shared Awkward projection by default. A leaf may
+opt into `query=...` for JMESPath selection; omitted queries are not inferred.
 
 Choose the data module by where the records live:
 
@@ -329,7 +331,7 @@ Start with:
 - [Model Tree](https://relflow.github.io/relflow/core-concepts/model-tree.html)
 - [Data Flow](https://relflow.github.io/relflow/core-concepts/data-flow.html)
 - [Binding Data](https://relflow.github.io/relflow/core-concepts/binding-data.html)
-- [Query Paths](https://relflow.github.io/relflow/core-concepts/querypaths.html)
+- [Advanced Query Paths](https://relflow.github.io/relflow/core-concepts/querypaths.html)
 - [Built-In Data Types](https://relflow.github.io/relflow/core-concepts/data-types.html)
 - [Learning Modes & Embeddings](https://relflow.github.io/relflow/core-concepts/embeddings.html)
 - [Training With Lightning](https://relflow.github.io/relflow/guides/lightning.html)

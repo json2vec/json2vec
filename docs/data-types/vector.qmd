@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -48,14 +49,13 @@ record. Use `Text` when `relflow` should compute embeddings from strings. Use a
 
 - Python lists or tuples.
 - 1D NumPy arrays.
-- 1D PyTorch tensors.
 
 Every valued input must have exactly `n_dim` numeric elements. `None` is encoded
 as a null state, and missing branch positions are encoded as padded state.
 Prepare vector scale and normalization upstream unless a custom tensorfield owns
 that behavior.
 
-Invalid containers, non-1D NumPy/PyTorch values, the wrong vector length, and
+Invalid containers, non-1D NumPy values, the wrong vector length, and
 non-numeric elements raise `ValueError`. Accepted valued vectors are stored as
 `float32`; the built-in does not fit or apply a normalizer.
 

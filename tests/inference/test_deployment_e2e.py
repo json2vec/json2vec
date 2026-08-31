@@ -136,7 +136,6 @@ def _schema() -> Schema:
                     {
                         "name": "label",
                         "type": "category",
-                        "query": "[*].label",
                         "embed": True,
                         "size": 32,
                     }

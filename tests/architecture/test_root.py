@@ -33,7 +33,6 @@ def _schema() -> Schema:
                     {
                         "name": "label",
                         "type": "category",
-                        "query": "[*].label",
                         "size": 32,
                     }
                 ],
@@ -108,7 +107,6 @@ def _prediction_schema() -> Schema:
                 {
                     "name": "color",
                     "type": "category",
-                    "query": "[*].color",
                     "embed": False,
                     "p_unavailable": 0.0,
                     "size": 16,
@@ -116,7 +114,6 @@ def _prediction_schema() -> Schema:
                 {
                     "name": "label",
                     "type": "category",
-                    "query": "[*].label",
                     "embed": False,
                     "p_prune": 1.0,
                     "p_unavailable": 0.0,
@@ -320,13 +317,11 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
                     {
                         "name": "label",
                         "type": "category",
-                        "query": "[*].label",
                         "size": 16,
                     },
                     {
                         "name": "tags",
                         "type": "set",
-                        "query": "[*].tags",
                         "size": 16,
                     },
                 ],
@@ -601,13 +596,11 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
                     {
                         "name": "color",
                         "type": "category",
-                        "query": "[*].color",
                         "size": 16,
                     },
                     {
                         "name": "ignored",
                         "type": "category",
-                        "query": "[*].ignored",
                         "active": False,
                         "embed": True,
                         "p_prune": 1.0,
@@ -869,7 +862,6 @@ def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
                     {
                         "name": "color",
                         "type": "category",
-                        "query": "[*].color",
                         "embed": True,
                         "size": 16,
                     }

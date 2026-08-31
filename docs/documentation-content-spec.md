@@ -86,8 +86,9 @@ jump:
 
 1. **Why:** hierarchical business records lose useful structure when flattened.
 2. **What:** a RelFlow schema is both a data contract and a model blueprint.
-3. **How data moves:** raw record to preprocessing, querying, state/content
-   tensors, model tree, decoder/loss, and prediction writer.
+3. **How data moves:** raw record to optional preprocessing, direct Awkward
+   projection or opt-in JMESPath extraction, state/content tensors, model tree,
+   decoder/loss, and prediction writer.
 4. **First result:** build, train, evaluate, save, load, and predict a tiny model.
 5. **Design:** choose branches, datatypes, learning roles, embeddings, and model
    capacity for a real problem.
@@ -150,7 +151,7 @@ The following material is required for the main reader journey:
 | --- | --- |
 | Installation and compatibility | Supported Python versions, package installation channel, optional extras, CPU/GPU expectations, a one-command import/version check, and a clear distinction between user installation and contributor checkout. If the package is intentionally checkout-only, say so. |
 | End-to-end first model | One small runnable path through build, train, validation metric, save, load, and prediction. Explain what successful output looks like and keep nested modeling as the next step rather than a second competing quickstart. |
-| Data-flow mental model | One canonical record-to-output walkthrough: raw record → preprocessor → query → state/content tensorfield → model tree → decoder/loss → writer/postprocessor. Define user-facing terms before `parcel`, `heritage`, or other internals. |
+| Data-flow mental model | One canonical record-to-output walkthrough: raw record → preprocessor → direct Awkward projection or explicit query → canonical ragged field → state/content tensorfield → model tree → decoder/loss → writer/postprocessor. Define user-facing terms before `parcel`, `heritage`, or other internals. |
 | Evaluation and metrics | Metric naming by schema address and stage, weighted total-loss composition, state versus content metrics, class imbalance, thresholds/top-k, selecting checkpoint monitors, validation leakage, and how to tell whether the model learned anything useful. |
 | Model lifecycle | `save`, `load`, checkpoint restoration, resuming, vocabulary/normalizer preservation, schema compatibility, `RollbackCheckpoint`, and train/serve artifact parity. Clarify lightweight RelFlow persistence versus Lightning checkpoints with optimizer/training state. |
 | Online serving | A dedicated supported path for `Deployment`, request/response contracts, batching, accelerator/backend choices, preprocessors/postprocessors, concurrency, failure behavior, and production caveats. If serving is experimental, mark it prominently. |
@@ -193,8 +194,8 @@ The following material is required for the main reader journey:
   agents and duplicates much of Getting Started.
 - Model Tree introduces architecture internals before the basic data-flow and
   value-state mental models are established.
-- Query Paths is comprehensive but long for the first learning path; common
-  inference should come before advanced JMESPath patterns.
+- Source binding should present the direct schema-shaped contract before
+  opt-in JMESPath and advanced preprocessing examples.
 - Dynamic Masking appears too early in the main sequence relative to evaluation,
   checkpointing, and inference.
 - The navbar and sidebar expose different conceptual groups; Motivation, AI /
@@ -219,8 +220,8 @@ follows:
    - Model Tree and addresses.
    - Data Types overview and universal state/content semantics.
    - Individual datatype references.
-   - Binding Data: same-name defaults, nested defaults, query versus
-     preprocessor.
+   - Binding Data: direct same-name fields and branches, explicit query, and
+     preprocessor boundaries.
    - Advanced Query Paths / JMESPath recipes.
    - Learning roles and exported embeddings.
    - Branch/window design and dynamic masking.
@@ -260,9 +261,9 @@ a one-paragraph summary and link to it.
 | Why hierarchy matters | Motivation | Use only the context needed by an example. |
 | Installation and first success | Getting Started | Link rather than repeat environment setup. |
 | End-to-end data flow and glossary | New Mental Model / Data Flow page | Define only page-specific internals. |
-| Tree, branch, leaf, context, address | Model Tree | Query/type pages assume and link to these terms. |
-| Choosing default binding, a query, or preprocessing | New short Binding Data page | Tutorials show one common case and link. |
-| Query syntax and inference | Advanced Query Paths reference | Datatype pages show only a relevant example. |
+| Tree, branch, leaf, context, address | Model Tree | Binding/type pages assume and link to these terms. |
+| Choosing direct binding, an explicit query, or preprocessing | New short Binding Data page | Tutorials show one common case and link. |
+| Opt-in JMESPath and schema-shaped normalization | Advanced Query Paths reference | Datatype pages show only a relevant example. |
 | Universal state/content vocabulary | Data Types overview | Type pages explain only type-specific content behavior. |
 | `target`, masking, pruning, and `embed` roles | Learning Modes & Embeddings | Tutorials summarize in a compact table and link. |
 | Public prediction envelope and `inferred` | Prediction/output-contract section | Type pages show their `content` member and link to the envelope. |

@@ -64,14 +64,26 @@ model = rf.Model(
 
 - Do not use a public `Struct(...)` constructor. Public examples should use `Model(...)` and `Branch(...)`.
 - `Model(..., name="customer")` names the generated root branch. Older examples may say `root=...`; update them.
-- Inferred request queries are written from one processed observation: `[*].amount`, not `[*][*].amount`.
-- `Branch(name="transactions")` makes child default queries like `[*].transactions[*].amount`.
+- Processed observation names and nesting match the schema by default. A leaf
+  may explicitly opt into observation-relative JMESPath extraction with
+  `query="[*].source.path"`; RelFlow never infers queries. Prefer an
+  `rf.Preprocessor` for sorting, derived values, joins, or coordinated sibling
+  transformations.
+- `Branch(name="transactions")` reads the same-named child collection, and its
+  leaves read keys such as `amount` from each child mapping.
 - `Branch(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root branch uses internal `Overflow.error`.
 - `target=True` is shorthand for `p_prune=1.0`; the field is hidden from input and decoded as a supervised target.
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
 - `Hash` represents large identifiers with batch-salted hashes, preserving equality across fields in one encoded batch without learning a persistent vocabulary.
 - `DateParts` is for calendar parts. If elapsed time or recency matters, derive a `Number`.
-- Preprocessors run before tensorization. Use them for Python logic, windowing, normalization, or splitting one raw record into multiple observations.
+- Tensorfield plugins declare their accepted raw atom compatibility families
+  with `Plugin(types=...)`. Keep those datatype contracts out of `Request` and
+  out of the shared ragged engine.
+- Preprocessors run before the shared Awkward tensorization pass. Use them for
+  source renaming, Python logic, windowing, normalization, or splitting one raw
+  record into multiple observations. Directly bound modeled values and explicit
+  query results must be Awkward-compatible. Unmodeled metadata is preserved
+  separately and may remain an opaque Python value.
 - Postprocessors run after prediction writing. Use them to reshape address-keyed outputs for APIs or warehouses.
 
 ## Data And Training

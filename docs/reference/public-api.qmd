@@ -76,6 +76,14 @@ when available.
 Use [Data Types And Value State](../core-concepts/data-types.qmd) to choose a
 type, then use its individual reference for options and limitations.
 
+Every leaf constructor accepts the shared optional `query` parameter. Its
+default is `None`, which uses direct schema-address projection from the shared
+Awkward batch; RelFlow does not infer an expression. A non-empty string opts
+that leaf into JMESPath extraction, after which the result uses the same
+canonical ragged-field and datatype path. See
+[Binding Data](../core-concepts/binding-data.qmd) and
+[Advanced Query Paths](../core-concepts/querypaths.qmd).
+
 ## Data And Processors
 
 | Export | Purpose | Guide |
@@ -88,37 +96,10 @@ type, then use its individual reference for options and limitations.
 | `postprocess`, `Postprocessor`, `Predictions`, `PostprocessorResult` | Reshape or filter address-keyed prediction output. | [Postprocessors](../guides/postprocessors.qmd) |
 | `RawObservation`, `RawBatch`, `Metadata` | Public typing aliases for processor integrations. | [Data Modules](../guides/data-modules.qmd) |
 | `MASK_LITERAL`, `MaskLiteral` | Mark literal positions as masked in processed input. | [Dynamic Masking](../core-concepts/dynamic-masking.qmd) |
-| `helpers` | Namespace for `infer_schema` and `InferenceConfig`, which derive a best-effort starting schema from sample records. | [Schema inference helper](#schema-inference-helper) |
 
 Provider enums `PreprocessorProvider` and `PostprocessorProvider` describe names
 the pipeline can inject into decorated function signatures. Most users request
 providers by their documented parameter names rather than reading these enums.
-
-### Schema inference helper
-
-`rf.helpers.infer_schema(...)` profiles sample records and returns field
-constructors ready to pass positionally to `Model`. Its guesses are a starting
-point, not a substitute for reviewing semantics, target leakage, category
-capacity, branch lengths, and overflow behavior.
-
-```python
-records = [
-    {"amount": 12.5, "merchant": "A", "label": "ok"},
-    {"amount": 8.0, "merchant": "B", "label": "review"},
-]
-
-fields = rf.helpers.infer_schema(
-    records,
-    config=rf.helpers.InferenceConfig(target="label"),
-    explain=True,
-)
-
-model = rf.Model(*fields, d_model=32, n_layers=1, n_heads=4)
-```
-
-Pass either an `InferenceConfig` or its fields as keyword overrides, not both.
-Inference samples from the front of large inputs, so use a representative,
-training-only sample and inspect every returned request before training.
 
 ## Prediction And Operation
 
@@ -162,7 +143,7 @@ installation error with the required command.
 
 | Export | Purpose |
 | --- | --- |
-| `Plugin`, `TENSORFIELDS` | Register and inspect tensorfield implementations. |
+| `Plugin`, `TENSORFIELDS` | Register and inspect tensorfield implementations; `Plugin(types=...)` declares accepted raw atom compatibility families. |
 | `RequestBase` | Base request/schema leaf. |
 | `TensorFieldBase` | Base state/content tensor container contract. |
 | `EmbedderBase` | Base visible-input encoder. |

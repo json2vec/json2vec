@@ -144,9 +144,11 @@ histories, especially with `overflow="tail"`.
 
 ## Window Coordinates
 
-Mask windows are resolved after preprocessing, query extraction, overflow
-handling, and padding. Branch masks never select padding. Null positions count
-as occupied and remain eligible.
+Mask windows are resolved after preprocessing, source binding (direct schema
+projection or explicit query extraction), overflow handling, and padding.
+Branch masks never select padding. Null positions count as occupied and remain
+eligible. Awkward preprocessing ends at tensorization; mask sampling and
+state/content hiding remain vectorized Torch operations.
 
 For a branch with `length=8`, `window=3`, and retained values shaped like
 this:

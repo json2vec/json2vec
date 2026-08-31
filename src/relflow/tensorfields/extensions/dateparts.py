@@ -5,16 +5,17 @@ import difflib
 import enum
 import math
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
+import awkward as ak
 import numpy as np
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -163,7 +164,7 @@ def _(arr: np.ndarray) -> np.ndarray:
     return (np.sin(radians), np.cos(radians))
 
 
-dateparts: Plugin = Plugin(name="dateparts")
+dateparts: Plugin = Plugin(name="dateparts", types=(str | date | datetime,))
 
 
 @dateparts.register
@@ -239,53 +240,28 @@ class TensorField(TensorFieldBase):
     @classmethod
     def new(
         cls,
-        values: list,
+        field: RaggedField,
         address: Address,
         schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-
         request: RequestBase = schema.requests[address]
+        values = ak.to_list(field.values)
 
         if request.pattern is not None:
-            values = apply(values, datetime.strptime, request.pattern)
+            values = [datetime.strptime(value, request.pattern) for value in values]
 
-        data, state = pad(
-            nested=values,
-            shape=leading_shape,
-            dtype="datetime64[s]",
-            pad_value=np.nan,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        state: torch.Tensor = torch.tensor(data=state, dtype=torch.int64)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state = state.masked_fill(literal_mask_tensor, Tokens.masked.value)
+        date_values = np.asarray(values, dtype="datetime64[s]")
+        state = torch.from_numpy(field.state)
 
         dateparts: dict[DatePart, torch.Tensor] = {}
 
         for datepart in request.dateparts:
-            sin, cos = datepart(data)
-            radian_embedding = torch.tensor(np.stack([sin, cos], axis=-1), dtype=torch.float)
-            radian_embedding = radian_embedding.masked_fill(~(state == Tokens.valued.value).unsqueeze(-1), 0.0)
-            dateparts[datepart] = radian_embedding
+            sin, cos = datepart(date_values)
+            embeddings = np.stack([sin, cos], axis=-1)
+            dateparts[datepart] = torch.from_numpy(field.place(embeddings, fill=0.0, value_shape=(2,))).to(
+                dtype=torch.float
+            )
 
         content: TensorDict[DatePart, torch.Tensor] = TensorDict(dateparts)
 
@@ -294,7 +270,7 @@ class TensorField(TensorFieldBase):
             state=state,
             trainable=torch.zeros_like(input=state, dtype=torch.bool),
             targets=TensorDict({}),
-            batch_size=len(values),
+            batch_size=field.batch_size,
         )
 
     def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
