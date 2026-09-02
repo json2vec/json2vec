@@ -58,7 +58,8 @@ For `{"origin": "IAD", "destination": "SFO"}`, the explicit query returns
 `[["IAD", "SFO"]]`: one root containing the two `locations` positions. Both
 positions bind to `itinerary/locations/location` and therefore share one
 vocabulary. No query is inferred for ordinary fields; this leaf deliberately
-pays JMESPath extraction before rejoining canonical ragged preparation.
+pays JMESPath extraction before converging with direct fields for paired
+value/state regularization.
 
 The equivalent preprocessor makes the transformed collection visible and easy
 to extend:

@@ -20,9 +20,9 @@ one that expresses the source contract.
 | One raw record should produce zero, one, or several observations | A yielding preprocessor. |
 
 Omitting `query` does not infer a JMESPath expression. It selects the leaf by
-its bound schema address from the shared Awkward batch. Setting `query` is an
-explicit opt-in to a separate extraction step for that leaf; its result then
-rejoins the same canonical ragged preparation and datatype codec.
+its bound schema address. Setting `query` opts that leaf into a separate
+extraction step. During eager batch coalescing, direct and queried values
+converge before the same paired value/state regularization and datatype codec.
 
 ## Direct Schema Binding
 
@@ -121,8 +121,9 @@ path relative to its `Branch`, and its result must preserve one dimension per
 schema branch.
 
 This path pays JMESPath evaluation and result materialization once per queried
-leaf. Direct fields continue to share one schema-aware Awkward projection pass,
-so use `query` for selection value rather than as routine boilerplate. See
+leaf. Direct fields use schema-aware Awkward projection, and the coalescer
+prepares all fields before datatype codecs begin. Use `query` for selection
+value rather than as routine boilerplate. See
 [Advanced Query Paths](querypaths.qmd) for filters, quoted keys, slices, null
 preservation, and field stacking.
 

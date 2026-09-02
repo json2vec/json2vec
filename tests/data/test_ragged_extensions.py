@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import relflow.data.ragged as ragged_module
-from relflow.data.ragged import RaggedBatch, RaggedField
+from relflow.data.ragged import RaggedField, coalesce
 from relflow.structs.enums import Strata, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
@@ -50,11 +50,8 @@ def _project(
     query: str | None,
 ) -> RaggedField:
     source_name = "source" if query is not None else "identity"
-    batch = RaggedBatch.new(
-        [[{source_name: value}] for value in values],
-        schema=schema,
-    )
-    return RaggedField.new(batch, address="record/identity", strata=Strata.predict)
+    batch = [[{source_name: value}] for value in values]
+    return coalesce(batch, schema=schema, strata=Strata.predict)["record/identity"]
 
 
 @pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
@@ -76,32 +73,22 @@ def test_custom_plugin_accepts_each_registered_type_family(query, value, expecte
 
 
 @pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
+def test_custom_plugin_accepts_a_registered_record_atom(query):
+    plugin, schema = _extension((dict,), query=query)
+    try:
+        field = _project(schema, [{"key": "value"}], query=query)
+
+        assert ak.to_list(field.values) == [{"key": "value"}]
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
 def test_custom_plugin_rejects_an_unregistered_value_type(query):
     plugin, schema = _extension((str,), query=query)
     try:
         with pytest.raises(TypeError, match="record/identity"):
             _project(schema, [1], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-def test_direct_type_validation_runs_when_ragged_batch_is_created():
-    plugin, schema = _extension((str,))
-    try:
-        with pytest.raises(TypeError, match="record/identity"):
-            RaggedBatch.new([[{"identity": 1}]], schema=schema)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-def test_query_type_validation_is_deferred_until_field_projection():
-    query = "[*].source"
-    plugin, schema = _extension((str,), query=query)
-    try:
-        batch = RaggedBatch.new([[{"source": 1}]], schema=schema)
-
-        with pytest.raises(TypeError, match="record/identity"):
-            RaggedField.new(batch, address="record/identity", strata=Strata.predict)
     finally:
         TENSORFIELDS.pop(plugin.name, None)
 
@@ -148,7 +135,7 @@ def test_homogeneous_numpy_array_stays_columnar_during_plugin_preparation():
     plugin = Plugin(_plugin_name(), types=(int | float,))
     value = np.arange(200_000, dtype=np.float32)
     try:
-        prepared, observed = plugin.prepare_value(value, address=Address("record/vector"))
+        prepared, observed = plugin.prepare(value, address=Address("record/vector"))
 
         assert prepared is value
         assert observed is None

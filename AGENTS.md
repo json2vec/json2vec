@@ -79,7 +79,8 @@ model = rf.Model(
 - Tensorfield plugins declare their accepted raw atom compatibility families
   with `Plugin(types=...)`. Keep those datatype contracts out of `Request` and
   out of the shared ragged engine.
-- Preprocessors run before the shared Awkward tensorization pass. Use them for
+- Preprocessors run before the eager Awkward coalescing pass, which prepares all
+  encoded `RaggedField` objects before datatype codecs run. Use preprocessors for
   source renaming, Python logic, windowing, normalization, or splitting one raw
   record into multiple observations. Directly bound modeled values and explicit
   query results must be Awkward-compatible. Unmodeled metadata is preserved
@@ -112,6 +113,16 @@ Top-level inference exports:
 - `rf.Writer` writes batch prediction output.
 - `rf.Postprocessor` is the postprocess callable type.
 - `rf.Deployment`, `rf.API`, `rf.Accelerator`, and related serving types are lazy exports that require `relflow[serving]`.
+
+## Code Style
+
+- Never prefix function or class names with `_`; control the public surface
+  with explicit exports instead. Python protocol methods such as
+  `__post_init__` are the exception.
+- Prefer short, single-word names that describe the operation, such as
+  `compile`, `project`, `regularize`, and `coalesce`.
+- Inline one-use forwarding helpers. Keep a named function only when it owns a
+  real semantic phase, recursion, or reusable operation.
 
 ## Useful Commands
 

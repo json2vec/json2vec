@@ -5,7 +5,7 @@ import torch
 from loguru import logger
 from tensordict import TensorDict
 
-from relflow.data.ragged import RaggedBatch, RaggedField
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -38,11 +38,8 @@ def _structure_payload() -> dict:
 
 
 def _tensorfield(rows: list[list[Any]], *, schema: Schema, strata: Strata) -> TensorField:
-    batch = RaggedBatch.new(
-        [[{"items": [{"amount": value} for value in row]}] for row in rows],
-        schema=schema,
-    )
-    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    batch = [[{"items": [{"amount": value} for value in row]}] for row in rows]
+    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
     return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 

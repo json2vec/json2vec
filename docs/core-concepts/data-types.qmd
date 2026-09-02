@@ -132,7 +132,7 @@ children instead of reading one leaf value.
 | Option | Default | Notes |
 | --- | --- | --- |
 | `name` | `None`; inferred when bound | Public schema name and default processed-observation key. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. |
-| `query` | `None` | Optional JMESPath source expression. `None` uses direct schema-address projection; no query is inferred. An explicit result rejoins canonical ragged preparation. See [Advanced Query Paths](querypaths.qmd). |
+| `query` | `None` | Optional JMESPath source expression. `None` uses direct schema-address projection; no query is inferred. Explicit and direct values converge during eager coalescing before paired value/state regularization. See [Advanced Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields remain in the schema but are ignored by encoding, loss, and prediction. |
 | `nullable` | `True` | Allows explicit `None` input. `False` raises whenever the encoded leaf contains state `null`. |

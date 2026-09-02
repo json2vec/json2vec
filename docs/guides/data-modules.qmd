@@ -26,11 +26,11 @@ The batch path is:
    transforms; it remains complete and ordered within its source/sharding path
    unless replacement is explicitly enabled for the `predict` split.
 4. Observations are grouped into model batches.
-5. Leaves without `query` project directly from the shared Awkward batch;
-   explicit JMESPath leaves extract their result and rejoin canonical ragged
-   preparation. Plugins enforce their declared raw atom families before
-   Awkward; both paths resolve branch `overflow` before stateful tensorfield
-   codecs.
+5. One eager coalescing call prepares every encoded `RaggedField`. Leaves without
+   `query` use direct projection; explicit JMESPath leaves extract their result,
+   and both paths converge before paired value/state regularization. Plugins
+   enforce their declared raw atom families, branch `overflow` resolves, and
+   final `Tokens` state is ready before any stateful tensorfield codec runs.
 6. `p_mask` hides sampled configured leaf positions for reconstruction,
    including null and padded positions in the current implementation.
 7. `p_prune` and `target=True` hide selected leaf instances for decoding.

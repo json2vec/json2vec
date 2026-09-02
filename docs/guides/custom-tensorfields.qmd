@@ -32,7 +32,7 @@ One plugin registers six named components:
 | Component | Responsibility |
 | --- | --- |
 | `Request` | Pydantic schema options and bound-tree validation. |
-| `TensorField` | Encode one `RaggedField` projection into fixed-shape content; implement empty prediction input, hiding, masking, and targeting. |
+| `TensorField` | Encode one eagerly prepared `RaggedField` into content; implement empty prediction input, hiding, masking, and targeting. |
 | `Embedder` | Convert visible state/content into a `d_model` parcel sent to the parent branch. |
 | `Decoder` | Pool heritage context and produce raw state/content predictions. |
 | `loss` | Compare decoded tensors with cached targets and log address-qualified metrics. |
@@ -44,8 +44,9 @@ The runtime path is:
 
 ```text
 processed observations → schema binding or explicit JMESPath
-→ Plugin(types=...) atom preparation → canonical Awkward field preparation
-→ RaggedField projection → TensorField.new / TensorField.empty
+→ Plugin(types=...) atom preparation
+→ eager atomic coalescing of every RaggedField
+→ TensorField.new / TensorField.empty
 → masking and target caching
 → Embedder.forward → Parcel
 → parent branch encoders
@@ -93,14 +94,15 @@ custom subclass explicitly when the plugin accepts it. RelFlow converts NumPy sc
 equivalents, recursively prepares atoms inside list, tuple, and NumPy-array leaf
 values, and collects the compatibility families observed at each field
 address. More than one family at one address is an error. Do not declare a type
-in more than one family, as in `types=(int, int | float)`. Structural
-containers and NumPy scalar classes are prepared by the shared carrier and are
-not valid family entries.
+in more than one family, as in `types=(int, int | float)`. Sequence containers
+and NumPy scalar classes are prepared by the shared coalescer and are not valid
+family entries. A record-valued extension may register a concrete mapping type
+such as `dict` as a terminal atom.
 
 The declaration is an atom contract, not a semantic shape schema. For example,
 a Vector plugin may accept the numeric family while its `TensorField.new(...)`
-still enforces list rank, fixed width, and finite values after branch overflow.
-One-shot iterators are rejected rather than consumed implicitly.
+still enforces list rank, fixed width, and numeric conversion after branch
+overflow. One-shot iterators are rejected rather than consumed implicitly.
 
 `None` and a whole-leaf prediction `"<MASK>"` are handled by the shared routing
 layer and do not need entries in `types`. Inside a structured leaf, the string
@@ -127,10 +129,11 @@ class Request(rf.RequestBase):
 
 `RequestBase` provides common options such as `name`, `query`, `nullable`,
 `active`, `embed`, `weight`, `p_mask`, `p_prune`, pooling, heads, linear depth,
-and dropout. With `query=None`, a request reads its schema location directly
-from the shared Awkward batch. An explicit JMESPath query is evaluated by the
-core before the result rejoins `RaggedField`; custom tensorfields therefore
-receive the same `field` contract in either case and do not implement querying.
+and dropout. With `query=None`, a request reads its schema location directly.
+An explicit JMESPath query is evaluated inside the same eager coalescing call;
+direct and queried values converge before paired value/state regularization.
+Custom tensorfields therefore receive the same `field` contract in either case
+and do not implement querying.
 Add only datatype-specific options and validate combinations in Pydantic
 validators or `post_bind_validate()` when the check requires the bound tree
 shape.
@@ -146,8 +149,6 @@ import numpy as np
 import torch
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.ragged import RaggedField
-
 
 @signed_scalar.register
 @tensorclass
@@ -160,7 +161,7 @@ class TensorField(rf.TensorFieldBase):
     @classmethod
     def new(
         cls,
-        field: RaggedField,
+        field: rf.RaggedField,
         address,
         schema,
         strata,
@@ -207,11 +208,14 @@ Use the shared `Tokens` values exactly. Do not invent a public state for a
 condition that belongs to content. The built-ins use safe zero content for
 non-valued positions and keep original targets in a `TensorDict` before hiding.
 
-The shared projection owns schema traversal, missing/null/padded state,
-prediction-literal placement, and branch overflow. The plugin declaration owns
-raw atom compatibility; the tensorfield owns semantic validation and encoding
-of retained values. `field.place(...)` requires one encoded row per retained
-value and preserves any datatype-specific trailing dimensions.
+The internal coalescer owns schema traversal, missing/null/padded/masked state,
+prediction-literal placement, and branch overflow. It prepares every encoded
+field successfully before any `TensorField.new(...)` runs. `field.state`
+therefore already contains final `rf.Tokens` values rather than temporary
+presence or literal codes. The plugin declaration owns raw atom compatibility;
+the tensorfield owns semantic validation and encoding of retained values.
+`field.place(...)` requires one encoded row per retained value and preserves any
+datatype-specific trailing dimensions.
 
 Test `new(...)` with scalar, nested, null, padded, whole-leaf prediction masks,
 overflow, and prediction-missing inputs. For structured leaves, also prove that

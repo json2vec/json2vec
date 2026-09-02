@@ -214,8 +214,9 @@ returned from prediction.
 Data modules load raw records, apply optional preprocessing, batch
 observations, tensorize values from the model schema, apply configured masking
 and target pruning in non-predict loops, and hand encoded batches to Lightning.
-Same-named schema fields use shared Awkward projection by default. A leaf may
-opt into `query=...` for JMESPath selection; omitted queries are not inferred.
+One eager Awkward coalescing pass prepares all encoded fields before datatype
+codecs run. Same-named fields use direct projection; a leaf may opt into
+`query=...` for JMESPath selection, and omitted queries are not inferred.
 
 Choose the data module by where the records live:
 

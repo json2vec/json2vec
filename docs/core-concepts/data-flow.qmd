@@ -92,8 +92,8 @@ observations.
 The result is a **processed observation**: one model-facing mapping wrapped in
 `rf.Observation`. A preprocessor may yield several observations from one raw
 record, but each output is an independent example with its own singleton root.
-Internally, RelFlow wraps each observation as a one-record root before building
-the shared Awkward batch; that wrapper does not create multiple root items.
+Internally, RelFlow wraps each observation as a one-record root before eager
+Awkward coalescing; that wrapper does not create multiple root items.
 
 ::: {.callout-important}
 Use the same preprocessor contract for every data split and inference path.
@@ -113,16 +113,17 @@ observation:
 | `order/line_items/price` | each `line_items` child's `price` |
 | `order/returned` | `returned` |
 
-The root name affects addresses, not source lookup. All processed observations
-become one schema-aware Awkward batch. Each directly bound leaf receives a
-column projection that already owns its fixed shape, value state, retained flat
-values, and dense destinations.
+The root name affects addresses, not source lookup. One eager Awkward
+coalescing call prepares every encoded field in the processed batch. Each
+directly bound leaf receives a column projection that becomes fixed shape,
+final value state, retained flat values, and dense destinations.
 
 A leaf with an explicit `query=...` instead evaluates that JMESPath expression
-against the processed observation. The extracted result rejoins the same
-canonical ragged-field preparation, so overflow, state, prediction literals,
-and datatype encoding do not fork into a second engine. Queries are never
-inferred: omitting `query` always chooses direct schema-address projection.
+against the processed observation. Its result converges with direct values
+before paired value/state regularization, so overflow, final `Tokens` state,
+prediction literals, and dense placement do not fork into a second engine. All
+fields are ready before datatype codecs begin. Queries are never inferred:
+omitting `query` always chooses direct schema-address projection.
 
 Use a preprocessor for Python logic or coordinated child transformations. See
 [Binding Data](binding-data.qmd) and [Advanced Query Paths](querypaths.qmd).

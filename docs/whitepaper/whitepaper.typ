@@ -24,7 +24,7 @@
 ]
 
 #let querynote() = sidenote[
-  Conceptual query/input pair only. Shape the raw input and `jmespath` query around your own data; the query is the bridge from your record shape into the schema. See @sec:jmespath[Querying with JMESPath].
+  Conceptual query/input pair only. Fields bind directly by schema address when `query` is omitted; use an explicit `jmespath` query when the source needs declarative selection. See @sec:jmespath[Querying with JMESPath].
 ]
 
 #let pullquote(body) = block(
@@ -512,7 +512,7 @@ Sample input:
 
 Now, `itinerary/locations/location` will share parameters. This requires no change to the source data because the `jmespath` query reshapes the values at encode time. Querying is discussed further in @sec:jmespath.
 
-`jmespath` querying enables succinct extraction of data from complex `json`-like data structures without modifying the data on the fly. Every field requires a `query` for this reason.
+`jmespath` querying enables succinct extraction of data from complex `json`-like data structures without modifying the data on the fly. It is an explicit per-field option: fields without `query` use direct schema-address binding, and RelFlow does not infer an expression.
 
 Broadly speaking, support for `jmespath` is meant to enable modeling from many source shapes: a dictionary of lists, a list of dictionaries, a dictionary of dictionaries of lists, or whatever else appears in the source system.
 
@@ -701,7 +701,10 @@ By using transfer learning with schema evolution, teams can adapt foundation mod
 
 Schemas define the shape of the model, but datatype plugins define how each data field behaves. The built-in datatypes use this architecture internally. Although registry and base objects are importable, dynamically registered external request types do not currently round-trip through saved schema validation; treat custom tensorfields as an experimental, same-process extension surface rather than a stable artifact-compatible plugin SDK.
 
+Each plugin also declares its accepted raw atom compatibility families with `Plugin(types=(...))`. Separate tuple entries are incompatible—for example, `(str, bytes)` accepts either identity type but rejects a field that mixes them—while a union entry such as `(int | float,)` permits compatible numeric promotion. RelFlow applies this declaration recursively to list, tuple, and NumPy-array leaf atoms; the tensorfield remains responsible for semantic container shape and encoding.
+
 A field's `type` is not only a validation hint. It selects a small bundle of components that know how to:
+- Validate and canonicalize declared raw atom families before Awkward construction
 - Validate datatype-specific schema parameters
 - Convert raw `json`-like values into tensors
 - Mask and prune values during training
@@ -716,7 +719,7 @@ The context encoder does not need to know whether a field started as a string ca
 Conceptually, a datatype plugin for `foo` looks like this:
 
 ```python
-foo: Plugin = Plugin(name="foo")
+foo: Plugin = Plugin(name="foo", types=(str, bytes))
 
 @foo.register
 class Request(RequestBase):
@@ -950,7 +953,7 @@ This is important operationally. In many production ML systems, training data is
 
 === Querying with JMESPath <sec:jmespath>
 
-Every leaf field has a `jmespath` query. The query defines how values are pulled from the incoming `json`-like observation before the datatype plugin converts them into tensors.
+Every leaf field may opt into a `jmespath` query. Without one, RelFlow directly projects the same-named value at the leaf's schema address. An explicit query defines how that leaf is pulled from the incoming `json`-like observation before its result rejoins canonical ragged preparation and the datatype plugin converts it into tensors.
 
 #sidenote[
   The queries and sample inputs in this section are intentionally simple. They are not a required data format. `jmespath` is meant to let the schema adapt to the structure you already have: maps of arrays, arrays of maps, deeply nested objects, flattened records, or source-specific payloads. The field query is the bridge between your raw record shape and the model's schema.

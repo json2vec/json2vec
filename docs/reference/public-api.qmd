@@ -77,10 +77,11 @@ Use [Data Types And Value State](../core-concepts/data-types.qmd) to choose a
 type, then use its individual reference for options and limitations.
 
 Every leaf constructor accepts the shared optional `query` parameter. Its
-default is `None`, which uses direct schema-address projection from the shared
-Awkward batch; RelFlow does not infer an expression. A non-empty string opts
-that leaf into JMESPath extraction, after which the result uses the same
-canonical ragged-field and datatype path. See
+default is `None`, which uses direct schema-address projection during eager
+Awkward coalescing; RelFlow does not infer an expression. A non-empty string
+opts that leaf into JMESPath extraction. Both paths converge before paired
+value/state regularization, and all `RaggedField` objects are ready before
+datatype codecs run. See
 [Binding Data](../core-concepts/binding-data.qmd) and
 [Advanced Query Paths](../core-concepts/querypaths.qmd).
 
@@ -139,12 +140,13 @@ installation error with the required command.
 | `Suffix` | Supported streaming file suffixes |
 | `Component` | Tensorfield plugin component names |
 
-## Experimental Extension Internals
+## Experimental Extension Surface
 
 | Export | Purpose |
 | --- | --- |
 | `Plugin`, `TENSORFIELDS` | Register and inspect tensorfield implementations; `Plugin(types=...)` declares accepted raw atom compatibility families. |
 | `RequestBase` | Base request/schema leaf. |
+| `RaggedField` | Eagerly prepared extension boundary containing final dense `Tokens` state, flat retained values, and `place(...)` for scattering encoded content. |
 | `TensorFieldBase` | Base state/content tensor container contract. |
 | `EmbedderBase` | Base visible-input encoder. |
 | `DecoderBase` | Base heritage pooling and prediction decoder. |

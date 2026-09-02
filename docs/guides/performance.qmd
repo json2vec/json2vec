@@ -140,21 +140,20 @@ preprocessing, explicit queries, tensorization, or I/O.
 
 ## Understand Ragged Preparation
 
-RelFlow constructs one schema-shaped Awkward `RaggedBatch` for each processed
-batch. Individual fields project from that shared carrier; they do not each
-recursively walk the original Python records. The structural pass owns missing
-versus null, branch overflow, padding, prediction literals, and dense placement.
-Before construction, each plugin enforces its declared raw atom compatibility
-families; the ragged core does not name concrete leaf types. Datatype codecs
-still perform the work that is inherently field-specific, such as vocabulary
-updates, date parsing, hashing, or tokenization, after overflow selects
-retained values.
+RelFlow eagerly coalesces every encoded address for a processed batch before
+any datatype codec runs. Fields do not each recursively walk the original Python
+records. The shared path owns missing versus null, branch overflow, padding,
+prediction literals, final `Tokens` state, and dense placement. Each plugin
+enforces its declared raw atom compatibility families; the ragged core does not
+name concrete leaf types. Datatype codecs still perform inherently
+field-specific work such as vocabulary updates, date parsing, hashing, or
+tokenization after overflow selects retained values.
 
-That shared projection is the default when a leaf's `query` is `None`. An
-explicit `query=...` opts the leaf into JMESPath evaluation and materializes a
-separate result before it rejoins canonical `RaggedField` preparation. This is
-valuable for concise source extraction and stacking, but the extraction cost
-is paid per queried leaf. Do not add queries that merely restate schema names;
+Direct projection is the default when a leaf's `query` is `None`. An explicit
+`query=...` opts the leaf into JMESPath evaluation and pays one extraction cost
+for that leaf. Its result converges with direct values before the same paired
+value/state regularization, and all `RaggedField` objects are ready before the
+first datatype codec runs. Do not add queries that merely restate schema names;
 none are inferred or required.
 
 Ordinary Awkward operations execute through its compiled kernels; users do not

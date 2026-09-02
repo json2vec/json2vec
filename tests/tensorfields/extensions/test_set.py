@@ -1,7 +1,7 @@
 import torch
 from tensordict import TensorDict
 
-from relflow.data.ragged import RaggedBatch, RaggedField
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -56,8 +56,7 @@ def _new_tensorfield(
     interprocess_encoding_context,
 ) -> TensorField:
     batch = [[{"items": [{"tags": value} for value in root]}] for (root,) in values]
-    ragged_batch = RaggedBatch.new(batch, schema=schema)
-    field = RaggedField.new(ragged_batch, address=ADDRESS, strata=strata)
+    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
     return TensorField.new(
         field=field,
         address=ADDRESS,

@@ -5,7 +5,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
-from relflow.data.ragged import RaggedBatch, RaggedField
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -74,11 +74,8 @@ def _tensorfield(
     strata: Strata,
     interprocess_encoding_context: VocabularyState,
 ) -> TensorField:
-    batch = RaggedBatch.new(
-        [[{"items": [{"cluster": value} for value in row]}] for row in rows],
-        schema=schema,
-    )
-    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    batch = [[{"items": [{"cluster": value} for value in row]}] for row in rows]
+    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
     return TensorField.new(
         field=field,
         address=ADDRESS,

@@ -7,7 +7,7 @@ import torch
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
 
-from relflow.data.ragged import RaggedBatch, RaggedField
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -50,14 +50,11 @@ def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
 
 
 def _tensorfield(groups: list[list[list[Any]]], *, schema: Schema, strata: Strata) -> TensorField:
-    batch = RaggedBatch.new(
-        [
-            [{"groups": [{"items": [{"enabled": value} for value in items]} for items in observation]}]
-            for observation in groups
-        ],
-        schema=schema,
-    )
-    field = RaggedField.new(batch, address=ADDRESS, strata=strata)
+    batch = [
+        [{"groups": [{"items": [{"enabled": value} for value in items]} for items in observation]}]
+        for observation in groups
+    ]
+    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
     return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 

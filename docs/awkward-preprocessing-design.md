@@ -1,8 +1,9 @@
 # Awkward Array Preprocessing Design
 
-- Status: Phase 1 implemented; Awkward is a core dependency and `RaggedBatch`
-  / `RaggedField` are the canonical tensorization path. Direct Arrow/Polars
-  adapters and profile-driven fused kernels remain Phase 2 work.
+- Status: Phase 1 implemented; Awkward-backed eager coalescing is the canonical
+  tensorization path and `RaggedField` is the tensorfield extension boundary.
+  Direct Arrow/Polars adapters and profile-driven fused kernels remain Phase 2
+  work.
 - Date: 2026-08-29
 - Audit baseline: `e7cf72d`
 - Priority: Simplification and standardization first, speed second
@@ -24,16 +25,18 @@ engine: maintaining two permanent correctness paths would work against the
 primary goal. Built-in and third-party tensorfields adopt the same new contract
 in one change; there is no Python-values adapter.
 
-The canonical design is one Awkward `RaggedBatch` per processed batch, not one
-new `ak.Array` per field. It avoids repeatedly materializing and walking the
-same nested records and can reuse Arrow/Polars buffers.
+The canonical design is one eager coalescing operation per processed batch. It
+prepares every address selected for encoding before any datatype codec runs and
+returns one `RaggedField` per encoded address. This avoids repeatedly
+materializing and walking the same nested records and can reuse Arrow/Polars
+buffers.
 
 Direct schema-address projection is the default. A leaf may explicitly opt
 into JMESPath with `query=...` when declarative source extraction is valuable.
 No JMESPath expression is inferred for an omitted query. The explicit path
-pays one extraction/materialization pass per queried leaf, then adapts the
-result into the same `RaggedField` contract; it is not a second padding, state,
-literal, overflow, or datatype engine.
+pays one extraction/materialization pass per queried leaf, then converges with
+direct projection before the shared paired value/state regularization. It is
+not a second padding, state, literal, overflow, or datatype engine.
 
 Keep masking and model routing in PyTorch after tensorization. Most masking is
 already tensorized; introducing Awkward there would add a backend transition
@@ -127,7 +130,7 @@ nested values, or converted prediction values at audit baseline `e7cf72d`.
 Schema construction, layer iteration, and metric-registry loops that never walk
 data values are excluded.
 
-### Replace With RaggedBatch / RaggedField
+### Replace With Eager Coalescing / RaggedField
 
 | Location | Current traversal | Replacement |
 | --- | --- | --- |
@@ -136,18 +139,18 @@ data values are excluded.
 | `data/nested.py:76-138` `extract_mask_literals` / `walk` | Recursive cleaned-tree and parallel-flag construction | Literal state produced during canonical ingestion |
 | `data/nested.py:141-188` `_iter_leaf_nodes` | Explicit stack traversal with overflow at each depth | Awkward clipping, offsets, presence, and regularization |
 | `data/nested.py:190-202` `_write_leaf` | Per-leaf null/state/content write | Compiled Awkward kernels or one fused Numba placement kernel |
-| `data/nested.py:205-235` `pad` | Allocate plus walk/scatter | `RaggedField.new(...)` |
-| `data/iterables.py:133-179` query compiler | Parses generated selectors and recursively projects ordinary fields | Replace generated/default selectors with direct schema-address projection from `RaggedBatch`; retain only cached JMESPath compilation for explicit `query` leaves |
-| `data/iterables.py:156-177` direct-query `apply` | Recursive list projection and missing-child compaction | Schema-path projection with coordinate-preserving provenance |
-| `data/iterables.py:245-246` JMESPath evaluation | Evaluates arbitrary value expressions for every leaf | Run only for explicit `query`; adapt its result into canonical `RaggedField` preparation |
+| `data/nested.py:205-235` `pad` | Allocate plus walk/scatter | Internal eager coalescing into `RaggedField` |
+| `data/iterables.py:133-179` query compiler | Parses generated selectors and recursively projects ordinary fields | Replace generated/default selectors with direct schema-address projection; retain only cached JMESPath compilation for explicit `query` leaves |
+| `data/iterables.py:156-177` direct-query `apply` | Recursive list projection and missing-child compaction | Schema-path projection with coordinate-preserving final state |
+| `data/iterables.py:245-246` JMESPath evaluation | Evaluates arbitrary value expressions for every leaf | Run only for explicit `query`; join direct values before shared paired regularization |
 | `data/iterables.py:187-208` resolution monitor | Stack walk to detect an empty result | Reduce `RaggedField.state` |
 | `tensorfields/shared/vocabulary.py:192-208` `_tokens` | Recursive outer batch/branch flattening | Iterate `RaggedField.values`; retain iteration inside one Set value |
-| `data/datasets/polars.py:73-119` | `to_dicts()` / named `iter_rows()` materialization | Arrow/Polars-to-RaggedBatch on eligible no-row-preprocessor paths |
+| `data/datasets/polars.py:73-119` | `to_dicts()` / named `iter_rows()` materialization | Arrow/Polars-to-coalescer adapter on eligible no-row-preprocessor paths |
 | `data/datasets/streaming.py:151-250` | Arrow `RecordBatch.to_pylist()` | `ak.from_arrow` plus exactly one singleton root axis |
 
 At the audit baseline, every built-in repeated literal extraction and usually
 two structural passes (content/state plus literal flags). All nine call-site
-groups now collapse into `RaggedField.new(...)`:
+groups now consume fields produced by the eager coalescer:
 
 | Tensorfield | Audit-baseline preparation range |
 | --- | --- |
@@ -222,15 +225,6 @@ class RaggedField:
     values: ak.Array  # flat retained valued leaves
     placement: np.ndarray  # one dense destination per value
 
-    @classmethod
-    def new(
-        cls,
-        batch: "RaggedBatch",
-        *,
-        address: Address,
-        strata: Strata,
-    ) -> "RaggedField": ...
-
     @property
     def shape(self) -> tuple[int, ...]:
         return self.state.shape
@@ -244,7 +238,7 @@ class RaggedField:
     ) -> np.ndarray: ...
 ```
 
-One structural pass produces:
+The coalescer gives each `RaggedField`:
 
 - the dense `np.int64` RelFlow `state` array, including predict-literal masked
   state and ready for Torch embedding indices;
@@ -253,9 +247,10 @@ One structural pass produces:
 
 The invariants are deliberately strict:
 
-- `batch` already has batch × singleton-root leading axes; `RaggedField.new`
-  never guesses or inserts either axis;
-- `state` already contains `Tokens.masked` at prediction-literal positions;
+- the internal coalescer receives batch × singleton-root leading axes and
+  never asks a datatype codec to guess or insert either axis;
+- `state` contains final `Tokens` values—`valued`, `null`, `padded`, or
+  `masked`—rather than temporary routing codes;
 - `values` excludes null, missing, literal-masked, and overflow-clipped leaves;
 - `placement` is one-dimensional `np.int64`; `placement[i]` indexes the raveled
   dense destination for `values[i]`;
@@ -266,14 +261,12 @@ The invariants are deliberately strict:
   trailing value shape, scatters them, and leaves every other destination at
   `fill`.
 
-Datatype implementations become leaf codecs. For Category:
+Datatype implementations become leaf codecs. The internal coalescer runs once,
+then the field for an address is passed to its codec. For Category:
 
 ```python
-field = RaggedField.new(
-    batch,
-    address=address,
-    strata=strata,
-)
+fields = coalesce(processed_batch, schema=schema, strata=strata)
+field = fields[address]
 
 vocabulary.reserve(field.values, learn=strata == Strata.train)
 encoded = np.fromiter(
@@ -299,100 +292,76 @@ flat BLAKE3 loop. Set retains only its label encoding/scatter. A clipped value
 cannot enter a vocabulary, affect counts, invoke a tokenizer, or reach
 `TensorField.new` codec validation because it is outside the configured model
 shape. It has already satisfied the plugin's pre-Awkward atom contract needed
-to construct a safe shared carrier.
+for safe coalescing.
 
-`RaggedField` is implemented only with Awkward. The current iterator is deleted;
-tests assert the new semantic truth table rather than treating the old engine
-as an oracle.
+`coalesce` is an internal module-level function, not another extension API.
+`RaggedField` is the public extension boundary. The old iterator is deleted;
+tests assert the semantic truth table rather than treating the old engine as an
+oracle.
 
-## Canonical Ragged Batch
+## Canonical Eager Coalescer
 
 Awkward represents irregular list structure, option values, and record fields
-without object-dtype NumPy arrays. Once preprocessing has produced a batch,
-construct exactly one schema-aware carrier and project every field from it.
+without object-dtype NumPy arrays. Once preprocessing has produced a batch, one
+internal call prepares every encoded field atomically:
 
 ```python
-batch = RaggedBatch.new(processed_batch, schema=schema)
-field = RaggedField.new(batch, address="record/events/amount", strata=strata)
+def coalesce(
+    values: EncodedBatch,
+    *,
+    schema: Schema,
+    strata: Strata,
+) -> dict[Address, RaggedField]: ...
 ```
 
-```python
-@dataclass(frozen=True)
-class RaggedBatch:
-    layout: ak.Array
-    provenance: ak.Array  # int8: 0 missing, 1 present, 2 whole-leaf MASK
-    schema: Schema
-    source: EncodedBatch  # untouched metadata and explicit-query source
+`coalesce` is deliberately internal. Tensorfield extensions receive the
+resulting `RaggedField`; they do not construct, project, or regularize an
+intermediate batch carrier.
 
-    @classmethod
-    def new(
-        cls,
-        values: EncodedBatch | pa.RecordBatch,
-        *,
-        schema: Schema,
-    ) -> "RaggedBatch": ...
-```
+For each address selected for encoding, the coalescer:
 
-`layout` is a schema-only projection containing directly bound modeled values;
-it does not copy unrelated keys or query-backed leaves. Both `layout` and
-`provenance` have batch × singleton generated-root × declared schema axes. Python
-preprocessing already produces that root axis. Arrow and Polars adapters insert
-it exactly once. `provenance` records source slots separately from option values
-because an absent field, an explicit `None`, and a whole-leaf `"<MASK>"` have
-different RelFlow states. One compact carrier avoids separate presence and
-literal trees.
-`source` retains the processed observations unchanged for prediction metadata
-and explicit JMESPath evaluation.
+1. projects the same-named schema path or evaluates its explicit JMESPath;
+2. applies the owning plugin's raw atom compatibility contract;
+3. pairs the ragged values with a state sidecar containing final `Tokens`;
+4. clips and pads the value/state pair together across declared branch axes;
+5. emits flat retained values, dense final state, and placement as one
+   `RaggedField`.
 
-Schema paths become column projections:
+Direct and queried values therefore converge before regularization. JMESPath
+remains an opt-in extraction step, but it cannot fork overflow, state, literal,
+or placement semantics. Every field is successfully prepared before the first
+`TensorField.new(...)` codec runs, so a structural/type failure cannot leave a
+partially updated vocabulary, counter, tokenizer, or other field-owned state.
 
-```python
-def project(
-    batch: RaggedBatch,
-    fields: tuple[str, ...],
-) -> tuple[ak.Array, ak.Array]:
-    values = batch.layout
-    provenance = batch.provenance
-    for field in fields:  # path depth, not number of observations
-        values = values[field]
-        provenance = provenance[field]
-    return values, provenance
-
-amount, amount_provenance = project(batch, ("events", "amount"))
-```
+The sidecar uses `Tokens.valued`, `Tokens.null`, `Tokens.padded`, and
+`Tokens.masked` directly. There is no intermediate `0/1/2` routing vocabulary.
+Pairing values and final state before clipping/padding keeps their coordinates
+aligned and prevents the two halves from applying overflow independently.
 
 Projection preserves branch coordinates. For example,
 `[{}, {"f": None}, {"f": 1}]` produces `[P, N, V]`; it never compacts to
-`[N, V]`. Missing or null containers have zero children. A request first
-performs pure carrier-safety inspection on its raw leaves. Overflow then
-applies only to declared branch axes and completes before a tensorfield
-reserves, counts, tokenizes, semantically validates, or encodes retained leaves.
+`[N, V]`. Missing or null containers have zero children. Plugin atom checks and
+all structural preparation complete before a tensorfield reserves, counts,
+tokenizes, semantically validates, or encodes retained leaves.
 
-That small path loop is desirable. It replaces nested loops over every record
-and event with column selection while keeping dynamic schema paths readable.
-
-Schema paths are the default projection language. Filters, functions,
-indexing, slices, and multiselects may be expressed by an explicit leaf
-JMESPath `query`; transformations involving business logic, joins, or
-coordinated sibling changes belong in a preprocessor. Explicit query results
-must preserve the leaf's declared branch rank and then rejoin `RaggedField`, so
-there remains one structural implementation for overflow, state, literals, and
-dense placement.
-
-JMESPath projection expressions may compact missing or null leaf values. Use
-null-preserving `map(&field, collection)` expressions for aligned queried
-siblings, or preprocess the child objects together when alignment is complex.
+The small schema-path loop is desirable. It replaces nested loops over every
+record and event with column selection while keeping dynamic paths readable.
+Filters, functions, indexing, slices, and multiselects may be expressed by an
+explicit leaf JMESPath `query`; business logic, joins, or coordinated sibling
+changes belong in a preprocessor. JMESPath projections may compact missing or
+null leaves, so use null-preserving `map(&field, collection)` expressions for
+aligned queried siblings or preprocess them together.
 
 Only directly bound modeled values and materialized explicit-query results must
 use values that Awkward can represent. UUID, Decimal, custom classes, and other
 opaque values need normalization when a field binds to them; the same values
-may remain untouched under unmodeled metadata keys. An incompatible modeled
-value raises during `RaggedBatch.new`, while an incompatible explicit-query
-result raises when that result rejoins `RaggedField`.
+may remain untouched under unmodeled metadata keys. Any coalescing failure is
+reported before datatype codecs begin, regardless of whether the field uses
+direct projection or an explicit query.
 
 Prediction metadata remains the original processed observation, stored
-separately from the schema-only Awkward layout. Unmodeled metadata is neither
-traversed nor coerced during tensorization.
+separately from modeled Awkward data. Unmodeled metadata is neither traversed
+nor coerced during tensorization.
 
 `ak.pad_none(..., clip=True)` turns a ragged axis into a fixed-width axis, and a
 filled regular array can be converted to NumPy/Torch. See the official
@@ -417,7 +386,7 @@ chunks. See the official
 [Arrow conversion guide](https://awkward-array.org/doc/main/user-guide/how-to-convert-arrow.html).
 
 Observation preprocessors and explicit JMESPath queries receive Python objects,
-so those source paths materialize rows before canonical ragged preparation. A
+so those source paths materialize rows before paired ragged regularization. A
 no-preprocessor, direct-binding Arrow path can remain columnar. Prediction
 metadata is materialized separately only at the public output boundary.
 
@@ -552,8 +521,8 @@ flow.
 
 ### Prediction Literal Scope
 
-`"<MASK>"` is interpreted and validated only at modeled field projections and
-their declared structured-leaf boundary. `RaggedBatch` does not recursively scan
+`"<MASK>"` is interpreted and validated only at modeled fields and their
+declared structured-leaf boundary. The coalescer does not recursively scan
 unmodeled metadata for the reserved string. This removes a full raw-record
 traversal and makes the wire contract follow what the model actually consumes.
 
@@ -567,9 +536,9 @@ states. For a scalar field:
 ```
 
 A direct Awkward record projection can represent both missing and explicit null
-as option values, so `RaggedBatch.new` builds the compact provenance layout
-during ingestion. `RaggedField.new` projects values and provenance together;
-projection never compacts a missing coordinate.
+as option values. The coalescer pairs values with final `Tokens` state before
+regularization, so clipping and padding never compact a missing coordinate or
+misalign state from its value.
 
 ### Structured Leaves
 
@@ -602,8 +571,10 @@ that mixes them. The numeric plugin permits `int` and `float` together. Plugin
 construction rejects a type repeated across families. Matching prefers an
 exact registered runtime type after canonicalization. Thus explicitly
 registered `bool`/`int` and `datetime`/`date` remain distinct; accepted custom
-subclasses are registered explicitly. Structural containers and NumPy scalar
-classes are prepared by the carrier and are not valid family entries.
+subclasses are registered explicitly. List, tuple, ndarray, iterator, and
+NumPy scalar classes are prepared structurally and are not valid family
+entries. Record-valued extensions may register a concrete mapping type such
+as `dict` as a terminal atom.
 
 Before Awkward construction, the shared core converts NumPy scalar atoms to
 their Python equivalents and recursively prepares atoms inside list, tuple,
@@ -647,9 +618,10 @@ direct and explicit-query leaves and never dispatches on a built-in type name.
 Every tensorfield then receives `RaggedField`, including third-party
 extensions. It semantically validates or encodes the retained
 `field.values`, then calls `field.place`. There is no nested-Python
-`TensorField.new` signature or plugin-owned query path. The core adapts either
-direct projection or an explicit JMESPath result before invoking the
-tensorfield.
+`TensorField.new` signature or plugin-owned query path. The core converges
+direct projection and explicit JMESPath extraction before paired
+regularization, prepares every encoded field, and only then invokes tensorfield
+codecs.
 
 The runtime owns prediction metadata separately. Awkward layouts do not enter
 model state or checkpoints.
@@ -696,7 +668,7 @@ Interpretation:
   one-row case is more extreme (about 1 ms of Awkward overhead per field here);
 - replacing `pad` alone improved this input but offers much less architectural
   simplification than sharing the whole batch;
-- sharing one Awkward batch amortized conversion across fields;
+- sharing one eager Awkward coalescing pass amortized conversion across fields;
 - avoiding Arrow `to_pylist()` dominated only the sufficiently large synthetic
   workload.
 
@@ -706,7 +678,7 @@ The result supports a canonical batch/source boundary, not adding Awkward only
 inside the existing `pad` function.
 
 A Phase 1 benchmark reconstructed the exact audit-baseline numeric path and
-compared it with canonical `RaggedBatch` construction plus all `RaggedField`
+compared it with the then-current canonical batch preparation plus all field
 projections on the same 32-observation, capacity-1,536 workload. Median
 milliseconds:
 
@@ -716,11 +688,12 @@ milliseconds:
 | 4 | 73.21 | 59.76 | 1.23x |
 | 16 | 281.20 | 208.84 | 1.35x |
 
-The canonical path does more work than the simplified prototype: it builds
-coordinate-preserving provenance and supports the complete
-missing/null/overflow/literal contract while preserving unmodeled metadata
-outside Awkward. Treat these as directional implementation results, not a
-release or end-to-end training claim.
+The canonical path does more work than the simplified prototype: it preserves
+coordinates and supports the complete missing/null/overflow/literal contract
+while keeping unmodeled metadata outside Awkward. Treat these as directional
+implementation results, not a release or end-to-end training claim. The eager
+coalescer should be rebenchmarked separately rather than inheriting these
+historical timings.
 
 ## General Value Ballpark
 
@@ -800,9 +773,9 @@ Important constraints:
   into the input, or fill an `ak.ArrayBuilder` created outside the JIT;
 - variable batch size and list lengths are runtime values and do not by
   themselves require a new specialization. Layout form and leaf dtypes do;
-- RaggedBatch construction must normalize each field to a schema-stable
-  Awkward Form so all-empty, no-null, and some-null batches do not create a
-  stream of specializations;
+- eager coalescing must normalize each field to a schema-stable Awkward Form so
+  all-empty, no-null, and some-null batches do not create a stream of
+  specializations;
 - preprocessors normalize opaque modeled values and explicit-query results
   before their Awkward construction, so nopython kernels see only
   schema-stable Awkward forms; opaque unmodeled metadata never enters them;
@@ -828,12 +801,13 @@ oracle only in tests.
 ### Phase 1: Canonical Engine
 
 1. Add Awkward as a core dependency.
-2. Implement `RaggedBatch.new(...)` and `RaggedField.new(...)` together.
+2. Implement internal eager `coalesce(...)` and the `RaggedField` boundary
+   together.
 3. Change every built-in and third-party tensorfield contract to consume
    `RaggedField`.
 4. Delete duplicated literal/pad/state code, generated/default JMESPath
    extraction, and the old recursive engine. Keep explicit queries as an
-   adapter into `RaggedField`.
+   extraction adapter that converges before paired regularization.
 5. Run the full tensorfield, data, plugin, and checkpoint suites.
 6. Record deleted code, concepts, and error paths as primary acceptance metrics.
 
@@ -898,7 +872,8 @@ The Awkward launch is complete only when all of these are true:
    table in this design.
 5. Every custom tensorfield uses the same `RaggedField` contract.
 6. Omitted queries use direct schema-address projection; explicit queries
-   rejoin `RaggedField` without introducing a second structural engine.
+   converge with direct values before paired regularization without introducing
+   a second structural engine.
 7. Batches can scale with the configured memory budget without Python recursive
    traversal becoming the bottleneck.
 8. Representative thousand-value nested and Arrow-backed workloads improve

@@ -6,6 +6,7 @@ import inspect
 import re
 import warnings
 from abc import abstractmethod
+from collections.abc import Iterator
 from types import UnionType
 from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, get_args, overload
 
@@ -415,10 +416,10 @@ class Plugin:
                 raise TypeError("Plugin types must contain only concrete types or PEP 604 unions of concrete types")
             if type(None) in members:
                 raise TypeError("Plugin types must not include NoneType; null is represented by field state")
-            if any(issubclass(member, (list, tuple, np.ndarray, np.generic)) for member in members):
+            if any(issubclass(member, (list, tuple, np.ndarray, np.generic, Iterator)) for member in members):
                 raise TypeError(
                     "Plugin types declare canonical terminal Python atoms; "
-                    "list, tuple, ndarray, and NumPy scalar classes are prepared structurally"
+                    "sequences, iterators, ndarrays, and NumPy scalar classes are prepared structurally"
                 )
 
             for member in members:
@@ -450,88 +451,74 @@ class Plugin:
         """Registered raw atom compatibility families."""
         return self._types
 
-    def _expected_types(self) -> str:
-        families = [" | ".join(member.__name__ for member in family) for family in self._type_families]
-        return ", ".join(families)
-
-    def _family_for(self, value: Any, *, address: Address) -> int:
-        value_type = type(value)
-        if value_type in self._type_to_family:
-            return self._type_to_family[value_type]
-
-        raise TypeError(
-            f"field at address '{address}' contains unsupported {value_type.__name__} values for plugin "
-            f"'{self.name}'; expected {self._expected_types()}; normalize it in a preprocessor"
-        )
-
-    @staticmethod
-    def _canonical_numpy_scalar(value: np.generic) -> Any:
-        if isinstance(value, np.datetime64):
-            if np.isnat(value):
-                return None
-            return value.astype("datetime64[us]").item()
-        if isinstance(value, np.timedelta64):
-            if np.isnat(value):
-                return None
-            return value.astype("timedelta64[us]").item()
-
-        canonical = value.item()
-        if not isinstance(canonical, np.generic):
-            return canonical
-
-        match value.dtype.kind:
-            case "b":
-                return bool(value)
-            case "i" | "u":
-                return int(value)
-            case "f":
-                return float(value)
-            case "c":
-                return complex(value)
-            case "U":
-                return str(value)
-            case "S":
-                return bytes(value)
-            case _:
-                return canonical
-
-    def _prepare_value(
+    def convert(
         self,
         value: Any,
         *,
         address: Address,
         observed: set[ValueTypeObservation],
     ) -> Any:
+        if hasattr(value, "__next__"):
+            raise TypeError(
+                f"field at address '{address}' contains a one-shot iterator; materialize it as a list in a preprocessor"
+            )
         if value is None:
             return None
         if isinstance(value, np.generic):
-            canonical = self._canonical_numpy_scalar(value)
+            if isinstance(value, (np.datetime64, np.timedelta64)):
+                if np.isnat(value):
+                    return None
+                unit = "datetime64[us]" if isinstance(value, np.datetime64) else "timedelta64[us]"
+                canonical = value.astype(unit).item()
+            else:
+                canonical = value.item()
+                if isinstance(canonical, np.generic):
+                    match value.dtype.kind:
+                        case "b":
+                            canonical = bool(value)
+                        case "i" | "u":
+                            canonical = int(value)
+                        case "f":
+                            canonical = float(value)
+                        case "c":
+                            canonical = complex(value)
+                        case "U":
+                            canonical = str(value)
+                        case "S":
+                            canonical = bytes(value)
             if isinstance(canonical, np.generic):
-                self._family_for(canonical, address=address)
-                raise AssertionError("unreachable")
-            return self._prepare_value(canonical, address=address, observed=observed)
-        if isinstance(value, np.ndarray):
+                value = canonical
+            else:
+                return self.convert(canonical, address=address, observed=observed)
+        elif isinstance(value, np.ndarray):
             if value.ndim == 0:
-                return self._prepare_value(value[()], address=address, observed=observed)
+                return self.convert(value[()], address=address, observed=observed)
             if value.dtype.hasobject:
-                return [self._prepare_value(child, address=address, observed=observed) for child in value]
+                return [self.convert(child, address=address, observed=observed) for child in value]
             if value.size:
                 representative = np.zeros((), dtype=value.dtype)[()]
-                self._prepare_value(representative, address=address, observed=observed)
+                self.convert(representative, address=address, observed=observed)
             if value.dtype.kind == "M":
                 return value.astype("datetime64[us]")
             if value.dtype.kind == "m":
                 return value.astype("timedelta64[us]")
             return value
-        if isinstance(value, (list, tuple)):
-            return [self._prepare_value(child, address=address, observed=observed) for child in value]
+        elif isinstance(value, (list, tuple)):
+            return [self.convert(child, address=address, observed=observed) for child in value]
 
-        family = self._family_for(value, address=address)
+        value_type = type(value)
+        family = self._type_to_family.get(value_type)
+        if family is None:
+            expected = ", ".join(" | ".join(member.__name__ for member in members) for members in self._type_families)
+            raise TypeError(
+                f"field at address '{address}' contains unsupported {value_type.__name__} values for plugin "
+                f"'{self.name}'; expected {expected}; normalize it in a preprocessor"
+            )
         if len(self._type_families) > 1:
-            observed.add((family, type(value)))
+            observed.add((family, value_type))
         return value
 
-    def prepare_value(self, value: Any, *, address: Address) -> tuple[Any, ValueTypeObservations]:
+    def prepare(self, value: Any, *, address: Address) -> tuple[Any, ValueTypeObservations]:
         """Canonicalize one raw leaf value and record its compatibility family."""
         if value is None:
             return None, None
@@ -544,11 +531,11 @@ class Plugin:
                 return value, observed
 
         observed: set[ValueTypeObservation] = set()
-        prepared = self._prepare_value(value, address=address, observed=observed)
-        self.validate_value_types(observed, address=address)
+        prepared = self.convert(value, address=address, observed=observed)
+        self.validate(observed, address=address)
         return prepared, observed or None
 
-    def validate_value_types(self, observed: ValueTypeObservations, *, address: Address) -> None:
+    def validate(self, observed: ValueTypeObservations, *, address: Address) -> None:
         """Reject values from incompatible registered families in one field batch."""
         if observed is None or len({family for family, _ in observed}) <= 1:
             return

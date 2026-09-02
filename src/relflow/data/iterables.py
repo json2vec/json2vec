@@ -19,7 +19,7 @@ from relflow.data.datasets.base import (
     RawObservation,
 )
 from relflow.data.processors import Preprocessor
-from relflow.data.ragged import RaggedBatch, RaggedField
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
@@ -122,7 +122,7 @@ def encode(
 
     hash_salt = random.getrandbits(64) if strata in {Strata.train, Strata.validate} else 0
 
-    ragged_batch = RaggedBatch.new(batch, schema=schema)
+    ragged_fields = coalesce(batch, schema=schema, strata=strata)
 
     for address, request in schema.active_requests.items():
         TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
@@ -136,7 +136,7 @@ def encode(
             continue
 
         kwargs: dict[str, Any] = dict(
-            field=RaggedField.new(ragged_batch, address=address, strata=strata),
+            field=ragged_fields.pop(address),
             address=address,
             schema=schema,
             strata=strata,

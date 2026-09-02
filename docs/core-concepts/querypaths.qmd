@@ -5,9 +5,9 @@ eval: false
 
 # Advanced Query Paths
 
-RelFlow normally binds a leaf by its schema address. That direct path projects
-same-named fields from one shared Awkward batch and is the simplest, fastest
-input contract.
+RelFlow normally binds a leaf by its schema address. That direct path uses
+same-named Awkward projection during eager batch coalescing and is the simplest,
+fastest input contract.
 
 Set a leaf's `query=...` only when a stable source shape is easier to select
 with JMESPath—for example, a renamed or quoted key, a nested source path, a
@@ -15,12 +15,13 @@ filter, an index, a slice, or field stacking. An explicit query replaces direct
 lookup for that leaf; RelFlow never generates or infers a JMESPath expression
 when `query` is omitted.
 
-After evaluating an explicit query, RelFlow sends its result through the same
-canonical `RaggedField` preparation as direct fields. Branch overflow, missing
-state, explicit nulls, prediction masks, plugin-declared atom compatibility, and
-dense placement therefore follow one contract. The query itself is still an
-extra per-field Python/JMESPath extraction pass, so prefer direct binding when
-the source already matches the schema.
+During eager batch coalescing, RelFlow evaluates explicit queries and converges
+their results with direct fields before shared paired value/state
+regularization. Branch overflow, final `Tokens` state, explicit nulls,
+prediction masks, plugin-declared atom compatibility, and dense placement
+therefore follow one contract. The query itself is still an extra per-field
+Python/JMESPath extraction pass, so prefer direct binding when the source
+already matches the schema.
 
 For JMESPath language details, see the upstream
 [tutorial](https://jmespath.org/tutorial.html),
@@ -300,10 +301,11 @@ branch geometry, state, and sibling alignment together.
 
 ## Performance And Carrier Rules
 
-Direct fields share one schema-aware Awkward construction and column
-projection. Each explicit JMESPath field instead evaluates its own expression,
-materializes that result, and rejoins canonical `RaggedField` preparation.
-Queries are therefore an opt-in expressiveness tradeoff, not the fast default.
+Direct fields use schema-aware Awkward column projection. Each explicit
+JMESPath field instead evaluates and materializes its own expression. Both paths
+then enter the same paired regularization, and the coalescer prepares all
+`RaggedField` objects before datatype codecs begin. Queries are therefore an
+opt-in expressiveness tradeoff, not the fast default.
 
 The extracted result must be compatible with the leaf's schema rank and with
 Awkward. Directly bound modeled values follow the same Awkward-compatible input
@@ -326,8 +328,8 @@ selects them. Keep business-specific transformations in a preprocessor.
 
 - Return to [Binding Data](binding-data.qmd) to choose direct binding, a query,
   or a preprocessor.
-- Use [Data Flow](data-flow.qmd) to see where query extraction rejoins Awkward
-  tensorization.
+- Use [Data Flow](data-flow.qmd) to see where query extraction converges with
+  direct Awkward preparation.
 - Use [Data Modules](../guides/data-modules.qmd) for preprocessor wiring.
 - Use [Temporal Validation](../guides/temporal-validation.qmd) for tested
   point-in-time windows.
