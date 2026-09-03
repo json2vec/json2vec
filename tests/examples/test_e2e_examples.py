@@ -5,17 +5,18 @@ from pathlib import Path
 
 import lightning.pytorch as lit
 import polars as pl
+import pyarrow as pa
 import pytest
 import torch
 
 import relflow as rf
 
 
-def _repo_root() -> Path:
+def repository() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _quarto_anchors(source: Path) -> set[str]:
+def anchors(source: Path) -> set[str]:
     text = source.read_text()
     anchors = set(re.findall(r"\{#([^}]+)\}", text))
 
@@ -31,7 +32,7 @@ def _quarto_anchors(source: Path) -> set[str]:
 
 
 def test_quarto_docs_snapshot_contains_expected_pages() -> None:
-    root = _repo_root()
+    root = repository()
 
     expected = {
         "docs/index.qmd",
@@ -52,6 +53,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/data-types/set.qmd",
         "docs/data-types/text.qmd",
         "docs/data-types/vector.qmd",
+        "docs/guides/arrow-migration.qmd",
         "docs/guides/batch-inference.qmd",
         "docs/guides/custom-tensorfields.qmd",
         "docs/guides/data-modules.qmd",
@@ -62,12 +64,12 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/guides/model-configuration.qmd",
         "docs/guides/model-lifecycle.qmd",
         "docs/guides/performance.qmd",
-        "docs/guides/postprocessors.qmd",
         "docs/guides/prediction-output.qmd",
         "docs/guides/schema-mutation.qmd",
         "docs/guides/serving.qmd",
         "docs/guides/temporal-validation.qmd",
         "docs/guides/troubleshooting.qmd",
+        "docs/guides/working-with-arrow.qmd",
         "docs/reference/public-api.qmd",
         "docs/case-studies/device-tenure.qmd",
         "docs/case-studies/iris-reproducible.qmd",
@@ -78,7 +80,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
 
 
 def test_quarto_docs_use_current_public_api_style() -> None:
-    root = _repo_root()
+    root = repository()
     sources = "\n".join(path.read_text() for path in sorted((root / "docs").rglob("*.qmd")))
 
     assert "rf.Model(" in sources
@@ -89,13 +91,13 @@ def test_quarto_docs_use_current_public_api_style() -> None:
 
 
 def test_workflow_guides_label_example_status() -> None:
-    guides = _repo_root() / "docs/guides"
+    guides = repository() / "docs/guides"
     unlabeled = [path.name for path in guides.glob("*.qmd") if "**Example status" not in path.read_text()]
     assert unlabeled == []
 
 
 def test_quarto_navigation_and_relative_links_resolve() -> None:
-    root = _repo_root()
+    root = repository()
     docs = root / "docs"
 
     navigation = (docs / "_quarto.yml").read_text()
@@ -113,7 +115,7 @@ def test_quarto_navigation_and_relative_links_resolve() -> None:
             destination = (source.parent / pathname).resolve() if pathname else source.resolve()
             if not destination.is_file():
                 missing_links.append((source.relative_to(root).as_posix(), target))
-            elif anchor and anchor not in _quarto_anchors(destination):
+            elif anchor and anchor not in anchors(destination):
                 missing_anchors.append((source.relative_to(root).as_posix(), target))
 
     assert missing_links == []
@@ -121,7 +123,7 @@ def test_quarto_navigation_and_relative_links_resolve() -> None:
 
 
 def test_documented_contracts_match_public_enums_and_requests() -> None:
-    root = _repo_root()
+    root = repository()
     docs = root / "docs"
     data_types = (docs / "core-concepts/data-types.qmd").read_text()
     branch = (docs / "data-types/branch.qmd").read_text()
@@ -149,26 +151,25 @@ def test_documented_contracts_match_public_enums_and_requests() -> None:
             assert f"`{public_name}`" in reference, f"{name}.{public_name} is missing from its reference"
 
 
-def test_documented_streaming_and_attention_constraints_match_runtime() -> None:
-    root = _repo_root()
+def test_documented_arrow_and_attention_constraints_match_runtime() -> None:
+    root = repository()
     readme = (root / "README.md").read_text()
     data_modules = (root / "docs/guides/data-modules.qmd").read_text()
     model_configuration = (root / "docs/guides/model-configuration.qmd").read_text()
     public_api = (root / "docs/reference/public-api.qmd").read_text()
-    readme_prose = " ".join(readme.split())
-    data_module_prose = " ".join(data_modules.split())
+    published = readme + data_modules + public_api
 
-    assert "`ndjson` is local-only" in readme
-    assert "Avro is not supported" in readme_prose
-    assert "The `ndjson` reader uses local file access" in data_module_prose
-    assert "Avro is not supported" in data_module_prose
+    assert "`rf.ArrowDataModule`" in readme
+    assert "`ArrowDataModule`" in data_modules
+    assert "`num_workers=0`" in data_modules
+    assert "StreamingDataModule" not in published
 
     for page in (model_configuration, public_api):
         assert "`d_model // n_heads >= 2`" in page
 
 
 def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
-    docs = _repo_root() / "docs/data-types"
+    docs = repository() / "docs/data-types"
     common = {
         "name",
         "type",
@@ -210,15 +211,17 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
 
 
 def test_documented_schema_binding_preserves_sparse_coordinates() -> None:
-    observation = [
-        {
-            "events": [
-                {"ip_country": "US", "amount": None},
-                {"ip_country": None, "amount": 950.0},
-                {"ip_country": "CA", "amount": None},
-            ]
-        }
-    ]
+    observation = pa.Table.from_pylist(
+        [
+            {
+                "events": [
+                    {"ip_country": "US", "amount": None},
+                    {"ip_country": None, "amount": 950.0},
+                    {"ip_country": "CA", "amount": None},
+                ]
+            }
+        ]
+    )
 
     model = rf.Model(
         d_model=8,
@@ -259,7 +262,7 @@ def test_documented_schema_binding_preserves_sparse_coordinates() -> None:
             risk_score=rf.Number,
         ),
     )
-    filtered_encoded = filtered_model.encode(filtered)
+    filtered_encoded = filtered_model.encode(pa.Table.from_pylist(filtered))
     assert filtered_encoded[rf.Address("record", "login_events", "device_id")].state.tolist() == [[[0, 0]]]
     assert filtered_encoded[rf.Address("record", "login_events", "risk_score")].state.tolist() == [[[1, 0]]]
 
@@ -275,22 +278,21 @@ def test_documented_prediction_envelope_is_executable() -> None:
         label=rf.Category(target=True, size=2, p_unavailable=0.0),
     )
     model.encode(
-        [
-            {"amount": 1.0, "label": "no"},
-            {"amount": 2.0, "label": "yes"},
-        ],
+        pa.table({"amount": [1.0, 2.0], "label": ["no", "yes"]}),
         strata="train",
     )
 
-    output = model.predict([{"amount": 1.5}])
-    target = output[rf.Address("record", "label")]
-    root = output[rf.Address("record")]
+    output = model.predict(pa.table({"amount": [1.5]}))
+    predictions = output["predictions"].combine_chunks()
+    target = predictions.field("record/label")
+    root = predictions.field("record")
 
-    assert set(target) == {"state", "content", "inferred"}
-    assert set(target["state"]) == {token.name for token in rf.Tokens}
-    assert set(target["content"]) == {"value", "probability", "topk"}
-    assert target["inferred"] == [True]
-    assert torch.linalg.vector_norm(torch.tensor(root["embedding"][0])).item() == pytest.approx(1.0)
+    assert {field.name for field in target.type} == {"state", "content", "inferred"}
+    assert {field.name for field in target.type.field("state").type} == {token.name for token in rf.Tokens}
+    assert {field.name for field in target.type.field("content").type} == {"value", "probability", "topk"}
+    assert target.field("inferred").to_pylist() == [True]
+    embedding = root.field("embedding")[0].as_py()
+    assert torch.linalg.vector_norm(torch.tensor(embedding)).item() == pytest.approx(1.0)
 
 
 def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
@@ -330,8 +332,6 @@ def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
         num_workers=0,
         persistent_workers=False,
         pin_memory=False,
-        observation_buffer_size=8,
-        sample_rate=1.0,
     )
     trainer = lit.Trainer(
         accelerator="cpu",
@@ -352,14 +352,15 @@ def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
     artifact = tmp_path / "getting-started.rf"
     model.save(artifact)
     restored = rf.Model.load(artifact)
-    predictions = restored.predict([{"sepal_length": 5.0, "petal_length": 1.5}])
-    assert predictions[rf.Address("record", "species")]["inferred"] == [True]
-    assert len(predictions[rf.Address("record")]["embedding"][0]) == 16
+    predictions = restored.predict(pa.table({"sepal_length": [5.0], "petal_length": [1.5]}))
+    output = predictions["predictions"].combine_chunks()
+    assert output.field("record/species").field("inferred").to_pylist() == [True]
+    assert len(output.field("record").field("embedding")[0].as_py()) == 16
 
 
 def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
     lit.seed_everything(7, workers=True)
-    records = pl.read_ndjson(_repo_root() / "docs/data/iris.jsonl").with_row_index()
+    records = pl.read_ndjson(repository() / "docs/data/iris.jsonl").with_row_index()
     train_records = records.filter((pl.col("index") % 5) < 3).drop("index")
     validate_records = records.filter((pl.col("index") % 5) == 3).drop("index")
     test_records = records.filter((pl.col("index") % 5) == 4).drop("index")
@@ -405,18 +406,19 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
 
     trainer.fit(model=model, datamodule=datamodule)
     metrics = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
-    assert metrics["flower.species/test.accuracy.content"] == pytest.approx(0.9)
+    assert metrics["flower.species/test.accuracy.content"] == pytest.approx(14 / 15)
 
     artifact = tmp_path / "iris-model.rf"
     model.save(artifact)
     restored = rf.Model.load(artifact)
-    requests = test_records.drop("species").head(3).to_dicts()
+    requests = test_records.drop("species").head(3).to_arrow()
     predictions = restored.predict(requests)
-    assert predictions[rf.Address("flower", "species")]["inferred"] == [True, True, True]
+    species = predictions["predictions"].combine_chunks().field("flower/species")
+    assert species.field("inferred").to_pylist() == [True, True, True]
 
 
 def test_only_allowed_standalone_examples_are_present() -> None:
-    root = _repo_root()
+    root = repository()
     examples = root / "examples"
     if not examples.exists():
         return

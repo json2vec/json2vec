@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,7 +10,19 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
-from relflow.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
+from relflow.tensorfields.base import TENSORFIELDS
+from relflow.tensorfields.extensions.number import (
+    Decoder,
+    Embedder,
+    GlobalOnlineNormalizer,
+    TensorField,
+    loss,
+    write,
+)
+from relflow.tensorfields.extensions.number import (
+    output as output_type,
+)
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/items/amount"
 
@@ -38,8 +51,9 @@ def _structure_payload() -> dict:
 
 
 def _tensorfield(rows: list[list[Any]], *, schema: Schema, strata: Strata) -> TensorField:
-    batch = [[{"items": [{"amount": value} for value in row]}] for row in rows]
+    batch = arrow_batch([{"items": [{"amount": value} for value in row]} for row in rows])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["number"].prepare(field.values, address=ADDRESS))
     return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 
@@ -182,7 +196,7 @@ def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
     assert torch.isfinite(parcel.payload).all()
 
 
-def test_number_write_emits_state_probability_map():
+def test_number_write_emits_flat_arrow_content():
     structure = Schema.model_validate(_structure_payload())
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
@@ -198,11 +212,9 @@ def test_number_write_emits_state_probability_map():
         ),
     )
 
-    output = write(module=SimpleNamespace(schema=structure), prediction=prediction)
-    state_payload = output[TensorKey.state.name]
+    module = SimpleNamespace(schema=structure)
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
 
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    assert all(probabilities.shape == (2, 1) for probabilities in state_payload.values())
-    assert state_payload[Tokens.valued.name][0, 0] > 0.99
-    assert state_payload[Tokens.null.name][1, 0] > 0.99
-    assert output[TensorKey.content.name].shape == (2, 1, 1)
+    assert output.type == datatype
+    assert output.field(TensorKey.content.name).to_pylist() == [1.5, 2.5]

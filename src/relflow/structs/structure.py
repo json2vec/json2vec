@@ -71,6 +71,7 @@ class Branch(Node):
 
     name: str | None = None
     type: Annotated[Literal["branch"], pydantic.Field(default="branch")] = "branch"
+    query: str | None = None
     attention: AttentionMode = AttentionMode.mha
     length: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     overflow: Overflow = Overflow.head
@@ -122,6 +123,14 @@ class Branch(Node):
 
         values["masks"] = [mask]
         return values
+
+    @pydantic.model_validator(mode="after")
+    def check_query(self):
+        if self.query is not None:
+            from relflow.data.query import compile
+
+            compile(self.query)
+        return self
 
     def model_post_init(self, __context):
         for field in self.fields:
@@ -176,7 +185,7 @@ class Branch(Node):
     def __rich_console__(self, console, options):
         is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
         display_type = "root" if is_root else self.type
-        attributes = ("attention", "n_layers", "n_heads", "n_linear", "dropout")
+        attributes = ("query", "attention", "n_layers", "n_heads", "n_linear", "dropout")
         if not is_root:
             attributes = ("length", "overflow", *attributes)
 

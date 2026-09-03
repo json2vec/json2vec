@@ -1,335 +1,286 @@
 ---
-marimo-static-output: true
 eval: false
 ---
 
-# Advanced Query Paths
+# Query Paths
 
-RelFlow normally binds a leaf by its schema address. That direct path uses
-same-named Awkward projection during eager batch coalescing and is the simplest,
-fastest input contract.
-
-Set a leaf's `query=...` only when a stable source shape is easier to select
-with JMESPath—for example, a renamed or quoted key, a nested source path, a
-filter, an index, a slice, or field stacking. An explicit query replaces direct
-lookup for that leaf; RelFlow never generates or infers a JMESPath expression
-when `query` is omitted.
-
-During eager batch coalescing, RelFlow evaluates explicit queries and converges
-their results with direct fields before shared paired value/state
-regularization. Branch overflow, final `Tokens` state, explicit nulls,
-prediction masks, plugin-declared atom compatibility, and dense placement
-therefore follow one contract. The query itself is still an extra per-field
-Python/JMESPath extraction pass, so prefer direct binding when the source
-already matches the schema.
-
-For JMESPath language details, see the upstream
-[tutorial](https://jmespath.org/tutorial.html),
-[examples](https://jmespath.org/examples.html), and
-[specification](https://jmespath.org/specification.html).
-
-## The Request-Level Contract
-
-RelFlow evaluates each explicit leaf query relative to one processed
-observation. One ordinary record is represented at that boundary by the
-singleton generated root:
+Most schemas need no query at all. When a model field and its source field have
+the same name and nesting, RelFlow binds them directly:
 
 ```python
-processed_observation = [
-    {"amount": 12.50, "merchant": "bookshop"}
-]
+model = rf.Model(
+    amount=rf.Number,
+    items=rf.Branch(
+        length=32,
+        sku=rf.Category(size=4096),
+    ),
+)
 ```
 
-The configured request query for `amount` would be:
+This reads `amount` from each source row, `items` from that row, and `sku` from
+each item struct. Add `query=...` only when the source path differs.
 
-```python
-request_query = "[*].amount"
-```
+RelFlow's query language is a small structural path compiled to Arrow
+operations. It can select struct fields, traverse or slice lists, choose a list
+position, and look up one literal map key. It deliberately does not evaluate
+general expressions.
 
-During batch encoding, RelFlow adds the outer batch selector internally. Do
-not include it in the configured request:
+## The Most Important Rule: Paths Are Node-Relative
 
-```text
-configured request: [*].amount
-internal search:    [*][*].amount
-```
-
-This syntax applies only to explicit queries. With plain `amount=rf.Number`,
-RelFlow projects the `amount` key directly and does not create `[*].amount`.
-
-The request-level rules are:
-
-- begin at the processed observation, normally with `[*].`;
-- write a full source path—an explicit query is not relative to its parent
-  `Branch`;
-- preserve one result dimension for each branch in the schema path;
-- use `[*]` to preserve an array and `[]` only to flatten intentionally;
-- use JMESPath syntax, not JSONPath (`[*].amount`, not `$.amount`).
-
-## Renamed And Nested Source Keys
-
-A stable schema may read a versioned or nested source path without a
-preprocessor:
+Every explicit query starts from the value selected by its parent model node:
 
 ```python
 import relflow as rf
 
 model = rf.Model(
+    name="order",
+    query="payload",
     d_model=32,
     n_layers=1,
-    n_heads=4,
-    amount=rf.Number(query="[*].transaction.amount_usd"),
-    merchant=rf.Category(
-        query="[*].transaction.merchant_name",
-        size=4096,
-    ),
-    label=rf.Category(query="[*].outcome", target=True, size=2),
-)
-```
-
-For this record:
-
-```python
-record = {
-    "transaction": {
-        "amount_usd": 12.50,
-        "merchant_name": "bookshop",
-    },
-    "outcome": "approved",
-}
-```
-
-the model addresses remain `record/amount`, `record/merchant`, and
-`record/label`. Queries change source selection, not schema identity.
-
-## Quoted Source Keys
-
-Use quoted JMESPath members when source keys contain spaces, punctuation, or
-characters that are not valid bare identifiers:
-
-```python
-model = rf.Model(
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    job_code=rf.Category(query='[*]."job code"', size=128),
-    amount=rf.Number(query='[*].transaction."amount-usd"'),
-)
-```
-
-Single-quoted Python strings are convenient when the query contains
-double-quoted object members.
-
-## Explicit Paths Under A Branch
-
-When a schema branch name differs from the source array path, every queried
-child leaf receives a full request-level expression:
-
-```python
-record = {
-    "payload": {
-        "items": [
-            {"product": {"sku": "A12"}, "qty": 2},
-            {"product": {"sku": "B07"}, "qty": 1},
-        ]
-    }
-}
-
-model = rf.Model(
-    d_model=64,
-    n_layers=2,
     n_heads=4,
     line_items=rf.Branch(
+        query="items[-32:]",
         length=32,
-        sku=rf.Category(
-            query="[*].payload.items[*].product.sku",
-            size=2048,
-        ),
-        quantity=rf.Number(query="[*].payload.items[*].qty"),
+        sku=rf.Category(query="product.sku", size=4096),
+        quantity=rf.Number(query="qty"),
     ),
+    returned=rf.Category(query="outcome", target=True, size=2),
 )
 ```
 
-Both results retain the root and `line_items` dimensions:
+Given one source row:
+
+```python
+{
+    "request_id": "req-42",
+    "payload": {
+        "items": [
+            {"product": {"sku": "A-1"}, "qty": 2},
+            {"product": {"sku": "B-9"}, "qty": 1},
+        ],
+        "outcome": "false",
+    },
+}
+```
+
+resolution proceeds as follows:
 
 ```text
-sku       -> [["A12", "B07"]]
-quantity  -> [[2, 1]]
+source row
+└── Model query: payload
+    ├── Branch query: items[-32:]
+    │   ├── sku query: product.sku
+    │   └── quantity query: qty
+    └── returned query: outcome
 ```
 
-Do not shorten these to paths relative to `line_items`; `Branch` does not have
-a source query of its own. RelFlow applies the branch's `length` and `overflow`
-policy after query extraction and before datatype codecs update their state.
+The branch declares the `items` selection and slice once. Each child's compiled
+expression inherits that same selector and overflow domain. Users do not repeat
+`items[*]`, and sibling paths cannot independently shift their coordinates.
 
-## Filters And Coordinate Alignment
+## Default And Explicit Selection
 
-JMESPath filters can select a subset of child objects:
+The complete resolution rules are:
+
+- `Model(query=None)` starts at the source row.
+- `Model(query="payload")` starts every child at the selected source struct.
+- A child with no query selects its own schema name from its parent.
+- A child with a query uses that path instead of its schema name.
+- Every child query is relative to its parent's selected value.
+- A child `Branch` must select a list of structs.
+
+For example, only the mismatched name needs a query:
 
 ```python
 model = rf.Model(
-    d_model=64,
-    n_layers=2,
-    n_heads=4,
-    login_events=rf.Branch(
-        length=16,
-        device_id=rf.Hash(
-            query="[*].map(&device_id, events[?event_type == 'login'])"
-        ),
-        risk_score=rf.Number(
-            query="[*].map(&risk_score, events[?event_type == 'login'])"
-        ),
-    ),
+    amount=rf.Number(query="gross_amount"),
+    merchant=rf.Category(size=1024),  # reads "merchant" directly
 )
 ```
 
-Every sibling uses the same filter, and `map` preserves one result—including
-`None`—for every selected event. A projection such as
-`events[?event_type == 'login'].risk_score` may drop null or missing scores.
-Even with the same filter, that can shift later scores onto earlier device
-coordinates.
+## Grammar At A Glance
 
-Use a [preprocessor](../guides/data-modules.qmd#preprocessors) when selection
-depends on sorting, an `as_of` timestamp, multi-step business rules, or any
-operation that should transform sibling child fields together.
-
-## Indexes And Slices
-
-Indexes read a fixed position; slices retain a bounded part of an array:
-
-```python
-model = rf.Model(
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    first_origin=rf.Category(
-        query="[*].legs[0].origin_airport",
-        size=512,
-    ),
-    recent_events=rf.Branch(
-        length=10,
-        amount=rf.Number(query="[*].events[-10:].amount"),
-    ),
-)
-```
-
-The slice returns up to ten event amounts while preserving the root dimension.
-If ordering must be established or the cutoff is temporal, sort and filter in
-a preprocessor instead. A branch-level `overflow="tail"` is often clearer than
-repeating a slice across every child query.
-
-## Stack Fields With A Query
-
-An explicit multiselect can turn sibling source roles into one shared repeated
-field:
-
-```python
-model = rf.Model(
-    name="itinerary",
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    locations=rf.Branch(
-        length=2,
-        overflow="error",
-        location=rf.Category(
-            query="[*].[origin, destination]",
-            size=4096,
-        ),
-    ),
-)
-```
-
-For `{"origin": "IAD", "destination": "SFO"}`, the query yields
-`[["IAD", "SFO"]]`. Both values occupy `itinerary/locations/location` and
-share one vocabulary. See [Field Stacking](../guides/field-stacking.qmd) for
-query and preprocessor variants, including explicit role labels.
-
-## Update Or Temporarily Override A Query
-
-`query` is a serializable leaf schema attribute. Update it when a source
-contract changes but the schema identity remains valid:
-
-```python
-model.update(
-    rf.where("address") == "record/amount",
-    query="[*].transaction.amount_usd",
-)
-```
-
-Use `override(...)` for a temporary experiment:
-
-```python
-with model.override(
-    rf.where("address") == "record/amount",
-    query="[*].fallback.amount",
-):
-    predictions = model.predict(records)
-```
-
-Changing a query can change field meaning even when tensor shapes remain
-compatible. Validate the result and version the changed artifact.
-
-## Test Before Encoding
-
-Test an expression against a one-item processed observation before involving
-the model:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import jmespath
-
-observation = [
-    {
-        "payload": {
-            "items": [
-                {"product": {"sku": "A12"}, "qty": 2},
-                {"product": {"sku": "B07"}, "qty": 1},
-            ]
-        }
-    }
-]
-
-query = "[*].payload.items[*].product.sku"
-assert jmespath.search(query, observation) == [["A12", "B07"]]
-```
-
-If this assertion works, use the same string as `query=...`; do not add another
-leading `[*]`. Then call `model.encode(records)` to check all leaf results,
-branch geometry, state, and sibling alignment together.
-
-## Performance And Carrier Rules
-
-Direct fields use schema-aware Awkward column projection. Each explicit
-JMESPath field instead evaluates and materializes its own expression. Both paths
-then enter the same paired regularization, and the coalescer prepares all
-`RaggedField` objects before datatype codecs begin. Queries are therefore an
-opt-in expressiveness tradeoff, not the fast default.
-
-The extracted result must be compatible with the leaf's schema rank and with
-Awkward. Directly bound modeled values follow the same Awkward-compatible input
-contract. Unmodeled metadata remains untouched and need not be compatible;
-normalize opaque Python objects only when a modeled field or explicit query
-selects them. Keep business-specific transformations in a preprocessor.
-
-## Troubleshooting
-
-| Symptom | Likely issue | Fix |
+| Syntax | Input structure | Meaning |
 | --- | --- | --- |
-| Query is rejected while building the model | Invalid JMESPath | Compile with `jmespath.compile(...)` or test against one observation. |
-| Query returns empty results | Source path or key does not exist | Check exact keys on a representative processed observation. |
-| Query starts with `[*][*]` | Internal batch selector was configured manually | Remove one leading selector. |
-| Branch children are misaligned | Sibling expressions filter, flatten, or compact nulls differently | Use the same selection plus `map(&field, collection)`, or transform the child objects together in a preprocessor. |
-| Result is flatter than the schema | `[]` flattened an array or a `[*]` level is missing | Preserve one array dimension for each parent branch. |
-| Values select correctly but state/content is unexpected | The result violates branch, nullability, or datatype rules | Inspect `model.encode(...)`, then use the relevant datatype reference. |
+| `customer.name` | struct | select named members |
+| `["gross amount"]` | struct | select a field whose name is not an identifier |
+| `items[*].sku` | list of structs | traverse one list axis and retain its offsets |
+| `legs[0].origin` | list | select one position and remove that list axis |
+| `events[-10:]` | list | slice every list independently |
+| `attributes["country"]` | map | look up one literal string key |
+| `flags[true]` | map | look up one literal boolean key |
 
-## Where Next
+An identifier starts with a letter and continues with letters, digits, or
+underscores. Quoted field names use JSON double quotes.
 
-- Return to [Binding Data](binding-data.qmd) to choose direct binding, a query,
-  or a preprocessor.
-- Use [Data Flow](data-flow.qmd) to see where query extraction converges with
-  direct Awkward preparation.
-- Use [Data Modules](../guides/data-modules.qmd) for preprocessor wiring.
-- Use [Temporal Validation](../guides/temporal-validation.qmd) for tested
-  point-in-time windows.
+Queries are observation-relative. They never begin with `$` or a batch-level
+`[*]`.
+
+### List traversal
+
+`[*]` traverses exactly one list axis without flattening it:
+
+```python
+aliases=rf.Set(query="contacts[*].alias", size=4096)
+```
+
+Use it when a leaf path itself crosses an unmodeled list. You do not write
+`[*]` merely to enter a modeled `Branch`; RelFlow lifts child queries over the
+branch element type automatically.
+
+### List index
+
+```python
+origin=rf.Category(query="legs[0].origin", size=512)
+```
+
+Positive indices count from the beginning and negative indices from the end.
+An out-of-range position is structural absence and becomes `padded`, not an
+exception.
+
+### List slice
+
+```python
+events=rf.Branch(
+    query="history[-20:]",
+    length=20,
+    amount=rf.Number,
+)
+```
+
+Slices use Python's half-open, clamped behavior independently for every source
+list. Bounds may be omitted (`[:10]`, `[-20:]`, `[:]`). Slice steps such as
+`[::2]` are not part of the language.
+
+The source slice and model capacity solve different problems. `query="history[-20:]"`
+chooses source elements; `Branch(length=20)` sets model geometry and controls
+padding or overflow.
+
+### Map lookup
+
+```python
+country=rf.Category(query='attributes["country"]', size=256)
+```
+
+Keys must be literal strings, integers, or booleans and must convert losslessly
+to the Arrow map key type. A missing key becomes `padded`; an existing key with
+a null value becomes `null`. Duplicate selected keys are rejected.
+
+## Null, Missing, And Padded State
+
+Queries preserve structural information needed by RelFlow's value-state model:
+
+| Source condition | State |
+| --- | --- |
+| selected non-null leaf | `valued` |
+| selected leaf is null and its ancestors exist | `null` |
+| parent struct or list is null | `padded` |
+| list index is out of range | `padded` |
+| map key is absent | `padded` |
+| map key exists with a null value | `null` |
+| configured branch capacity adds a position | `padded` |
+| required field is absent from the Arrow schema | binding error |
+
+Arrow columnarization cannot distinguish a mapping key omitted in one Python
+row from that same declared field explicitly set to `None`; both become a null
+slot in the struct field. If the distinction matters, encode it as an explicit
+source column before building Arrow.
+
+## What Queries Do Not Do
+
+The language excludes:
+
+- filters and predicates;
+- functions and pipes;
+- arithmetic, comparisons, and boolean expressions;
+- recursive descent;
+- object wildcards;
+- flattening;
+- sorting and joins;
+- fallback expressions;
+- multiselects and field stacking.
+
+This boundary is intentional. Structural navigation compiles cleanly and
+keeps nested siblings aligned. Data-dependent transformations belong in one
+Arrow preprocessor where their schema and lineage are explicit.
+
+For example, filter login events once and let the branch bind directly:
+
+```python
+import awkward as ak
+import pyarrow.compute as pc
+
+@rf.preprocess(
+    requires=("events",),
+    produces=("login_events",),
+)
+def select_logins(batch: rf.Batch) -> rf.Batch:
+    field = batch.data.schema.field("events")
+    events = ak.from_arrow(batch.data["events"])
+    keep = ak.fill_none(events["type"] == "login", False)
+    values = ak.to_arrow(events[keep], extensionarray=False)
+    values = pc.cast(values, field.type)
+    data = batch.data.append_column("login_events", values)
+    return batch.replace(data)
+
+model = rf.Model(
+    login_events=rf.Branch(
+        length=32,
+        timestamp=rf.DateParts,
+        device=rf.Category(size=128),
+    ),
+)
+```
+
+The predicate moves complete event structs, so `timestamp` and `device` remain
+aligned.
+
+## Prediction And Target Binding
+
+Train, validation, and test plans include target columns needed for losses and
+metrics. A prediction plan excludes persistent supervised targets from source
+requirements, so ordinary prediction input can omit fields declared with
+`target=True`.
+
+This remains true when the target has an explicit query:
+
+```python
+fraud=rf.Category(query="labels.fraud", target=True, size=2)
+```
+
+Training data needs `labels.fraud`; ordinary prediction data does not. Missing
+active input fields still fail binding rather than turning into silent nulls.
+
+## Errors Are Early And Contextual
+
+Syntax is parsed with the model. The complete path binds to the
+post-preprocessor Arrow type, and the bound plan is cached for the exact
+expression, type, and model address. That plan still executes separately for
+each field batch and leaf; shared-prefix result caching is not yet part of the
+runtime. A failure reports the expression, failing segment, and model
+address—for example, applying `[0]` to a struct or selecting an absent field.
+
+Use this debugging order:
+
+1. inspect the post-preprocessor `pa.Schema`;
+2. identify the parent model node and the Arrow value it selects;
+3. read the child query relative to that value—not from the source root;
+4. verify that a `Branch` returns a list of structs and a leaf returns a type
+   accepted by its plugin;
+5. move data-dependent logic into a preprocessor.
+
+## Migration Examples
+
+Old batch-root expressions are not interpreted:
+
+| Old form | New form |
+| --- | --- |
+| `[*].payload.amount` | `amount=rf.Number(query="payload.amount")` |
+| `[*].payload.items[*].product.sku` | root `query="payload"`, branch `query="items"`, leaf `query="product.sku"` |
+| `[*].legs[0].origin` | `legs[0].origin` |
+| `[*].events[-10:].amount` | branch `query="events[-10:]"`, child `amount=rf.Number` |
+| `[*]."job code"` | `["job code"]` |
+
+See [Arrow Migration](../guides/arrow-migration.qmd) for the rest of the
+breaking API changes and [Binding Data](binding-data.qmd) for choosing between
+direct binding, queries, and preprocessors.

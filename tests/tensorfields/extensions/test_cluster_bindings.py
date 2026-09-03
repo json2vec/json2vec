@@ -7,13 +7,14 @@ import torch
 
 import relflow as rf
 from relflow.tensorfields.extensions.cluster import Embedder
+from tests.arrow import table
 
 ADDRESS = rf.Address("record/merchant_id")
 CAPACITY = 6
 N_CLUSTERS = 3
 
 
-def _model() -> rf.Model:
+def build() -> rf.Model:
     torch.manual_seed(0)
     return rf.Model(
         name="record",
@@ -31,30 +32,30 @@ def _model() -> rf.Model:
     )
 
 
-def _embedder(model: rf.Model) -> Embedder:
+def embedder(model: rf.Model) -> Embedder:
     embedder = model.nodes[ADDRESS].embedder
     assert isinstance(embedder, Embedder)
     return embedder
 
 
-def _learn(model: rf.Model, *tokens: str) -> None:
+def learn(model: rf.Model, *tokens: str) -> None:
     model.encode(
-        [{"merchant_id": token} for token in tokens],
+        table([{"merchant_id": token} for token in tokens]),
         strata=rf.Strata.train,
         mask=False,
     )
 
 
 def test_cluster_vocabulary_returns_immutable_model_snapshot() -> None:
-    model = _model()
-    _learn(model, "ALPHA", "BETA")
+    model = build()
+    learn(model, "ALPHA", "BETA")
 
     snapshot = rf.Cluster.vocabulary(model, ADDRESS)
 
     assert snapshot == ("ALPHA", "BETA")
     assert isinstance(snapshot, tuple)
 
-    _learn(model, "GAMMA")
+    learn(model, "GAMMA")
 
     assert snapshot == ("ALPHA", "BETA")
     assert rf.Cluster.vocabulary(model, "record/merchant_id") == (
@@ -65,26 +66,26 @@ def test_cluster_vocabulary_returns_immutable_model_snapshot() -> None:
 
 
 def test_cluster_vocabulary_reads_latest_encoding_context_snapshot() -> None:
-    model = _model()
+    model = build()
     encoding_context = model.interprocess_encoding_context
 
-    _learn(model, "ALPHA", "BETA")
+    learn(model, "ALPHA", "BETA")
 
     assert rf.Cluster.vocabulary(encoding_context, ADDRESS) == ("ALPHA", "BETA")
 
 
 def test_cluster_vocabulary_reads_same_length_context_replacement() -> None:
-    model = _model()
-    _learn(model, "ALPHA")
+    model = build()
+    learn(model, "ALPHA")
     encoding_context = model.interprocess_encoding_context
 
-    _embedder(model).vocab.load_snapshot(["BETA"])
+    embedder(model).vocab.load_snapshot(["BETA"])
 
     assert rf.Cluster.vocabulary(encoding_context, ADDRESS) == ("BETA",)
 
 
 def test_cluster_assignments_return_softmax_snapshots_without_sentinel() -> None:
-    model = _model()
+    model = build()
     # Cluster 2 starts uncommitted, but assignment probabilities and eval argmax
     # still span every configured cluster column.
     rf.Cluster.assign(model, ADDRESS, "ALPHA", [0.2, 0.1, 0.7])
@@ -106,13 +107,13 @@ def test_cluster_assignments_return_softmax_snapshots_without_sentinel() -> None
 
 
 def test_cluster_assignments_empty_vocabulary_is_empty() -> None:
-    assert rf.Cluster.assignments(_model(), ADDRESS) == {}
+    assert rf.Cluster.assignments(build(), ADDRESS) == {}
 
 
 def test_cluster_assignments_preserve_source_precision_for_eval_argmax() -> None:
-    model = _model().double()
-    _learn(model, "ALPHA")
-    weight = _embedder(model).embeddings["cluster"].weight
+    model = build().double()
+    learn(model, "ALPHA")
+    weight = embedder(model).embeddings["cluster"].weight
     with torch.no_grad():
         weight[0].copy_(torch.tensor([1.0, 1.00000001, 0.0], dtype=torch.float64))
 
@@ -123,11 +124,11 @@ def test_cluster_assignments_preserve_source_precision_for_eval_argmax() -> None
 
 
 def test_cluster_status_returns_detached_cpu_native_snapshot() -> None:
-    model = _model()
-    embedder = _embedder(model)
+    model = build()
+    field = embedder(model)
     with torch.no_grad():
-        embedder.committed.copy_(torch.tensor([False, True, True]))
-        embedder.usage_ema.copy_(torch.tensor([0.1, 0.2, 0.7]))
+        field.committed.copy_(torch.tensor([False, True, True]))
+        field.usage_ema.copy_(torch.tensor([0.1, 0.2, 0.7]))
 
     snapshot = rf.Cluster.status(model, ADDRESS)
 
@@ -137,19 +138,19 @@ def test_cluster_status_returns_detached_cpu_native_snapshot() -> None:
     assert isinstance(snapshot["usage"], tuple)
 
     with torch.no_grad():
-        embedder.committed.zero_()
-        embedder.usage_ema.zero_()
+        field.committed.zero_()
+        field.usage_ema.zero_()
 
     assert snapshot["committed"] == (1, 2)
     assert snapshot["usage"] == pytest.approx((0.1, 0.2, 0.7))
 
 
 def test_cluster_status_preserves_usage_precision() -> None:
-    model = _model().double()
-    embedder = _embedder(model)
+    model = build().double()
+    field = embedder(model)
     expected = (0.1234567890123, 0.2345678901234, 0.6419753208643)
     with torch.no_grad():
-        embedder.usage_ema.copy_(torch.tensor(expected, dtype=torch.float64))
+        field.usage_ema.copy_(torch.tensor(expected, dtype=torch.float64))
 
     assert rf.Cluster.status(model, ADDRESS)["usage"] == expected
 
@@ -161,7 +162,7 @@ def test_cluster_status_preserves_usage_precision() -> None:
 )
 def test_cluster_model_bindings_reject_missing_address(binding) -> None:
     with pytest.raises(KeyError, match="missing"):
-        binding(_model(), "record/missing")
+        binding(build(), "record/missing")
 
 
 @pytest.mark.parametrize(

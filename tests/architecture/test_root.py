@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 import torch
 
@@ -18,9 +19,11 @@ from relflow.tensorfields.shared.vocabulary import (
     OnlineVocabularyModel,
     VocabularySyncCallback,
 )
+from tests.arrow import batch as arrow_batch
+from tests.arrow import table
 
 
-def _schema() -> Schema:
+def configuration() -> Schema:
     return Schema.model_validate(
         {
             "d_model": 8,
@@ -42,7 +45,7 @@ def _schema() -> Schema:
 
 
 def test_model_accepts_schema_positionally_and_by_keyword() -> None:
-    schema = _schema()
+    schema = configuration()
 
     positional = Model(schema)
     keyword = Model(schema=schema)
@@ -53,7 +56,7 @@ def test_model_accepts_schema_positionally_and_by_keyword() -> None:
 
 def test_model_rejects_schema_combined_with_tree_configuration() -> None:
     with pytest.raises(TypeError, match="schema cannot be combined"):
-        Model(schema=_schema(), d_model=8)
+        Model(schema=configuration(), d_model=8)
 
 
 def test_model_tree_constructor_requires_architecture_options() -> None:
@@ -62,7 +65,7 @@ def test_model_tree_constructor_requires_architecture_options() -> None:
 
 
 def test_on_save_checkpoint_serializes_schema() -> None:
-    schema = _schema()
+    schema = configuration()
     model = Model(schema=schema, batch_size=2)
     checkpoint = {}
 
@@ -74,7 +77,7 @@ def test_on_save_checkpoint_serializes_schema() -> None:
 
 
 def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
-    schema = _schema()
+    schema = configuration()
     model = Model(schema=schema, batch_size=2)
     pathname = tmp_path / "nested" / "model.ckpt"
 
@@ -94,7 +97,7 @@ def test_save_writes_loadable_checkpoint(tmp_path: Path) -> None:
             assert restored_state[key] == value
 
 
-def _prediction_schema() -> Schema:
+def prediction_schema() -> Schema:
     return Schema(
         d_model=8,
         fields={
@@ -125,14 +128,16 @@ def _prediction_schema() -> Schema:
     )
 
 
-def _primed_prediction_model() -> Model:
-    schema = _prediction_schema()
+def primed() -> Model:
+    schema = prediction_schema()
     model = Model(schema=schema, batch_size=2)
     inputs = encode(
-        batch=[
-            [{"color": "red", "label": "warm"}],
-            [{"color": "blue", "label": "cool"}],
-        ],
+        batch=arrow_batch(
+            [
+                {"color": "red", "label": "warm"},
+                {"color": "blue", "label": "cool"},
+            ]
+        ),
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
@@ -142,8 +147,8 @@ def _primed_prediction_model() -> Model:
     return model
 
 
-def _build_checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
-    schema = _schema()
+def checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
+    schema = configuration()
     model = Model(schema=schema, batch_size=2)
     checkpoint_path = tmp_path / "model.ckpt"
     model.save(checkpoint_path)
@@ -152,7 +157,7 @@ def _build_checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
 
 
 def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path, schema = _build_checkpoint(tmp_path)
+    checkpoint_path, schema = checkpoint(tmp_path)
 
     model = Model.load(checkpoint_path)
 
@@ -161,7 +166,7 @@ def test_load_restores_local_checkpoint(tmp_path: Path) -> None:
 
 
 def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> None:
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
     best_path = tmp_path / "best.ckpt"
     model.save(best_path)
     best_state = {
@@ -214,7 +219,7 @@ def test_rollback_checkpoint_restores_best_model_from_disk(tmp_path: Path) -> No
 
 
 def test_rollback_checkpoint_loads_schema_metadata_with_weights_only_disabled(tmp_path: Path) -> None:
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
     best_path = tmp_path / "best.ckpt"
     model.save(best_path)
     checkpoint = torch.load(best_path, weights_only=False, map_location="cpu")
@@ -259,7 +264,7 @@ def test_rollback_checkpoint_requires_a_saved_checkpoint() -> None:
 
 
 def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> None:
-    _, schema = _build_checkpoint(tmp_path)
+    _, schema = checkpoint(tmp_path)
     model = Model(
         schema=schema,
         batch_size=2,
@@ -271,7 +276,7 @@ def test_configure_optimizers_uses_user_supplied_optimizer(tmp_path: Path) -> No
 
 
 def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> None:
-    _, schema = _build_checkpoint(tmp_path)
+    _, schema = checkpoint(tmp_path)
     model = Model(
         schema=schema,
         batch_size=2,
@@ -286,7 +291,7 @@ def test_configure_optimizers_uses_user_supplied_scheduler(tmp_path: Path) -> No
 
 
 def test_configure_callbacks_collects_active_extension_callbacks() -> None:
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
 
     callbacks = model.configure_callbacks()
     callback_types = [type(callback) for callback in callbacks]
@@ -358,7 +363,7 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
 
 
 def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> None:
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
     model._trainer = type(  # noqa: SLF001
         "TrainerStub",
         (),
@@ -377,7 +382,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
 
 
 def test_builtin_resources_are_attached_to_extension_modules() -> None:
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
     address = Address("root", "label")
 
     assert isinstance(model.nodes[address].embedder.vocab, OnlineVocabularyModel)
@@ -417,7 +422,7 @@ def test_online_vocabulary_model_uses_local_storage_until_shared():
 
 
 def test_vocabulary_callback_freezes_model_vocabularies_on_fit_end():
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
     address = Address("root", "label")
     vocab = model.nodes[address].embedder.vocab
 
@@ -450,13 +455,15 @@ def test_runtime_placement_callback_moves_module_to_root_device() -> None:
 
 
 def test_training_counters_observe_all_encoded_fields() -> None:
-    schema = _prediction_schema()
+    schema = prediction_schema()
     model = Model(schema=schema, batch_size=2)
     inputs = encode(
-        batch=[
-            [{"color": "red", "label": "warm"}],
-            [{"color": "blue", "label": "cool"}],
-        ],
+        batch=arrow_batch(
+            [
+                {"color": "red", "label": "warm"},
+                {"color": "blue", "label": "cool"},
+            ]
+        ),
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
@@ -519,13 +526,15 @@ def test_training_counters_call_content_counter_for_empty_updates() -> None:
             self.calls.append(values.detach().cpu())
             return values
 
-    schema = _prediction_schema()
+    schema = prediction_schema()
     model = Model(schema=schema, batch_size=2)
     inputs = encode(
-        batch=[
-            [{"color": "red", "label": "warm"}],
-            [{"color": "blue", "label": "cool"}],
-        ],
+        batch=arrow_batch(
+            [
+                {"color": "red", "label": "warm"},
+                {"color": "blue", "label": "cool"},
+            ]
+        ),
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
@@ -550,7 +559,7 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
         calls.append(kwargs)
 
     monkeypatch.setattr(Model, "log", log)
-    model = Model(schema=_schema(), batch_size=2)
+    model = Model(schema=configuration(), batch_size=2)
     value = torch.tensor(1.0, requires_grad=True)
 
     assert model.track(("loss", "train"), value=value) is value
@@ -564,13 +573,15 @@ def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None
 
 def test_training_step_returns_only_loss_to_avoid_retaining_prediction_graphs(monkeypatch) -> None:
     monkeypatch.setattr(Model, "log", lambda self, **kwargs: None)
-    schema = _prediction_schema()
+    schema = prediction_schema()
     model = Model(schema=schema, batch_size=2)
     inputs = encode(
-        batch=[
-            [{"color": "red", "label": "warm"}],
-            [{"color": "blue", "label": "cool"}],
-        ],
+        batch=arrow_batch(
+            [
+                {"color": "red", "label": "warm"},
+                {"color": "blue", "label": "cool"},
+            ]
+        ),
         schema=schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
@@ -613,10 +624,12 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
     )
 
     inputs = encode(
-        batch=[
-            [{"color": "red"}],
-            [{"color": "blue"}],
-        ],
+        batch=arrow_batch(
+            [
+                {"color": "red"},
+                {"color": "blue"},
+            ]
+        ),
         schema=model.schema,
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
@@ -632,48 +645,35 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
 
 
 def test_predict_encodes_batch_and_returns_supervised_outputs() -> None:
-    model = _primed_prediction_model()
+    model = primed()
     model.train()
 
-    supervised = model.predict(
-        batch=[
-            [{"color": "red"}],
-            [{"color": "blue"}],
-        ]
-    )
+    supervised = model.predict(table([{"color": "red"}, {"color": "blue"}]))
 
     assert model.training
-    assert Address("root", "label") in supervised
-    content = supervised[Address("root", "label")][TensorKey.content.name]
-    state = supervised[Address("root", "label")][TensorKey.state.name]
+    label = supervised["predictions"].combine_chunks().field("root/label")
+    content = label.field(TensorKey.content.name).to_pylist()
+    state = label.field(TensorKey.state.name).to_pylist()
 
-    assert len(content[TensorKey.value.name]) == 2
-    assert all(not isinstance(value, list) for value in content[TensorKey.value.name])
-    assert all(not isinstance(probability, list) for probability in content[TensorKey.probability.name])
-    assert len(content[TensorKey.topk.name]) == 2
-    assert all(row and isinstance(row[0], dict) for row in content[TensorKey.topk.name])
+    assert len(content) == 2
+    assert all(not isinstance(row[TensorKey.value.name], list) for row in content)
+    assert all(not isinstance(row[TensorKey.probability.name], list) for row in content)
+    assert all(row[TensorKey.topk.name] and isinstance(row[TensorKey.topk.name][0], dict) for row in content)
     assert all(
-        len(probabilities) == 2 and all(not isinstance(probability, list) for probability in probabilities)
-        for probabilities in state.values()
+        len(row) == len(Tokens) and all(not isinstance(probability, list) for probability in row.values())
+        for row in state
     )
-    assert supervised[Address("root", "label")][TensorKey.inferred.name] == [True, True]
+    assert label.field(TensorKey.inferred.name).to_pylist() == [True, True]
 
 
 def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
-    model = _primed_prediction_model()
+    model = primed()
 
-    inputs = model.encode(
-        batch=[
-            {"color": "red"},
-            {"color": "blue"},
-        ]
-    )
+    inputs = model.encode(table([{"color": "red"}, {"color": "blue"}]))
 
     color = inputs[Address("root", "color")]
     label = inputs[Address("root", "label")]
 
-    assert TensorKey.metadata in inputs.keys()
-    assert inputs[TensorKey.metadata] == [[{"color": "red"}], [{"color": "blue"}]]
     assert torch.equal(
         color.state,
         torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
@@ -695,15 +695,17 @@ def test_encode_branch_tail_overflow_keeps_last_values() -> None:
     )
 
     inputs = model.encode(
-        batch=[
-            {
-                "events": [
-                    {"amount": 1.0},
-                    {"amount": 2.0},
-                    {"amount": 3.0},
-                ]
-            }
-        ]
+        table(
+            [
+                {
+                    "events": [
+                        {"amount": 1.0},
+                        {"amount": 2.0},
+                        {"amount": 3.0},
+                    ]
+                }
+            ]
+        )
     )
 
     amount = inputs[Address("record", "events", "amount")]
@@ -725,15 +727,17 @@ def test_encode_branch_error_overflow_raises() -> None:
 
     with pytest.raises(ValueError, match="branch overflow at dimension 2 for record/events/amount"):
         model.encode(
-            batch=[
-                {
-                    "events": [
-                        {"amount": 1.0},
-                        {"amount": 2.0},
-                        {"amount": 3.0},
-                    ]
-                }
-            ]
+            table(
+                [
+                    {
+                        "events": [
+                            {"amount": 1.0},
+                            {"amount": 2.0},
+                            {"amount": 3.0},
+                        ]
+                    }
+                ]
+            )
         )
 
 
@@ -745,7 +749,7 @@ def test_encode_allows_null_inputs_by_default() -> None:
         n_heads=4,
     )
 
-    inputs = model.encode(batch=[{"amount": None}])
+    inputs = model.encode(table([{"amount": None}], schema=pa.schema([("amount", pa.float64())])))
     amount = inputs[Address("record", "amount")]
 
     assert model.schema.requests[Address("record", "amount")].nullable is True
@@ -761,25 +765,21 @@ def test_encode_nullable_false_rejects_null_inputs() -> None:
     )
 
     with pytest.raises(ValueError, match="record/amount.*nullable=False.*1 null"):
-        model.encode(batch=[{"amount": None}])
+        model.encode(table([{"amount": None}], schema=pa.schema([("amount", pa.float64())])))
 
 
 def test_encode_accepts_preprocess() -> None:
-    @rf.preprocess
-    def __root_helper_preprocess(observation: dict):
-        return rf.Observation({"color": observation["hue"]})
+    @rf.preprocess(requires=("hue",), produces=("color",))
+    def recolor(batch: rf.Batch) -> rf.Batch:
+        return batch.replace(pa.table({"color": batch.data["hue"]}))
 
-    model = _primed_prediction_model()
+    model = primed()
 
     inputs = model.encode(
-        batch=[
-            {"hue": "red"},
-            {"hue": "blue"},
-        ],
-        preprocess=__root_helper_preprocess,
+        table([{"hue": "red"}, {"hue": "blue"}]),
+        preprocess=recolor,
     )
 
-    assert inputs[TensorKey.metadata] == [[{"color": "red"}], [{"color": "blue"}]]
     assert torch.equal(
         inputs[Address("root", "color")].state,
         torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
@@ -787,17 +787,18 @@ def test_encode_accepts_preprocess() -> None:
 
 
 def test_encode_accepts_strata_for_testing_training_inputs() -> None:
-    model = _primed_prediction_model()
+    model = primed()
 
     inputs = model.encode(
-        batch=[
-            {"color": "red", "label": "warm"},
-            {"color": "blue", "label": "cool"},
-        ],
+        table(
+            [
+                {"color": "red", "label": "warm"},
+                {"color": "blue", "label": "cool"},
+            ]
+        ),
         strata=Strata.train,
     )
 
-    assert TensorKey.metadata not in inputs.keys()
     assert torch.equal(
         inputs[Address("root", "label")].targets[TensorKey.state],
         torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
@@ -809,19 +810,20 @@ def test_encode_accepts_strata_for_testing_training_inputs() -> None:
 
 
 def test_encode_mask_false_skips_training_target_masking() -> None:
-    model = _primed_prediction_model()
+    model = primed()
 
     inputs = model.encode(
-        batch=[
-            {"color": "red", "label": "warm"},
-            {"color": "blue", "label": "cool"},
-        ],
+        table(
+            [
+                {"color": "red", "label": "warm"},
+                {"color": "blue", "label": "cool"},
+            ]
+        ),
         strata=Strata.train,
         mask=False,
     )
     label = inputs[Address("root", "label")]
 
-    assert TensorKey.metadata not in inputs.keys()
     assert list(label.targets.keys()) == []
     assert not label.trainable.any()
     assert torch.equal(
@@ -831,19 +833,14 @@ def test_encode_mask_false_skips_training_target_masking() -> None:
 
 
 def test_predict_encodes_batch_and_returns_embedding_outputs() -> None:
-    model = _primed_prediction_model()
+    model = primed()
 
-    predictions = model.predict(
-        batch=[
-            [{"color": "red"}],
-            [{"color": "blue"}],
-        ]
-    )
+    predictions = model.predict(table([{"color": "red"}, {"color": "blue"}]))
 
-    assert Address("root") in predictions
-    embedding = predictions[Address("root")][TensorKey.embedding.name]
+    root = predictions["predictions"].combine_chunks().field("root")
+    embedding = root.field(TensorKey.embedding.name)
     assert len(embedding) == 2
-    assert all(not isinstance(row[0], list) for row in embedding)
+    assert embedding.type == pa.list_(pa.float32(), 8)
 
 
 def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
@@ -872,12 +869,7 @@ def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
     model = Model(schema=schema, batch_size=2)
     model.nodes[Address("root", "color")].decoder.pool = ConstantPool()
 
-    inputs = model.encode(
-        batch=[
-            [{"color": "red"}],
-            [{"color": "blue"}],
-        ]
-    )
+    inputs = model.encode(table([{"color": "red"}, {"color": "blue"}]))
     predictions = model(inputs, strata=Strata.predict)
     prediction = next(item for item in predictions if item.address == Address("root", "color"))
 
@@ -886,46 +878,31 @@ def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
 
 
 def test_inference_helpers_accept_postprocess() -> None:
-    model = _primed_prediction_model()
+    model = primed()
     calls = []
 
     @rf.postprocess
-    def postprocess(predictions, *, batch, input, metadata):
-        calls.append((batch, input, metadata, predictions))
-        return {
-            Address("root", "label"): {"value": ["postprocessed"]},
-            Address("root"): {"embedding": [[1.0, 2.0]]},
-        }
+    def compact(batch: rf.Batch) -> rf.Batch:
+        calls.append(batch)
+        return batch.replace(pa.table({"label": ["postprocessed", "postprocessed"]}))
 
-    batch = [
-        [{"color": "red"}],
-        [{"color": "blue"}],
-    ]
+    batch = table([{"color": "red"}, {"color": "blue"}])
 
-    predictions = model.predict(batch=batch, postprocess=postprocess)
+    predictions = model.predict(batch=batch, postprocess=compact)
 
     assert len(calls) == 1
-    assert calls[0][0] is batch
-    assert TensorKey.metadata in calls[0][1].keys()
-    assert list(calls[0][2]) == batch
-    assert Address("root", "label") in calls[0][3]
-    assert predictions[Address("root", "label")][TensorKey.value.name] == ["postprocessed"]
-    assert predictions[Address("root")][TensorKey.embedding.name] == [[1.0, 2.0]]
+    assert calls[0].data.column_names == ["inputs", "predictions"]
+    assert predictions.to_pydict() == {"label": ["postprocessed", "postprocessed"]}
 
 
 def test_inference_helpers_accept_preprocess() -> None:
-    @rf.preprocess
-    def __root_helper_preprocess(observation: dict):
-        return rf.Observation({"color": observation["hue"]})
+    @rf.preprocess(requires=("hue",), produces=("color",))
+    def recolor(batch: rf.Batch) -> rf.Batch:
+        return batch.replace(pa.table({"color": batch.data["hue"]}))
 
-    model = _primed_prediction_model()
+    model = primed()
 
-    supervised = model.predict(
-        batch=[
-            {"hue": "red"},
-            {"hue": "blue"},
-        ],
-        preprocess=__root_helper_preprocess,
-    )
+    supervised = model.predict(table([{"hue": "red"}, {"hue": "blue"}]), preprocess=recolor)
 
-    assert Address("root", "label") in supervised
+    predictions = supervised["predictions"].combine_chunks()
+    assert predictions.type.get_field_index("root/label") >= 0

@@ -6,7 +6,6 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
 
-import awkward as ak
 import numpy as np
 import pydantic
 import torch
@@ -153,10 +152,7 @@ class TensorField(TensorFieldBase):
         strata: Strata,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
-        values = ak.to_list(field.values)
-        invalid = next((value for value in values if not isinstance(value, str)), None)
-        if invalid is not None:
-            raise ValueError(f"text field at '{address}' expects string values, got {type(invalid).__name__}")
+        values = field.values.to_pylist()
 
         if values:
             tokenizer = CachedModel.get_tokenizer(request.model)
@@ -175,7 +171,7 @@ class TensorField(TensorFieldBase):
 
         token_ids = torch.from_numpy(field.place(encoded_ids, fill=0, value_shape=(request.max_length,)))
         attention_mask = torch.from_numpy(field.place(encoded_mask, fill=0, value_shape=(request.max_length,)))
-        state_tensor = torch.from_numpy(field.state)
+        state_tensor = torch.from_numpy(field.dense)
 
         return cls(
             state=state_tensor,
@@ -484,5 +480,10 @@ def loss(
 
 
 @text.register
-def write(module: Model, prediction: Prediction):
+def output(module: Model, address: Address) -> None:
+    return None
+
+
+@text.register
+def write(module: Model, prediction: Prediction, datatype: None) -> None:
     return None

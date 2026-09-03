@@ -1,11 +1,12 @@
 # ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-import awkward as ak
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -23,6 +24,7 @@ from relflow.tensorfields.base import (
     TensorFieldBase,
     apply_mask_policies,
 )
+from relflow.tensorfields.output import array, labels, struct, variable
 from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
@@ -104,32 +106,6 @@ class Request(RequestBase):
         return data
 
 
-def _encode_set_content(value: Any, state: VocabularyState, n_tokens: int) -> np.ndarray:
-    encoded = np.zeros(n_tokens, dtype=np.float32)
-
-    if value is None:
-        return encoded
-
-    if isinstance(value, str | bytes):
-        items = (value,)
-    elif isinstance(value, list | tuple | np.ndarray):
-        items = value
-    elif isinstance(value, Iterable):
-        raise ValueError("set values must use a list, tuple, NumPy array, or singleton label")
-    else:
-        items = (value,)
-
-    for item in items:
-        if item is None:
-            continue
-
-        index = state.encode(item)
-        if index is not None and index < n_tokens:
-            encoded[index] = 1.0
-
-    return encoded
-
-
 @sets.register
 @tensorclass
 class TensorField(TensorFieldBase):
@@ -149,26 +125,30 @@ class TensorField(TensorFieldBase):
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
         n_tokens: int = request.size
-        values = ak.to_list(field.values)
+        values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
         learn = strata == Strata.train
+        encoded = np.zeros((len(values), n_tokens), dtype=np.float32)
+        if (
+            pa.types.is_list(values.type)
+            or pa.types.is_large_list(values.type)
+            or pa.types.is_fixed_size_list(values.type)
+        ):
+            parents = pc.list_parent_indices(values)
+            flattened = pc.list_flatten(values)
+        else:
+            parents = pa.array(np.arange(len(values), dtype=np.int64))
+            flattened = values
+        if flattened.null_count:
+            valid = pc.is_valid(flattened)
+            flattened = pc.filter(flattened, valid)
+            parents = pc.filter(parents, valid)
+        indices = interprocess_encoding_context.indices(flattened, learn=learn)
+        if len(indices):
+            rows = parents.to_numpy(zero_copy_only=False)
+            known = indices < n_tokens
+            encoded[rows[known], indices[known]] = 1.0
 
-        interprocess_encoding_context.reserve(values, learn=learn)
-
-        encoded = np.asarray(
-            [
-                _encode_set_content(
-                    value=value,
-                    state=interprocess_encoding_context,
-                    n_tokens=n_tokens,
-                )
-                for value in values
-            ],
-            dtype=np.float32,
-        )
-        if not values:
-            encoded = np.empty((0, n_tokens), dtype=np.float32)
-
-        state_tensor = torch.from_numpy(field.state)
+        state_tensor = torch.from_numpy(field.dense)
         content = torch.from_numpy(field.place(encoded, fill=0.0, value_shape=(n_tokens,)))
 
         if strata == Strata.train and request.p_unavailable > 0.0:
@@ -388,37 +368,47 @@ def loss(
 
 
 @sets.register
-def write(module: Model, prediction: Prediction):
-    node = module.nodes[prediction.address]
+def output(module: Model, address: Address) -> pa.StructType:
+    candidate = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string(), nullable=False),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+        ]
+    )
+    return pa.struct([pa.field(TensorKey.content.name, pa.list_(candidate), nullable=False)])
+
+
+@sets.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content_type = datatype.field(TensorKey.content.name).type
+    candidate_type = content_type.value_type
+    logits = prediction.payload[TensorKey.content]
+    coordinates = logits.reshape(-1, logits.shape[-1])
+    vocabulary = labels(module.nodes[prediction.address].embedder.vocab)
+    size = len(vocabulary)
+    if size > coordinates.shape[-1]:
+        raise ValueError(
+            f"set vocabulary at {prediction.address!s} has {size} values but prediction width is "
+            f"{coordinates.shape[-1]}"
+        )
+
+    probabilities = coordinates[:, :size].sigmoid()
     request: Request = module.schema.requests[prediction.address]
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    content_logits: torch.Tensor = prediction.payload[TensorKey.content]
-
-    tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
-
-    vocab = node.embedder.vocab.snapshot()
-    probabilities = content_logits[..., : len(vocab)].sigmoid().detach().float().cpu().numpy()
     if request.threshold is None:
-        content_payload = {str(label): probabilities[..., index] for index, label in enumerate(vocab)}
+        counts = torch.full((coordinates.shape[0],), size, dtype=torch.int64)
+        indices = torch.arange(size, device=logits.device).expand(coordinates.shape[0], size).reshape(-1)
+        selected = probabilities.reshape(-1)
     else:
-        labels = np.asarray(vocab, dtype=object)
+        keep = probabilities.ge(request.threshold)
+        counts = keep.sum(dim=-1, dtype=torch.int64)
+        indices = keep.nonzero(as_tuple=False)[:, 1]
+        selected = probabilities[keep]
 
-        def pack_thresholded(values: np.ndarray) -> dict[str, float] | list:
-            if values.ndim == 1:
-                keep = values >= request.threshold
-                return {
-                    str(label): float(probability)
-                    for label, probability in zip(labels[keep].tolist(), values[keep].tolist())
-                }
-
-            return [pack_thresholded(values[index]) for index in range(values.shape[0])]
-
-        content_payload = pack_thresholded(probabilities)
-
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: content_payload,
-    }
+    candidates = struct(
+        {
+            TensorKey.value.name: pc.take(vocabulary, array(indices, pa.int64())),
+            TensorKey.probability.name: array(selected, pa.float32()),
+        },
+        candidate_type,
+    )
+    return struct({TensorKey.content.name: variable(candidates, counts)}, datatype)

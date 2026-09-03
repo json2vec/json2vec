@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 import torch
 from tensordict import TensorDict
@@ -6,7 +8,10 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.vector import Decoder, Embedder, TensorField, loss, write
+from relflow.tensorfields.extensions.vector import output as output_type
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/items/embedding"
 
@@ -44,8 +49,9 @@ def _values() -> list:
 
 
 def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
-    batch = [[{"items": [{"embedding": value} for value in root]}] for (root,) in values]
+    batch = arrow_batch([{"items": [{"embedding": value} for value in root]} for (root,) in values])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["vector"].prepare(field.values, address=ADDRESS))
     return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 
@@ -69,7 +75,7 @@ def test_vector_tensorfield_new_rejects_wrong_embedding_length():
         [[[0.6, 0.7, 0.8], [0.9, 1.0, 1.1]]],
     ]
 
-    with pytest.raises(ValueError, match="expects embeddings with length 3"):
+    with pytest.raises(ValueError, match="expects every value to have length 3"):
         _new_tensorfield(
             values=bad_values,
             schema=schema,
@@ -154,10 +160,15 @@ def test_vector_write_returns_content_payload():
         ),
     )
 
-    output = write(module=_DummyModule(structure), prediction=prediction)
-    assert TensorKey.state.name in output
-    assert set(output[TensorKey.state.name].keys()) == set(Tokens.__members__.keys())
-    assert TensorKey.content.name in output
-    assert output[TensorKey.content.name].shape == (2, 2, 3)
-    assert output[TensorKey.content.name][0].sum() == 6.0
-    assert output[TensorKey.content.name][1].sum() == 0.0
+    module = _DummyModule(structure)
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
+    assert output.type == datatype
+    content = output.field(TensorKey.content.name)
+    assert len(content) == 4
+    assert content.to_pylist() == [
+        [1.0, 1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ]

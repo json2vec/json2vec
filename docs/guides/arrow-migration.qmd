@@ -1,0 +1,359 @@
+---
+eval: false
+---
+
+# Migrate To The Arrow Pipeline
+
+**Example status — migration reference:** examples show direct replacements for
+the removed row-oriented APIs and use the shipped Arrow contracts.
+
+This release is intentionally breaking. RelFlow now has one columnar CPU data
+contract from ingestion through prediction output: Apache Arrow. Old row
+wrappers, file-discovery options, JMESPath expressions, Python prediction
+dictionaries, and `StreamingDataModule` are removed rather than emulated.
+
+The shortest migration is usually:
+
+```text
+records or files → pyarrow.Table / pyarrow.dataset → ArrowDataModule
+row preprocessor → Batch preprocessor using Arrow kernels
+JMESPath → node-relative structural query
+Python prediction mapping → pyarrow.Table
+row postprocessor → same-row Batch postprocessor
+```
+
+Migrate one boundary at a time in that order. It makes schema errors local and
+keeps model changes separate from data changes.
+
+## API Map
+
+| Before | Now |
+| --- | --- |
+| Python records as the common internal format | `pa.Table` inside `rf.Batch` |
+| `StreamingDataModule(...)` | construct an Arrow source and use `rf.ArrowDataModule(...)` |
+| `PolarsDataModule` with an internal Polars pipeline | one `DataFrame.to_arrow()` at ingress, then the Arrow pipeline |
+| `RawObservation`, `Observation`, `RawBatch`, `Metadata` | removed; use Arrow columns and `rf.Batch` |
+| row callable returning `rf.Observation` | `@rf.preprocess` callable accepting and returning `rf.Batch` |
+| JMESPath beginning with `[*]` | node-relative structural `query` |
+| mutable address-keyed prediction dictionary | canonical `pa.Table` with `inputs` and `predictions` |
+| postprocessor providers and mutable mappings | `@rf.postprocess` with `Batch → Batch` |
+| recursive prediction `serialize` / `squeeze` / `unbatch` helpers | stable Arrow list and struct shapes |
+| Polars/JSON writer staging | direct Arrow-to-Parquet `rf.Writer` |
+
+There are no compatibility aliases. Delete the old plumbing once each new
+boundary is covered by a schema test.
+
+## 1. Move Input To Arrow
+
+For an in-memory source, construct one table:
+
+```python
+import pyarrow as pa
+import relflow as rf
+
+train = pa.Table.from_pylist(records, schema=train_schema)
+
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=validate,
+    seed=42,
+)
+```
+
+For existing Polars code, install `relflow[polars]` and keep the small adapter:
+
+```python
+data = rf.PolarsDataModule(
+    model=model,
+    train=train_frame,
+    validate=validate_frame,
+)
+```
+
+`LazyFrame` is no longer accepted. Call `.collect()` yourself. This makes the
+point at which a lazy plan executes visible and reproducible.
+
+For Python mapping producers, choose by ownership:
+
+- an existing `torch.utils.data.IterableDataset` goes to
+  `rf.CustomDataModule`;
+- a restartable zero-argument mapping generator goes to
+  `rf.SyntheticDataModule`;
+- a restartable producer of Arrow units goes directly to
+  `rf.ArrowDataModule`.
+
+Both Python adapters convert bounded groups with
+`pa.RecordBatch.from_pylist(...)`. Set `ingress_rows` to bound that temporary
+list and provide `arrow_schema` when the first group cannot define the complete
+schema.
+
+### Replace `StreamingDataModule`
+
+File format, filesystem, and partition discovery are Arrow Dataset concerns
+now. Do that work when constructing the Dataset; do not move path regexes into
+a preprocessor. RelFlow-planned scanner filtering and projection pushdown are
+deferred in this first release:
+
+```python
+import pyarrow.dataset as ds
+
+train_dataset = ds.dataset("train/", format="parquet")
+data = rf.ArrowDataModule(model=model, train=train_dataset)
+```
+
+For a custom streaming format, provide a factory that opens a fresh Arrow
+reader on every call:
+
+```python
+import pyarrow.ipc as ipc
+
+def train_source():
+    handle = pa.memory_map("train.arrow", "r")
+    return ipc.open_stream(handle)
+
+data = rf.ArrowDataModule(model=model, train=train_source)
+```
+
+Do not pass a one-shot `RecordBatchReader`, a path string, or a configured
+`Scanner`; pass a Dataset or restartable factory.
+
+## 2. Rewrite Preprocessors By Batch
+
+An old row transform typically read a dictionary and returned an
+`Observation`. The replacement reads complete Arrow columns and returns a
+lineage-aware batch.
+
+Before:
+
+```python
+@rf.preprocess
+def prepare(record):
+    return rf.Observation(
+        {
+            "amount": float(record["subtotal"]) + float(record["tax"] or 0),
+            "merchant": record["merchant"].strip().lower(),
+        }
+    )
+```
+
+After:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
+@rf.preprocess(
+    requires=("subtotal", "tax", "merchant"),
+    produces=("amount", "merchant"),
+)
+def prepare(batch: rf.Batch) -> rf.Batch:
+    subtotal = pc.cast(batch.data["subtotal"], pa.float64())
+    tax = pc.fill_null(batch.data["tax"], 0.0)
+    amount = pc.add(subtotal, tax)
+    merchant = pc.utf8_lower(pc.utf8_trim_whitespace(batch.data["merchant"]))
+
+    data = pa.table({"amount": amount, "merchant": merchant})
+    return batch.replace(data)
+```
+
+Choose the return operation from the row effect:
+
+| The transform… | Return… |
+| --- | --- |
+| changes columns but preserves row count and order | `batch.replace(data)` |
+| keeps a subset | `batch.filter(mask)` or `batch.take(indices)` |
+| deliberately establishes a new order | `batch.order(indices)` |
+| emits one row per list item | `batch.explode(column, name=...)` |
+| performs an arbitrary one-to-many expansion | `batch.expand(data, parents, ordinals)` |
+| combines several source rows into one | `batch.group(data, parents)` |
+
+Do not return a bare `pa.Table`: that drops lineage. Do not manually slice
+`batch.data` without applying the same operation to identity.
+
+`group` accepts one ordered list of parent row indices per output row. That
+order contributes to grouped identity, so define it deterministically rather
+than inheriting incidental hash or worker order.
+
+Declare `scope="dataset"` only for a true global sort, aggregation, or regroup.
+The default `scope="partition"` is the scalable choice for projection,
+filtering, derivation, fixed lookups, and nested transforms local to an input
+partition. Dataset scope sees the complete split for a `Table` or
+`pyarrow.dataset.Dataset`; callable factories reject it until coordinated
+caching exists.
+
+`requires` declares all top-level source columns the function reads. RelFlow
+validates that metadata today; using it for Arrow Dataset scanner projection is
+deferred. `produces` declares columns the processor creates or replaces.
+Omitting `requires` means the processor may read any column, while
+`requires=()` explicitly says that it reads no source columns.
+
+Keyword-only user settings are immutable:
+
+```python
+@rf.preprocess(requires=("amount",), produces=("amount",))
+def scale(batch: rf.Batch, *, divisor: float) -> rf.Batch:
+    values = pc.divide(batch.data["amount"], divisor)
+    index = batch.data.schema.get_field_index("amount")
+    return batch.replace(batch.data.set_column(index, "amount", values))
+
+prepare = scale.partial(divisor=100.0)
+```
+
+Fit values outside iteration, bind them with `.partial(...)`, and version them
+with the model artifact. A preprocessor is not an implicit fitting lifecycle.
+
+## 3. Replace JMESPath With Structural Queries
+
+The new language is observation-relative, so delete the batch-leading `[*]`.
+Move shared collection selection to the `Branch` that owns the collection.
+
+| JMESPath-style expression | New schema binding |
+| --- | --- |
+| `[*].payload.amount` | `amount=rf.Number(query="payload.amount")` |
+| `[*].legs[0].origin` | `origin=rf.Category(query="legs[0].origin", ...)` |
+| `[*].events[-10:].amount` | `events=rf.Branch(query="events[-10:]", amount=rf.Number, ...)` |
+| `[*]."job code"` | `job=rf.Category(query='["job code"]', ...)` |
+
+For a nested payload shared by several fields:
+
+```python
+model = rf.Model(
+    query="payload",
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    items=rf.Branch(
+        query="line_items[-32:]",
+        length=32,
+        sku=rf.Category(query="product.sku", size=4096),
+        quantity=rf.Number(query="qty"),
+    ),
+    returned=rf.Category(query="outcome", target=True, size=2),
+)
+```
+
+Filters, functions, pipes, sorting, flattening, joins, and fallback expressions
+are intentionally absent. Implement them once in an Arrow preprocessor, then
+bind the resulting structure directly. See [Query Paths](../core-concepts/querypaths.qmd)
+for grammar and null/padded behavior.
+
+## 4. Make Randomization Explicit Where Order Matters
+
+Training now shuffles by default; validation, test, and prediction do not.
+`sample` is a probability applied to logical observations after preprocessing.
+Set a seed for repeatability:
+
+```python
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=validate,
+    seed=42,
+    shuffle={"train": True, "validate": False},
+    sample={"train": 0.8, "validate": 1.0},
+)
+```
+
+Use `shuffle=False` only for an intentionally ordered training scheme. The
+initial factory path uses a bounded Arrow shuffle controlled by `shuffle_rows`;
+in-memory tables receive a full permutation. Replacement, multiple loader
+workers, and distributed scheduling currently fail explicitly instead of
+silently weakening the ordering contract.
+
+This repeatability applies to data sampling and order. Stochastic masking,
+pruning, branch masks, and unavailable simulation still draw from Torch's
+global random stream and are not identity- or chunk-invariant. Seed the model
+runtime separately when reproducing a complete training run.
+
+## 5. Migrate Prediction Consumers
+
+`Model.predict(...)` now returns a `pyarrow.Table`. Without a postprocessor it
+has two top-level columns:
+
+```text
+inputs: struct<explicitly retained processed columns>
+predictions: struct<address: struct<typed prediction fields>>
+```
+
+The Arrow row dimension is always the request batch. Repeated model axes remain
+list dimensions, including for a one-row request; there is no batch-size-based
+`squeeze` behavior.
+
+Replace code that recursively indexes Python dictionaries with Arrow struct
+selection:
+
+```python
+result = model.predict(
+    request_table,
+    retain=("request_id",),
+)
+
+inputs = result["inputs"]
+predictions = result["predictions"]
+field = pc.struct_field(predictions, "record/fraud")
+content = pc.struct_field(field, "content")
+
+request_id = pc.struct_field(inputs, "request_id")
+label = pc.struct_field(content, "value")
+probability = pc.struct_field(content, "probability")
+```
+
+Only call `result.to_pylist()` at an application boundary that truly requires
+Python or JSON. `rf.Writer` writes Arrow directly to Parquet.
+
+## 6. Rewrite Postprocessors As Same-Row Arrow Transforms
+
+Postprocessors no longer receive provider parameters or mutable prediction
+mappings. Everything needed from the request must be named in `retain` and
+read from `batch.data["inputs"]`.
+
+```python
+@rf.postprocess
+def warehouse(batch: rf.Batch, *, threshold: float) -> rf.Batch:
+    inputs = batch.data["inputs"]
+    predictions = batch.data["predictions"]
+    fraud = pc.struct_field(predictions, "record/fraud")
+    content = pc.struct_field(fraud, "content")
+    probability = pc.struct_field(content, "probability")
+
+    data = pa.table(
+        {
+            "request_id": pc.struct_field(inputs, "request_id"),
+            "fraud": pc.struct_field(content, "value"),
+            "fraud_probability": probability,
+            "review": pc.greater_equal(probability, threshold),
+        }
+    )
+    return batch.replace(data)
+
+postprocessor = warehouse.partial(threshold=0.8)
+```
+
+A postprocessor may project, rename, derive, nest, flatten, or redact columns.
+It may not filter, reorder, expand, or group rows. Do that after prediction in
+application code, or before prediction when the operation should change model
+execution.
+
+## Verification Checklist
+
+Before removing the old pipeline, test these contracts on an empty batch, one
+row, and more than one model batch:
+
+- input and preprocessor output schemas are exact, including nested physical
+  types and nullability;
+- direct and explicit queries select the same values you intend;
+- every row-changing preprocessor uses a lineage-aware `Batch` method;
+- the same fitted preprocessor values are used for train, validation, and
+  prediction;
+- training order changes between epochs and reproduces from the same seed;
+- validation and prediction retain processed source order;
+- requested `retain` columns appear under `inputs` and no other source columns
+  leak into output;
+- prediction schema is identical for batch size one and larger batches;
+- postprocessors preserve row count, order, and identity;
+- Parquet output reads back with the expected schema.
+
+The [Working With Arrow](working-with-arrow.qmd) guide is the practical Arrow
+reference. [Data Modules](data-modules.qmd), [Binding Data](../core-concepts/binding-data.qmd),
+and [Prediction Output](prediction-output.qmd) own the detailed contracts.

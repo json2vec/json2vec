@@ -1,117 +1,27 @@
-"""Composable iterable stages for fetching, preprocessing, and encoding data."""
+"""Arrow batch encoding and tensor masking stages."""
 
 from __future__ import annotations
 
 import inspect
 import random
 from collections.abc import Iterable, Iterator
-from typing import Any, TypeVar, cast
+from dataclasses import replace
+from typing import Any, cast
 
 from beartype import beartype
 from tensordict import TensorDict
 
-from relflow.data.datasets.base import (
-    EncodedBatch,
-    EncodedInput,
-    InterprocessEncodingContext,
-    PreprocessorConfig,
-    ProcessedObservation,
-    RawObservation,
-)
-from relflow.data.processors import Preprocessor
+from relflow.data.arrow import Batch
+from relflow.data.datasets.base import EncodedInput, InterprocessEncodingContext
 from relflow.data.ragged import coalesce
-from relflow.structs.enums import Strata, TensorKey
+from relflow.structs.enums import Strata
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import TENSORFIELDS, TensorFieldBase
 
-T = TypeVar("T")
-
-
-@beartype
-def process(
-    pipe: Iterable[RawObservation],
-    preprocessor: PreprocessorConfig.Value,
-    strata: Strata,
-    schema: Schema,
-    interprocess_encoding_context: InterprocessEncodingContext,
-) -> Iterator[ProcessedObservation]:
-    resolved = Preprocessor.normalize(PreprocessorConfig.normalize(preprocessor))
-
-    if resolved is None:
-        for item in pipe:
-            yield [item]
-        return
-
-    for item in pipe:
-        yield from resolved.outputs(
-            item,
-            strata=strata,
-            schema=schema,
-            encoding_context=interprocess_encoding_context,
-        )
-
-
-@beartype
-def batch(pipe: Iterable[T], batch_size: int) -> Iterator[list[T]]:
-    items: list[T] = []
-
-    for item in pipe:
-        items.append(item)
-        if len(items) == batch_size:
-            yield items
-            items = []
-
-    if items:
-        yield items
-
-
-@beartype
-def sample(pipe: Iterable[T], sample_rate: float, strata: Strata) -> Iterator[T]:
-    if strata == Strata.predict or sample_rate >= 1.0:
-        yield from pipe
-        return
-
-    for item in pipe:
-        if random.random() < sample_rate:
-            yield item
-
-
-@beartype
-def shuffle(pipe: Iterable[T], size: int, strata: Strata) -> Iterator[T]:
-    if strata == Strata.predict:
-        yield from pipe
-        return
-
-    iterable = iter(pipe)
-    buffer: list[T] = []
-    exhausted = False
-
-    for _ in range(size):
-        try:
-            buffer.append(next(iterable))
-        except StopIteration:
-            exhausted = True
-            break
-
-    while buffer:
-        idx = random.randrange(len(buffer))
-        item = buffer[idx]
-
-        if exhausted:
-            buffer.pop(idx)
-        else:
-            try:
-                buffer[idx] = next(iterable)
-            except StopIteration:
-                exhausted = True
-                buffer.pop(idx)
-
-        yield item
-
 
 def encode(
-    batch: EncodedBatch,
+    batch: Batch,
     schema: Schema,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
@@ -125,7 +35,8 @@ def encode(
     ragged_fields = coalesce(batch, schema=schema, strata=strata)
 
     for address, request in schema.active_requests.items():
-        TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
+        plugin = TENSORFIELDS[request.type]
+        TensorField = cast(type[TensorFieldBase], getattr(plugin, "TensorField"))
 
         if (strata == Strata.predict) & (address in target_addresses):
             out[address] = TensorField.empty(
@@ -135,8 +46,10 @@ def encode(
             )
             continue
 
+        field = ragged_fields.pop(address)
+        field = replace(field, values=plugin.prepare(field.values, address=address))
         kwargs: dict[str, Any] = dict(
-            field=ragged_fields.pop(address),
+            field=field,
             address=address,
             schema=schema,
             strata=strata,
@@ -156,30 +69,10 @@ def encode(
 
     inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
 
-    if strata == Strata.predict:
-        inputs[TensorKey.metadata] = batch
-
     return inputs
 
 
-@beartype
-def transform(
-    pipe: Iterable[EncodedBatch],
-    schema: Schema,
-    strata: Strata,
-    interprocess_encoding_context: InterprocessEncodingContext,
-) -> Iterator[EncodedInput]:
-    for item in pipe:
-        yield encode(
-            batch=item,
-            schema=schema,
-            strata=strata,
-            interprocess_encoding_context=interprocess_encoding_context,
-            defer_target_masking=True,
-        )
-
-
-def _apply_mask_policy(
+def policy(
     field: TensorFieldBase,
     *,
     p_mask: float,
@@ -230,7 +123,7 @@ def mask(
             if p_mask <= 0.0 and p_prune <= 0.0 and not branch_masks:
                 continue
 
-            _apply_mask_policy(
+            policy(
                 item[address],
                 p_mask=p_mask,
                 p_prune=p_prune,

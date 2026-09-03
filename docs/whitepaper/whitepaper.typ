@@ -5,6 +5,18 @@
   ],
 )
 
+#block(
+  width: 100%,
+  inset: 8pt,
+  fill: rgb("#fff7d6"),
+  stroke: 1pt + rgb("#b7791f"),
+)[
+  *Historical API notice.* This manuscript predates RelFlow's Arrow-native
+  breaking release. Its JMESPath, `rf.Observation`, Python-row preprocessing,
+  and dictionary prediction examples are retained as design history and are
+  not current API guidance. Use the rendered documentation for supported code.
+]
+
 #let link-color = rgb("#0b5cad")
 #show ref: set text(fill: link-color)
 #show ref: underline

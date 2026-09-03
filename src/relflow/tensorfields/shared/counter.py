@@ -5,14 +5,15 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from lightning.pytorch import Callback
+from tensordict import TensorDict
 
+from relflow.data.arrow import Encoded
 from relflow.distributed import all_reduce_sum, is_distributed, synchronize_epoch_metrics
 from relflow.structs.enums import TensorKey, Tokens
 from relflow.structs.tree import Address
 
 if TYPE_CHECKING:
     from lightning.pytorch import Trainer
-    from tensordict import TensorDict
 
     from relflow.architecture.root import Model
 
@@ -103,11 +104,12 @@ class CounterUpdateCallback(Callback):
         self,
         trainer: Trainer,
         pl_module: Model,
-        batch: TensorDict,
+        batch: TensorDict | Encoded,
         batch_idx: int,
     ) -> None:  # ty:ignore[invalid-method-override]
+        inputs = batch.tensors if isinstance(batch, Encoded) else batch
         for address in pl_module.schema.active_requests:
-            field = batch[address]
+            field = inputs[address]
             embedder = pl_module.nodes[address].embedder
             observed: set[int] = set()
 

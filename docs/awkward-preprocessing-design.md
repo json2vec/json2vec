@@ -1,13 +1,15 @@
-# Awkward Array Preprocessing Design
+# Awkward Array Preprocessing Design (Historical)
 
-- Status: Phase 1 implemented; Awkward-backed eager coalescing is the canonical
-  tensorization path and `RaggedField` is the tensorfield extension boundary.
-  Direct Arrow/Polars adapters and profile-driven fused kernels remain Phase 2
-  work.
+- Status: Superseded by [Arrow-Native Pipeline Design And Roadmap](arrow-data-pipeline-design.md).
 - Date: 2026-08-29
 - Audit baseline: `e7cf72d`
 - Priority: Simplification and standardization first, speed second
 - Related design: [Unified Masking And Pruning](unified-mask-design-spec.md)
+
+This document records the first Awkward coalescing design and its recursive-loop
+audit. Its JMESPath, Python observation, persistent Awkward carrier, and staged
+Arrow migration details are not current API guidance. The shipped pipeline now
+keeps data in Arrow and uses Awkward only as a transient nested-kernel view.
 
 ## Decision
 

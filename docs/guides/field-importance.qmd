@@ -71,9 +71,8 @@ datamodule = rf.PolarsDataModule(
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    observation_buffer_size=256,
-    chunk_batch_size=32,
-    sample_rate=1.0,
+    seed=42,
+    sample=1.0,
 )
 
 trainer = lit.Trainer(

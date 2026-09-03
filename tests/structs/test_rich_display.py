@@ -1,5 +1,6 @@
 from pprint import pformat
 
+import pyarrow as pa
 import torch
 from rich.console import Console
 from rich.pretty import Pretty
@@ -36,10 +37,10 @@ def test_leaf_rich_display_uses_schema_summary() -> None:
 
 def test_leaf_rich_display_shows_only_explicit_query() -> None:
     direct = render_text(rf.Number("amount"))
-    queried = render_text(rf.Number("amount", query="[*].payload.amount"))
+    queried = render_text(rf.Number("amount", query="payload.amount"))
 
     assert "query=" not in direct
-    assert "amount [number] active query=[*].payload.amount" in queried
+    assert "amount [number] active query=payload.amount" in queried
 
 
 def test_leaf_display_flags() -> None:
@@ -286,7 +287,7 @@ def test_tensorfield_rich_display_previews_state_tokens() -> None:
         n_heads=4,
     )
     field = model.encode(
-        [{"letters": [{"letter": "A"}, {"letter": "B"}]}],
+        pa.Table.from_pylist([{"letters": [{"letter": "A"}, {"letter": "B"}]}]),
         strata=rf.Strata.train,
     )["record/letters/letter"]
 
@@ -316,14 +317,16 @@ def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
         n_heads=4,
     )
     field = model.encode(
-        [
-            {
-                "words": [
-                    {"letters": [{"letter": "A"}]},
-                    {"letters": [{"letter": "B"}, {"letter": "C"}]},
-                ]
-            }
-        ],
+        pa.Table.from_pylist(
+            [
+                {
+                    "words": [
+                        {"letters": [{"letter": "A"}]},
+                        {"letters": [{"letter": "B"}, {"letter": "C"}]},
+                    ]
+                }
+            ]
+        ),
         strata=rf.Strata.train,
         mask=False,
     )["record/words/letters/letter"]

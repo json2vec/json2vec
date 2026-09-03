@@ -5,8 +5,9 @@ import enum
 import math
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-import awkward as ak
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -24,6 +25,7 @@ from relflow.tensorfields.base import (
     TensorFieldBase,
     apply_mask_policies,
 )
+from relflow.tensorfields.output import array, fixed, struct
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
@@ -53,27 +55,6 @@ class Request(RequestBase):
     objective: Objective = Objective.l2
 
 
-def coerce(value: Any, *, n_dim: int, address: Address) -> np.ndarray:
-    if isinstance(value, np.ndarray):
-        if value.ndim != 1:
-            raise ValueError(f"vector field at '{address}' expects 1D embeddings, got array with ndim={value.ndim}")
-        raw: list[Any] = value.tolist()
-    elif isinstance(value, (list, tuple)):
-        raw = list(value)
-    else:
-        raise ValueError(
-            f"vector field at '{address}' expects embeddings as list/tuple/1D ndarray, got {type(value).__name__}"
-        )
-
-    if len(raw) != n_dim:
-        raise ValueError(f"vector field at '{address}' expects embeddings with length {n_dim}, got {len(raw)}")
-
-    try:
-        return np.asarray(raw, dtype=np.float32)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"vector field at '{address}' contains non-numeric embedding values") from error
-
-
 @vector.register
 @tensorclass
 class TensorField(TensorFieldBase):
@@ -91,10 +72,29 @@ class TensorField(TensorFieldBase):
         strata: Strata,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
-        vectors = [coerce(value, n_dim=request.n_dim, address=address) for value in ak.to_list(field.values)]
-        encoded = np.stack(vectors, axis=0) if vectors else np.empty((0, request.n_dim), dtype=np.float32)
+        values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+        if not len(values):
+            encoded = np.empty((0, request.n_dim), dtype=np.float32)
+        else:
+            if not (
+                pa.types.is_list(values.type)
+                or pa.types.is_large_list(values.type)
+                or pa.types.is_fixed_size_list(values.type)
+            ):
+                raise ValueError(f"vector field at '{address}' expects an Arrow list, got {values.type}")
+            lengths = pc.list_value_length(values)
+            if pc.any(pc.not_equal(lengths, request.n_dim)).as_py():
+                raise ValueError(f"vector field at '{address}' expects every value to have length {request.n_dim}")
+            flattened = pc.list_flatten(values)
+            if flattened.null_count:
+                raise ValueError(f"vector field at '{address}' expects non-null numeric elements")
+            try:
+                flattened = pc.cast(flattened, pa.float32(), safe=True)
+            except pa.ArrowException as error:
+                raise ValueError(f"vector field at '{address}' could not be converted to float32") from error
+            encoded = flattened.to_numpy(zero_copy_only=False).reshape(-1, request.n_dim)
         content = field.place(encoded, fill=0.0, value_shape=(request.n_dim,))
-        state = torch.from_numpy(field.state)
+        state = torch.from_numpy(field.dense)
 
         return cls(
             content=torch.from_numpy(content),
@@ -269,19 +269,17 @@ def loss(
 
 
 @vector.register
-def write(module: Model, prediction: Prediction):
-    content: np.ndarray = prediction.payload[TensorKey.content].detach().float().cpu().numpy()
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    tokens: np.ndarray = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
+def output(module: Model, address: Address) -> pa.StructType:
+    request: Request = module.schema.requests[address]
+    content = pa.list_(pa.float32(), request.n_dim)
+    return pa.struct([pa.field(TensorKey.content.name, content, nullable=False)])
 
-    non_valued = state_logits.argmax(dim=-1).ne(Tokens.valued.value).detach().cpu().numpy()
-    content = content.copy()
+
+@vector.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    request: Request = module.schema.requests[prediction.address]
+    content = prediction.payload[TensorKey.content].detach().float().clone()
+    non_valued = prediction.payload[TensorKey.state].argmax(dim=-1).ne(Tokens.valued.value)
     content[non_valued] = 0.0
-
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: content,
-    }
+    values = fixed(array(content, pa.float32()), request.n_dim)
+    return struct({TensorKey.content.name: values}, datatype)

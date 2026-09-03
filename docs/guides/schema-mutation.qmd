@@ -155,13 +155,15 @@ state exists when the context exits:
 #| echo: true
 #| output: true
 
+import pyarrow as pa
+
 with model.override(rf.where("name") == "amount", active=False):
     ablated_predictions = model.predict(
-        [{"channel": "web"}]
+        pa.Table.from_pylist([{"channel": "web"}])
     )
 
 restored_predictions = model.predict(
-    [{"amount": 42.0, "channel": "web"}]
+    pa.Table.from_pylist([{"amount": 42.0, "channel": "web"}])
 )
 ```
 

@@ -8,8 +8,9 @@ import re
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
-import awkward as ak
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -246,13 +247,14 @@ class TensorField(TensorFieldBase):
         strata: Strata,
     ) -> TensorFieldBase:
         request: RequestBase = schema.requests[address]
-        values = ak.to_list(field.values)
-
-        if request.pattern is not None:
-            values = [datetime.strptime(value, request.pattern) for value in values]
-
-        date_values = np.asarray(values, dtype="datetime64[s]")
-        state = torch.from_numpy(field.state)
+        values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+        try:
+            if request.pattern is not None:
+                values = pc.strptime(values, format=request.pattern, unit="s")
+            date_values = values.to_numpy(zero_copy_only=False).astype("datetime64[s]")
+        except (pa.ArrowException, TypeError, ValueError) as error:
+            raise ValueError(f"dateparts field at '{address}' contains invalid date values") from error
+        state = torch.from_numpy(field.dense)
 
         dateparts: dict[DatePart, torch.Tensor] = {}
 
@@ -447,5 +449,10 @@ def loss(
 
 
 @dateparts.register
-def write(module: Model, prediction: Prediction):
+def output(module: Model, address: Address) -> None:
+    return None
+
+
+@dateparts.register
+def write(module: Model, prediction: Prediction, datatype: None) -> None:
     return None

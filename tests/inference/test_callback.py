@@ -2,232 +2,121 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import lightning.pytorch as lit
-import polars as pl
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import pytest
-import torch
-from tensordict import TensorDict
 
 import relflow as rf
+from relflow.data.datasets.arrow import identity
 from relflow.inference.callback import Writer
 
 
-class _DummyModule:
-    def write(self, predictions):
-        return {"root/label": {"value": ["ok"]}}
+def result(data: pa.Table, *, namespace: str = "writer") -> rf.Batch:
+    return rf.Batch(data=data, identity=identity(data.num_rows, namespace=namespace))
 
 
-class _RowsModule:
-    def __init__(self, num_rows: int):
-        self.num_rows = num_rows
-
-    def write(self, predictions):
-        return {"root/label": {"value": ["ok"] * self.num_rows}}
-
-
-def test_writer_postprocess_receives_batch_context(tmp_path):
-    seen = {}
-
-    @rf.postprocess
-    def processor(
-        predictions,
-        *,
-        input,
-        batch,
-        metadata,
-        batch_indices,
-        batch_idx,
-        dataloader_idx,
-    ):
-        seen["input"] = input
-        seen["batch"] = batch
-        seen["metadata"] = metadata
-        seen["batch_indices"] = batch_indices
-        seen["batch_idx"] = batch_idx
-        seen["dataloader_idx"] = dataloader_idx
-        seen["predictions"] = predictions
-
-    batch = TensorDict(
-        {
-            "metadata": [{"color": "r"}],
-            "dummy": torch.tensor([1]),
-        },
-        batch_size=[1],
-    )
-    writer = Writer(path=tmp_path, postprocessor=processor)
-
+def write(writer: Writer, output: object, *, rank: int = 0, batch_idx: int = 0) -> None:
     writer.write_on_batch_end(
-        trainer=SimpleNamespace(local_rank=0, global_rank=7),
-        pl_module=_DummyModule(),
-        output={"predictions": []},
-        batch_indices=[12],
-        batch=batch,
-        batch_idx=3,
-        dataloader_idx=4,
+        trainer=SimpleNamespace(global_rank=rank),
+        pl_module=SimpleNamespace(),
+        output=output,
+        batch_indices=None,
+        batch=None,
+        batch_idx=batch_idx,
+        dataloader_idx=0,
     )
+
+
+def test_writer_persists_the_written_arrow_batch_and_identity(tmp_path):
+    output = result(
+        pa.table(
+            {
+                "inputs": pa.array([{"request_id": "a"}, {"request_id": "b"}]),
+                "predictions": pa.array([{"score": 0.25}, {"score": 0.75}]),
+            }
+        )
+    )
+    writer = Writer(tmp_path)
+
+    write(writer, output, rank=7)
     writer.on_predict_end(SimpleNamespace(), SimpleNamespace())
 
-    assert seen["input"] is batch
-    assert seen["batch"] is batch
-    assert list(seen["metadata"]) == [{"color": "r"}]
-    assert seen["batch_indices"] == [12]
-    assert seen["batch_idx"] == 3
-    assert seen["dataloader_idx"] == 4
-    assert seen["predictions"]["root/label"]["value"] == ["ok"]
-    assert (tmp_path / "rank-7.parquet").exists()
+    path = tmp_path / "rank-7.parquet"
+    assert path.exists()
     assert not (tmp_path / "rank-0.parquet").exists()
-    assert pl.read_parquet(tmp_path / "rank-7.parquet").to_dicts() == [
-        {"inputs": {"color": "r"}, "predictions": {"root/label": {"value": "ok"}}}
-    ]
-
-
-@pytest.mark.parametrize("prediction_rows", [1, 3])
-def test_writer_rejects_prediction_rows_misaligned_with_batch(tmp_path, prediction_rows):
-    batch = TensorDict(
-        {
-            "metadata": [{"color": "r"}, {"color": "b"}],
-            "dummy": torch.tensor([1, 2]),
-        },
-        batch_size=[2],
+    table = pq.read_table(path)
+    assert table.column_names == ["identity", "inputs", "predictions"]
+    assert table.select(["inputs", "predictions"]).equals(output.data)
+    assert (
+        pc.struct_field(table["identity"], "logical").to_pylist()
+        == pc.struct_field(output.identity, "logical").to_pylist()
     )
-    writer = Writer(path=tmp_path)
+    assert writer.writer is None
 
-    with pytest.raises(ValueError, match=rf"root/label.*has {prediction_rows} rows; expected 2"):
-        writer.write_on_batch_end(
-            trainer=SimpleNamespace(local_rank=0, global_rank=0),
-            pl_module=_RowsModule(prediction_rows),
-            output={"predictions": []},
-            batch_indices=[0, 1],
-            batch=batch,
-            batch_idx=0,
-            dataloader_idx=0,
+
+def test_writer_applies_one_arrow_postprocessor_before_persistence(tmp_path):
+    calls = []
+
+    @rf.postprocess
+    def compact(batch: rf.Batch) -> rf.Batch:
+        calls.append(batch)
+        predictions = batch.data["predictions"]
+        return batch.replace(
+            pa.table(
+                {
+                    "request_id": pc.struct_field(batch.data["inputs"], "request_id"),
+                    "score": pc.struct_field(predictions, "score"),
+                }
+            )
         )
 
+    output = result(
+        pa.table(
+            {
+                "inputs": pa.array([{"request_id": "a"}]),
+                "predictions": pa.array([{"score": 0.5}]),
+            }
+        )
+    )
+    writer = Writer(tmp_path, postprocessor=compact)
+
+    write(writer, output)
+    writer.close()
+
+    assert calls == [output]
+    table = pq.read_table(tmp_path / "rank-0.parquet")
+    assert table.column_names == ["identity", "request_id", "score"]
+    assert table.select(["request_id", "score"]).to_pylist() == [{"request_id": "a", "score": 0.5}]
+
+
+def test_writer_locks_the_exact_first_batch_schema_and_closes_on_drift(tmp_path):
+    writer = Writer(tmp_path)
+    write(writer, result(pa.table({"score": pa.array([1], type=pa.int64())})), batch_idx=0)
+
+    with pytest.raises(ValueError, match="schema differs from the first batch"):
+        write(writer, result(pa.table({"score": pa.array([1.0], type=pa.float64())})), batch_idx=1)
+
+    assert writer.writer is None
+    table = pq.read_table(tmp_path / "rank-0.parquet")
+    assert table["score"].type == pa.int64()
+    assert table["score"].to_pylist() == [1]
+
+
+def test_writer_rejects_the_reserved_identity_column(tmp_path):
+    writer = Writer(tmp_path)
+
+    with pytest.raises(ValueError, match="reserved column name 'identity'"):
+        write(writer, result(pa.table({"identity": ["user-owned"]})))
+
+    assert writer.writer is None
     assert not list(tmp_path.glob("*.parquet"))
 
 
-@pytest.mark.parametrize("prediction_rows", [1, 3])
-def test_writer_rejects_postprocessor_row_mismatch_and_closes_on_exception(tmp_path, prediction_rows):
-    @rf.postprocess
-    def processor(predictions, *, batch_idx):
-        if batch_idx == 0:
-            return predictions
-        return {"root/label": {"value": ["ok"] * prediction_rows}}
+def test_writer_requires_predict_step_to_return_batch(tmp_path):
+    writer = Writer(tmp_path)
 
-    batch = TensorDict(
-        {
-            "metadata": [{"color": "r"}, {"color": "b"}],
-            "dummy": torch.tensor([1, 2]),
-        },
-        batch_size=[2],
-    )
-    trainer = SimpleNamespace(local_rank=0, global_rank=0)
-    module = _RowsModule(num_rows=2)
-    writer = Writer(path=tmp_path, postprocessor=processor)
+    with pytest.raises(TypeError, match="predict_step.*rf.Batch"):
+        write(writer, pa.table({"score": [1.0]}))
 
-    writer.write_on_batch_end(
-        trainer=trainer,
-        pl_module=module,
-        output={"predictions": []},
-        batch_indices=[0, 1],
-        batch=batch,
-        batch_idx=0,
-        dataloader_idx=0,
-    )
-
-    with pytest.raises(ValueError, match=rf"root/label.*has {prediction_rows} rows; expected 2") as error:
-        writer.write_on_batch_end(
-            trainer=trainer,
-            pl_module=module,
-            output={"predictions": []},
-            batch_indices=[2, 3],
-            batch=batch,
-            batch_idx=1,
-            dataloader_idx=0,
-        )
-
-    assert writer.writer is not None
-    writer.on_exception(trainer, SimpleNamespace(), error.value)
     assert writer.writer is None
-    assert len(pl.read_parquet(tmp_path / "rank-0.parquet")) == 2
-
-
-def test_writer_rejects_later_batch_schema_drift(tmp_path):
-    trainer = SimpleNamespace(local_rank=0, global_rank=0)
-    module = _RowsModule(num_rows=1)
-    writer = Writer(path=tmp_path)
-    first = TensorDict(
-        {"metadata": [{"id": 1}], "dummy": torch.tensor([1])},
-        batch_size=[1],
-    )
-    drifted = TensorDict(
-        {"metadata": [{"id": 2, "extra": "lost"}], "dummy": torch.tensor([2])},
-        batch_size=[1],
-    )
-
-    writer.write_on_batch_end(
-        trainer=trainer,
-        pl_module=module,
-        output={"predictions": []},
-        batch_indices=[0],
-        batch=first,
-        batch_idx=0,
-        dataloader_idx=0,
-    )
-
-    with pytest.raises(ValueError, match="schema.*incompatible.*first batch") as error:
-        writer.write_on_batch_end(
-            trainer=trainer,
-            pl_module=module,
-            output={"predictions": []},
-            batch_indices=[1],
-            batch=drifted,
-            batch_idx=1,
-            dataloader_idx=0,
-        )
-
-    writer.on_exception(trainer, SimpleNamespace(), error.value)
-    assert writer.writer is None
-    assert pl.read_parquet(tmp_path / "rank-0.parquet").to_dicts() == [
-        {"inputs": {"id": 1}, "predictions": {"root/label": {"value": "ok"}}}
-    ]
-
-
-def test_writer_completes_real_prediction_loop_with_throughput_callback(tmp_path):
-    model = rf.Model(
-        d_model=8,
-        n_layers=1,
-        n_heads=2,
-        batch_size=2,
-        amount=rf.Number,
-        label=rf.Category(target=True, size=2, p_unavailable=0.0),
-    )
-    model.encode(
-        [
-            {"amount": 1.0, "label": "no"},
-            {"amount": 2.0, "label": "yes"},
-        ],
-        strata="train",
-    )
-
-    datamodule = rf.PolarsDataModule(
-        model=model,
-        predict=pl.DataFrame({"amount": [1.5, 2.5]}),
-        num_workers=0,
-        persistent_workers=False,
-        pin_memory=False,
-    )
-    output = tmp_path / "predictions"
-    trainer = lit.Trainer(
-        accelerator="cpu",
-        callbacks=[rf.Writer(output)],
-        logger=False,
-        enable_progress_bar=False,
-        enable_model_summary=False,
-    )
-
-    trainer.predict(model=model, datamodule=datamodule, return_predictions=False)
-
-    frame = pl.read_parquet(output / "rank-0.parquet")
-    assert len(frame) == 2
-    assert frame.columns == ["inputs", "predictions"]

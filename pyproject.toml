@@ -12,14 +12,12 @@ requires-python = ">=3.12"
 dependencies = [
     "awkward>=2.13.0",
     "beartype>=0.21.0",
-    "jmespath>=1.0.1",
     "pluggy>=1.6.0",
     "rich>=14.0.0",
     "pydantic>=2.11.7",
     "loguru>=0.7.3",
     "anytree>=2.13.0",
     "pyarrow>=21.0.0",
-    "polars>=1.35.2",
     "numpy>=2.2.6",
     "blake3>=1.0.8",
     "msgspec>=0.21.1",
@@ -30,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+polars = [
+    "polars>=1.35.2",
+]
 serving = [
     "fastapi>=0.124.0",
     "orjson>=3.10.0",
@@ -41,6 +42,7 @@ text = [
 ]
 docs = [
     "marimo>=0.23.8",
+    "polars>=1.35.2",
 ]
 
 [dependency-groups]
@@ -58,6 +60,7 @@ dev = [
     "uvicorn>=0.38.0",
     "ty>=0.0.1a20",
     "pre-commit>=4.3.0",
+    "polars>=1.35.2",
 ]
 
 [build-system]

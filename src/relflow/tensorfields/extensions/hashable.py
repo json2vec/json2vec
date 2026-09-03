@@ -5,9 +5,10 @@ import math
 from collections.abc import Hashable as HashableValue
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-import awkward as ak
 import msgspec
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -90,9 +91,21 @@ class TensorField(TensorFieldBase):
         request: Request = schema.requests[address]
         n_hashes: int = request.n_hashes
 
-        hashes = np.empty((len(field.values), n_hashes), dtype=np.int64)
+        values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+        if (
+            pa.types.is_list(values.type)
+            or pa.types.is_large_list(values.type)
+            or pa.types.is_fixed_size_list(values.type)
+            or pa.types.is_struct(values.type)
+            or pa.types.is_map(values.type)
+        ):
+            raise ValueError(f"hash field at '{address}' expects scalar Arrow values, got {values.type}")
+        if pa.types.is_dictionary(values.type):
+            values = pc.dictionary_decode(values)
+        unique = pc.unique(values)
+        unique_hashes = np.empty((len(unique), n_hashes), dtype=np.int64)
         key = salt.to_bytes(32, "big", signed=False)
-        for index, value in enumerate(ak.to_list(field.values)):
+        for index, value in enumerate(unique.to_pylist()):
             if not isinstance(value, HashableValue):
                 raise ValueError(
                     f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
@@ -104,9 +117,14 @@ class TensorField(TensorFieldBase):
                     f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
                 ) from error
             digest = blake3(payload, key=key).digest(length=n_hashes * 8)
-            hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
+            unique_hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
 
-        state_tensor = torch.from_numpy(field.state)
+        positions = pc.index_in(values, value_set=unique)
+        if positions.null_count:
+            raise RuntimeError(f"hash field at '{address}' failed to resolve an Arrow value")
+        hashes = unique_hashes[positions.to_numpy(zero_copy_only=False)]
+
+        state_tensor = torch.from_numpy(field.dense)
         content = torch.from_numpy(field.place(hashes, fill=0, value_shape=(n_hashes,)))
 
         return cls(
@@ -312,5 +330,10 @@ def loss(
 
 
 @hashable.register
-def write(module: Model, prediction: Prediction):
+def output(module: Model, address: Address) -> None:
+    return None
+
+
+@hashable.register
+def write(module: Model, prediction: Prediction, datatype: None) -> None:
     return None

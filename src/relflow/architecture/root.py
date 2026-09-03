@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Self, cast
 
 import lightning.pytorch as lit
+import pyarrow as pa
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
@@ -26,8 +27,9 @@ from relflow.architecture.mutations import (
     SchemaEditor,
     immutable,
 )
-from relflow.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
-from relflow.data.datasets.base import EncodedBatch, EncodedInput
+from relflow.architecture.runtime import ModelRuntime, Postprocessor, PredictionInput, Preprocessor, Retain, step
+from relflow.data.arrow import Batch, Encoded
+from relflow.data.datasets.base import EncodedInput
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata
 from relflow.structs.experiment import (
@@ -85,6 +87,7 @@ class Model(lit.LightningModule, Renderable):
         batch_size: int = 1,
         fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
+        query: str | None = None,
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
@@ -110,6 +113,7 @@ class Model(lit.LightningModule, Renderable):
                 Lightning example inputs.
             fields: Optional sequence form of `field_args`.
             name: Root branch name. Defaults to `record`.
+            query: Optional source path selected by the generated root.
             description: Optional description on the generated root branch.
             embed: Configure the generated root branch as an embedding output.
             attention: Attention mode for the generated root branch.
@@ -131,6 +135,7 @@ class Model(lit.LightningModule, Renderable):
             batch_size=batch_size,
             fields=fields,
             name=name,
+            query=query,
             description=description,
             embed=embed,
             attention=attention,
@@ -152,6 +157,7 @@ class Model(lit.LightningModule, Renderable):
         batch_size: int = 1,
         fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
+        query: str | None = None,
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
@@ -192,6 +198,7 @@ class Model(lit.LightningModule, Renderable):
                 n_heads=cast(int, n_heads),
                 fields=fields,
                 name=name,
+                query=query,
                 description=description,
                 embed=embed,
                 attention=attention,
@@ -214,6 +221,7 @@ class Model(lit.LightningModule, Renderable):
         self._schema_editor: SchemaEditor = SchemaEditor(self)
         self._contract_generation: int = 0
         self._contract_scheduler: ContractScheduler = ContractScheduler()
+        self.output_plans: dict[Any, Any] = {}
 
         self._build()
 
@@ -240,6 +248,7 @@ class Model(lit.LightningModule, Renderable):
     def _reset_contracts(self) -> None:
         self._contract_generation += 1
         self._contract_scheduler.reset()
+        self.output_plans.clear()
 
     def __rich_console__(self, console, options):
         parameters = sum(parameter.numel() for parameter in self.parameters())
@@ -502,18 +511,26 @@ class Model(lit.LightningModule, Renderable):
 
     from_checkpoint = load
 
-    def write(self, predictions: list[Prediction]) -> dict[Address, dict[str, Any]]:
-        return ModelRuntime.write(self, predictions)
+    def write(
+        self,
+        predictions: list[Prediction],
+        *,
+        source: Batch,
+        retain: Retain = (),
+    ) -> Batch:
+        """Convert tensor predictions into the canonical Arrow output batch."""
+
+        return ModelRuntime.write(self, predictions, source=source, retain=retain)
 
     @immutable("inference")
     def encode(
         self,
-        batch: EncodedBatch | list[dict[str, Any]],
+        batch: Batch | pa.Table | pa.RecordBatch,
         preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
         mask: bool = True,
     ) -> EncodedInput:
-        """Return encoded tensorfield inputs for raw or processed observations."""
+        """Return encoded tensorfield inputs for one Arrow input unit."""
         return ModelRuntime.encode(
             self,
             batch=batch,
@@ -525,16 +542,32 @@ class Model(lit.LightningModule, Renderable):
     @immutable("inference")
     def predict(
         self,
-        batch: EncodedBatch | list[dict[str, Any]],
+        batch: PredictionInput,
         preprocess: Preprocessor | None = None,
         postprocess: Postprocessor | None = None,
-    ) -> dict[Address, dict[str, Any]]:
+        retain: Retain = (),
+    ) -> pa.Table:
+        """Predict one Arrow input unit and return a typed Arrow table."""
+
         return ModelRuntime.predict(
             self,
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
+            retain=retain,
         )
+
+    def transfer_batch_to_device(
+        self,
+        batch: Any,
+        device: torch.device,
+        dataloader_idx: int,
+    ) -> Any:
+        """Move encoded tensors while retaining Arrow data on CPU."""
+
+        if isinstance(batch, Encoded):
+            return Encoded(tensors=batch.tensors.to(device), source=batch.source, retain=batch.retain)
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

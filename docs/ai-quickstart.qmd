@@ -74,13 +74,13 @@ record = {
 }
 ```
 
-Processed observation keys and nesting match the schema: `customer_tier` is a
-root key and `sku` is a key on each `line_items` child. This direct binding is
-the default; RelFlow does not infer JMESPath. Opt a leaf into `query=...` for a
-stable selection expression, or use an `@rf.preprocess` object for Python
-logic, coordinated reshaping, normalization, sorting, filtering, or windowing.
+Arrow field names and nesting match the schema: `customer_tier` is a root field
+and `sku` is a field on each `line_items` struct. This direct binding is the
+default. Put an Arrow-native structural `query=...` on a root, branch, or leaf
+when the source path differs; use an `@rf.preprocess` object for coordinated
+reshaping, normalization, sorting, filtering, joins, or windowing.
 See [Binding Data](core-concepts/binding-data.qmd) and
-[Advanced Query Paths](core-concepts/querypaths.qmd).
+[Query Paths](core-concepts/querypaths.qmd).
 
 ## Assign Learning Roles
 
@@ -104,28 +104,32 @@ repeated-window selection.
 RelFlow uses ordinary Lightning loops for training and large-batch prediction:
 
 ```python
-datamodule = rf.PolarsDataModule(
+import lightning.pytorch as lit
+import pyarrow as pa
+
+datamodule = rf.ArrowDataModule(
     model=model,
-    train=train_frame,
-    validate=validate_frame,
+    train=train_table,
+    validate=validate_table,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
 )
 
+trainer = lit.Trainer(max_epochs=1)
 trainer.fit(model=model, datamodule=datamodule)
 metrics = trainer.validate(model=model, datamodule=datamodule)
 
 model.save("model.pt")
 restored = rf.Model.load("model.pt")
 
-predictions = restored.predict(
-    [{"customer_tier": "gold", "line_items": []}]
-)
+requests = validate_table.drop(["returned"]).slice(0, 1)
+result = restored.predict(requests)
 ```
 
-Prediction requests normally omit fields configured with `target=True`. Output
-is keyed by `rf.Address`; decoded leaves include `state`, type-specific
+Prediction requests normally omit fields configured with `target=True`.
+`Model.predict` returns a `pyarrow.Table`; its `predictions` struct has one
+field per schema address. Decoded leaves include `state`, type-specific
 `content`, and `inferred`, while configured nodes can include `embedding`.
 
 Use [Training With Lightning](guides/lightning.qmd) for trainer behavior,
@@ -137,33 +141,39 @@ rank-partitioned Parquet output.
 
 ## Shape The Boundaries
 
-A preprocessor is part of the input contract:
+A preprocessor is part of the Arrow input contract:
 
 ```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
 @rf.preprocess
-def normalize_order(record: dict) -> rf.Observation:
-    return rf.Observation(
+def normalize_order(batch: rf.Batch) -> rf.Batch:
+    tier = pc.utf8_lower(pc.utf8_trim_whitespace(batch.data["tier"]))
+    data = pa.table(
         {
-            "customer_tier": record["tier"].strip().lower(),
-            "line_items": record["items"],
+            "customer_tier": tier,
+            "line_items": batch.data["items"],
         }
     )
-
-raw_requests = [{"tier": " Gold ", "items": []}]
-predictions = restored.predict(raw_requests, preprocess=normalize_order)
+    return batch.replace(data)
 ```
 
 A postprocessor is part of the application output contract:
 
 ```python
 @rf.postprocess
-def response(predictions):
-    field = predictions[rf.Address("order", "returned")]
-    return {"returned": field["content"]["value"]}
+def response(batch: rf.Batch) -> rf.Batch:
+    predictions = batch.data["predictions"]
+    returned = pc.struct_field(predictions, "order/returned")
+    content = pc.struct_field(returned, "content")
+    return batch.replace(
+        pa.table({"returned": pc.struct_field(content, "value")})
+    )
 ```
 
 Pass the same preprocessor through training and inference. Keep the stable,
-address-keyed model output intact until the postprocessor boundary. See
+typed model output intact until the postprocessor boundary. See
 [Data Flow](core-concepts/data-flow.qmd) and
 [Postprocessors](guides/postprocessors.qmd).
 
@@ -173,10 +183,11 @@ address-keyed model output intact until the postprocessor boundary. See
 | --- | --- | --- |
 | Root model | `rf.Model(...)` | [Model Tree](core-concepts/model-tree.qmd) |
 | Repeated context | `rf.Branch(...)` | [Branch](data-types/branch.qmd) |
-| Typed leaves | `rf.Number`, `Category`, `Set`, `Hash`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
-| In-memory / streaming input | `rf.PolarsDataModule`, `rf.StreamingDataModule` | [Data Modules](guides/data-modules.qmd) |
+| Typed leaves | `rf.Number`, `Category`, `Cluster`, `Set`, `Hash`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
+| Arrow input | `rf.ArrowDataModule` | [Data Modules](guides/data-modules.qmd) |
+| Input adapters | `rf.PolarsDataModule`, `rf.CustomDataModule`, `rf.SyntheticDataModule` | [Data Modules](guides/data-modules.qmd) |
 | Interactive prediction | `model.predict(...)` | [Getting Started](getting-started.qmd#interpret-the-prediction) |
-| Prediction contract | address-keyed `state`, `content`, `inferred`, `embedding` | [Prediction Output](guides/prediction-output.qmd) |
+| Prediction contract | Arrow `inputs` and address-named `predictions` structs | [Prediction Output](guides/prediction-output.qmd) |
 | Batch prediction | `rf.Writer(...)` | [Batch Inference](guides/batch-inference.qmd) |
 | Online prediction | `rf.Deployment(...)` | [Serving](guides/serving.qmd) |
 | Input / output transforms | `@rf.preprocess`, `@rf.postprocess` | [Binding Data](core-concepts/binding-data.qmd), [Postprocessors](guides/postprocessors.qmd) |
@@ -192,8 +203,10 @@ address-keyed model output intact until the postprocessor boundary. See
 - Use `Hash` for large identifiers whose equality matters. Matching values
   align across leaves in one encoded batch, though branch pooling can discard
   token-level correspondence.
-- Set bounded capacity for Category and Set fields, then monitor vocabulary
-  growth rather than inventing a missing-value class.
+- Use `Cluster` when a high-cardinality learned vocabulary should share a much
+  smaller set of latent representations.
+- Set bounded capacity for Category, Cluster, and Set fields, then monitor
+  vocabulary growth rather than inventing a missing-value class.
 - Use `overflow="tail"` only when source order places the newest values last.
 - Include targets in train/validation data; omit them from ordinary prediction
   requests.

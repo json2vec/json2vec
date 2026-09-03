@@ -7,10 +7,8 @@ from abc import ABC
 from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
-import jmespath
 import pydantic
 from anytree import NodeMixin
-from jmespath.exceptions import JMESPathError
 from rich.console import Console
 from rich.text import Text
 
@@ -273,20 +271,13 @@ class Leaf(Node):
         return value
 
     @pydantic.model_validator(mode="after")
-    def check_jmespath_query(self):
+    def check_query(self):
         if self.query is None:
             return self
 
-        if not isinstance(self.query, str) or not self.query.strip():
-            raise ValueError("query must be a non-empty string")
+        from relflow.data.query import compile
 
-        try:
-            jmespath.compile(self.query)
-        except JMESPathError as error:
-            raise ValueError(f"invalid jmespath query: {error}") from error
-        if not self.query.startswith("[*]"):
-            raise ValueError("query must begin with '[*]' at the processed-observation root")
-
+        compile(self.query)
         return self
 
     def __rich_console__(self, console, options):

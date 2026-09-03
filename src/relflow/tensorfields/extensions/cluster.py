@@ -7,8 +7,8 @@ from contextlib import AbstractContextManager, contextmanager
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from weakref import ReferenceType, ref
 
-import awkward as ak
-import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -29,6 +29,7 @@ from relflow.tensorfields.base import (
     TensorFieldBase,
     apply_mask_policies,
 )
+from relflow.tensorfields.output import array, labels, struct
 from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
@@ -224,22 +225,15 @@ class TensorField(TensorFieldBase):
         strata: Strata,
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
-        values = ak.to_list(field.values)
         learn = strata == Strata.train
-
-        interprocess_encoding_context.reserve(values, learn=learn)
-        tokens = np.fromiter(
-            (interprocess_encoding_context.encode(value) for value in values),
-            dtype=np.int64,
-            count=len(values),
-        )
+        tokens = interprocess_encoding_context.indices(field.values, learn=learn)
 
         if len(interprocess_encoding_context) > (capacity := schema.requests[address].capacity):
             logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
                 "vocabulary exceeds size={}", capacity
             )
 
-        state_tensor = torch.from_numpy(field.state)
+        state_tensor = torch.from_numpy(field.dense)
         content = torch.from_numpy(field.place(tokens, fill=0))
         if strata == Strata.train:
             p_unavailable: float = schema.requests[address].p_unavailable
@@ -747,49 +741,75 @@ def loss(
 
 
 @cluster.register
-def write(module: Model, prediction: Prediction):
-    node = module.nodes[prediction.address]
-    embedder: Embedder = node.embedder
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    cluster_logits: torch.Tensor = prediction.payload[TensorKey.cluster]
+def output(module: Model, address: Address) -> pa.StructType:
+    cluster_type = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.int32(), nullable=False),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+        ]
+    )
+    content_type = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string()),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+        ]
+    )
+    return pa.struct(
+        [
+            pa.field(TensorKey.cluster.name, cluster_type, nullable=False),
+            pa.field(TensorKey.content.name, content_type, nullable=False),
+        ]
+    )
 
-    tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
-    cluster_log_probs = torch.log_softmax(cluster_logits, dim=-1)
-    cluster_probs = cluster_log_probs.exp()
-    cluster_max_logprobs, cluster_ids = cluster_log_probs.max(dim=-1)
-    cluster_payload = {
-        TensorKey.value.name: cluster_ids.detach().cpu().numpy().astype(np.int32),
-        TensorKey.probability.name: cluster_max_logprobs.exp().detach().float().cpu().numpy(),
-    }
+@cluster.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    cluster_type = datatype.field(TensorKey.cluster.name).type
+    content_type = datatype.field(TensorKey.content.name).type
+    embedder: Embedder = module.nodes[prediction.address].embedder
+    logits = prediction.payload[TensorKey.cluster]
+    cluster_probabilities = logits.reshape(-1, logits.shape[-1]).softmax(dim=-1)
+    cluster_probability, cluster_ids = cluster_probabilities.max(dim=-1)
+    cluster_values = struct(
+        {
+            TensorKey.value.name: array(cluster_ids, pa.int32()),
+            TensorKey.probability.name: array(cluster_probability, pa.float32()),
+        },
+        cluster_type,
+    )
 
     assign_weight: torch.Tensor = embedder.embeddings[TensorKey.cluster.name].weight
-    vocab_logits: torch.Tensor = cluster_probs @ assign_weight.T
+    vocabulary_logits = cluster_probabilities @ assign_weight.T
+    vocabulary = labels(embedder.vocab)
+    size = len(vocabulary)
+    if size > vocabulary_logits.shape[-1]:
+        raise ValueError(
+            f"cluster vocabulary at {prediction.address!s} has {size} values but assignment width is "
+            f"{vocabulary_logits.shape[-1]}"
+        )
 
-    vocab = np.array(embedder.vocab.snapshot(), dtype=object)
-    content_shape = tuple(state_distribution.shape[:-1])
-    content_labels = np.full(content_shape, None, dtype=object)
-    content_probabilities = np.zeros(content_shape, dtype=np.float32)
-    if len(vocab) > 0:
-        candidate_indices = torch.arange(len(vocab), device=vocab_logits.device, dtype=torch.int64)
-        candidate_logits = vocab_logits.index_select(dim=-1, index=candidate_indices)
-        log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
-        max_logits, max_indices = candidate_logits.max(dim=-1)
-        content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
-        max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
-        content_labels = vocab[max_indices_np]
+    count = vocabulary_logits.shape[0]
+    content_labels: pa.Array = pa.nulls(count, type=pa.large_string())
+    content_probability = torch.zeros(count, dtype=torch.float32, device=logits.device)
+    if size:
+        probabilities = vocabulary_logits[:, :size].softmax(dim=-1)
+        content_probability, indices = probabilities.max(dim=-1)
+        content_labels = pc.take(vocabulary, array(indices, pa.int64()))
 
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.cluster.name: cluster_payload,
-        TensorKey.content.name: {
+    content_values = struct(
+        {
             TensorKey.value.name: content_labels,
-            TensorKey.probability.name: content_probabilities,
+            TensorKey.probability.name: array(content_probability, pa.float32()),
         },
-    }
+        content_type,
+    )
+    return struct(
+        {
+            TensorKey.cluster.name: cluster_values,
+            TensorKey.content.name: content_values,
+        },
+        datatype,
+    )
 
 
 class ClusterReviveCallback(Callback):

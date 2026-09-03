@@ -1,7 +1,7 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
-import polars as pl
 import torch
 from tensordict import TensorDict
 
@@ -9,6 +9,7 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.category import (
     Decoder,
     Embedder,
@@ -16,7 +17,11 @@ from relflow.tensorfields.extensions.category import (
     loss,
     write,
 )
+from relflow.tensorfields.extensions.category import (
+    output as output_type,
+)
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/items/category"
 
@@ -61,8 +66,9 @@ def _tensorfield(
     strata: Strata,
     interprocess_encoding_context: VocabularyState,
 ) -> TensorField:
-    batch = [[{"items": [{"category": value} for value in row]}] for row in rows]
+    batch = arrow_batch([{"items": [{"category": value} for value in row]} for row in rows])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["category"].prepare(field.values, address=ADDRESS))
     return TensorField.new(
         field=field,
         address=ADDRESS,
@@ -270,7 +276,7 @@ class _DummyModule:
         self.schema = SimpleNamespace(requests={ADDRESS: SimpleNamespace(topk=[2, 3, 5, 10], size=8)})
 
 
-def test_category_write_emits_state_and_content_payloads():
+def test_category_write_emits_arrow_content_and_candidates():
     module = _DummyModule()
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
@@ -292,29 +298,17 @@ def test_category_write_emits_state_and_content_payloads():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    state_payload = output[TensorKey.state.name]
-    content_payload = output[TensorKey.content.name]
-    topk_payload = content_payload[TensorKey.topk.name]
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
+    content = output.field(TensorKey.content.name)
+    topk = content.field(TensorKey.topk.name).to_pylist()
 
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    assert all(probabilities.shape == (2, 1) for probabilities in state_payload.values())
-    assert state_payload[Tokens.valued.name][0, 0] > 0.99
-    assert state_payload[Tokens.padded.name][1, 0] > 0.99
-
-    assert content_payload["value"].tolist() == [["BETA"], ["GAMMA"]]
-    assert content_payload[TensorKey.probability.name].shape == (2, 1)
-
-    assert len(topk_payload) == 2
-    assert len(topk_payload[0][0]) == 5
-    assert len(topk_payload[1][0]) == 5
-
-    for row in topk_payload:
-        assert set(row[0][0].keys()) == {"label", "probability"}
-
-    frame = pl.DataFrame({"state": state_payload, "content": content_payload})
-    assert isinstance(frame.schema["state"], pl.Struct)
-    assert isinstance(frame.schema["content"], pl.Struct)
+    assert output.type == datatype
+    assert len(output) == 2
+    assert content.field(TensorKey.value.name).to_pylist() == ["BETA", "GAMMA"]
+    assert len(topk[0]) == 5
+    assert len(topk[1]) == 5
+    assert set(topk[0][0]) == {TensorKey.value.name, TensorKey.probability.name}
 
 
 def test_category_write_ignores_logits_beyond_vocabulary_snapshot():
@@ -332,10 +326,34 @@ def test_category_write_ignores_logits_beyond_vocabulary_snapshot():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    content_payload = output[TensorKey.content.name]
+    output = write(module=module, prediction=prediction, datatype=output_type(module, ADDRESS))
+    content = output.field(TensorKey.content.name)
 
-    assert content_payload[TensorKey.value.name].tolist() == [["EPS"]]
+    assert content.field(TensorKey.value.name).to_pylist() == ["EPS"]
+
+
+def test_category_empty_vocabulary_keeps_declared_schema():
+    module = _DummyModule()
+    module.nodes[ADDRESS].embedder.vocab = OnlineVocabularyModel(size=8)
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(1, 1, len(Tokens)),
+                TensorKey.content: torch.zeros(1, 1, 8),
+            },
+            batch_size=[1],
+        ),
+    )
+
+    datatype = output_type(module, ADDRESS)
+    written = write(module=module, prediction=prediction, datatype=datatype)
+    content = written.field(TensorKey.content.name)
+
+    assert written.type == datatype
+    assert content.field(TensorKey.value.name).to_pylist() == [None]
+    assert content.field(TensorKey.probability.name).to_pylist() == [0.0]
+    assert content.field(TensorKey.topk.name).to_pylist() == [[]]
 
 
 class _TrackingModule:

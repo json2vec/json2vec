@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -5,11 +7,14 @@ import relflow as rf
 from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.hashable import (
     Decoder,
     Embedder,
     TensorField,
 )
+from tests.arrow import batch as arrow_batch
+from tests.arrow import table
 
 ADDRESS = "root/items/identifier"
 
@@ -55,8 +60,9 @@ def _new_tensorfield(
     strata: Strata,
     salt: int = 0,
 ) -> TensorField:
-    batch = [[{"items": [{"identifier": value} for value in root]}] for (root,) in values]
+    batch = arrow_batch([{"items": [{"identifier": value} for value in root]} for (root,) in values])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["hash"].prepare(field.values, address=ADDRESS))
     return TensorField.new(
         field=field,
         address=ADDRESS,
@@ -130,9 +136,10 @@ def test_hash_value_preserves_python_scalar_identity_across_batches():
     assert not torch.equal(floating, integer)
 
 
-def test_hash_value_rejects_mixed_python_identity_types():
-    with pytest.raises(TypeError, match="mixes Python value types"):
-        _hash_matrix([1, 1.0], n_hashes=4)
+def test_hash_value_uses_one_canonical_arrow_type_within_a_batch():
+    outputs = _hash_matrix([1, 1.0], n_hashes=4)
+
+    assert torch.equal(outputs[0], outputs[1])
 
 
 # --- tensorfield content behaviour ------------------------------------------------
@@ -185,7 +192,7 @@ def test_hashable_tensorfield_rejects_non_scalar_values():
         [[[5, 6], [7, 8]]],
     ]
 
-    with pytest.raises(ValueError, match="only accepts MessagePack-compatible hashable scalar values"):
+    with pytest.raises(ValueError, match="expects scalar Arrow values"):
         _new_tensorfield(
             values=values,
             schema=schema,
@@ -193,11 +200,11 @@ def test_hashable_tensorfield_rejects_non_scalar_values():
         )
 
 
-def test_hashable_ragged_batch_rejects_opaque_values():
+def test_hashable_rejects_arrow_struct_values():
     schema = Schema.model_validate(_structure_payload())
-    values = [[[object(), object()]], [[object(), object()]]]
+    values = [[[{"key": 1}, {"key": 2}]], [[{"key": 3}, {"key": 4}]]]
 
-    with pytest.raises(TypeError, match="root/items/identifier.*normalize it in a preprocessor"):
+    with pytest.raises(TypeError, match="root/items/identifier.*does not accept Arrow type"):
         _new_tensorfield(values=values, schema=schema, strata=Strata.train)
 
 
@@ -361,10 +368,12 @@ def test_hashable_embedder_forward_produces_finite_projections():
         batch_size=2,
     )
     inputs = model.encode(
-        [
-            {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
-            {"items": [{"id": "d"}, {"id": "e"}, {"id": None}]},
-        ],
+        table(
+            [
+                {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+                {"items": [{"id": "d"}, {"id": "e"}, {"id": None}]},
+            ]
+        ),
         strata=Strata.train,
         mask=False,
     )
@@ -392,10 +401,12 @@ def test_hashable_training_loss_covers_state_and_content_heads():
     )
     address = "record/items/id"
     inputs = model.encode(
-        [
-            {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
-            {"items": [{"id": "d"}, {"id": "e"}, {"id": "f"}]},
-        ],
+        table(
+            [
+                {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+                {"items": [{"id": "d"}, {"id": "e"}, {"id": "f"}]},
+            ]
+        ),
         strata=Strata.train,
         mask=False,
     )
@@ -495,10 +506,12 @@ def test_hashable_fields_keep_state_embeddings_and_decoders_local():
 def test_hashable_gives_same_input_value_identical_raw_embeddings_across_fields():
     model = _hashable_model()
     inputs = model.encode(
-        [
-            {"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"},
-            {"items": [{"id": "carol"}, {"id": "dave"}], "owner": "carol"},
-        ],
+        table(
+            [
+                {"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"},
+                {"items": [{"id": "carol"}, {"id": "dave"}], "owner": "carol"},
+            ]
+        ),
         strata=Strata.train,
         mask=False,
     )
@@ -536,7 +549,7 @@ def test_equal_values_stay_matched_within_each_rotating_batch(monkeypatch: pytes
     from relflow.data import iterables
 
     model = _hashable_model()
-    records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
+    records = table([{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}])
     salts = iter((1, 2, 3))
     monkeypatch.setattr(iterables.random, "getrandbits", lambda bits: next(salts))
 
@@ -559,7 +572,7 @@ def test_inference_uses_stable_unsalted_hashes(strata: Strata, monkeypatch: pyte
     from relflow.data import iterables
 
     model = _hashable_model()
-    records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
+    records = table([{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}])
 
     def unexpected_random_salt(bits: int) -> int:
         raise AssertionError("inference must not generate a random salt")

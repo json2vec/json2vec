@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,7 +12,19 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
-from relflow.tensorfields.extensions.boolean import BooleanCounter, Decoder, Embedder, TensorField, loss, write
+from relflow.tensorfields.base import TENSORFIELDS
+from relflow.tensorfields.extensions.boolean import (
+    BooleanCounter,
+    Decoder,
+    Embedder,
+    TensorField,
+    loss,
+    write,
+)
+from relflow.tensorfields.extensions.boolean import (
+    output as output_type,
+)
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/groups/items/enabled"
 
@@ -50,11 +63,14 @@ def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
 
 
 def _tensorfield(groups: list[list[list[Any]]], *, schema: Schema, strata: Strata) -> TensorField:
-    batch = [
-        [{"groups": [{"items": [{"enabled": value} for value in items]} for items in observation]}]
-        for observation in groups
-    ]
+    batch = arrow_batch(
+        [
+            {"groups": [{"items": [{"enabled": value} for value in items]} for items in observation]}
+            for observation in groups
+        ]
+    )
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["boolean"].prepare(field.values, address=ADDRESS))
     return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 
@@ -78,7 +94,7 @@ def test_boolean_tensorfield_encodes_nested_values_without_vocabulary():
 
 
 def test_boolean_tensorfield_rejects_integer_lookalikes():
-    with pytest.raises(TypeError, match="unsupported int.*expected bool"):
+    with pytest.raises(TypeError, match="does not accept Arrow type int64.*compatible with bool"):
         _tensorfield(
             groups=[[[1]]],
             schema=_schema(),
@@ -304,10 +320,12 @@ def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_
 
 def test_boolean_write_preserves_nested_shape_and_emits_true_probability():
     schema = _schema()
+    module = SimpleNamespace(schema=schema)
+    datatype = output_type(module, ADDRESS)
     state_logits = torch.zeros(1, 1, 2, 3, len(Tokens))
     content_logits = torch.tensor([[[[[-2.0], [0.0], [2.0]], [[2.0], [-2.0], [0.0]]]]])
     output = write(
-        SimpleNamespace(schema=schema),
+        module,
         Prediction(
             address=ADDRESS,
             payload=TensorDict(
@@ -315,17 +333,17 @@ def test_boolean_write_preserves_nested_shape_and_emits_true_probability():
                 batch_size=[1],
             ),
         ),
+        datatype,
     )
 
-    content = output[TensorKey.content.name]
-    assert set(content) == {TensorKey.probability.name}
-    probabilities = content[TensorKey.probability.name]
-    assert probabilities.shape == (1, 1, 2, 3)
+    assert output.type == datatype
+    assert len(output) == 6
+    content = output.field(TensorKey.content.name)
+    probabilities = content.field(TensorKey.probability.name)
     assert np.allclose(
-        probabilities,
-        [[[[0.11920292, 0.5, 0.880797], [0.880797, 0.11920292, 0.5]]]],
+        probabilities.to_numpy(),
+        [0.11920292, 0.5, 0.880797, 0.880797, 0.11920292, 0.5],
     )
-    assert set(output[TensorKey.state.name]) == set(Tokens.__members__)
 
 
 @pytest.mark.parametrize(
@@ -337,8 +355,9 @@ def test_boolean_write_preserves_nested_shape_and_emits_true_probability():
 )
 def test_boolean_write_is_independent_of_evaluation_thresholds(thresholds: list[float]):
     schema = _schema(threshold=thresholds)
+    module = SimpleNamespace(schema=schema)
     output = write(
-        SimpleNamespace(schema=schema),
+        module,
         Prediction(
             address=ADDRESS,
             payload=TensorDict(
@@ -349,10 +368,10 @@ def test_boolean_write_is_independent_of_evaluation_thresholds(thresholds: list[
                 batch_size=[1],
             ),
         ),
+        output_type(module, ADDRESS),
     )
 
-    content = output[TensorKey.content.name]
-    assert set(content) == {TensorKey.probability.name}
-    probabilities = content[TensorKey.probability.name]
-    assert probabilities.shape == (1, 1, 2, 3)
-    assert np.allclose(probabilities, torch.tensor(1.0).sigmoid().item())
+    content = output.field(TensorKey.content.name)
+    probabilities = content.field(TensorKey.probability.name)
+    assert len(probabilities) == 6
+    assert np.allclose(probabilities.to_numpy(), torch.tensor(1.0).sigmoid().item())

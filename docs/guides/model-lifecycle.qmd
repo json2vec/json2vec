@@ -22,15 +22,18 @@ After fitting, save the model that you actually intend to use:
 #| echo: true
 #| output: true
 
+import pyarrow as pa
+
 artifact = model.save("artifacts/fraud-model.ckpt")
 restored = rf.Model.load(artifact)
 
-predictions = restored.predict(
-    [
-        {"amount": 12.5, "merchant": "books"},
-        {"amount": 8.0, "merchant": "coffee"},
-    ]
+requests = pa.table(
+    {
+        "amount": [12.5, 8.0],
+        "merchant": ["books", "coffee"],
+    }
 )
+predictions = restored.predict(requests)
 ```
 
 `rf.Model.from_checkpoint(...)` is an alias of `rf.Model.load(...)`.
@@ -213,7 +216,8 @@ together:
 
 Before promotion, load the saved artifact in a fresh process and run a small
 set of representative requests through the intended inference path. Compare
-address keys, shapes, and postprocessed fields as well as numerical tolerances.
+Arrow address fields, schemas, shapes, and postprocessed columns as well as
+numerical tolerances.
 
 ## Suggested Artifact Checks
 
@@ -227,8 +231,14 @@ assert loaded.schema.model_dump(mode="python") == model.schema.model_dump(
     mode="python"
 )
 
-smoke = loaded.predict([{"amount": 12.5, "merchant": "books"}])
-assert rf.Address("record", "fraud") in smoke
+import pyarrow as pa
+
+requests = pa.Table.from_pylist(
+    [{"amount": 12.5, "merchant": "books"}]
+)
+smoke = loaded.predict(requests)
+prediction_type = smoke.schema.field("predictions").type
+assert prediction_type.get_field_index("record/fraud") >= 0
 ```
 
 For a stronger release check, keep fixed representative inputs and assert the

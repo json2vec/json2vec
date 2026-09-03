@@ -86,9 +86,9 @@ jump:
 
 1. **Why:** hierarchical business records lose useful structure when flattened.
 2. **What:** a RelFlow schema is both a data contract and a model blueprint.
-3. **How data moves:** raw record to optional preprocessing, direct Awkward
-   projection or opt-in JMESPath extraction, state/content tensors, model tree,
-   decoder/loss, and prediction writer.
+3. **How data moves:** Arrow input to optional preprocessing, direct or explicit
+   structural query, transient ragged regularization, state/content tensors,
+   model tree, decoder/loss, and Arrow prediction writer.
 4. **First result:** build, train, evaluate, save, load, and predict a tiny model.
 5. **Design:** choose branches, datatypes, learning roles, embeddings, and model
    capacity for a real problem.
@@ -195,7 +195,7 @@ The following material is required for the main reader journey:
 - Model Tree introduces architecture internals before the basic data-flow and
   value-state mental models are established.
 - Source binding should present the direct schema-shaped contract before
-  opt-in JMESPath and advanced preprocessing examples.
+  explicit structural queries and advanced Arrow preprocessing examples.
 - Dynamic Masking appears too early in the main sequence relative to evaluation,
   checkpointing, and inference.
 - The navbar and sidebar expose different conceptual groups; Motivation, AI /
@@ -222,7 +222,7 @@ follows:
    - Individual datatype references.
    - Binding Data: direct same-name fields and branches, explicit query, and
      preprocessor boundaries.
-   - Advanced Query Paths / JMESPath recipes.
+   - Advanced structural Query Paths recipes.
    - Learning roles and exported embeddings.
    - Branch/window design and dynamic masking.
 3. **Train And Evaluate**
@@ -263,7 +263,7 @@ a one-paragraph summary and link to it.
 | End-to-end data flow and glossary | New Mental Model / Data Flow page | Define only page-specific internals. |
 | Tree, branch, leaf, context, address | Model Tree | Binding/type pages assume and link to these terms. |
 | Choosing direct binding, an explicit query, or preprocessing | New short Binding Data page | Tutorials show one common case and link. |
-| Opt-in JMESPath and schema-shaped normalization | Advanced Query Paths reference | Datatype pages show only a relevant example. |
+| Explicit structural queries and schema-shaped normalization | Advanced Query Paths reference | Datatype pages show only a relevant example. |
 | Universal state/content vocabulary | Data Types overview | Type pages explain only type-specific content behavior. |
 | `target`, masking, pruning, and `embed` roles | Learning Modes & Embeddings | Tutorials summarize in a compact table and link. |
 | Public prediction envelope and `inferred` | Prediction/output-contract section | Type pages show their `content` member and link to the envelope. |

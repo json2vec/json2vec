@@ -4,8 +4,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-import awkward as ak
-import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -24,6 +24,7 @@ from relflow.tensorfields.base import (
     TensorFieldBase,
     apply_mask_policies,
 )
+from relflow.tensorfields.output import array, labels, struct, variable
 from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
@@ -180,22 +181,15 @@ class TensorField(TensorFieldBase):
         strata: Strata,
         interprocess_encoding_context: VocabularyState,
     ) -> TensorFieldBase:
-        values = ak.to_list(field.values)
         learn = strata == Strata.train
-
-        interprocess_encoding_context.reserve(values, learn=learn)
-        tokens = np.fromiter(
-            (interprocess_encoding_context.encode(value) for value in values),
-            dtype=np.int64,
-            count=len(values),
-        )
+        tokens = interprocess_encoding_context.indices(field.values, learn=learn)
 
         if len(interprocess_encoding_context) > (size := schema.requests[address].size):
             logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
                 "vocabulary exceeds size={}", size
             )
 
-        state_tensor = torch.from_numpy(field.state)
+        state_tensor = torch.from_numpy(field.dense)
         content = torch.from_numpy(field.place(tokens, fill=0))
         if strata == Strata.train:
             p_unavailable: float = schema.requests[address].p_unavailable
@@ -455,69 +449,73 @@ def loss(
 
 
 @category.register
-def write(module: Model, prediction: Prediction):
-    node = module.nodes[prediction.address]
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    content_logits: torch.Tensor = prediction.payload[TensorKey.content]
+def output(module: Model, address: Address) -> pa.StructType:
+    candidate = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string(), nullable=False),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+        ]
+    )
+    content = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string()),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+            pa.field(TensorKey.topk.name, pa.list_(candidate), nullable=False),
+        ]
+    )
+    return pa.struct([pa.field(TensorKey.content.name, content, nullable=False)])
 
-    tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
-    vocab = np.array(node.embedder.vocab.snapshot(), dtype=object)
-    labels = vocab
-    content_shape = tuple(state_distribution.shape[:-1])
-    content_labels = np.full(content_shape, None, dtype=object)
-    content_probabilities = np.zeros(content_shape, dtype=np.float32)
+@category.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content_type = datatype.field(TensorKey.content.name).type
+    candidate_type = content_type.field(TensorKey.topk.name).type.value_type
+    logits = prediction.payload[TensorKey.content]
+    coordinates = logits.reshape(-1, logits.shape[-1])
+    vocabulary = labels(module.nodes[prediction.address].embedder.vocab)
+    size = len(vocabulary)
+    if size > coordinates.shape[-1]:
+        raise ValueError(
+            f"category vocabulary at {prediction.address!s} has {size} values but prediction width is "
+            f"{coordinates.shape[-1]}"
+        )
 
-    requested_ks: list[int] = module.schema.requests[prediction.address].topk
-    max_requested_k: int = max(requested_ks, default=0)
-
-    def _pack_candidates(labels: np.ndarray, probabilities: np.ndarray) -> list[dict[str, float]] | list:
-        if labels.ndim == 1:
-            return [
-                {"label": str(label), "probability": float(probability)}
-                for label, probability in zip(labels.tolist(), probabilities.tolist())
-            ]
-
-        return [_pack_candidates(labels[index], probabilities[index]) for index in range(labels.shape[0])]
-
-    def _empty_candidates(shape: tuple[int, ...]) -> list | None:
-        if len(shape) == 0:
-            return []
-
-        return [_empty_candidates(shape[1:]) for _ in range(shape[0])]
-
-    topk_payload: list | None = _empty_candidates(content_shape)
-    if len(vocab) > 0:
-        candidate_indices = torch.arange(len(vocab), device=content_logits.device, dtype=torch.int64)
-        candidate_logits = content_logits.index_select(dim=-1, index=candidate_indices)
-        log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
-        max_logits, max_indices = candidate_logits.max(dim=-1)
-        content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
-
-        max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
-        content_labels = labels[max_indices_np]
-
-        if max_requested_k > 0:
-            topk: int = min(max_requested_k, candidate_logits.shape[-1])
-            topk_logits, topk_indices = candidate_logits.topk(k=topk, dim=-1)
-            topk_probabilities = (topk_logits - log_norm).exp()
-
-            topk_indices_np: np.ndarray = topk_indices.detach().cpu().numpy().astype(np.int32)
-            topk_labels_np: np.ndarray = labels[topk_indices_np]
-            topk_probabilities_np: np.ndarray = topk_probabilities.detach().float().cpu().numpy()
-            topk_payload = _pack_candidates(
-                labels=topk_labels_np,
-                probabilities=topk_probabilities_np,
-            )
-
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: {
-            TensorKey.value.name: content_labels,
-            TensorKey.probability.name: content_probabilities,
-            TensorKey.topk.name: topk_payload,
+    count = coordinates.shape[0]
+    best_labels: pa.Array = pa.nulls(count, type=pa.large_string())
+    best_probabilities = torch.zeros(count, dtype=torch.float32, device=logits.device)
+    candidates = struct(
+        {
+            TensorKey.value.name: pa.array([], type=pa.large_string()),
+            TensorKey.probability.name: pa.array([], type=pa.float32()),
         },
-    }
+        candidate_type,
+    )
+    candidate_counts = torch.zeros(count, dtype=torch.int64)
+
+    if size:
+        probabilities = coordinates[:, :size].softmax(dim=-1)
+        best_probabilities, best_indices = probabilities.max(dim=-1)
+        best_labels = pc.take(vocabulary, array(best_indices, pa.int64()))
+
+        request: Request = module.schema.requests[prediction.address]
+        width = min(max(request.topk, default=0), size)
+        if width:
+            top_probabilities, top_indices = probabilities.topk(k=width, dim=-1)
+            candidates = struct(
+                {
+                    TensorKey.value.name: pc.take(vocabulary, array(top_indices, pa.int64())),
+                    TensorKey.probability.name: array(top_probabilities, pa.float32()),
+                },
+                candidate_type,
+            )
+            candidate_counts = torch.full((count,), width, dtype=torch.int64)
+
+    content = struct(
+        {
+            TensorKey.value.name: best_labels,
+            TensorKey.probability.name: array(best_probabilities, pa.float32()),
+            TensorKey.topk.name: variable(candidates, candidate_counts),
+        },
+        content_type,
+    )
+    return struct({TensorKey.content.name: content}, datatype)

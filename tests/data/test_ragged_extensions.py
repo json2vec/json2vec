@@ -3,241 +3,182 @@ from __future__ import annotations
 import ast
 import inspect
 import uuid
-from types import UnionType
-from typing import Any, Literal
 
-import awkward as ak
-import numpy as np
+import pyarrow as pa
 import pytest
 
+import relflow as rf
 import relflow.data.ragged as ragged_module
+from relflow.data.iterables import encode
 from relflow.data.ragged import RaggedField, coalesce
 from relflow.structs.enums import Strata, Tokens
-from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
-from relflow.tensorfields.base import TENSORFIELDS, Plugin, RequestBase
+from relflow.tensorfields.base import TENSORFIELDS, Plugin
+from relflow.tensorfields.extensions.number import number
+from tests.arrow import batch
 
 
-def _plugin_name() -> str:
+def plugin_name() -> str:
     return f"ragged_{uuid.uuid4().hex[:8]}"
 
 
-def _extension(
-    value_types: tuple[type[Any] | UnionType, ...],
-    *,
-    query: str | None = None,
-) -> tuple[Plugin, Schema]:
-    plugin_name = _plugin_name()
-    plugin = Plugin(plugin_name, types=value_types)
+@pytest.mark.parametrize(
+    ("family", "datatype"),
+    [
+        ((str,), pa.large_string()),
+        ((bytes,), pa.binary()),
+        ((bool,), pa.bool_()),
+        ((int,), pa.int64()),
+        ((float,), pa.float32()),
+        ((int | float,), pa.list_(pa.float64())),
+        ((dict,), pa.struct([("key", pa.string())])),
+        ((object,), pa.map_(pa.string(), pa.int64())),
+    ],
+)
+def test_plugin_accepts_registered_arrow_terminal_families(family, datatype):
+    plugin = Plugin(plugin_name(), types=family)
+    try:
+        assert plugin.accepts(datatype)
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
 
-    @plugin.register
-    class Request(RequestBase):
-        type: Literal[plugin_name] = plugin_name
 
-    schema = Schema.from_tree(
-        Request("identity", query=query),
+@pytest.mark.parametrize(
+    ("family", "datatype"),
+    [
+        ((str,), pa.int64()),
+        ((bool,), pa.int8()),
+        ((int,), pa.bool_()),
+        ((float,), pa.decimal128(10, 2)),
+        ((dict,), pa.list_(pa.string())),
+    ],
+)
+def test_plugin_rejects_unregistered_arrow_terminal_families(family, datatype):
+    plugin = Plugin(plugin_name(), types=family)
+    try:
+        assert not plugin.accepts(datatype)
+        with pytest.raises(TypeError, match="does not accept Arrow type.*normalize it in a preprocessor"):
+            plugin.prepare(pa.array([], type=datatype), address=Address("record/value"))
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_prepare_validates_and_preserves_one_whole_arrow_array():
+    plugin = Plugin(plugin_name(), types=(int | float,))
+    values = pa.array([[1, 2], [3]], type=pa.large_list(pa.int64()))
+    try:
+        prepared = plugin.prepare(values, address=Address("record/value"))
+
+        assert prepared is values
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        rf.Category(size=8, p_unavailable=0.0),
+        rf.Hash(),
+        rf.Set(size=8, p_unavailable=0.0),
+        rf.Cluster(capacity=8, n_clusters=2, p_unavailable=0.0),
+    ],
+)
+def test_multifamily_plugins_accept_all_null_arrow_columns(field):
+    model = rf.Model(value=field, d_model=8, n_layers=1, n_heads=2)
+
+    encoded = model.encode(pa.table({"value": pa.nulls(2)}), mask=False)["record/value"]
+
+    assert encoded.state.tolist() == [
+        [Tokens.null.value],
+        [Tokens.null.value],
+    ]
+
+
+def test_encode_calls_plugin_prepare_once_with_the_whole_leaf_column(monkeypatch: pytest.MonkeyPatch):
+    model = rf.Model(value=rf.Number, d_model=8, n_layers=1, n_heads=2)
+    calls: list[pa.DataType] = []
+    original = number.prepare
+
+    def prepare(values, *, address):
+        calls.append(values.type)
+        return original(values, address=address)
+
+    monkeypatch.setattr(number, "prepare", prepare)
+
+    encode(
+        batch=batch([{"value": 1}, {"value": 2}, {"value": None}]),
+        schema=model.schema,
+        strata=Strata.predict,
+        interprocess_encoding_context=model.interprocess_encoding_context,
+    )
+
+    assert calls == [pa.int64()]
+
+
+def test_builtin_plugin_type_contract_fails_before_codec_coercion():
+    model = rf.Model(value=rf.Number, d_model=8, n_layers=1, n_heads=2)
+
+    with pytest.raises(TypeError, match="plugin 'number'.*does not accept Arrow type large_string"):
+        model.encode(pa.table({"value": ["1.5"]}))
+
+
+def test_mask_spelling_is_ordinary_typed_string_content():
+    model = rf.Model(value=rf.Category(size=8, p_unavailable=0), d_model=8, n_layers=1, n_heads=2)
+
+    fields = model.encode(pa.table({"value": ["<MASK>"]}), mask=False)
+
+    assert fields["record/value"].state.tolist() == [[Tokens.valued.value]]
+
+
+def test_coalesce_returns_arrow_backed_ragged_fields():
+    model = rf.Model(
+        items=rf.Branch(length=3, value=rf.Number),
         d_model=8,
         n_layers=1,
         n_heads=2,
     )
-    return plugin, schema
+    source = batch([{"items": [{"value": 1.0}, {"value": None}]}])
+
+    field = coalesce(source, schema=model.schema, strata=Strata.predict)["record/items/value"]
+
+    assert isinstance(field, RaggedField)
+    assert isinstance(field.values, pa.Array)
+    assert field.values.to_pylist() == [1.0]
+    assert field.state.type == pa.int8()
+    assert field.state.to_pylist() == [Tokens.valued.value, Tokens.null.value, Tokens.padded.value]
+    assert field.placement.type == pa.int64()
+    assert field.placement.to_pylist() == [0]
+    assert field.shape == (1, 1, 3)
 
 
-def _project(
-    schema: Schema,
-    values: list[Any],
-    *,
-    query: str | None,
-) -> RaggedField:
-    source_name = "source" if query is not None else "identity"
-    batch = [[{source_name: value}] for value in values]
-    return coalesce(batch, schema=schema, strata=Strata.predict)["record/identity"]
+def test_ragged_field_rejects_null_retained_values():
+    with pytest.raises(ValueError, match="values cannot contain nulls"):
+        RaggedField(
+            values=pa.array([None], type=pa.int64()),
+            state=pa.array([Tokens.valued.value], type=pa.int8()),
+            placement=pa.array([0], type=pa.int64()),
+            shape=(1,),
+        )
 
 
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        pytest.param("alpha", "alpha", id="str"),
-        pytest.param(b"alpha", b"alpha", id="bytes"),
-    ],
-)
-def test_custom_plugin_accepts_each_registered_type_family(query, value, expected):
-    plugin, schema = _extension((str, bytes), query=query)
-    try:
-        field = _project(schema, [value], query=query)
-
-        assert ak.to_list(field.values) == [expected]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
+def test_ragged_field_rejects_unknown_state_tokens():
+    with pytest.raises(ValueError, match="unknown token"):
+        RaggedField(
+            values=pa.array([], type=pa.int64()),
+            state=pa.array([99], type=pa.int8()),
+            placement=pa.array([], type=pa.int64()),
+            shape=(1,),
+        )
 
 
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_custom_plugin_accepts_a_registered_record_atom(query):
-    plugin, schema = _extension((dict,), query=query)
-    try:
-        field = _project(schema, [{"key": "value"}], query=query)
-
-        assert ak.to_list(field.values) == [{"key": "value"}]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_custom_plugin_rejects_an_unregistered_value_type(query):
-    plugin, schema = _extension((str,), query=query)
-    try:
-        with pytest.raises(TypeError, match="record/identity"):
-            _project(schema, [1], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_union_entry_allows_safe_mixed_python_types(query):
-    plugin, schema = _extension((int | float,), query=query)
-    try:
-        field = _project(schema, [1, 2.5], query=query)
-
-        assert ak.to_list(field.values) == [1.0, 2.5]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_numeric_family_does_not_accept_boolean_subclass(query):
-    plugin, schema = _extension((int | float,), query=query)
-    try:
-        with pytest.raises(TypeError, match="unsupported bool"):
-            _project(schema, [True], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize(
-    ("value", "family", "expected"),
-    [
-        pytest.param(np.longdouble("1.25"), (float,), 1.25, id="long-double"),
-        pytest.param(np.clongdouble("1.25+0.5j"), (complex,), 1.25 + 0.5j, id="complex-long-double"),
-    ],
-)
-def test_extended_numpy_scalars_canonicalize_without_recursion(value, family, expected):
-    plugin, schema = _extension(family)
-    try:
-        field = _project(schema, [value], query=None)
-
-        assert ak.to_list(field.values) == [expected]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-def test_homogeneous_numpy_array_stays_columnar_during_plugin_preparation():
-    plugin = Plugin(_plugin_name(), types=(int | float,))
-    value = np.arange(200_000, dtype=np.float32)
-    try:
-        prepared, observed = plugin.prepare(value, address=Address("record/vector"))
-
-        assert prepared is value
-        assert observed is None
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_separate_entries_reject_mixed_python_type_families(query):
-    plugin, schema = _extension((int, float), query=query)
-    try:
-        with pytest.raises(TypeError, match="record/identity"):
-            _project(schema, [1, 2.5], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param(["alpha", "beta"], id="list"),
-        pytest.param(("alpha", "beta"), id="tuple"),
-        pytest.param(np.asarray(["alpha", "beta"]), id="numpy-array"),
-    ],
-)
-def test_custom_plugin_recursively_validates_sequence_atoms(query, value):
-    plugin, schema = _extension((str,), query=query)
-    try:
-        field = _project(schema, [value], query=query)
-
-        assert ak.to_list(field.values) == [["alpha", "beta"]]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_custom_plugin_rejects_mixed_families_inside_one_structured_value(query):
-    plugin, schema = _extension((str, bytes), query=query)
-    try:
-        with pytest.raises(TypeError, match="record/identity"):
-            _project(schema, [["alpha", b"beta"]], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_numpy_and_python_scalars_resolve_to_the_same_family(query):
-    plugin, schema = _extension((int,), query=query)
-    try:
-        field = _project(schema, [np.int64(1), 2], query=query)
-
-        assert ak.to_list(field.values) == [1, 2]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_exact_matching_keeps_bool_and_int_in_separate_families(query):
-    plugin, schema = _extension((int, bool), query=query)
-    try:
-        with pytest.raises(TypeError, match="record/identity"):
-            _project(schema, [True, 1], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize(
-    ("query", "null_state"),
-    [
-        pytest.param(None, Tokens.null.value, id="direct"),
-        pytest.param("[*].source", Tokens.padded.value, id="query"),
-    ],
-)
-def test_null_and_mask_routing_bypass_plugin_value_types(query, null_state):
-    plugin, schema = _extension((int,), query=query)
-    try:
-        field = _project(schema, [None, "<MASK>", 1], query=query)
-
-        assert field.state.tolist() == [
-            [null_state],
-            [Tokens.masked.value],
-            [Tokens.valued.value],
-        ]
-        assert ak.to_list(field.values) == [1]
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-@pytest.mark.parametrize("query", [None, "[*].source"], ids=["direct", "query"])
-def test_bytes_mask_spelling_remains_an_ordinary_checked_value(query):
-    plugin, schema = _extension((int,), query=query)
-    try:
-        with pytest.raises(TypeError, match="record/identity"):
-            _project(schema, [b"<MASK>"], query=query)
-    finally:
-        TENSORFIELDS.pop(plugin.name, None)
-
-
-def test_request_base_has_no_datatype_value_type_hooks():
-    assert "ragged_value_types" not in RequestBase.__dict__
-    assert "preserve_python_identity" not in RequestBase.__dict__
+def test_ragged_field_requires_exact_valued_placement():
+    with pytest.raises(ValueError, match="every valued state position"):
+        RaggedField(
+            values=pa.array([1], type=pa.int64()),
+            state=pa.array([Tokens.valued.value, Tokens.padded.value], type=pa.int8()),
+            placement=pa.array([1], type=pa.int64()),
+            shape=(2,),
+        )
 
 
 def test_ragged_core_does_not_name_or_import_registered_tensorfield_types():

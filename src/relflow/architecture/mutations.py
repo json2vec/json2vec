@@ -50,6 +50,8 @@ class MutationLockCallback(Callback):
     locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
 
     def _on_loop_start(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        if strata == Strata.predict:
+            pl_module.output_plans.clear()
         pl_module.locks[strata] += 1
 
     def _on_loop_end(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:

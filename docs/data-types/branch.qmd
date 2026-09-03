@@ -131,38 +131,34 @@ model
 With the default direct path, `relflow` reads each `measurements` child mapping
 and binds its `name` and `value` keys at the same repeated coordinate.
 
-For stable path differences, a child leaf can opt into a full JMESPath query:
+For stable path differences, put the shared collection selection on the branch
+and child paths on their owning leaves:
 
 ```python
 items = rf.Branch(
     name="items",
+    query="line_items[-32:]",
     length=32,
     sku=rf.Category(
-        query="[*].line_items[*].product_sku",
+        query="product_sku",
         size=2048,
     ),
-    quantity=rf.Number(query="[*].line_items[*].qty"),
+    quantity=rf.Number(query="qty"),
 )
 ```
 
-Queries belong to leaves, not to `Branch`, and are not relative to the branch
-name. Every sibling query must preserve the same repeated coordinates. Use a
-preprocessor when source conversion or coordinated reshaping is clearer:
+Queries are relative to their parent node. The branch selects its collection
+once, so every sibling shares the same repeated coordinates and overflow plan.
+Use a preprocessor for predicates or coordinated data-dependent reshaping:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-@rf.preprocess
-def prepare_items(record: dict) -> rf.Observation:
-    return rf.Observation(
-        {
-            "items": [
-                {"sku": item["product_sku"], "quantity": item["qty"]}
-                for item in record["line_items"]
-            ]
-        }
-    )
+@rf.preprocess(requires=("line_items",), produces=("items",))
+def prepare_items(batch: rf.Batch) -> rf.Batch:
+    data = batch.data.append_column("items", batch.data["line_items"])
+    return batch.replace(data)
 
 
 items = rf.Branch(
@@ -297,7 +293,7 @@ and profiling guidance.
 - Use [Model Tree](../core-concepts/model-tree.qmd) for branch addresses and
   hierarchical context flow.
 - Use [Binding Data](../core-concepts/binding-data.qmd) and
-  [Advanced Query Paths](../core-concepts/querypaths.qmd) for child source
+  [Query Paths](../core-concepts/querypaths.qmd) for child source
   binding and extraction.
 - Use [Dynamic Masking](../core-concepts/dynamic-masking.qmd) for the exact
   repeated-coordinate mask contract.

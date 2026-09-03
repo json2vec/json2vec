@@ -119,6 +119,9 @@ python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.gi
 ```
 
 ```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
 import relflow as rf
 
 model = rf.Model(
@@ -134,15 +137,18 @@ model = rf.Model(
     ),
 )
 
-records = [
-    {"message": "Refund was approved after manual review."},
-    {"message": "Customer asked for shipment tracking details."},
-]
+records = pa.Table.from_pylist(
+    [
+        {"message": "Refund was approved after manual review."},
+        {"message": "Customer asked for shipment tracking details."},
+    ]
+)
 
-predictions = model.predict(records)
-record_embedding = predictions[rf.Address("record")]["embedding"]
+result = model.predict(records)
+record = pc.struct_field(result["predictions"], "record")
+record_embedding = pc.struct_field(record, "embedding")
 
-print(len(record_embedding), len(record_embedding[0]))
+print(len(record_embedding), record_embedding.type.list_size)
 ```
 
 This is a wiring smoke test, not a trained classifier. It exercises tokenizer

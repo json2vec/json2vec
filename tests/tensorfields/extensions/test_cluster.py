@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,7 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.cluster import (
     ClusterMergeCallback,
     ClusterReviveCallback,
@@ -18,8 +20,12 @@ from relflow.tensorfields.extensions.cluster import (
     loss,
     write,
 )
+from relflow.tensorfields.extensions.cluster import (
+    output as output_type,
+)
 from relflow.tensorfields.shared.counter import Counter
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/items/cluster"
 
@@ -74,8 +80,9 @@ def _tensorfield(
     strata: Strata,
     interprocess_encoding_context: VocabularyState,
 ) -> TensorField:
-    batch = [[{"items": [{"cluster": value} for value in row]}] for row in rows]
+    batch = arrow_batch([{"items": [{"cluster": value} for value in row]} for row in rows])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["cluster"].prepare(field.values, address=ADDRESS))
     return TensorField.new(
         field=field,
         address=ADDRESS,
@@ -301,7 +308,7 @@ class _DummyWriteModule:
         self.nodes = {ADDRESS: SimpleNamespace(embedder=embedder)}
 
 
-def test_cluster_write_emits_state_cluster_and_content_payloads():
+def test_cluster_write_emits_arrow_cluster_and_content_payloads():
     K = 4
     capacity = 5
     embedder = _DummyEmbedder(
@@ -327,26 +334,19 @@ def test_cluster_write_emits_state_cluster_and_content_payloads():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    assert set(output.keys()) == {TensorKey.state.name, TensorKey.cluster.name, TensorKey.content.name}
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
+    assert output.type == datatype
+    assert output.type.names == [TensorKey.cluster.name, TensorKey.content.name]
 
-    state_payload = output[TensorKey.state.name]
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    for v in state_payload.values():
-        assert v.shape == (2, 1)
-    assert state_payload[Tokens.valued.name][0, 0] > 0.99
-    assert state_payload[Tokens.padded.name][1, 0] > 0.99
-
-    cluster_payload = output[TensorKey.cluster.name]
-    assert cluster_payload[TensorKey.value.name].tolist() == [[1], [2]]
-    assert cluster_payload[TensorKey.probability.name].shape == (2, 1)
-    assert (cluster_payload[TensorKey.probability.name] > 0.99).all()
+    cluster_payload = output.field(TensorKey.cluster.name)
+    assert cluster_payload.field(TensorKey.value.name).to_pylist() == [1, 2]
+    assert all(value > 0.99 for value in cluster_payload.field(TensorKey.probability.name).to_pylist())
 
     # Assignment table row i is one-hot on cluster (i % K), so vocab argmax on cluster 1 -> BETA,
     # cluster 2 -> GAMMA.
-    content_payload = output[TensorKey.content.name]
-    assert content_payload[TensorKey.value.name].tolist() == [["BETA"], ["GAMMA"]]
-    assert content_payload[TensorKey.probability.name].shape == (2, 1)
+    content_payload = output.field(TensorKey.content.name)
+    assert content_payload.field(TensorKey.value.name).to_pylist() == ["BETA", "GAMMA"]
 
 
 def test_cluster_write_drops_sentinel_column_from_content_prediction():
@@ -377,12 +377,12 @@ def test_cluster_write_drops_sentinel_column_from_content_prediction():
             batch_size=[1],
         ),
     )
-    output = write(module=module, prediction=prediction)
+    output = write(module=module, prediction=prediction, datatype=output_type(module, ADDRESS))
 
     # Sentinel dropped -> best real vocab wins. Vocab rows for A/B point at cluster 1 which has ~0
     # probability under our logits, so all vocab candidates are equal; argmax returns index 0 -> A.
-    content_payload = output[TensorKey.content.name]
-    assert content_payload[TensorKey.value.name].tolist() == [["A"]]
+    content_payload = output.field(TensorKey.content.name)
+    assert content_payload.field(TensorKey.value.name).to_pylist() == ["A"]
 
 
 def test_cluster_write_returns_none_labels_when_vocab_is_empty():
@@ -401,10 +401,10 @@ def test_cluster_write_returns_none_labels_when_vocab_is_empty():
             batch_size=[1],
         ),
     )
-    output = write(module=module, prediction=prediction)
-    content_payload = output[TensorKey.content.name]
-    assert content_payload[TensorKey.value.name].tolist() == [[None]]
-    assert content_payload[TensorKey.probability.name].tolist() == [[0.0]]
+    output = write(module=module, prediction=prediction, datatype=output_type(module, ADDRESS))
+    content_payload = output.field(TensorKey.content.name)
+    assert content_payload.field(TensorKey.value.name).to_pylist() == [None]
+    assert content_payload.field(TensorKey.probability.name).to_pylist() == [0.0]
 
 
 # ---------- loss ----------

@@ -1,3 +1,6 @@
+from dataclasses import replace
+from types import SimpleNamespace
+
 import torch
 from tensordict import TensorDict
 
@@ -5,8 +8,11 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
+from relflow.tensorfields.extensions.set import output as output_type
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/items/tags"
 
@@ -55,8 +61,9 @@ def _new_tensorfield(
     strata: Strata,
     interprocess_encoding_context,
 ) -> TensorField:
-    batch = [[{"items": [{"tags": value} for value in root]}] for (root,) in values]
+    batch = arrow_batch([{"items": [{"tags": value} for value in root]} for (root,) in values])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["set"].prepare(field.values, address=ADDRESS))
     return TensorField.new(
         field=field,
         address=ADDRESS,
@@ -200,7 +207,7 @@ class _DummyModule:
         return value
 
 
-def test_set_write_emits_probability_for_each_known_vocab_item():
+def test_set_write_emits_candidates_for_each_known_vocab_item():
     module = _DummyModule(schema=Schema.model_validate(_structure_payload()))
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
@@ -222,14 +229,16 @@ def test_set_write_emits_probability_for_each_known_vocab_item():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    state_payload = output[TensorKey.state.name]
-    content_payload = output[TensorKey.content.name]
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
+    content = output.field(TensorKey.content.name).to_pylist()
 
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    assert set(content_payload.keys()) == {"ALPHA", "BETA"}
-    assert content_payload["ALPHA"].shape == (2, 1)
-    assert content_payload["BETA"][0, 0] > content_payload["ALPHA"][0, 0]
+    assert output.type == datatype
+    assert [[candidate[TensorKey.value.name] for candidate in row] for row in content] == [
+        ["ALPHA", "BETA"],
+        ["ALPHA", "BETA"],
+    ]
+    assert content[0][1][TensorKey.probability.name] > content[0][0][TensorKey.probability.name]
 
 
 def test_set_write_filters_content_when_threshold_is_configured():
@@ -252,13 +261,35 @@ def test_set_write_filters_content_when_threshold_is_configured():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
+    output = write(module=module, prediction=prediction, datatype=output_type(module, ADDRESS))
     expected_probability = torch.sigmoid(torch.tensor(2.0)).item()
+    content = output.field(TensorKey.content.name).to_pylist()
 
-    assert output[TensorKey.content.name] == [
-        [{"BETA": expected_probability}],
-        [{"ALPHA": expected_probability}],
+    assert content == [
+        [{TensorKey.value.name: "BETA", TensorKey.probability.name: expected_probability}],
+        [{TensorKey.value.name: "ALPHA", TensorKey.probability.name: expected_probability}],
     ]
+
+
+def test_set_empty_vocabulary_keeps_declared_schema():
+    structure = Schema.model_validate(_structure_payload())
+    module = _DummyModule(schema=structure, embedder=SimpleNamespace(vocab=OnlineVocabularyModel(size=8)))
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(1, 1, len(Tokens)),
+                TensorKey.content: torch.zeros(1, 1, 8),
+            },
+            batch_size=[1],
+        ),
+    )
+
+    datatype = output_type(module, ADDRESS)
+    written = write(module=module, prediction=prediction, datatype=datatype)
+
+    assert written.type == datatype
+    assert written.field(TensorKey.content.name).to_pylist() == [[]]
 
 
 def test_set_loss_does_not_mutate_counter():

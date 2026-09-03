@@ -86,6 +86,9 @@ whole record.
 #| echo: true
 #| output: true
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 import relflow as rf
 
 model = rf.Model(
@@ -107,8 +110,12 @@ After training, `model.predict(...)` includes the root embedding:
 #| echo: true
 #| output: true
 
-predictions = model.predict(records)
-transaction_embedding = predictions[rf.Address("transaction")]["embedding"]
+requests = pa.Table.from_pylist(
+    [{"amount": 42.0, "merchant": "grocery"}]
+)
+result = model.predict(requests)
+transaction = pc.struct_field(result["predictions"], "transaction")
+transaction_embedding = pc.struct_field(transaction, "embedding")
 ```
 
 Use root embeddings for whole-record retrieval, clustering, anomaly detection,
@@ -147,10 +154,26 @@ This produces an embedding tree with at least two useful addresses:
 #| echo: true
 #| output: true
 
-predictions = model.predict(records)
-
-customer_embedding = predictions[rf.Address("customer")]["embedding"]
-events_embedding = predictions[rf.Address("customer", "events")]["embedding"]
+requests = pa.Table.from_pylist(
+    [
+        {
+            "customer_tier": "gold",
+            "events": [
+                {"event_type": "purchase", "merchant": "grocery", "amount": 42.0}
+            ],
+        }
+    ]
+)
+result = model.predict(requests)
+predictions = result["predictions"]
+customer_embedding = pc.struct_field(
+    pc.struct_field(predictions, "customer"),
+    "embedding",
+)
+events_embedding = pc.struct_field(
+    pc.struct_field(predictions, "customer/events"),
+    "embedding",
+)
 ```
 
 Use branch embeddings when the repeated behavior matters independently from the
@@ -200,12 +223,13 @@ bundled digit records.
 #| output: true
 
 import lightning.pytorch as lit
-import polars as pl
+import pyarrow.compute as pc
+import pyarrow.json as pajson
 import torch
 
 import relflow as rf
 
-records = pl.read_ndjson("docs/data/digits.jsonl").head(24)
+records = pajson.read_json("docs/data/digits.jsonl").slice(0, 24)
 
 model = rf.Model(
     name="digit",
@@ -224,15 +248,15 @@ model = rf.Model(
     ),
 )
 
-datamodule = rf.PolarsDataModule(
+datamodule = rf.ArrowDataModule(
     model=model,
     train=records,
     validate=records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    observation_buffer_size=32,
-    sample_rate=1.0,
+    seed=42,
+    sample=1.0,
 )
 
 trainer = lit.Trainer(
@@ -248,10 +272,17 @@ trainer = lit.Trainer(
 
 trainer.fit(model=model, datamodule=datamodule)
 model
-predictions = model.predict(records.to_dicts()[:2])
+result = model.predict(records.slice(0, 2))
+predictions = result["predictions"]
 
-digit = predictions[rf.Address("digit")]["embedding"]
-pixels = predictions[rf.Address("digit", "pixels")]["embedding"]
+digit = pc.struct_field(
+    pc.struct_field(predictions, "digit"),
+    "embedding",
+)
+pixels = pc.struct_field(
+    pc.struct_field(predictions, "digit/pixels"),
+    "embedding",
+)
 ```
 
 Root embeddings return one vector per input observation. A branch pools its
@@ -294,8 +325,14 @@ For small interactive workflows, call `Model.predict(...)` directly.
 #| echo: true
 #| output: true
 
-predictions = model.predict(records)
-root = predictions[rf.Address("transaction")]["embedding"]
+requests = pa.Table.from_pylist(
+    [{"amount": 42.0, "merchant": "grocery"}]
+)
+result = model.predict(requests)
+root = pc.struct_field(
+    pc.struct_field(result["predictions"], "transaction"),
+    "embedding",
+)
 ```
 
 For larger offline jobs, use the [Batch Inference](../guides/batch-inference.qmd)
@@ -331,8 +368,8 @@ anomaly detection, weak supervision, transfer learning, or diagnostics.
 
 - Use [Built-In Data Types](data-types.qmd) to choose leaf fields.
 - Use [Binding Data](binding-data.qmd) to choose direct binding, an explicit
-  query, or preprocessing, and [Advanced Query Paths](querypaths.qmd) for
-  JMESPath expressions.
+  query, or preprocessing, and [Query Paths](querypaths.qmd) for structural
+  Arrow selection.
 - Use [Dynamic Masking](dynamic-masking.qmd) for windowed reconstruction inside
   repeated contexts.
 - Use [Batch Inference](../guides/batch-inference.qmd) to write embedding jobs to

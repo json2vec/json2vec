@@ -40,16 +40,6 @@ class Strata(enum.StrEnum):
         return {strata: value for strata in cls}
 
 
-class Suffix(enum.StrEnum):
-    feather = "feather"
-    parquet = "parquet"
-    ndjson = "ndjson"
-    avro = "avro"
-    csv = "csv"
-    orc = "orc"
-    json = "json"
-
-
 class TensorKey(enum.StrEnum):
     value = "value"
     content = "content"
@@ -57,7 +47,6 @@ class TensorKey(enum.StrEnum):
     state = "state"
     trainable = "trainable"
     targets = "targets"
-    metadata = "metadata"
     intervals = "intervals"
     probability = "probability"
     topk = "topk"
@@ -76,28 +65,6 @@ class Metric(enum.StrEnum):
     throughput = "throughput"
     mae = "mae"
     rmse = "rmse"
-
-
-class ShardingStrategy(enum.StrEnum):
-    file = "file"
-    chunk = "chunk"
-    record = "record"
-
-    @classmethod
-    def normalize(cls, value: "ShardingStrategy | str") -> "ShardingStrategy":
-        if isinstance(value, cls):
-            return value
-
-        return cls(value.strip().lower())
-
-    @classmethod
-    def expand(
-        cls,
-        value: "ShardingStrategy | str | Mapping[Strata | str, ShardingStrategy | str]",
-        *,
-        default: "ShardingStrategy",
-    ) -> dict[Strata, "ShardingStrategy"]:
-        return {strata: cls.normalize(strategy) for strata, strategy in Strata.expand(value, default=default).items()}
 
 
 class AttentionMode(enum.StrEnum):
@@ -137,4 +104,5 @@ class Component(enum.StrEnum):
     Decoder = "Decoder"
     TensorField = "TensorField"
     loss = "loss"
+    output = "output"
     write = "write"

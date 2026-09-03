@@ -9,8 +9,9 @@ eval: false
 contract but require a trained artifact and a service-specific process setup.
 
 `rf.Deployment` exposes a saved RelFlow model through a FastAPI application.
-It loads one checkpoint, batches concurrent requests, runs prediction, and
-returns an HTTP-safe form of the canonical address-keyed output.
+It loads one checkpoint, gathers concurrent requests into one Arrow microbatch,
+runs the same model prediction and postprocessing path as offline inference,
+and performs one terminal Arrow-to-Python conversion for JSON.
 
 ::: {.callout-warning title="Operational maturity"}
 The repository provides and tests this serving runtime, but it does not define
@@ -50,6 +51,7 @@ deployment = rf.Deployment(
     port=8000,
     max_batch_size=128,
     batch_timeout=0.005,
+    retain=(),
 )
 
 deployment.serve()
@@ -137,43 +139,59 @@ present.
 FastAPI's standard JSON parsing and response class. Validate numerical and
 non-string-key behavior if you switch backends.
 
-## Reuse The Training Preprocessor
+## Reuse Arrow Processors
 
 Attach the same decorated RelFlow preprocessor and bound arguments used by the
-training data module:
+training data module.
 
-The excerpt assumes `normalize_transaction` and `compact_response` are
-decorated with `@rf.preprocess` and `@rf.postprocess`, respectively.
+In online serving, each HTTP object must produce exactly one
+processed Arrow observation. The runtime validates JSON objects individually,
+converts all valid objects with one `pa.Table.from_pylist(...)`, and calls
+`Model.predict(...)` once for the microbatch. A preprocessor may reorder valid
+rows because protected identity restores caller order, but it may not drop or
+expand them at the request boundary. A one-to-zero or one-to-many result fails
+instead of associating a prediction with the wrong caller.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+A deployment postprocessor receives the same canonical output `rf.Batch` as
+interactive prediction and `rf.Writer`. It has no request, observation,
+metadata, tensor, or batch-index providers. Retain every processed request
+field it needs on the deployment:
 
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
+@rf.postprocess
+def compact_response(batch: rf.Batch) -> rf.Batch:
+    inputs = batch.data["inputs"]
+    predictions = batch.data["predictions"]
+    fraud = pc.struct_field(predictions, "record/fraud")
+    content = pc.struct_field(fraud, "content")
+    return batch.replace(
+        pa.table(
+            {
+                "request_id": pc.struct_field(inputs, "request_id"),
+                "fraud": pc.struct_field(content, "value"),
+                "probability": pc.struct_field(content, "probability"),
+            }
+        )
+    )
+
+# `normalize_transaction` is the training-time @rf.preprocess object.
 deployment = (
-    rf.Deployment(checkpoint="artifacts/fraud-model.ckpt")
+    rf.Deployment(
+        checkpoint="artifacts/fraud-model.ckpt",
+        retain=("request_id",),
+    )
     .preprocess(normalize_transaction)
     .postprocess(compact_response)
 )
 ```
 
-In online serving, each HTTP object must produce exactly one
-`rf.Observation`. A preprocessor that drops the request or yields several
-observations produces an error envelope whose internal `status_code` is `422`.
-For an otherwise valid object/array request, the current `/predict` transport
-still returns HTTP `200`; clients must inspect the envelope. Data-module
-preprocessors may expand a source record into multiple training observations,
-so not every training preprocessor is valid at the request boundary.
-
-A deployment postprocessor may request these named runtime values:
-
-- `request`: the validated request dictionary;
-- `observations`: processed model-facing observations;
-- `input`: encoded tensorfields; and
-- `metadata`: processed observation metadata from the encoded input.
-
-Providers from other runtimes, such as writer `batch_idx`, are unavailable. If
-one postprocessor is shared across entry points, unavailable parameters must be
-optional.
+Without a postprocessor, deployment discards the canonical `inputs` column and
+serializes only `{"predictions": ...}`. This prevents `retain` from exposing
+request data accidentally. With a postprocessor, its table columns define each
+response row. Framework identity is always removed before JSON serialization.
 
 ## Validate Request And Response Schemas
 
@@ -199,8 +217,9 @@ deployment = rf.Deployment(
 `forge(request=..., response=...)` accepts either model independently. The
 request model is validated before preprocessing. The response model validates
 the final, postprocessed response and also defines its OpenAPI schema. Because
-the default address-keyed response is dynamic, a fixed response model is most
-useful after a postprocessor creates an application-specific shape.
+the default canonical `predictions` struct varies with the model schema, a
+fixed response model is most useful after a postprocessor creates an
+application-specific shape.
 
 Pydantic models document an interface; they do not provide authentication,
 authorization, request size limits, rate limiting, or backward-compatible

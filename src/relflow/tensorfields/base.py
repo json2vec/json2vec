@@ -6,12 +6,14 @@ import inspect
 import re
 import warnings
 from abc import abstractmethod
-from collections.abc import Iterator
-from types import UnionType
+from collections.abc import Iterator, Mapping
+from datetime import date, datetime, time, timedelta
+from types import MappingProxyType, UnionType
 from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, get_args, overload
 
 import numpy as np
 import pluggy
+import pyarrow as pa
 import torch
 from lightning.pytorch import Callback
 from rich.text import Text
@@ -39,11 +41,37 @@ ComponentValue: TypeAlias = Callable[..., Any] | type[Any]
 RegisterT = TypeVar("RegisterT", bound=ComponentValue)
 BranchMaskApplication: TypeAlias = tuple[Address, "Mask"]
 ValueTypeFamily: TypeAlias = type[Any] | UnionType
-ValueTypeObservation: TypeAlias = tuple[int, type[Any]]
-ValueTypeObservations: TypeAlias = set[ValueTypeObservation] | None
+ArrowMatcher: TypeAlias = Callable[[pa.DataType], bool]
+MATCHERS: Mapping[type[Any], ArrowMatcher] = MappingProxyType(
+    {
+        object: lambda datatype: True,
+        bool: pa.types.is_boolean,
+        int: pa.types.is_integer,
+        float: pa.types.is_floating,
+        str: lambda datatype: pa.types.is_string(datatype) or pa.types.is_large_string(datatype),
+        bytes: lambda datatype: (
+            pa.types.is_binary(datatype)
+            or pa.types.is_large_binary(datatype)
+            or pa.types.is_fixed_size_binary(datatype)
+        ),
+        datetime: pa.types.is_timestamp,
+        date: pa.types.is_date,
+        time: pa.types.is_time,
+        timedelta: pa.types.is_duration,
+        dict: lambda datatype: pa.types.is_struct(datatype) or pa.types.is_map(datatype),
+    }
+)
 
 
-def default_write(module: "Model", prediction: Prediction) -> None:
+def default_output(module: "Model", address: Address) -> None:
+    return None
+
+
+def default_write(
+    module: "Model",
+    prediction: Prediction,
+    datatype: pa.StructType | None,
+) -> None:
     return None
 
 
@@ -387,15 +415,22 @@ TENSORFIELDS: dict[str, "Plugin"] = {}
 class Plugin:
     """Registry object for a tensorfield implementation.
 
-    Register request, tensorfield, embedder, decoder, loss, and write
-    components with `@plugin.register`. ``types`` declares the raw terminal
-    Python types the plugin accepts. Separate tuple entries are incompatible
-    families; types joined in one PEP 604 union may safely share an Awkward
-    carrier. Creating a plugin with an existing name replaces the registry
-    entry and emits a warning.
+    Register request, tensorfield, embedder, decoder, loss, output, and write
+    components with `@plugin.register`. ``types`` names the Python equivalents
+    of accepted canonical Arrow terminal families. Separate tuple entries are
+    incompatible; types joined in one PEP 604 union may share one Arrow column.
+    ``arrow`` supplies a physical-type matcher for custom Python atoms or
+    overrides a standard matcher. Creating a plugin with an existing name
+    replaces the registry entry and emits a warning.
     """
 
-    def __init__(self, name: str, *, types: tuple[ValueTypeFamily, ...]):
+    def __init__(
+        self,
+        name: str,
+        *,
+        types: tuple[ValueTypeFamily, ...],
+        arrow: Mapping[type[Any], ArrowMatcher] | None = None,
+    ):
         if not isinstance(name, str):
             raise TypeError("Plugin name must be a string")
 
@@ -430,10 +465,29 @@ class Plugin:
                 type_to_family[member] = family_index
             families.append(cast(tuple[type[Any], ...], tuple(members)))
 
+        if arrow is not None and not isinstance(arrow, Mapping):
+            raise TypeError("Plugin arrow must be a mapping from declared value types to Arrow matchers")
+        declared = {} if arrow is None else dict(arrow)
+        unknown = [member for member in declared if member not in type_to_family]
+        if unknown:
+            names = ", ".join(getattr(member, "__name__", repr(member)) for member in unknown)
+            raise ValueError(f"Plugin arrow matcher type(s) are absent from types: {names}")
+        invalid = [member for member, matcher in declared.items() if not callable(matcher)]
+        if invalid:
+            names = ", ".join(member.__name__ for member in invalid)
+            raise TypeError(f"Plugin Arrow matcher(s) must be callable: {names}")
+        missing = [member for member in type_to_family if member not in MATCHERS and member not in declared]
+        if missing:
+            names = ", ".join(member.__name__ for member in missing)
+            raise TypeError(f"Plugin custom value type(s) require arrow matchers: {names}")
+
         self.name: str = name
-        self._types: tuple[ValueTypeFamily, ...] = types
-        self._type_families: tuple[tuple[type[Any], ...], ...] = tuple(families)
-        self._type_to_family: dict[type[Any], int] = type_to_family
+        self.value_types: tuple[ValueTypeFamily, ...] = types
+        self.families: tuple[tuple[type[Any], ...], ...] = tuple(families)
+        self.family_by_type: Mapping[type[Any], int] = MappingProxyType(type_to_family)
+        self.matchers: Mapping[type[Any], ArrowMatcher] = MappingProxyType(
+            {member: declared[member] if member in declared else MATCHERS[member] for member in type_to_family}
+        )
         self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
 
@@ -449,102 +503,67 @@ class Plugin:
     @property
     def types(self) -> tuple[ValueTypeFamily, ...]:
         """Registered raw atom compatibility families."""
-        return self._types
+        return self.value_types
 
-    def convert(
+    def terminals(self, datatype: pa.DataType) -> tuple[pa.DataType, ...]:
+        """Return terminal Arrow atom types beneath structural containers."""
+
+        if pa.types.is_dictionary(datatype):
+            return self.terminals(datatype.value_type)
+        if pa.types.is_list(datatype) or pa.types.is_large_list(datatype) or pa.types.is_fixed_size_list(datatype):
+            return self.terminals(datatype.value_type)
+        if pa.types.is_union(datatype):
+            return tuple(child for field in datatype for child in self.terminals(field.type))
+        return (datatype,)
+
+    def matches(self, member: type[Any], datatype: pa.DataType) -> bool:
+        """Match one registered Python atom to one Arrow terminal type."""
+
+        if pa.types.is_null(datatype):
+            return True
+        matcher = self.matchers[member]
+        if matcher(datatype):
+            return True
+        if isinstance(datatype, pa.ExtensionType):
+            return any(self.matches(member, terminal) for terminal in self.terminals(datatype.storage_type))
+        return False
+
+    def accepts(self, datatype: pa.DataType) -> bool:
+        """Return whether one Arrow value type belongs to an allowed family."""
+
+        families: set[int] = set()
+        for terminal in self.terminals(datatype):
+            if pa.types.is_null(terminal):
+                continue
+            matches = {
+                family
+                for family, members in enumerate(self.families)
+                if any(self.matches(member, terminal) for member in members)
+            }
+            if not matches:
+                return False
+            families.update(matches)
+        return len(families) <= 1
+
+    def prepare(
         self,
-        value: Any,
+        values: pa.Array | pa.ChunkedArray,
         *,
         address: Address,
-        observed: set[ValueTypeObservation],
-    ) -> Any:
-        if hasattr(value, "__next__"):
+    ) -> pa.Array | pa.ChunkedArray:
+        """Validate one whole Arrow leaf column at the plugin boundary."""
+
+        if not isinstance(values, (pa.Array, pa.ChunkedArray)):
             raise TypeError(
-                f"field at address '{address}' contains a one-shot iterator; materialize it as a list in a preprocessor"
+                f"plugin '{self.name}' at address '{address}' requires an Arrow array, got {type(values).__name__}"
             )
-        if value is None:
-            return None
-        if isinstance(value, np.generic):
-            if isinstance(value, (np.datetime64, np.timedelta64)):
-                if np.isnat(value):
-                    return None
-                unit = "datetime64[us]" if isinstance(value, np.datetime64) else "timedelta64[us]"
-                canonical = value.astype(unit).item()
-            else:
-                canonical = value.item()
-                if isinstance(canonical, np.generic):
-                    match value.dtype.kind:
-                        case "b":
-                            canonical = bool(value)
-                        case "i" | "u":
-                            canonical = int(value)
-                        case "f":
-                            canonical = float(value)
-                        case "c":
-                            canonical = complex(value)
-                        case "U":
-                            canonical = str(value)
-                        case "S":
-                            canonical = bytes(value)
-            if isinstance(canonical, np.generic):
-                value = canonical
-            else:
-                return self.convert(canonical, address=address, observed=observed)
-        elif isinstance(value, np.ndarray):
-            if value.ndim == 0:
-                return self.convert(value[()], address=address, observed=observed)
-            if value.dtype.hasobject:
-                return [self.convert(child, address=address, observed=observed) for child in value]
-            if value.size:
-                representative = np.zeros((), dtype=value.dtype)[()]
-                self.convert(representative, address=address, observed=observed)
-            if value.dtype.kind == "M":
-                return value.astype("datetime64[us]")
-            if value.dtype.kind == "m":
-                return value.astype("timedelta64[us]")
-            return value
-        elif isinstance(value, (list, tuple)):
-            return [self.convert(child, address=address, observed=observed) for child in value]
-
-        value_type = type(value)
-        family = self._type_to_family.get(value_type)
-        if family is None:
-            expected = ", ".join(" | ".join(member.__name__ for member in members) for members in self._type_families)
+        if not self.accepts(values.type):
+            expected = ", ".join(" | ".join(member.__name__ for member in members) for members in self.families)
             raise TypeError(
-                f"field at address '{address}' contains unsupported {value_type.__name__} values for plugin "
-                f"'{self.name}'; expected {expected}; normalize it in a preprocessor"
+                f"plugin '{self.name}' at address '{address}' does not accept Arrow type {values.type}; "
+                f"expected terminal atoms compatible with {expected}; normalize it in a preprocessor"
             )
-        if len(self._type_families) > 1:
-            observed.add((family, value_type))
-        return value
-
-    def prepare(self, value: Any, *, address: Address) -> tuple[Any, ValueTypeObservations]:
-        """Canonicalize one raw leaf value and record its compatibility family."""
-        if value is None:
-            return None, None
-
-        value_type = type(value)
-        if not isinstance(value, (np.generic, np.ndarray, list, tuple)):
-            family = self._type_to_family.get(value_type)
-            if family is not None:
-                observed = {(family, value_type)} if len(self._type_families) > 1 else None
-                return value, observed
-
-        observed: set[ValueTypeObservation] = set()
-        prepared = self.convert(value, address=address, observed=observed)
-        self.validate(observed, address=address)
-        return prepared, observed or None
-
-    def validate(self, observed: ValueTypeObservations, *, address: Address) -> None:
-        """Reject values from incompatible registered families in one field batch."""
-        if observed is None or len({family for family, _ in observed}) <= 1:
-            return
-
-        names = ", ".join(sorted(value_type.__name__ for _, value_type in observed))
-        raise TypeError(
-            f"field at address '{address}' mixes Python value types from incompatible families ({names}); "
-            "normalize it in a preprocessor so it uses one registered compatibility family"
-        )
+        return values
 
     @overload
     def register(self, obj: None, component: Component | str) -> None: ...
@@ -563,8 +582,8 @@ class Plugin:
                 raise TypeError("component must be provided when registering None")
 
             key = Component(component)
-            if key != Component.write:
-                raise TypeError("only write may be registered as None")
+            if key not in {Component.output, Component.write}:
+                raise TypeError("only output and write may be registered as None")
 
             if key in self.components:
                 raise ValueError(f"Component '{key}' already registered in plugin '{self.name}'")
@@ -643,13 +662,24 @@ class Plugin:
                 if obj is not None and not callable(obj):
                     raise TypeError("Write must be a callable function")
 
-                # check the signature of the function
-                expected_params: list[str] = ["module", "prediction"]
-                func_params: list[str] = list(obj.__annotations__.keys())
+                expected_params: list[str] = ["module", "prediction", "datatype"]
+                func_params = list(inspect.signature(obj).parameters)
 
                 if func_params != expected_params:
                     raise TypeError(
                         f"Write function must accept the following parameters: {expected_params}, got {func_params}"
+                    )
+
+            case Component.output:
+                if not callable(obj):
+                    raise TypeError("Output must be a callable function")
+
+                expected_params = ["module", "address"]
+                func_params = list(inspect.signature(obj).parameters)
+
+                if func_params != expected_params:
+                    raise TypeError(
+                        f"Output function must accept the following parameters: {expected_params}, got {func_params}"
                     )
 
         self.components[key] = obj
@@ -685,6 +715,9 @@ class Plugin:
             if value is not None:
                 return value
 
+        if component == Component.output:
+            return default_output
+
         if component == Component.write:
             return default_write
 
@@ -709,6 +742,10 @@ class Plugin:
     @property
     def loss(self) -> Callable[..., Any]:
         return cast(Callable[..., Any], self._component(Component.loss))
+
+    @property
+    def output(self) -> Callable[..., Any]:
+        return cast(Callable[..., Any], self._component(Component.output))
 
     @property
     def write(self) -> Callable[..., Any]:

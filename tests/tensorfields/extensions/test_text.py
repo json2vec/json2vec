@@ -1,5 +1,6 @@
 import builtins
 import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.text import (
     ATTENTION_MASK,
     DEFAULT_TEXT_MODEL,
@@ -21,6 +23,7 @@ from relflow.tensorfields.extensions.text import (
     loss,
     write,
 )
+from tests.arrow import batch as arrow_batch
 
 ADDRESS = "root/items/body"
 
@@ -61,8 +64,9 @@ def _values() -> list:
 
 
 def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
-    batch = [[{"items": [{"body": value} for value in root]}] for (root,) in values]
+    batch = arrow_batch([{"items": [{"body": value} for value in root]} for (root,) in values])
     field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    field = replace(field, values=TENSORFIELDS["text"].prepare(field.values, address=ADDRESS))
     return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
 
 
@@ -564,5 +568,5 @@ def test_text_write_returns_no_payload(monkeypatch: pytest.MonkeyPatch):
         ),
     )
 
-    output = write(module=_DummyModule(structure, None, None), prediction=prediction)
+    output = write(module=_DummyModule(structure, None, None), prediction=prediction, datatype=None)
     assert output is None

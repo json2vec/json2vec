@@ -1,268 +1,79 @@
-"""Coalesce schema-shaped inputs into canonical Awkward-backed fields."""
+"""Coalesce schema-shaped inputs into canonical Arrow-backed fields."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+import math
+import re
 from dataclasses import dataclass
-from functools import cache
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 import awkward as ak
-import jmespath
 import numpy as np
-from jmespath.exceptions import JMESPathError
+import pyarrow as pa
 
+from relflow.data.arrow import Batch
+from relflow.data.query import Projection, query
 from relflow.structs.enums import Overflow, Strata, Tokens
 from relflow.structs.tree import Address
 
 if TYPE_CHECKING:
-    from relflow.data.datasets.base import EncodedBatch
     from relflow.structs.experiment import Schema
     from relflow.structs.structure import Branch
-    from relflow.tensorfields.base import Plugin, ValueTypeObservation, ValueTypeObservations
-
-MASK_LITERAL = "<MASK>"
-MaskLiteral: TypeAlias = Literal["<MASK>"]
-
-_SEQUENCE_TYPES = (list, tuple, np.ndarray)
-_AWKWARD_CONVERSION_ERRORS = (TypeError, ValueError, RuntimeError, OverflowError)
 
 
-@cache
-def compile(expression: str) -> jmespath.parser.ParsedResult:
-    try:
-        return jmespath.compile(f"[*]{expression}")
-    except JMESPathError as error:
-        raise ValueError(f"invalid JMESPath query {expression!r}: {error}") from error
+def member(name: str) -> str:
+    """Render a schema name as one native query member."""
+
+    return name if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) else f"[{json.dumps(name)}]"
 
 
-def sequence(value: Any) -> bool:
-    return isinstance(value, _SEQUENCE_TYPES) and not (isinstance(value, np.ndarray) and value.ndim == 0)
+def append(expression: str, selector: str) -> str:
+    """Append one node-relative selector to an accumulated path."""
+
+    if not expression:
+        return selector
+    return f"{expression}{selector}" if selector.startswith("[") else f"{expression}.{selector}"
 
 
-def prepare(
-    value: Any,
-    *,
-    address: Address,
-    plugin: Plugin,
-) -> tuple[Any, int, ValueTypeObservations]:
-    if type(value) in (str, np.str_) and str(value) == MASK_LITERAL:
-        return None, Tokens.masked.value, None
+def expression(request: Any, root: Branch) -> str:
+    """Compose one leaf's node-relative selectors into an executable path."""
 
-    prepared, observed = plugin.prepare(value, address=address)
-    state = Tokens.null.value if prepared is None else Tokens.valued.value
-    return prepared, state, observed
-
-
-def normalize(
-    record: Any,
-    branch: Branch,
-    direct_branches: frozenset[Address],
-    plugins: Mapping[Address, Plugin],
-    observed_types: dict[Address, set[ValueTypeObservation]],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    if not isinstance(record, Mapping):
-        record = {}
-
-    values: dict[str, Any] = {}
-    states: dict[str, Any] = {}
-    for child in branch.fields:
-        name = child.name
-        if child.type == "branch":
-            if child.address not in direct_branches:
-                values[name] = []
-                states[name] = []
-                continue
-
-            raw = record.get(name)
-            if raw is None:
-                values[name] = []
-                states[name] = []
-                continue
-
-            if isinstance(raw, Mapping):
-                if child.length != 1:
-                    raise TypeError(
-                        f"branch at address '{child.address}' expects a sequence, got a mapping; "
-                        "mapping shorthand is only valid for length=1"
-                    )
-                items = [raw]
-            elif sequence(raw):
-                items = raw
-            else:
-                raise TypeError(f"branch at address '{child.address}' expects a sequence, got {type(raw).__name__}")
-
-            child_values: list[dict[str, Any]] = []
-            child_states: list[dict[str, Any]] = []
-            for item_index, item in enumerate(items):
-                if item is not None and not isinstance(item, Mapping):
-                    raise TypeError(
-                        f"branch at address '{child.address}' item {item_index} must be a mapping or null, "
-                        f"got {type(item).__name__}"
-                    )
-                item_values, item_states = normalize(
-                    item,
-                    child,
-                    direct_branches,
-                    plugins,
-                    observed_types,
-                )
-                child_values.append(item_values)
-                child_states.append(item_states)
-            values[name] = child_values
-            states[name] = child_states
+    result = root.query or ""
+    for node in request.path:
+        if node is root or node is request or getattr(node, "type", None) != "branch":
             continue
+        result = append(result, node.query or member(node.name))
+        result = f"{result}[*]"
 
-        # Explicit queries read from ``source`` and never enter the direct
-        # Awkward layout. This also prevents a same-named raw key from
-        # affecting the queried field's validation or inferred Awkward Form.
-        if child.query is not None or child.address not in plugins:
-            states[name] = Tokens.padded.value
-            continue
-
-        if name not in record:
-            states[name] = Tokens.padded.value
-            continue
-
-        prepared, state, observed = prepare(
-            record[name],
-            address=child.address,
-            plugin=plugins[child.address],
-        )
-        if observed:
-            observed_types.setdefault(child.address, set()).update(observed)
-
-        # A literal is routing state, not a value. Store it as an option value
-        # so it cannot influence Awkward's type promotion.
-        values[name] = prepared
-        states[name] = state
-
-    return values, states
+    return append(result, request.query or member(request.name))
 
 
-def diagnose(
-    value: Any,
-    branch: Branch,
-    addresses: tuple[Address, ...],
-    direct_branches: frozenset[Address],
-) -> None:
-    if not isinstance(value, Mapping):
-        return
-
-    for child in branch.fields:
-        name = child.name
-        if name not in value:
-            continue
-
-        raw = value[name]
-        if child.type == "branch":
-            if child.address not in direct_branches or raw is None:
-                continue
-            items = [raw] if isinstance(raw, Mapping) else raw
-            if sequence(items):
-                for item in items:
-                    diagnose(item, child, addresses, direct_branches)
-            continue
-
-        if child.query is not None or child.address not in addresses:
-            continue
-
-        try:
-            ak.Array([raw])
-        except _AWKWARD_CONVERSION_ERRORS as error:
-            raise TypeError(
-                f"field at address '{child.address}' contains an unsupported {type(raw).__name__}; "
-                "normalize it in a preprocessor"
-            ) from error
-
-
-def project(
-    values: ak.Array,
-    states: ak.Array,
-    fields: tuple[str, ...],
-    *,
-    address: Address,
-) -> tuple[ak.Array, ak.Array]:
-    for index, field in enumerate(fields):
-        value_fields = ak.fields(values)
-        state_fields = ak.fields(states)
-
-        if field in state_fields:
-            state = states[field]
-        elif not state_fields and len(ak.flatten(states, axis=None)) == 0:
-            state = states
-        else:
-            raise KeyError(f"cannot project field {field!r} for address '{address}'")
-
-        if field in value_fields:
-            value = values[field]
-        elif field in state_fields:
-            # A leaf absent from every source record has no Awkward record
-            # field. Its schema-owned state is padded, so materialize an
-            # option-valued projection. Missing intermediate branches stay
-            # empty and acquire their declared geometry during regularization.
-            available = state != Tokens.padded.value
-            value = ak.mask(state, available) if index == len(fields) - 1 else state
-        elif not value_fields and len(ak.flatten(values, axis=None)) == 0:
-            value = values
-        else:
-            raise KeyError(f"cannot project field {field!r} for address '{address}'")
-
-        values, states = value, state
-
-    return values, states
-
-
-def query(
-    source: EncodedBatch,
-    expression: str,
+def extract(
+    selected: Projection,
     *,
     address: Address,
     leaf_axis: int,
-    plugin: Plugin,
 ) -> tuple[ak.Array, ak.Array]:
-    def walk(value: Any, depth: int) -> tuple[Any, Any, ValueTypeObservations]:
-        if depth == 0:
-            return prepare(value, address=address, plugin=plugin)
-        if value is None:
-            return None, None, None
-        if hasattr(value, "__next__"):
-            raise TypeError(
-                f"query result for address '{address}' contains a one-shot iterator; "
-                "materialize it as a list in a preprocessor"
-            )
-        if not isinstance(value, list):
-            return value, Tokens.padded.value, None
-
-        cleaned: list[Any] = []
-        states: list[Any] = []
-        observed: set[ValueTypeObservation] = set()
-        for child in value:
-            child_value, child_state, child_observed = walk(child, depth - 1)
-            cleaned.append(child_value)
-            states.append(child_state)
-            if child_observed:
-                observed.update(child_observed)
-        return cleaned, states, observed or None
+    """Lower an Arrow projection to Awkward values and model-state slots."""
 
     try:
-        result = compile(expression).search(source)
-    except _AWKWARD_CONVERSION_ERRORS + (JMESPathError,) as error:
-        raise TypeError(f"JMESPath query failed for address '{address}': {expression!r}") from error
+        values = ak.from_arrow(selected.values)[:, np.newaxis]
+        present = ak.from_arrow(selected.present)[:, np.newaxis]
+        if present.ndim > leaf_axis + 1:
+            available = ~ak.is_none(present, axis=leaf_axis)
+        else:
+            available = ak.fill_none(present, False, axis=leaf_axis)
+        null = ak.is_none(values, axis=leaf_axis)
+        states = ak.where(
+            available,
+            ak.where(null, Tokens.null.value, Tokens.valued.value),
+            Tokens.padded.value,
+        )
 
-    normalized, state_slots, observed = walk(result, leaf_axis + 1)
-    plugin.validate(observed, address=address)
-
-    try:
-        values = ak.Array(normalized)
-        states = ak.values_astype(ak.Array(state_slots), np.int8)
-    except _AWKWARD_CONVERSION_ERRORS + (JMESPathError,) as error:
-        raise TypeError(
-            f"JMESPath query for address '{address}' did not produce an Awkward-compatible "
-            f"schema-shaped result: {expression!r}"
-        ) from error
-
-    return values, states
+        return values, ak.values_astype(states, np.int8)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as error:
+        raise TypeError(f"Arrow query result for address '{address}' is not Awkward-compatible") from error
 
 
 def regularize(
@@ -310,30 +121,63 @@ def regularize(
 
 @dataclass(frozen=True, slots=True)
 class RaggedField:
-    """Dense field geometry plus flat retained Awkward values."""
+    """Arrow-backed retained values and their dense model geometry."""
 
-    state: np.ndarray
-    values: ak.Array
-    placement: np.ndarray
+    values: pa.Array | pa.ChunkedArray
+    state: pa.Array | pa.ChunkedArray
+    placement: pa.Array | pa.ChunkedArray
+    shape: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        if self.state.dtype != np.dtype(np.int64):
-            raise TypeError(f"RaggedField.state must use int64, got {self.state.dtype}")
-        if self.placement.dtype != np.dtype(np.int64) or self.placement.ndim != 1:
-            raise TypeError("RaggedField.placement must be a one-dimensional int64 array")
+        if not isinstance(self.values, (pa.Array, pa.ChunkedArray)):
+            raise TypeError(f"RaggedField.values must be an Arrow array, got {type(self.values).__name__}")
+        if not isinstance(self.state, (pa.Array, pa.ChunkedArray)) or self.state.type != pa.int8():
+            datatype = getattr(self.state, "type", type(self.state).__name__)
+            raise TypeError(f"RaggedField.state must be an int8 Arrow array, got {datatype}")
+        if not isinstance(self.placement, (pa.Array, pa.ChunkedArray)) or self.placement.type != pa.int64():
+            datatype = getattr(self.placement, "type", type(self.placement).__name__)
+            raise TypeError(f"RaggedField.placement must be an int64 Arrow array, got {datatype}")
+        if self.state.null_count or self.placement.null_count:
+            raise ValueError("RaggedField state and placement cannot contain nulls")
+        if self.values.null_count:
+            raise ValueError("RaggedField values cannot contain nulls")
+        if not self.shape or any(
+            not isinstance(size, int) or isinstance(size, bool) or size < 0 for size in self.shape
+        ):
+            raise ValueError("RaggedField.shape must contain non-negative integer dimensions")
+        if len(self.state) != math.prod(self.shape):
+            raise ValueError(
+                f"RaggedField state length must equal shape product {math.prod(self.shape)}, got {len(self.state)}"
+            )
         if len(self.values) != len(self.placement):
             raise ValueError(
                 f"RaggedField values/placement length mismatch: {len(self.values)} values, "
                 f"{len(self.placement)} placements"
             )
+        states = self.state.to_numpy(zero_copy_only=False)
+        allowed = np.asarray([token.value for token in Tokens], dtype=np.int8)
+        if np.any(~np.isin(states, allowed)):
+            raise ValueError("RaggedField state contains an unknown token")
 
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self.state.shape
+        positions = self.placement.to_numpy(zero_copy_only=False)
+        if len(positions) and (np.any(positions < 0) or np.any(positions >= len(self.state))):
+            raise ValueError("RaggedField placement contains an out-of-range dense position")
+        if len(positions) > 1 and np.any(positions[1:] <= positions[:-1]):
+            raise ValueError("RaggedField placement must be strictly increasing")
+        expected = np.flatnonzero(states == Tokens.valued.value)
+        if not np.array_equal(positions, expected):
+            raise ValueError("RaggedField placement must contain every valued state position exactly once")
 
     @property
     def batch_size(self) -> int:
         return self.shape[0]
+
+    @property
+    def dense(self) -> np.ndarray:
+        """Return model state as one dense int64 NumPy view."""
+
+        values = self.state.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        return values.reshape(self.shape)
 
     def place(
         self,
@@ -352,95 +196,49 @@ class RaggedField:
             raise ValueError(f"encoded values must have shape {expected}, got {array.shape}")
 
         placed = np.full((*self.shape, *value_shape), fill, dtype=array.dtype)
-        flat_shape = (self.state.size, *value_shape)
-        placed.reshape(flat_shape)[self.placement] = array
+        flat_shape = (len(self.state), *value_shape)
+        placement = self.placement.to_numpy(zero_copy_only=False)
+        placed.reshape(flat_shape)[placement] = array
         return placed
 
 
 def coalesce(
-    values: EncodedBatch,
+    values: Batch,
     schema: Schema,
     strata: Strata | str,
 ) -> dict[Address, RaggedField]:
     """Prepare every encoded field before datatype codecs mutate shared state."""
-    from relflow.tensorfields.base import TENSORFIELDS
-
-    if not isinstance(values, list):
-        raise TypeError(f"coalesce values must be an encoded batch list, got {type(values).__name__}")
+    if not isinstance(values, Batch):
+        raise TypeError(f"coalesce values must be an Arrow Batch, got {type(values).__name__}")
 
     strata = Strata.normalize(strata)
     predict_targets = set(schema.target) if strata == Strata.predict else set()
     addresses = tuple(address for address in schema.active_requests if address not in predict_targets)
-    plugins = {address: TENSORFIELDS[schema.requests[address].type] for address in addresses}
-    direct_branches = frozenset(
-        node.address
-        for address in addresses
-        if schema.requests[address].query is None
-        for node in schema.requests[address].path
-        if node.type == "branch"
-    )
-    observed_types: dict[Address, set[ValueTypeObservation]] = {}
-    direct_values: list[list[dict[str, Any]]] = []
-    direct_states: list[list[dict[str, Any]]] = []
+    paths = {address: expression(schema.requests[address], schema.fields) for address in addresses}
+    batch_size = len(values)
 
-    for batch_index, roots in enumerate(values):
-        if not isinstance(roots, list) or len(roots) != 1:
-            length = len(roots) if isinstance(roots, list) else None
-            detail = type(roots).__name__ if length is None else str(length)
-            raise ValueError(
-                "coalesce requires exactly one generated-root record per batch item; "
-                f"batch item {batch_index} provided {detail}"
-            )
-        if not isinstance(roots[0], Mapping):
-            raise TypeError(
-                f"coalesce root record at batch item {batch_index} must be a mapping, got {type(roots[0]).__name__}"
-            )
-
-        root_values, root_states = normalize(
-            roots[0],
-            schema.fields,
-            direct_branches,
-            plugins,
-            observed_types,
-        )
-        direct_values.append([root_values])
-        direct_states.append([root_states])
-
-    for address, observed in observed_types.items():
-        plugins[address].validate(observed, address=address)
     if not addresses:
         return {}
 
-    try:
-        layout = ak.Array(direct_values)
-        states = ak.values_astype(ak.Array(direct_states), np.int8)
-    except _AWKWARD_CONVERSION_ERRORS as error:
-        for roots in values:
-            diagnose(roots[0], schema.fields, addresses, direct_branches)
-        raise TypeError(
-            "coalesce requires directly bound values to be Awkward-compatible; "
-            f"normalize the modeled value in a preprocessor: {error}"
-        ) from error
-
     fields: dict[Address, RaggedField] = {}
-    root_name = schema.fields.name
     for address in addresses:
-        request = schema.requests[address]
-        shape = (len(values), *schema.shapes[address])
-        parts = tuple(str(address).split("/"))
-        if parts and parts[0] == root_name:
-            parts = parts[1:]
-
-        if request.query is None:
-            projected_values, projected_states = project(layout, states, parts, address=address)
-        else:
-            projected_values, projected_states = query(
-                values,
-                request.query,
+        shape = (batch_size, *schema.shapes[address])
+        selected = query(
+            values.data,
+            paths[address],
+            address=address,
+        )
+        try:
+            projected_values, projected_states = extract(
+                selected,
                 address=address,
                 leaf_axis=len(shape) - 1,
-                plugin=plugins[address],
             )
+        except (TypeError, IndexError, ak.errors.AxisError) as error:
+            raise ValueError(
+                f"Arrow query for address '{address}' does not match its schema shape: "
+                f"{paths[address]!r} must produce {len(shape)} list axes"
+            ) from error
 
         try:
             dense_values, dense_states = regularize(
@@ -457,26 +255,25 @@ def coalesce(
             for _ in range(len(shape) - 1):
                 dense_values = ak.flatten(dense_values, axis=1)
         except (IndexError, ak.errors.AxisError) as error:
-            if request.query is None:
-                raise
             raise ValueError(
-                f"JMESPath query for address '{address}' does not match its schema shape: "
-                f"{request.query!r} must produce {len(shape)} list axes"
+                f"Arrow query for address '{address}' does not match its schema shape: "
+                f"{paths[address]!r} must produce {len(shape)} list axes"
             ) from error
 
         if state.shape != shape:
             raise ValueError(f"coalesced state for address '{address}' must have shape {shape}, got {state.shape}")
-        if np.any(state == Tokens.masked.value) and strata != Strata.predict:
-            raise ValueError(f"{MASK_LITERAL!r} at address '{address}' is only valid during predict strata")
-
         placement = np.flatnonzero(state.ravel() == Tokens.valued.value).astype(np.int64, copy=False)
+        retained = ak.to_arrow(dense_values[placement], extensionarray=False)
+        if not isinstance(retained, pa.Array):
+            raise TypeError(f"coalesced values for address '{address}' did not produce an Arrow array")
         fields[address] = RaggedField(
-            state=state,
-            values=dense_values[placement],
-            placement=placement,
+            values=retained,
+            state=pa.array(state.reshape(-1), type=pa.int8()),
+            placement=pa.array(placement, type=pa.int64()),
+            shape=shape,
         )
 
     return fields
 
 
-__all__ = ["MASK_LITERAL", "MaskLiteral", "RaggedField"]
+__all__ = ["RaggedField"]

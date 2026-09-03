@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 import torch
 from tensordict import TensorDict
@@ -168,7 +169,7 @@ def test_override_applies_only_within_prediction_scope():
     initial_row_2 = embedder.embeddings["cluster"].weight[min(initial_vocab_size, CAPACITY)].detach().clone()
 
     with rf.Cluster.override(model, ADDRESS, {"overridden": 3}):
-        model.predict([{"merchant_id": "overridden"}])
+        model.predict(pa.table({"merchant_id": ["overridden"]}))
 
     assert len(embedder.vocab.master) == initial_vocab_size
     # The row that got temporarily written must be reverted to its original values.
@@ -180,11 +181,11 @@ def test_override_is_used_by_tensorization():
     model = _model()
 
     with rf.Cluster.override(model, ADDRESS, {"overridden": 3}):
-        overridden = model.encode([{"merchant_id": "overridden"}])[Address(ADDRESS)]
+        overridden = model.encode(pa.table({"merchant_id": ["overridden"]}))[Address(ADDRESS)]
         assert int(overridden.content.item()) == 0
         assert int(overridden.state.item()) == Tokens.valued.value
 
-    unavailable = model.encode([{"merchant_id": "overridden"}])[Address(ADDRESS)]
+    unavailable = model.encode(pa.table({"merchant_id": ["overridden"]}))[Address(ADDRESS)]
     assert int(unavailable.content.item()) == CAPACITY
 
 

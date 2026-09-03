@@ -4,8 +4,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-import awkward as ak
-import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -31,6 +31,7 @@ from relflow.tensorfields.base import (
     TensorFieldBase,
     apply_mask_policies,
 )
+from relflow.tensorfields.output import array, struct
 from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
@@ -43,12 +44,6 @@ boolean.callback(CounterUpdateCallback)
 BOOLEAN_VALUES = (-1.0, 0.0, 1.0)
 Threshold = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
 Thresholds = Annotated[list[Threshold], pydantic.Field(min_length=1)]
-
-
-def _encode(value: Any) -> float:
-    if not isinstance(value, (bool, np.bool_)):
-        raise TypeError(f"Boolean values must be bool or None, received {type(value).__name__}")
-    return 1.0 if bool(value) else -1.0
 
 
 @boolean.register
@@ -120,13 +115,12 @@ class TensorField(TensorFieldBase):
         schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        encoded = np.fromiter(
-            (_encode(value) for value in ak.to_list(field.values)),
-            dtype=np.float32,
-            count=len(field.values),
-        )
+        encoded = pc.if_else(field.values, pa.scalar(1.0, pa.float32()), pa.scalar(-1.0, pa.float32()))
+        if isinstance(encoded, pa.ChunkedArray):
+            encoded = encoded.combine_chunks()
+        encoded = encoded.to_numpy(zero_copy_only=False)
         content = torch.from_numpy(field.place(encoded, fill=0.0))
-        state = torch.from_numpy(field.state)
+        state = torch.from_numpy(field.dense)
         return cls(
             content=content,
             state=state,
@@ -295,13 +289,14 @@ def loss(module: Model, prediction: Prediction, batch: TensorFieldBase, strata: 
 
 
 @boolean.register
-def write(module: Model, prediction: Prediction):
-    state_logits = prediction.payload[TensorKey.state]
-    state_distribution = state_logits.softmax(dim=-1).detach().float().cpu().numpy()
-    state_payload = {token.name: state_distribution[..., token.value] for token in Tokens}
+def output(module: Model, address: Address) -> pa.StructType:
+    content = pa.struct([pa.field(TensorKey.probability.name, pa.float32(), nullable=False)])
+    return pa.struct([pa.field(TensorKey.content.name, content, nullable=False)])
 
-    probabilities = prediction.payload[TensorKey.content].sigmoid().squeeze(-1).detach().float().cpu().numpy()
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: {TensorKey.probability.name: probabilities},
-    }
+
+@boolean.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content_type = datatype.field(TensorKey.content.name).type
+    probabilities = array(prediction.payload[TensorKey.content].sigmoid(), pa.float32())
+    content = struct({TensorKey.probability.name: probabilities}, content_type)
+    return struct({TensorKey.content.name: content}, datatype)

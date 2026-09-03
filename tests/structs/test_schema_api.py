@@ -8,7 +8,7 @@ def test_model_constructor_supports_direct_binding_and_opt_in_queries():
     model = rf.Model(
         rf.Category(
             "job_code",
-            query='[*].source."job code"',
+            query='source["job code"]',
             description="job code",
             size=128,
             source="openml",
@@ -32,7 +32,7 @@ def test_model_constructor_supports_direct_binding_and_opt_in_queries():
     job = params.requests["record/job_code"]
     assert job.name == "job_code"
     assert job.description == "job code"
-    assert job.query == '[*].source."job code"'
+    assert job.query == 'source["job code"]'
     assert job.size == 128
     assert job.source == "openml"
 
@@ -73,7 +73,7 @@ def test_model_constructor_accepts_branch_nodes_with_optional_leaf_queries():
             rf.Number("amount"),
             rf.Category(
                 "merchant_code",
-                query='[*].source.transactions[*]."merchant code"',
+                query='source["merchant code"]',
                 description="merchant code",
                 size=32,
             ),
@@ -95,7 +95,7 @@ def test_model_constructor_accepts_branch_nodes_with_optional_leaf_queries():
     merchant = params.requests["record/transactions/merchant_code"]
     assert merchant.name == "merchant_code"
     assert merchant.description == "merchant code"
-    assert merchant.query == '[*].source.transactions[*]."merchant code"'
+    assert merchant.query == 'source["merchant code"]'
     assert merchant.size == 32
 
 
@@ -111,8 +111,6 @@ def test_branch_mask_shorthand_normalizes_and_exports_public_api():
 
     bound = model.schema.branches["record/transactions"]
     assert bound.masks == [policy]
-    assert rf.MASK_LITERAL == "<MASK>"
-    assert rf.MaskLiteral is not None
 
 
 def test_branch_mask_validation_rejects_invalid_bound_configs():

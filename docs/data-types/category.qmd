@@ -152,22 +152,35 @@ inference-only preprocessor can deliberately turn unseen values into `null`
 instead of leaving them as valued-but-unavailable content:
 
 ```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
 @rf.preprocess
 def null_unseen_category(
-    record: dict,
+    batch: rf.Batch,
     *,
     encoding_context,
-) -> rf.Observation:
+) -> rf.Batch:
     vocabulary = rf.Category.vocabulary(
         encoding_context,
         "record/merchant_category",
     )
-    value = record["merchant_category"].strip().lower()
-
-    return rf.Observation({
-        **record,
-        "merchant_category": value if value in vocabulary else None,
-    })
+    values = pc.utf8_lower(
+        pc.utf8_trim_whitespace(batch.data["merchant_category"])
+    )
+    known = pc.is_in(
+        values,
+        value_set=pa.array(vocabulary, type=pa.large_string()),
+    )
+    values = pc.if_else(
+        known,
+        values,
+        pa.scalar(None, type=pa.large_string()),
+    )
+    index = batch.data.schema.get_field_index("merchant_category")
+    return batch.replace(
+        batch.data.set_column(index, "merchant_category", values)
+    )
 
 
 predictions = model.predict(
@@ -235,29 +248,23 @@ unseen input.
 
 This excerpt emphasizes `Category` content; the
 [Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
-defines the complete shared `state` and `inferred` members:
+defines the complete shared `state` and `inferred` members. Prediction output is
+an Arrow table; use struct kernels to select this address without converting
+rows to Python:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+import pyarrow.compute as pc
 
-{
-    "record/merchant_category": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": {
-            "value": ...,
-            "probability": ...,
-            "topk": ...,
-        },
-        "inferred": ...,
-    }
-}
+merchant = pc.struct_field(
+    result["predictions"],
+    "record/merchant_category",
+)
+state = pc.struct_field(merchant, "state")
+content = pc.struct_field(merchant, "content")
+value = pc.struct_field(content, "value")
+probability = pc.struct_field(content, "probability")
+topk = pc.struct_field(content, "topk")
+inferred = pc.struct_field(merchant, "inferred")
 ```
 
 `topk` serves two related roles:
@@ -271,8 +278,9 @@ Top-1 is already represented by `content.value` and `content.probability`, so
 emitted. There is no separate availability probability: use upstream
 vocabulary monitoring when availability itself matters.
 
-Rendered examples use string addresses for readability. The dictionary returned
-by `Model.predict(...)` is keyed by `rf.Address` objects.
+The address remains a slash-delimited Arrow struct field name. `rf.Address`
+still identifies model-tree nodes in schema and extension APIs; it is not the
+container type returned by `Model.predict(...)`.
 
 ## Capacity And Compute
 

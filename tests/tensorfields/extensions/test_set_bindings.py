@@ -5,11 +5,12 @@ from __future__ import annotations
 import pytest
 
 import relflow as rf
+from tests.arrow import table
 
 ADDRESS = rf.Address("record/tags")
 
 
-def _model() -> rf.Model:
+def build() -> rf.Model:
     return rf.Model(
         name="record",
         d_model=8,
@@ -21,41 +22,41 @@ def _model() -> rf.Model:
     )
 
 
-def _learn(model: rf.Model, *values: list[str]) -> None:
+def learn(model: rf.Model, *values: list[str]) -> None:
     model.encode(
-        [{"tags": value} for value in values],
+        table([{"tags": value} for value in values]),
         strata=rf.Strata.train,
         mask=False,
     )
 
 
 def test_set_vocabulary_returns_immutable_model_snapshot() -> None:
-    model = _model()
-    _learn(model, ["ALPHA", "BETA"])
+    model = build()
+    learn(model, ["ALPHA", "BETA"])
 
     snapshot = rf.Set.vocabulary(model, ADDRESS)
 
     assert snapshot == ("ALPHA", "BETA")
     assert isinstance(snapshot, tuple)
 
-    _learn(model, ["GAMMA"])
+    learn(model, ["GAMMA"])
 
     assert snapshot == ("ALPHA", "BETA")
     assert rf.Set.vocabulary(model, "record/tags") == ("ALPHA", "BETA", "GAMMA")
 
 
 def test_set_vocabulary_reads_latest_encoding_context_snapshot() -> None:
-    model = _model()
+    model = build()
     encoding_context = model.interprocess_encoding_context
 
-    _learn(model, ["ALPHA", "BETA"])
+    learn(model, ["ALPHA", "BETA"])
 
     assert rf.Set.vocabulary(encoding_context, ADDRESS) == ("ALPHA", "BETA")
 
 
 def test_set_vocabulary_reads_same_length_context_replacement() -> None:
-    model = _model()
-    _learn(model, ["ALPHA"])
+    model = build()
+    learn(model, ["ALPHA"])
     encoding_context = model.interprocess_encoding_context
 
     model.nodes[ADDRESS].embedder.vocab.load_snapshot(["BETA"])
@@ -65,7 +66,7 @@ def test_set_vocabulary_reads_same_length_context_replacement() -> None:
 
 @pytest.mark.parametrize("use_model", [True, False], ids=["model", "encoding-context"])
 def test_set_vocabulary_raises_for_missing_address(use_model: bool) -> None:
-    model = _model()
+    model = build()
     source = model if use_model else model.interprocess_encoding_context
 
     with pytest.raises(KeyError, match="missing"):

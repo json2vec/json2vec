@@ -12,6 +12,18 @@ from relflow.tensorfields.base import (
     RequestBase,
     TensorFieldBase,
 )
+from relflow.tensorfields.output import (
+    array,
+    embedding,
+    fixed,
+    inferred,
+    labels,
+    offsets,
+    shape,
+    state,
+    struct,
+    variable,
+)
 
 __all__ = [
     "TENSORFIELDS",
@@ -20,6 +32,16 @@ __all__ = [
     "Plugin",
     "RequestBase",
     "TensorFieldBase",
+    "array",
     "base",
+    "embedding",
     "extensions",
+    "fixed",
+    "inferred",
+    "labels",
+    "offsets",
+    "shape",
+    "state",
+    "struct",
+    "variable",
 ]

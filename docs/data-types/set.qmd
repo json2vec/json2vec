@@ -123,13 +123,20 @@ appropriate way to consult a trained vocabulary during inference
 preprocessing:
 
 ```python
+import awkward as ak
+import pyarrow.compute as pc
+
 @rf.preprocess
-def keep_known_tags(record: dict, *, encoding_context) -> rf.Observation:
+def keep_known_tags(batch: rf.Batch, *, encoding_context) -> rf.Batch:
     vocabulary = rf.Set.vocabulary(encoding_context, "record/tags")
-    return rf.Observation({
-        **record,
-        "tags": [tag for tag in record["tags"] if tag in vocabulary],
-    })
+    index = batch.data.schema.get_field_index("tags")
+    field = batch.data.schema.field(index)
+    tags = ak.from_arrow(batch.data.column(index))
+    known = ak.Array(vocabulary)
+    keep = ak.fill_none(ak.any(tags[:, :, None] == known, axis=-1), False)
+    values = ak.to_arrow(tags[keep], extensionarray=False)
+    values = pc.cast(values, field.type)
+    return batch.replace(batch.data.set_column(index, field, values))
 ```
 
 Avoid making training-preprocessor decisions from the current learned
@@ -156,51 +163,28 @@ grow linearly with `size`.
 
 ## Prediction Output
 
-With `threshold=None`, `Model.predict(...)` returns one independent probability
-for each populated vocabulary label. It does not return unused capacity or
-unknown labels:
+`Model.predict(...)` returns a `pa.Table`. `content` is one Arrow list of
+`struct<value: large_string, probability: float32>` per coordinate; it never
+creates one dynamic struct field per vocabulary label. With `threshold=None`,
+the list includes each populated vocabulary label. Unused capacity and unknown
+labels are omitted:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+import pyarrow.compute as pc
 
-{
-    "record/tags": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": {
-            "vip": ...,
-            "international": ...,
-        },
-        "inferred": ...,
-    }
-}
+tags = pc.struct_field(result["predictions"], "record/tags")
+state = pc.struct_field(tags, "state")
+candidates = pc.struct_field(tags, "content")
+inferred = pc.struct_field(tags, "inferred")
 ```
 
-With `threshold=0.75`, `content` contains only populated labels whose
-probabilities meet the threshold:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-{
-    "record/tags": {
-        "content": {"vip": 0.91},
-        # shared state and inferred members omitted in this excerpt
-    }
-}
-```
+With `threshold=0.75`, each candidate list contains only populated labels whose
+probabilities meet the threshold. Its length may therefore vary by row, while
+the field's Arrow type remains stable.
 
 The [Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
-explains `state`, `inferred`, shapes, and visible-field decoding. Rendered
-examples use string addresses for readability; Python results are keyed by
-`rf.Address` objects.
+explains `state`, `inferred`, shapes, and visible-field decoding. The
+slash-delimited address is a field name inside the Arrow `predictions` struct.
 
 Thresholding reduces the response, not model compute, because the decoder still
 scores its full `size`-wide output. Tune the threshold against validation data

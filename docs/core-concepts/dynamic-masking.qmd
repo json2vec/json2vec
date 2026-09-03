@@ -43,7 +43,7 @@ and mark the positions trainable. The selection masks differ:
 
 - `p_mask` draws a Bernoulli sample for every configured position from the
   original state snapshot. In normal non-predict ingestion it can select valued,
-  null, or padded positions; the prediction-only `<MASK>` literal is rejected.
+  null, or padded positions.
 - `p_prune` draws one Bernoulli sample per batch observation, then expands it
   across every branch position belonging to that leaf. `target=True` is
   `p_prune=1.0`.
@@ -59,6 +59,8 @@ Consequently, stochastic validation/test metrics evaluate a sampled masking
 distribution and can vary across passes. Fix random seeds and aggregate repeated
 evaluation when that variance matters, or use deterministic `target=True` for a
 fixed supervised target. Lightning evaluation mode does not disable masking.
+These draws use Torch's random stream; they are not keyed by `Batch.identity`
+and are not invariant to model-batch or source-chunk boundaries.
 :::
 
 Every selected position can contribute to state loss because its original state
@@ -190,6 +192,7 @@ from __future__ import annotations
 import random
 import string
 
+import pyarrow as pa
 from rich import print
 
 import relflow as rf
@@ -209,7 +212,7 @@ def words(rng: random.Random) -> list[dict[str, list[dict[str, str]]]]:
 
 
 rng = random.Random(7)
-data = [{"words": words(rng)} for _ in range(5)]
+data = pa.Table.from_pylist([{"words": words(rng)} for _ in range(5)])
 
 model = rf.Model(
     d_model=16,
@@ -269,6 +272,7 @@ to inspect the raw tensorized state before any dynamic masks, `p_mask`, or
 #| echo: true
 #| output: true
 
+# `records` is a pyarrow.Table matching `model`.
 unmasked = model.encode(records, strata=rf.Strata.train, mask=False)
 masked = model.encode(records, strata=rf.Strata.train, mask=True)
 ```
@@ -329,32 +333,13 @@ rf.Mask(
 )
 ```
 
-## Prediction Placeholders
+## Prediction Requests
 
-During prediction, every tensorfield accepts the literal string `"<MASK>"` as a
-placeholder for "decode this value":
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-model.predict(
-    [
-        {
-            "events": [
-                {"event_type": "login", "amount": 0.0},
-                {"event_type": "<MASK>", "amount": "<MASK>"},
-            ]
-        }
-    ]
-)
-```
-
-`"<MASK>"` is predict-only. It raises in train, validate, and test strata, and
-vocabulary-backed fields never learn it as an observed token.
-
-For structured leaves such as `Set` or `Vector`, a scalar `"<MASK>"` masks the
-whole field. A collection containing `"<MASK>"` as one element is invalid.
+There is no reserved value literal for per-observation prediction masking.
+Strings that resemble mask tokens remain ordinary source content. Omit fields
+configured with `target=True` from prediction input; their masked coordinates
+come from the model schema. User-supplied per-observation selection arguments
+are part of the separate mask redesign and are not shipped by this Arrow pass.
 
 ## Validation
 

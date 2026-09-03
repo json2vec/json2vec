@@ -172,13 +172,8 @@ def require_forward_addresses(
     *,
     strata: Strata,
 ) -> None:
-    keys = set(inputs.keys())
-    metadata_keys = {key for key in keys if key == TensorKey.metadata}
-    addresses = {Address(str(key)) for key in keys if key != TensorKey.metadata}
+    addresses = {Address(str(key)) for key in inputs.keys()}
     expected = set(module.schema.active_requests)
-
-    if metadata_keys and strata != Strata.predict:
-        raise ForwardContractError(f"forward input contains {TensorKey.metadata} outside predict strata")
 
     missing = expected - addresses
     if missing:

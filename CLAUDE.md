@@ -2,4 +2,6 @@
 
 @AGENTS.md
 
-Use the shared agent guide as the source of truth for RelFlow API style, examples, gotchas, and verification commands.
+Follow the shared agent guide's implementation style and ownership boundaries
+as the source of truth. Use `CONTRIBUTING.md` for the complete extension, Arrow
+data, documentation, and testing contracts.

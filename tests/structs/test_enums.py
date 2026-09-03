@@ -1,4 +1,4 @@
-from relflow.structs.enums import AttentionMode, ShardingStrategy, Strata
+from relflow.structs.enums import AttentionMode, Strata
 
 
 def test_strata_normalizes_strings():
@@ -12,21 +12,6 @@ def test_strata_expands_scalar_and_mapping_values():
     expanded = Strata.expand({"TRAIN": 1}, default=0)
     assert expanded[Strata.train] == 1
     assert expanded[Strata.validate] == 0
-
-
-def test_sharding_strategy_values_stable():
-    assert {member.value for member in ShardingStrategy} == {"file", "chunk", "record"}
-
-
-def test_sharding_strategy_normalizes_strings():
-    assert ShardingStrategy.normalize(" RECORD ") is ShardingStrategy.record
-    assert ShardingStrategy.normalize(ShardingStrategy.chunk) is ShardingStrategy.chunk
-
-
-def test_sharding_strategy_expands_by_strata():
-    expanded = ShardingStrategy.expand({"train": "record"}, default=ShardingStrategy.chunk)
-    assert expanded[Strata.train] is ShardingStrategy.record
-    assert expanded[Strata.validate] is ShardingStrategy.chunk
 
 
 def test_attention_mode_kv_heads():

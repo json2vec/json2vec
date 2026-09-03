@@ -9,8 +9,8 @@
   <!-- discord-invite:end -->
 </p>
 
-RelFlow builds PyTorch/Lightning models directly from
-JSON-like schemas.
+RelFlow builds PyTorch/Lightning models directly from nested, Arrow-backed
+schemas.
 It is meant for predictive modeling on records that are not naturally flat:
 customers with transactions, orders with line items, sessions with clickstream
 events, devices recurring across histories, and mixed datatypes at every level.
@@ -23,14 +23,15 @@ the schema becomes the model.
 
 A `relflow` schema is both a data contract and an architecture blueprint.
 
-- Leaf fields such as `Number`, `Category`, `Set`, `Hash`, `Text`, and
-  `Vector` become datatype-specific tensorfields.
+- Leaf fields such as `Number`, `Category`, `Cluster`, `Set`, `Hash`, `Text`,
+  and `Vector` become datatype-specific tensorfields.
 - `Branch` nodes define shared contexts for child fields, with optional local
   attention and pooling before the representation flows upward.
 - Targets, masks, pruning, and embeddings are configured on the same schema
   tree.
-- Prediction output is keyed by schema address, so decoded values and
-  embeddings remain attached to the part of the record that produced them.
+- Prediction output uses schema addresses as fields inside a typed Arrow
+  struct, so decoded values and embeddings remain attached to the part of the
+  record that produced them.
 
 That gives one model surface for supervised prediction, masked reconstruction,
 unsupervised embedding workflows, schema mutation, field importance, batch
@@ -78,21 +79,23 @@ to emit embeddings at configured addresses.
 
 ## Train With Lightning
 
-`rf.Model` is a LightningModule. `rf.PolarsDataModule` and
-`rf.StreamingDataModule` are LightningDataModule implementations. The schema
+`rf.Model` is a LightningModule. `rf.ArrowDataModule` is the canonical
+LightningDataModule; focused Polars, custom, and synthetic adapters enter the
+same Arrow pipeline. The schema
 defines the model tree, typed losses, prediction outputs, and embeddings;
 Lightning runs `fit`, `validate`, `test`, and `predict`.
 
 ```python
 import lightning.pytorch as lit
-import polars as pl
+import pyarrow as pa
+import pyarrow.json as pajson
 import torch
 
 import relflow as rf
 
-records = pl.read_ndjson("docs/data/iris.jsonl").head(36).with_row_index()
-train_records = records.filter((pl.col("index") % 3) != 2).drop("index")
-validate_records = records.filter((pl.col("index") % 3) == 2).drop("index")
+records = pajson.read_json("docs/data/iris.jsonl").slice(0, 36)
+train_records = records.take(pa.array([index for index in range(36) if index % 3 != 2]))
+validate_records = records.take(pa.array([index for index in range(36) if index % 3 == 2]))
 
 model = rf.Model(
     d_model=16,
@@ -106,15 +109,15 @@ model = rf.Model(
     species=rf.Category(target=True, size=3, topk=[2]),
 )
 
-datamodule = rf.PolarsDataModule(
+datamodule = rf.ArrowDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    observation_buffer_size=32,
-    sample_rate=1.0,
+    seed=42,
+    sample=1.0,
 )
 
 trainer = lit.Trainer(
@@ -141,18 +144,24 @@ strategies. See
 
 ## Predict And Embed
 
-For small interactive batches, call `model.predict(...)` with raw dictionaries.
+For interactive work, call `model.predict(...)` with an Arrow table or record
+batch. A nonempty sequence of mappings is a small-request convenience; use
+typed Arrow for empty or large inputs. The result is always a `pyarrow.Table`.
 
 ```python
-requests = validate_records.drop("species").head(3).to_dicts()
-predictions = model.predict(requests)
+import pyarrow.compute as pc
 
-species = predictions[rf.Address("record", "species")]
-record = predictions[rf.Address("record")]
+requests = validate_records.drop(["species"]).slice(0, 3)
+result = model.predict(requests)
 
-print(species["content"]["value"])
-print(species["content"]["probability"])
-print(record["embedding"])
+predictions = result["predictions"]
+species = pc.struct_field(predictions, "record/species")
+content = pc.struct_field(species, "content")
+record = pc.struct_field(predictions, "record")
+
+print(pc.struct_field(content, "value"))
+print(pc.struct_field(content, "probability"))
+print(pc.struct_field(record, "embedding"))
 ```
 
 For larger offline jobs, configure a `predict` split on a data module and attach
@@ -167,9 +176,9 @@ trainer = lit.Trainer(
     logger=False,
 )
 
-predict_datamodule = rf.PolarsDataModule(
+predict_datamodule = rf.ArrowDataModule(
     model=model,
-    predict=validate_records.drop("species"),
+    predict=validate_records.drop(["species"]),
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
@@ -211,30 +220,31 @@ returned from prediction.
 
 ## Data Modules
 
-Data modules load raw records, apply optional preprocessing, batch
-observations, tensorize values from the model schema, apply configured masking
-and target pruning in non-predict loops, and hand encoded batches to Lightning.
-One eager Awkward coalescing pass prepares all encoded fields before datatype
-codecs run. Same-named fields use direct projection; a leaf may opt into
-`query=...` for JMESPath selection, and omitted queries are not inferred.
+Data modules load Arrow records, apply optional batch preprocessing, sample and
+shuffle logical observations, tensorize values from the model schema, apply
+configured masking and target pruning, and hand encoded batches to Lightning.
+One preparation phase produces all selected ragged fields before datatype
+codecs run. Same-named fields use direct projection; any node may opt into a small,
+Arrow-native structural `query=...` path.
 
 Choose the data module by where the records live:
 
 | Use case | Module |
 | --- | --- |
-| Tutorials, tests, notebooks, in-memory Polars frames | `PolarsDataModule` |
-| Many local files | `StreamingDataModule` |
-| S3-backed datasets | `StreamingDataModule` |
-| Distributed training or prediction over large inputs | `StreamingDataModule` |
+| In-memory Arrow or restartable Arrow factories | `ArrowDataModule` |
+| Local or remote Arrow datasets | `ArrowDataModule` |
+| Collected in-memory Polars frames | `PolarsDataModule` |
+| PyTorch `IterableDataset` mappings | `CustomDataModule` |
+| Restartable mapping generators | `SyntheticDataModule` |
 
-`StreamingDataModule` supports local `ndjson`, `parquet`, `feather`, `csv`,
-`orc`, and `json` inputs. S3 roots use the PyArrow-backed formats—`parquet`,
-`feather`, `csv`, `orc`, and `json`; `ndjson` is local-only. Avro is not
-supported by the current reader. Split arguments are compiled regular
-expressions matched against discovered file paths.
+Polars is an optional ingress adapter and converts each frame once. Custom and
+synthetic adapters convert bounded mapping groups once per chunk. Thereafter,
+all four use the same Arrow preprocessing, shuffling, coalescing, and encoding
+path. The first Arrow release deliberately limits Dataset and factory sources
+to one reader while distributed ownership is completed.
 
 See [Data Modules](https://relflow.github.io/relflow/guides/data-modules.html)
-for split configuration, sharding, sampling, buffers, and preprocessors.
+for split configuration, sampling, shuffling, buffering, and preprocessors.
 
 ## What Makes This Different
 
@@ -332,11 +342,12 @@ Start with:
 - [Model Tree](https://relflow.github.io/relflow/core-concepts/model-tree.html)
 - [Data Flow](https://relflow.github.io/relflow/core-concepts/data-flow.html)
 - [Binding Data](https://relflow.github.io/relflow/core-concepts/binding-data.html)
-- [Advanced Query Paths](https://relflow.github.io/relflow/core-concepts/querypaths.html)
+- [Query Paths](https://relflow.github.io/relflow/core-concepts/querypaths.html)
 - [Built-In Data Types](https://relflow.github.io/relflow/core-concepts/data-types.html)
 - [Learning Modes & Embeddings](https://relflow.github.io/relflow/core-concepts/embeddings.html)
 - [Training With Lightning](https://relflow.github.io/relflow/guides/lightning.html)
 - [Data Modules](https://relflow.github.io/relflow/guides/data-modules.html)
+- [Working With Arrow](https://relflow.github.io/relflow/guides/working-with-arrow.html)
 - [Evaluation And Metrics](https://relflow.github.io/relflow/guides/evaluation.html)
 - [Model Lifecycle](https://relflow.github.io/relflow/guides/model-lifecycle.html)
 - [Batch Inference](https://relflow.github.io/relflow/guides/batch-inference.html)
@@ -354,10 +365,12 @@ Tutorials and guides:
 - [Troubleshooting](https://relflow.github.io/relflow/guides/troubleshooting.html)
 - [Experimental Custom Tensorfields](https://relflow.github.io/relflow/guides/custom-tensorfields.html)
 - [Public API Map](https://relflow.github.io/relflow/reference/public-api.html)
+- [Arrow Migration](https://relflow.github.io/relflow/guides/arrow-migration.html)
 - [Branch](https://relflow.github.io/relflow/data-types/branch.html)
 - [Number](https://relflow.github.io/relflow/data-types/number.html)
 - [Boolean](https://relflow.github.io/relflow/data-types/boolean.html)
 - [Category](https://relflow.github.io/relflow/data-types/category.html)
+- [Cluster](https://relflow.github.io/relflow/data-types/cluster.html)
 - [Set](https://relflow.github.io/relflow/data-types/set.html)
 - [Hash](https://relflow.github.io/relflow/data-types/hash.html)
 - [DateParts](https://relflow.github.io/relflow/data-types/dateparts.html)

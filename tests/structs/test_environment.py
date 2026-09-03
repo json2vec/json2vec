@@ -22,6 +22,8 @@ ENV_VARS = (
     "LOG_LEVEL",
     "RELFLOW_JSON_BACKEND",
     "JSON_BACKEND",
+    "RELFLOW_RETAIN",
+    "RETAIN",
 )
 
 
@@ -62,3 +64,9 @@ def test_deployment_environment_accepts_realtime_serving_knobs(monkeypatch: pyte
 
     assert env.workers == 2
     assert env.json_backend is JSONBackend.stdlib
+
+
+def test_deployment_environment_accepts_all_column_retention(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("RELFLOW_RETAIN", '"*"')
+
+    assert Deployment().retain == "*"

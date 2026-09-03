@@ -27,7 +27,7 @@ representation or learning objective itself must change.
 
 ## Component Lifecycle
 
-One plugin registers six named components:
+One plugin registers seven named components:
 
 | Component | Responsibility |
 | --- | --- |
@@ -36,23 +36,24 @@ One plugin registers six named components:
 | `Embedder` | Convert visible state/content into a `d_model` parcel sent to the parent branch. |
 | `Decoder` | Pool heritage context and produce raw state/content predictions. |
 | `loss` | Compare decoded tensors with cached targets and log address-qualified metrics. |
-| `write` | Convert raw prediction tensors to CPU/JSON-compatible public content, or return no decoded output. |
+| `output` | Declare the stable plugin-owned Arrow coordinate type before any prediction batch. |
+| `write` | Convert raw prediction tensors to one flat `pa.StructArray` of exactly that type. |
 
 Callbacks are optional and are registered separately with `plugin.callback(...)`.
 
 The runtime path is:
 
 ```text
-processed observations → schema binding or explicit JMESPath
-→ Plugin(types=...) atom preparation
+Arrow batches → direct binding or explicit structural query
 → eager atomic coalescing of every RaggedField
+→ Plugin(types=..., arrow=...) terminal validation
 → TensorField.new / TensorField.empty
 → masking and target caching
 → Embedder.forward → Parcel
 → parent branch encoders
 → Decoder.forward / Decoder.decode → Prediction
 → loss during train, validate, or test
-→ write during prediction
+→ output-plan compilation → write during prediction
 ```
 
 ## Create And Import The Plugin
@@ -76,38 +77,69 @@ types valid; durable checkpoint, batch, and serving workflows are unsupported.
 
 ### Declare Raw Atom Compatibility
 
-`types` is a required tuple of the raw atom families that the plugin accepts.
-Each tuple entry is a separate, incompatible family. A PEP 604 union groups
-types that may safely promote together:
+`types` is a required tuple naming the canonical Arrow terminal families that
+the plugin accepts. The declaration uses familiar Python equivalents, but
+`Plugin.prepare(...)` validates the whole Arrow leaf type—not the Python
+objects that may have existed before Arrow conversion—before
+`TensorField.new(...)` runs. Each tuple entry is a separate, incompatible
+family. A PEP 604 union groups terminal types that may safely share one plugin
+input:
 
 ```python
-# Either all str or all bytes at one field address; mixing is rejected.
+# A string+binary Arrow union is rejected because it spans two families.
 identity = rf.Plugin(name="identity", types=(str, bytes))
 
 # int and float are one compatible numeric family and may mix.
 numeric = rf.Plugin(name="numeric", types=(int | float,))
 ```
 
-RelFlow matches the exact registered runtime type after canonicalization. This
-keeps pairs such as `bool`/`int` and `datetime`/`date` distinct; register a
-custom subclass explicitly when the plugin accepts it. RelFlow converts NumPy scalar atoms to their Python
-equivalents, recursively prepares atoms inside list, tuple, and NumPy-array leaf
-values, and collects the compatibility families observed at each field
-address. More than one family at one address is an error. Do not declare a type
-in more than one family, as in `types=(int, int | float)`. Sequence containers
-and NumPy scalar classes are prepared by the shared coalescer and are not valid
-family entries. A record-valued extension may register a concrete mapping type
-such as `dict` as a terminal atom.
+RelFlow maps those families to Arrow terminal types: for example, `str` accepts
+`string` and `large_string`, `int` accepts integer arrays, and `datetime`
+accepts timestamp arrays. This keeps pairs such as `bool`/`int` and
+`timestamp`/`date` distinct. List containers are structural: validation walks
+through list, fixed-size-list, dictionary, extension, and union types to their
+terminals. More than one declared family in one leaf is an error. Do not
+declare a type in more than one family, as in `types=(int, int | float)`.
+Sequence classes, iterators, NumPy arrays, and NumPy scalar classes are not
+valid family entries. A record-valued extension may use `dict`, which accepts
+Arrow struct or map terminals.
+
+Arrow conversion is allowed to canonicalize Python input before this check.
+For example, PyArrow may infer `binary` for a bounded Python chunk containing
+both `str` and `bytes`; the plugin then sees one binary family and accepts it.
+If original Python-type provenance matters, provide an explicit Arrow schema
+or normalize the values deliberately before they enter the Arrow pipeline.
+
+Custom Python atoms require a plugin-owned physical matcher. The matcher sees
+the logical Arrow extension type first; if it does not accept an extension,
+RelFlow also checks its storage terminals:
+
+```python
+from decimal import Decimal
+
+import pyarrow as pa
+
+decimal = rf.Plugin(
+    name="decimal",
+    types=(Decimal,),
+    arrow={Decimal: pa.types.is_decimal},
+)
+```
+
+Every `arrow` key must occur in `types`, and every matcher must accept a
+`pa.DataType` and return a boolean. Built-in Python equivalents already have
+standard matchers and may be overridden when a plugin needs a narrower
+physical contract. A declared custom type without a matcher fails immediately
+when the plugin is created instead of becoming an unusable registry entry.
 
 The declaration is an atom contract, not a semantic shape schema. For example,
 a Vector plugin may accept the numeric family while its `TensorField.new(...)`
-still enforces list rank, fixed width, and numeric conversion after branch
-overflow. One-shot iterators are rejected rather than consumed implicitly.
+still enforces Arrow list rank, fixed width, and numeric conversion after
+branch overflow.
 
-`None` and a whole-leaf prediction `"<MASK>"` are handled by the shared routing
-layer and do not need entries in `types`. Inside a structured leaf, the string
-`"<MASK>"` is an ordinary `str` atom and must be allowed if the datatype accepts
-it.
+`None` is handled as a shared null state and does not need an entry in `types`.
+All string values remain ordinary `str` atoms when the datatype accepts
+strings; the data layer reserves no string sentinel.
 
 ## Define The Request
 
@@ -129,9 +161,10 @@ class Request(rf.RequestBase):
 
 `RequestBase` provides common options such as `name`, `query`, `nullable`,
 `active`, `embed`, `weight`, `p_mask`, `p_prune`, pooling, heads, linear depth,
-and dropout. With `query=None`, a request reads its schema location directly.
-An explicit JMESPath query is evaluated inside the same eager coalescing call;
-direct and queried values converge before paired value/state regularization.
+and dropout. With `query=None`, a request reads its own name from its parent
+selection. An explicit node-relative structural query is evaluated inside the
+same coalescing call; direct and queried values converge before paired
+value/state regularization.
 Custom tensorfields therefore receive the same `field` contract in either case
 and do not implement querying.
 Add only datatype-specific options and validate combinations in Pydantic
@@ -144,8 +177,9 @@ Use a tensorclass with the four runtime fields. State shape is the leading
 schema shape; content may add datatype-specific trailing dimensions.
 
 ```python
-import awkward as ak
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import torch
 from tensordict import TensorDict, tensorclass
 
@@ -167,15 +201,14 @@ class TensorField(rf.TensorFieldBase):
         strata,
         interprocess_encoding_context=None,
     ):
-        # field.values contains only retained, valued leaf values. Encode that
-        # flat Awkward view, then scatter it into the dense schema shape.
-        encoded = np.fromiter(
-            (encode(value) for value in ak.to_list(field.values)),
-            dtype=np.float32,
-            count=len(field.values),
-        )
+        # field.values is the Arrow array of retained, valued leaf values.
+        # Cast it columnarly, then scatter it into dense model geometry.
+        encoded = pc.cast(field.values, pa.float32(), safe=True)
+        if isinstance(encoded, pa.ChunkedArray):
+            encoded = encoded.combine_chunks()
+        encoded = encoded.to_numpy(zero_copy_only=False)
         content = torch.from_numpy(field.place(encoded, fill=0.0))
-        state = torch.from_numpy(field.state)
+        state = torch.from_numpy(field.dense)
 
         # Use interprocess_encoding_context for field-owned mutable state such
         # as a vocabulary; stateless tensorfields can omit this parameter.
@@ -208,19 +241,24 @@ Use the shared `Tokens` values exactly. Do not invent a public state for a
 condition that belongs to content. The built-ins use safe zero content for
 non-valued positions and keep original targets in a `TensorDict` before hiding.
 
-The internal coalescer owns schema traversal, missing/null/padded/masked state,
-prediction-literal placement, and branch overflow. It prepares every encoded
-field successfully before any `TensorField.new(...)` runs. `field.state`
-therefore already contains final `rf.Tokens` values rather than temporary
-presence or literal codes. The plugin declaration owns raw atom compatibility;
-the tensorfield owns semantic validation and encoding of retained values.
-`field.place(...)` requires one encoded row per retained value and preserves any
-datatype-specific trailing dimensions.
+The internal coalescer owns schema traversal, missing/null/padded state, and
+branch overflow. It prepares every encoded field successfully before any
+`TensorField.new(...)` runs. The resulting `RaggedField` is entirely
+Arrow-backed: `values` contains retained valued inputs, `state` is flat `int8`,
+`placement` is flat `int64`, and `shape` is the dense model geometry. Use
+`field.dense` for the final `rf.Tokens` state as a shaped NumPy array.
 
-Test `new(...)` with scalar, nested, null, padded, whole-leaf prediction masks,
-overflow, and prediction-missing inputs. For structured leaves, also prove that
-a nested `"<MASK>"` string is ordinary codec input. Test `empty(...)` separately
-because it controls requests that omit a target.
+The plugin declaration owns Arrow terminal compatibility; the tensorfield owns
+semantic validation and encoding. `field.place(...)` requires one encoded row
+per retained value and preserves datatype-specific trailing dimensions. This
+is the plugin boundary—Awkward may be a convenient temporary view inside an
+upstream preprocessor, but it is not stored in `RaggedField` or passed to a
+datatype codec.
+
+Test `new(...)` with scalar, nested, null, padded, overflow, and missing target
+input. If strings are accepted, prove that control-like text remains ordinary
+content. Test `empty(...)` separately because it controls requests that omit a
+target.
 
 ## Embed Visible Input
 
@@ -286,11 +324,16 @@ in `write`, and target comparison belongs in `loss`.
 
 ## Define Loss And Output
 
-Registered hook parameter names must match the runtime contract and must be
-annotated:
+Registered hook parameter names must match the runtime contract. `loss`
+parameters must be annotated; clear annotations are also strongly recommended
+for `output` and `write`:
 
 ```python
 from typing import Any
+
+import pyarrow as pa
+
+from relflow.tensorfields import array, struct
 
 
 @signed_scalar.register
@@ -306,25 +349,49 @@ def loss(
 
 
 @signed_scalar.register
-def write(module: Any, prediction: Any):
-    # Detach, move to CPU, preserve leading batch/branch shapes, and return a
-    # mapping such as {"state": ..., "content": ...}.
-    ...
+def output(module: Any, address: rf.Address) -> pa.StructType:
+    # This is the stable plugin-owned type for one flat model coordinate.
+    return pa.struct(
+        [pa.field(rf.TensorKey.content.name, pa.float32(), nullable=False)]
+    )
+
+
+@signed_scalar.register
+def write(
+    module: Any,
+    prediction: Any,
+    datatype: pa.StructType,
+) -> pa.StructArray:
+    content = array(prediction.payload[rf.TensorKey.content], pa.float32())
+    return struct({rf.TensorKey.content.name: content}, datatype)
 ```
 
 Call `module.track((address, strata, metric, component), value=...)` so logs use
 the same address/stage convention as built-ins. Compute content loss only where
 the cached target state makes that content meaningful.
 
-If the datatype intentionally has no decoded public output, omit `write` or
+`output` must depend only on stable model, request, and plugin state; it cannot
+infer a type from the first prediction values. RelFlow calls it once while
+compiling the output plan, then supplies that exact `datatype` to every
+`write` call. Use the supplied type—do not call `output` again or infer a new
+type from prediction values.
+
+`write` returns one flat struct per decoded model coordinate with exactly the
+declared field order and types. It must not wrap branch axes, filter
+coordinates, handle identity, construct Python rows, or return NumPy/object
+values. The shared runtime validates the coordinate count and wraps compiled
+repeated axes afterward.
+
+The runtime reserves `state`, `inferred`, and `embedding`: it adds those shared
+fields and normalizes embeddings. A plugin fragment cannot declare them.
+
+If the datatype intentionally has no decoded public output, omit both hooks or
 register `None` explicitly:
 
 ```python
+signed_scalar.register(None, component=rf.Component.output)
 signed_scalar.register(None, component=rf.Component.write)
 ```
-
-The runtime adds `inferred` to decoded public output and normalizes configured
-`embedding` output. A writer should not duplicate those envelope fields.
 
 ## Register Callbacks
 
@@ -352,12 +419,12 @@ A custom datatype test suite should cover:
 1. request validation and schema inspection within the creating process;
 2. scalar and every supported schema nesting shape;
 3. null, padded, masked, unavailable/malformed, and overflow behavior;
-4. `p_mask`, `p_prune`, `target=True`, literal masks, and missing prediction
-   input;
+4. `p_mask`, `p_prune`, `target=True`, and missing prediction input;
 5. embedder shape, non-valued zero-content invariant, and device movement;
 6. decoder shape for query and mean pooling if both are supported;
 7. finite loss with no valued content and correct metric selection;
-8. complete public output and `inferred` shape;
+8. stable declared Arrow output, flat writer count/type, shared envelope, and
+   `inferred` shape;
 9. an explicit guard proving that unsupported save/load is not used by the
    integration;
 10. Lightning train/validate/test/predict and multi-rank state synchronization;

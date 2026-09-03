@@ -2,33 +2,36 @@ import pytest
 
 import relflow as rf
 from relflow.structs.enums import Strata, Tokens
+from tests.arrow import table
 
 
-def _model(*fields):
+def build(*fields):
     return rf.Model(*fields, d_model=8, n_layers=1, n_heads=2)
 
 
 def test_direct_schema_binding_and_explicit_nested_query_can_share_a_batch():
-    model = _model(
+    model = build(
         rf.Branch(
             rf.Number("value"),
             name="items",
             length=2,
         ),
-        rf.Number("gross_amount", query='[*].payload.metrics."gross amount"'),
+        rf.Number("gross_amount", query='payload.metrics["gross amount"]'),
     )
 
     encoded = model.encode(
-        [
-            {
-                "items": [{"value": 1.0}, {"value": 2.0}],
-                "payload": {"metrics": {"gross amount": 9.5}},
-            },
-            {
-                "items": [{"value": 3.0}],
-                "payload": {"metrics": {"gross amount": 10.5}},
-            },
-        ],
+        table(
+            [
+                {
+                    "items": [{"value": 1.0}, {"value": 2.0}],
+                    "payload": {"metrics": {"gross amount": 9.5}},
+                },
+                {
+                    "items": [{"value": 3.0}],
+                    "payload": {"metrics": {"gross amount": 10.5}},
+                },
+            ]
+        ),
         strata=Strata.predict,
         mask=False,
     )
@@ -48,73 +51,33 @@ def test_direct_schema_binding_and_explicit_nested_query_can_share_a_batch():
     assert queried.content.tolist() == [[9.5], [10.5]]
 
 
-def test_explicit_filter_and_map_query_preserves_coordinates_before_overflow():
-    model = _model(
+def test_filters_are_rejected_with_a_preprocessor_remedy():
+    with pytest.raises(ValueError, match="filters are not supported; use a preprocessor"):
         rf.Branch(
-            rf.Number("device_id", query="[*].map(&device_id, events[?kind == 'login'])"),
-            rf.Number("risk_score", query="[*].map(&risk_score, events[?kind == 'login'])"),
+            rf.Number("device_id"),
             name="login_events",
+            query="events[?kind]",
             length=2,
-            overflow="head",
         )
-    )
-
-    encoded = model.encode(
-        [
-            {
-                "events": [
-                    {"kind": "login", "device_id": 1, "risk_score": None},
-                    {"kind": "purchase", "device_id": 99, "risk_score": 99.0},
-                    {"kind": "login", "device_id": 2, "risk_score": 2.0},
-                    {"kind": "login", "device_id": 3, "risk_score": 3.0},
-                ]
-            }
-        ],
-        strata=Strata.predict,
-        mask=False,
-    )
-
-    device_id = encoded[rf.Address("record/login_events/device_id")]
-    risk_score = encoded[rf.Address("record/login_events/risk_score")]
-
-    # `map` retains the null risk at the first selected event. The third login
-    # is then removed by the branch's normal head-overflow policy.
-    assert device_id.state.tolist() == [[[Tokens.valued.value, Tokens.valued.value]]]
-    assert device_id.content.tolist() == [[[1.0, 2.0]]]
-    assert risk_score.state.tolist() == [[[Tokens.null.value, Tokens.valued.value]]]
-    assert risk_score.content.tolist() == [[[0.0, 2.0]]]
-
-
-def test_explicit_query_result_uses_ragged_mask_literal_semantics():
-    model = _model(rf.Number("amount", query="[*].payload.amount"))
-    record = {"payload": {"amount": rf.MASK_LITERAL}}
-
-    encoded = model.encode([record], strata=Strata.predict, mask=False)
-    amount = encoded[rf.Address("record/amount")]
-
-    assert amount.state.tolist() == [[Tokens.masked.value]]
-    assert amount.content.tolist() == [[0.0]]
-    assert not amount.trainable.any()
-
-    with pytest.raises(ValueError, match="only valid during predict"):
-        model.encode([record], strata=Strata.train, mask=False)
 
 
 def test_query_backed_leaf_ignores_same_named_direct_source_values():
-    model = _model(
+    model = build(
         rf.Category(
             "label",
-            query="[*].payload.label",
+            query="payload.label",
             size=8,
             p_unavailable=0.0,
         )
     )
 
     encoded = model.encode(
-        [
-            {"label": 1, "payload": {"label": "A"}},
-            {"label": "ignored", "payload": {"label": "B"}},
-        ],
+        table(
+            [
+                {"label": 1, "payload": {"label": "A"}},
+                {"label": 2, "payload": {"label": "B"}},
+            ]
+        ),
         strata=Strata.train,
         mask=False,
     )
@@ -126,10 +89,10 @@ def test_query_backed_leaf_ignores_same_named_direct_source_values():
     assert rf.Category.vocabulary(model, "record/label") == ("A", "B")
 
 
-def test_explicit_query_reports_schema_rank_mismatch_with_field_context():
-    model = _model(
+def test_scalar_plugin_rejects_list_valued_query_with_field_context():
+    model = build(
         rf.Branch(
-            rf.Number("value", query="[*].payload.value"),
+            rf.Number("value", query="values[*]"),
             name="items",
             length=2,
         )
@@ -137,6 +100,69 @@ def test_explicit_query_reports_schema_rank_mismatch_with_field_context():
 
     with pytest.raises(
         ValueError,
-        match=r"JMESPath query for address 'record/items/value'.*must produce 3 list axes",
+        match=r"number field at 'record/items/value' expects scalar Arrow values",
     ):
-        model.encode([{"payload": {"value": 1.0}}], strata=Strata.predict, mask=False)
+        model.encode(
+            table([{"items": [{"values": [1.0, 2.0]}]}]),
+            strata=Strata.predict,
+            mask=False,
+        )
+
+
+def test_set_owns_the_list_produced_by_a_traversal_query():
+    model = build(
+        rf.Set(
+            "aliases",
+            query="contacts[*].alias",
+            size=8,
+            p_unavailable=0.0,
+        )
+    )
+
+    encoded = model.encode(
+        table(
+            [
+                {"contacts": [{"alias": "Ada"}, {"alias": "A"}]},
+                {"contacts": []},
+                {"contacts": None},
+            ]
+        ),
+        strata=Strata.train,
+        mask=False,
+    )[rf.Address("record/aliases")]
+
+    assert encoded.state.tolist() == [
+        [Tokens.valued.value],
+        [Tokens.valued.value],
+        [Tokens.padded.value],
+    ]
+    assert rf.Set.vocabulary(model, "record/aliases") == ("Ada", "A")
+    assert encoded.content[0, 0].sum().item() == 2
+    assert encoded.content[1, 0].sum().item() == 0
+
+
+def test_vector_owns_the_list_produced_by_a_traversal_query():
+    model = build(
+        rf.Vector(
+            "coordinates",
+            query="measurements[*].value",
+            n_dim=2,
+        )
+    )
+
+    encoded = model.encode(
+        table(
+            [
+                {"measurements": [{"value": 1.0}, {"value": 2.0}]},
+                {"measurements": [{"value": 3.0}, {"value": 4.0}]},
+            ]
+        ),
+        strata=Strata.predict,
+        mask=False,
+    )[rf.Address("record/coordinates")]
+
+    assert encoded.state.tolist() == [
+        [Tokens.valued.value],
+        [Tokens.valued.value],
+    ]
+    assert encoded.content.tolist() == [[[1.0, 2.0]], [[3.0, 4.0]]]

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import enum
 import math
-from typing import TYPE_CHECKING, Annotated, Any, Iterable, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-import awkward as ak
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
@@ -25,6 +26,7 @@ from relflow.tensorfields.base import (
     TensorFieldBase,
     apply_mask_policies,
 )
+from relflow.tensorfields.output import array, struct
 from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
 
 if TYPE_CHECKING:
@@ -120,10 +122,21 @@ class TensorField(TensorFieldBase):
         schema: Schema,
         strata: Strata,
     ) -> TensorFieldBase:
-        encoded = np.asarray(ak.to_list(field.values), dtype=np.float64)
+        values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+        if (
+            pa.types.is_list(values.type)
+            or pa.types.is_large_list(values.type)
+            or pa.types.is_fixed_size_list(values.type)
+        ):
+            raise ValueError(f"number field at '{address}' expects scalar Arrow values, got {values.type}")
+
+        encoded = pc.cast(values, pa.float64(), safe=True)
+        if isinstance(encoded, pa.ChunkedArray):
+            encoded = encoded.combine_chunks()
+        encoded = encoded.to_numpy(zero_copy_only=False)
         data = field.place(encoded, fill=0.0)
         content = torch.from_numpy(np.nan_to_num(data, nan=0.0)).to(dtype=torch.float32)
-        state = torch.from_numpy(field.state)
+        state = torch.from_numpy(field.dense)
 
         return cls(
             content=content,
@@ -411,17 +424,11 @@ def loss(
 
 
 @number.register
-def write(module: Model, prediction: Prediction):
-    content: np.ndarray = prediction.payload[TensorKey.content].detach().double().cpu().numpy()
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    tokens: np.ndarray = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
+def output(module: Model, address: Address) -> pa.StructType:
+    return pa.struct([pa.field(TensorKey.content.name, pa.float64(), nullable=False)])
 
-    output: dict[str, Iterable] = {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: content,
-    }
 
-    return output
+@number.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content = array(prediction.payload[TensorKey.content], pa.float64())
+    return struct({TensorKey.content.name: content}, datatype)

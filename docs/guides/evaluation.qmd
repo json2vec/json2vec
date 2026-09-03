@@ -46,7 +46,7 @@ datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=validate_frame,
-    sample_rate={"train": 0.25, "validate": 1.0},
+    sample={"train": 0.25, "validate": 1.0},
 )
 ```
 
@@ -75,23 +75,23 @@ the installed throughput callback. Do not expect it in
 Metrics for one schema leaf use:
 
 ```text
-<address-with-colons>/<stage>:<metric>:<component>
+<address-with-dots>/<stage>.<metric>.<component>
 ```
 
-Slashes in the schema address become colons so the first slash still separates
-the logger group. For a `Category` target at `record/fraud`, representative
+Slashes in the schema address become dots so the first remaining slash
+separates the logger group. For a `Category` target at `record/fraud`, representative
 names are:
 
 ```text
-record:fraud/validate:loss:state
-record:fraud/validate:accuracy:state
-record:fraud/validate:loss:content
-record:fraud/validate:accuracy:content
-record:fraud/validate:vocabulary:size
+record.fraud/validate.loss.state
+record.fraud/validate.accuracy.state
+record.fraud/validate.loss.content
+record.fraud/validate.accuracy.content
+record.fraud/validate.vocabulary.size
 ```
 
 A configured category `topk=[3]` additionally emits
-`record:fraud/validate:accuracy:top3`. Metric availability is datatype-specific;
+`record.fraud/validate.accuracy.top3`. Metric availability is datatype-specific;
 each [datatype reference](../core-concepts/data-types.qmd) lists the metrics it
 owns.
 
@@ -208,7 +208,7 @@ When the primary product target is one leaf, monitoring its metric can be more
 appropriate than global loss:
 
 ```text
-record:fraud/validate:accuracy:content
+record.fraud/validate.accuracy.content
 ```
 
 Accuracy can be unstable on small or imbalanced splits, so make this choice

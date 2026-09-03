@@ -1,7 +1,9 @@
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from lightning.pytorch import Callback
 
@@ -54,10 +56,14 @@ def _build_plugin() -> Plugin:
     def loss(module: object, prediction: object, batch: object, strata: Strata):
         return 3.14
 
-    def write(module: object, prediction: object):
+    def output(module: object, address: object) -> pa.StructType:
+        return pa.struct([])
+
+    def write(module: object, prediction: object, datatype: pa.StructType | None) -> None:
         return None
 
     plugin.register(loss)
+    plugin.register(output)
     plugin.register(write)
 
     return plugin
@@ -113,6 +119,101 @@ def test_plugin_stores_separate_and_union_value_type_families():
         TENSORFIELDS.pop(name, None)
 
 
+def test_custom_value_type_requires_and_uses_an_arrow_matcher():
+    missing = _plugin_name("decimalmissing")
+    with pytest.raises(TypeError, match="custom value type.*require arrow matchers.*Decimal"):
+        Plugin(name=missing, types=(Decimal,))
+    assert missing not in TENSORFIELDS
+
+    name = _plugin_name("decimal")
+    plugin = Plugin(name=name, types=(Decimal,), arrow={Decimal: pa.types.is_decimal})
+    try:
+        assert plugin.accepts(pa.decimal128(12, 2))
+        assert plugin.accepts(pa.decimal256(50, 8))
+        assert not plugin.accepts(pa.float64())
+    finally:
+        TENSORFIELDS.pop(name, None)
+
+
+def test_custom_arrow_matcher_sees_extension_type_before_storage():
+    class Identifier:
+        pass
+
+    class IdentifierType(pa.ExtensionType):
+        def __init__(self):
+            super().__init__(pa.binary(16), f"relflow.test.identifier.{uuid.uuid4().hex}")
+
+        def __arrow_ext_serialize__(self):
+            return b""
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type, serialized):
+            return cls()
+
+    datatype = IdentifierType()
+    name = _plugin_name("extension")
+    plugin = Plugin(
+        name=name,
+        types=(Identifier,),
+        arrow={Identifier: lambda candidate: isinstance(candidate, IdentifierType)},
+    )
+    bytes_name = _plugin_name("extensionstorage")
+    bytes_plugin = Plugin(name=bytes_name, types=(bytes,))
+    try:
+        assert plugin.accepts(datatype)
+        assert bytes_plugin.accepts(datatype)
+    finally:
+        TENSORFIELDS.pop(name, None)
+        TENSORFIELDS.pop(bytes_name, None)
+
+
+def test_custom_matchers_preserve_declared_union_family_boundaries():
+    datatype = pa.dense_union(
+        [
+            pa.field("text", pa.string()),
+            pa.field("decimal", pa.decimal128(12, 2)),
+        ]
+    )
+    union_name = _plugin_name("unionfamily")
+    union = Plugin(
+        name=union_name,
+        types=(str | Decimal,),
+        arrow={Decimal: pa.types.is_decimal},
+    )
+    separate_name = _plugin_name("separatefamilies")
+    separate = Plugin(
+        name=separate_name,
+        types=(str, Decimal),
+        arrow={Decimal: pa.types.is_decimal},
+    )
+    try:
+        assert union.accepts(datatype)
+        assert not separate.accepts(datatype)
+    finally:
+        TENSORFIELDS.pop(union_name, None)
+        TENSORFIELDS.pop(separate_name, None)
+
+
+def test_plugin_rejects_invalid_arrow_matcher_declarations():
+    with pytest.raises(TypeError, match="arrow must be a mapping"):
+        Plugin(name=_plugin_name("arrowmapping"), types=(int,), arrow=[])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="absent from types"):
+        Plugin(name=_plugin_name("arrowkey"), types=(int,), arrow={float: pa.types.is_floating})
+    with pytest.raises(TypeError, match="must be callable"):
+        Plugin(name=_plugin_name("arrowcallable"), types=(int,), arrow={int: object()})  # type: ignore[dict-item]
+
+
+def test_plugin_judges_python_ingress_after_arrow_canonicalization():
+    values = pa.array(["text", b"bytes"])
+    name = _plugin_name("canonical")
+    plugin = Plugin(name=name, types=(str, bytes))
+    try:
+        assert pa.types.is_binary(values.type)
+        assert plugin.accepts(values.type)
+    finally:
+        TENSORFIELDS.pop(name, None)
+
+
 def test_plugin_warns_and_overwrites_duplicate_name():
     name = _plugin_name("duplicate")
     first = Plugin(name=name, types=(str,))
@@ -134,6 +235,7 @@ def test_plugin_registers_components_and_wraps_loss():
         assert Component.Embedder in plugin.components
         assert Component.Decoder in plugin.components
         assert Component.loss in plugin.components
+        assert Component.output in plugin.components
         assert Component.write in plugin.components
 
         class DummyModule:
@@ -157,8 +259,17 @@ def test_plugin_registers_components_and_wraps_loss():
 def test_plugin_write_defaults_to_no_output_when_unregistered():
     plugin = Plugin(name=_plugin_name("defaultwrite"), types=(object,))
     try:
-        assert plugin.write(module=object(), prediction=object()) is None
+        assert plugin.write(module=object(), prediction=object(), datatype=None) is None
         assert Component.write not in plugin.components
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_output_defaults_to_no_output_when_unregistered():
+    plugin = Plugin(name=_plugin_name("defaultoutput"), types=(object,))
+    try:
+        assert plugin.output(module=object(), address=object()) is None
+        assert Component.output not in plugin.components
     finally:
         TENSORFIELDS.pop(plugin.name, None)
 
@@ -168,7 +279,55 @@ def test_plugin_accepts_explicit_none_write():
     try:
         plugin.register(None, component=Component.write)
 
-        assert plugin.write(module=object(), prediction=object()) is None
+        assert plugin.write(module=object(), prediction=object(), datatype=None) is None
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_accepts_explicit_none_output():
+    plugin = Plugin(name=_plugin_name("noneoutput"), types=(object,))
+    try:
+        plugin.register(None, component=Component.output)
+
+        assert plugin.output(module=object(), address=object()) is None
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_output_requires_module_and_address_parameters():
+    plugin = Plugin(name=_plugin_name("badoutput"), types=(object,))
+
+    def output(module: object) -> pa.StructType:
+        return pa.struct([])
+
+    try:
+        with pytest.raises(TypeError, match="Output function must accept"):
+            plugin.register(output)
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_write_accepts_a_return_annotation():
+    plugin = Plugin(name=_plugin_name("typedwrite"), types=(object,))
+
+    def write(module: object, prediction: object, datatype: pa.StructType | None) -> None:
+        return None
+
+    try:
+        assert plugin.register(write) is write
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_write_requires_declared_datatype_parameter():
+    plugin = Plugin(name=_plugin_name("legacywrite"), types=(object,))
+
+    def write(module: object, prediction: object) -> None:
+        return None
+
+    try:
+        with pytest.raises(TypeError, match="Write function must accept"):
+            plugin.register(write)
     finally:
         TENSORFIELDS.pop(plugin.name, None)
 

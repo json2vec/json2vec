@@ -134,29 +134,17 @@ The content loss is computed in normalized units, while tracked `mae` and
 
 ## Prediction Output
 
-Rendered examples use string paths for readability. The Python dictionary
-returned by `Model.predict(...)` is keyed by `rf.Address` objects.
+`Model.predict(...)` returns a `pa.Table`. Select the Number field from its
+`predictions` struct, then read its shared state, scalar content, and inferred
+flag with Arrow kernels:
 
-`Model.predict(...)` returns a state probability map, numeric content, and the
-shared `inferred` mask. This is the complete field envelope:
+```python
+import pyarrow.compute as pc
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-{
-    "record/amount": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": ...,
-        "inferred": ...,
-    }
-}
+amount = pc.struct_field(result["predictions"], "record/amount")
+state = pc.struct_field(amount, "state")
+content = pc.struct_field(amount, "content")  # float64
+inferred = pc.struct_field(amount, "inferred")
 ```
 
 Interpret content together with the state distribution. A numeric prediction is

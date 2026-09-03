@@ -97,26 +97,17 @@ source vector's scale.
 
 ## Prediction Output
 
-`Model.predict(...)` returns state probabilities, reconstructed vector
-content, and the shared inferred mask. This is the complete field envelope:
+`Model.predict(...)` returns an Arrow table. Vector `content` is a
+`fixed_size_list<float32>[size]`, so its width is stable for zero, one, or many
+observations:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+import pyarrow.compute as pc
 
-{
-    "record/embedding": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": ...,
-        "inferred": ...,
-    }
-}
+embedding = pc.struct_field(result["predictions"], "record/embedding")
+state = pc.struct_field(embedding, "state")
+content = pc.struct_field(embedding, "content")
+inferred = pc.struct_field(embedding, "inferred")
 ```
 
 See [Prediction Output](../guides/prediction-output.qmd) for array shapes and

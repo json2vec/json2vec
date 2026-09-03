@@ -916,15 +916,6 @@ wheels = [
 ]
 
 [[package]]
-name = "jmespath"
-version = "1.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz", hash = "sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d", size = 27377, upload-time = "2026-01-22T16:35:26.279Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl", hash = "sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64", size = 20419, upload-time = "2026-01-22T16:35:24.919Z" },
-]
-
-[[package]]
 name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2423,13 +2414,11 @@ dependencies = [
     { name = "awkward" },
     { name = "beartype" },
     { name = "blake3" },
-    { name = "jmespath" },
     { name = "lightning" },
     { name = "loguru" },
     { name = "msgspec" },
     { name = "numpy" },
     { name = "pluggy" },
-    { name = "polars" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "rich" },
@@ -2441,6 +2430,10 @@ dependencies = [
 [package.optional-dependencies]
 docs = [
     { name = "marimo" },
+    { name = "polars" },
+]
+polars = [
+    { name = "polars" },
 ]
 serving = [
     { name = "fastapi" },
@@ -2460,6 +2453,7 @@ dev = [
     { name = "nbclient" },
     { name = "nbformat" },
     { name = "orjson" },
+    { name = "polars" },
     { name = "pre-commit" },
     { name = "pydantic-settings" },
     { name = "pytest" },
@@ -2476,7 +2470,6 @@ requires-dist = [
     { name = "beartype", specifier = ">=0.21.0" },
     { name = "blake3", specifier = ">=1.0.8" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.124.0" },
-    { name = "jmespath", specifier = ">=1.0.1" },
     { name = "lightning", specifier = ">=2.6.4" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "marimo", marker = "extra == 'docs'", specifier = ">=0.23.8" },
@@ -2484,7 +2477,8 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "orjson", marker = "extra == 'serving'", specifier = ">=3.10.0" },
     { name = "pluggy", specifier = ">=1.6.0" },
-    { name = "polars", specifier = ">=1.35.2" },
+    { name = "polars", marker = "extra == 'docs'", specifier = ">=1.35.2" },
+    { name = "polars", marker = "extra == 'polars'", specifier = ">=1.35.2" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pydantic-settings", marker = "extra == 'serving'", specifier = ">=2.10.1" },
@@ -2495,7 +2489,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'text'", specifier = ">=4.55.0" },
     { name = "uvicorn", marker = "extra == 'serving'", specifier = ">=0.38.0" },
 ]
-provides-extras = ["serving", "text", "docs"]
+provides-extras = ["polars", "serving", "text", "docs"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2505,6 +2499,7 @@ dev = [
     { name = "nbclient", specifier = ">=0.10.2" },
     { name = "nbformat", specifier = ">=5.10.4" },
     { name = "orjson", specifier = ">=3.10.0" },
+    { name = "polars", specifier = ">=1.35.2" },
     { name = "pre-commit", specifier = ">=4.3.0" },
     { name = "pydantic-settings", specifier = ">=2.10.1" },
     { name = "pytest", specifier = ">=8.4.1" },

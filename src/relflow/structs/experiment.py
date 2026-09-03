@@ -149,6 +149,7 @@ class Schema(Node):
         n_heads: int,
         fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
+        query: str | None = None,
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
@@ -183,6 +184,7 @@ class Schema(Node):
 
         branch = Branch(
             name=name,
+            query=query,
             description=description,
             embed=embed,
             attention=attention,
