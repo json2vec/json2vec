@@ -167,7 +167,8 @@ class FastAPIRuntime:
         """Validate, predict, serialize, and scatter one request microbatch.
 
         Valid requests cross the Python-to-Arrow boundary together, call
-        ``Model.predict`` once, and cross back to Python with one terminal
+        the preprocessor, ``Model.predict``, and the postprocessor once for the
+        whole microbatch, then cross back to Python with one terminal
         ``Table.to_pylist``. Invalid request rows retain their original slots.
         """
 

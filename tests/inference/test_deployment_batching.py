@@ -81,6 +81,62 @@ def test_fastapi_batcher_splits_ready_requests_by_max_batch_size():
     assert responses == [{"id": 1}, {"id": 2}, {"id": 3}]
 
 
+def test_batcher_runs_processors_once_for_one_collated_arrow_batch():
+    preprocessed = []
+    postprocessed = []
+
+    @rf.preprocess
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        preprocessed.append(batch)
+        return batch.take(pa.array([2, 0, 1], type=pa.int64()))
+
+    @rf.postprocess
+    def compact(batch: rf.Batch) -> rf.Batch:
+        postprocessed.append(batch)
+        values = pa.compute.struct_field(batch.data["inputs"], "value")
+        return batch.replace(pa.table({"value": values}))
+
+    async def run():
+        model = Model(
+            value=Number,
+            d_model=8,
+            n_layers=1,
+            n_heads=2,
+            embed=True,
+        )
+        server = deployment_module.FastAPIRuntime(
+            checkpoint=model,
+            accelerator=deployment_module.Accelerator.cpu,
+            preprocessor=prepare,
+            postprocessor=compact,
+            retain=("value",),
+        )
+        batcher = deployment_module.FastAPIBatcher(
+            runtime=server,
+            max_batch_size=3,
+            batch_timeout=0.05,
+        )
+        await batcher.start()
+        try:
+            return await asyncio.gather(
+                batcher.submit({"value": 3.0}),
+                batcher.submit({"value": 1.0}),
+                batcher.submit({"value": 2.0}),
+            )
+        finally:
+            await batcher.stop()
+
+    responses = asyncio.run(run())
+
+    assert len(preprocessed) == 1
+    assert len(postprocessed) == 1
+    assert isinstance(preprocessed[0], rf.Batch)
+    assert isinstance(postprocessed[0], rf.Batch)
+    assert preprocessed[0].data["value"].to_pylist() == [3.0, 1.0, 2.0]
+    assert pa.compute.struct_field(postprocessed[0].data["inputs"], "value").to_pylist() == [2.0, 3.0, 1.0]
+    assert responses == [{"value": 3.0}, {"value": 1.0}, {"value": 2.0}]
+
+
 def test_runtime_converts_valid_requests_to_one_arrow_prediction_call():
     model = PredictModel()
 

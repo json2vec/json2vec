@@ -147,10 +147,17 @@ training data module.
 In online serving, each HTTP object must produce exactly one
 processed Arrow observation. The runtime validates JSON objects individually,
 converts all valid objects with one `pa.Table.from_pylist(...)`, and calls
-`Model.predict(...)` once for the microbatch. A preprocessor may reorder valid
-rows because protected identity restores caller order, but it may not drop or
-expand them at the request boundary. A one-to-zero or one-to-many result fails
-instead of associating a prediction with the wrong caller.
+the preprocessor, `Model.predict(...)`, and the postprocessor once each for the
+complete microbatch. Neither processor runs once per request. A preprocessor
+may reorder valid rows because protected identity restores caller order, but
+it may not drop or expand them at the request boundary. A one-to-zero or
+one-to-many result fails instead of associating a prediction with the wrong
+caller.
+
+`max_batch_size` bounds that contract: a larger request list is split and each
+resulting model microbatch gets one preprocessor and one postprocessor call.
+Pydantic validation remains item-wise so malformed requests can fail without
+discarding valid neighbors.
 
 A deployment postprocessor receives the same canonical output `rf.Batch` as
 interactive prediction and `rf.Writer`. It has no request, observation,
