@@ -6,7 +6,7 @@ import torch
 from tensordict import TensorDict
 
 import relflow as rf
-from relflow.data.arrow import IDENTITY, Batch, Encoded
+from relflow.data.arrow import IDENTITY, Batch, Encoded, variants
 
 
 def identities(size: int) -> pa.Array:
@@ -25,6 +25,20 @@ def identities(size: int) -> pa.Array:
 
 def test_batch_is_public():
     assert rf.Batch is Batch
+
+
+def test_variants_respects_sliced_union_offsets():
+    values = pa.UnionArray.from_dense(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([0, 0, 1], type=pa.int32()),
+        [pa.array([1, 3]), pa.array([2.0])],
+    ).slice(1)
+
+    codes, offsets = variants(values)
+
+    assert codes.tolist() == [1, 0]
+    assert offsets is not None
+    assert offsets.tolist() == [0, 1]
 
 
 def test_batch_validates_data_alignment():

@@ -137,6 +137,15 @@ a Vector plugin may accept the numeric family while its `TensorField.new(...)`
 still enforces Arrow list rank, fixed width, and numeric conversion after
 branch overflow.
 
+Before `TensorField.new(...)`, `Plugin.prepare(...)` validates the whole leaf
+and canonicalizes representation wrappers with Arrow operations. Dictionary
+arrays are decoded recursively through list containers. A logical extension
+type is preserved when one of the plugin's matchers accepts that extension
+directly; otherwise its storage type is prepared. Compatible union children
+are promoted when Arrow defines one safe common type. If no common type exists,
+the union reaches the datatype codec unchanged and that plugin must implement
+its semantic conversion explicitly.
+
 `None` is handled as a shared null state and does not need an entry in `types`.
 All string values remain ordinary `str` atoms when the datatype accepts
 strings; the data layer reserves no string sentinel.

@@ -6,7 +6,8 @@ import inspect
 import random
 from collections.abc import Iterable, Iterator
 from dataclasses import replace
-from typing import Any, cast
+from functools import cache
+from typing import Any, Callable, cast
 
 from beartype import beartype
 from tensordict import TensorDict
@@ -18,6 +19,15 @@ from relflow.structs.enums import Strata
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import TENSORFIELDS, TensorFieldBase
+
+
+@cache
+def signature(function: Callable[..., Any]) -> tuple[frozenset[str], bool]:
+    """Cache the stable keyword contract of one tensorfield method."""
+
+    parameters = inspect.signature(function).parameters
+    variadic = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    return frozenset(parameters), variadic
 
 
 def encode(
@@ -47,14 +57,16 @@ def encode(
             continue
 
         field = ragged_fields.pop(address)
-        field = replace(field, values=plugin.prepare(field.values, address=address))
+        values = plugin.prepare(field.values, address=address)
+        if values is not field.values:
+            field = replace(field, values=values)
         kwargs: dict[str, Any] = dict(
             field=field,
             address=address,
             schema=schema,
             strata=strata,
         )
-        parameters = inspect.signature(TensorField.new).parameters
+        parameters, _ = signature(TensorField.new)
         if "interprocess_encoding_context" in parameters:
             kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
 
@@ -81,8 +93,7 @@ def policy(
     address: Address,
     schema: Schema,
 ) -> None:
-    parameters = inspect.signature(field.mask).parameters
-    supports_policy_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    parameters, supports_policy_kwargs = signature(type(field).mask)
     supports_policy_kwargs |= any(name in parameters for name in ("p_prune", "branch_masks", "schema"))
 
     if supports_policy_kwargs:

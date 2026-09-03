@@ -253,12 +253,12 @@ active input fields still fail binding rather than turning into silent nulls.
 
 ## Errors Are Early And Contextual
 
-Syntax is parsed with the model. The complete path binds to the
-post-preprocessor Arrow type, and the bound plan is cached for the exact
-expression, type, and model address. That plan still executes separately for
-each field batch and leaf; shared-prefix result caching is not yet part of the
-runtime. A failure reports the expression, failing segment, and model
-address—for example, applying `[0]` to a struct or selecting an absent field.
+Syntax is parsed with the model. Each node-relative branch or leaf path binds
+to the post-preprocessor Arrow type, and the bound plan is cached for the exact
+expression, type, and model address. A branch plan executes once per model
+batch and its retained layout is reused by every active descendant. A failure
+reports the expression, failing segment, and model address—for example,
+applying `[0]` to a struct or selecting an absent field.
 
 Use this debugging order:
 

@@ -7,6 +7,7 @@ import pyarrow as pa
 import pytest
 
 import relflow as rf
+from relflow.data.datasets.arrow import convert
 from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, Tokens
 from tests.arrow import batch as arrow_batch
@@ -58,6 +59,101 @@ def test_ragged_field_distinguishes_value_null_and_missing():
     assert field.place(np.asarray([9.0]), fill=-1.0).tolist() == [[9.0], [-1.0], [-1.0]]
 
 
+def test_sibling_fields_share_branch_geometry_without_sharing_leaf_state():
+    model = build(
+        rf.Branch(
+            rf.Number("left"),
+            rf.Number("right"),
+            name="items",
+            length=3,
+        )
+    )
+    fields = coalesce(
+        arrow_batch(
+            [
+                {
+                    "items": [
+                        {"left": 1.0, "right": None},
+                        None,
+                        {"left": None, "right": 2.0},
+                    ]
+                }
+            ]
+        ),
+        schema=model.schema,
+        strata=Strata.train,
+    )
+
+    left = fields["record/items/left"]
+    right = fields["record/items/right"]
+    assert left.dense.tolist() == [[[Tokens.valued.value, Tokens.padded.value, Tokens.null.value]]]
+    assert right.dense.tolist() == [[[Tokens.null.value, Tokens.padded.value, Tokens.valued.value]]]
+    assert left.values.to_pylist() == [1.0]
+    assert right.values.to_pylist() == [2.0]
+    assert left.placement.to_pylist() == [0]
+    assert right.placement.to_pylist() == [2]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param(
+            pa.UnionArray.from_dense(
+                pa.array([0, 1, 0], type=pa.int8()),
+                pa.array([0, 0, 1], type=pa.int32()),
+                [pa.array([1, None], type=pa.int64()), pa.array([2], type=pa.int32())],
+            ),
+            id="dense",
+        ),
+        pytest.param(
+            pa.UnionArray.from_sparse(
+                pa.array([0, 1, 0], type=pa.int8()),
+                [
+                    pa.array([1, None, None], type=pa.int64()),
+                    pa.array([None, 2, None], type=pa.int32()),
+                ],
+            ),
+            id="sparse",
+        ),
+        pytest.param(
+            pa.UnionArray.from_dense(
+                pa.array([0, 0, 1, 0], type=pa.int8()),
+                pa.array([0, 1, 0, 2], type=pa.int32()),
+                [pa.array([99, 1, None], type=pa.int64()), pa.array([2], type=pa.int32())],
+            ).slice(1),
+            id="sliced-dense",
+        ),
+        pytest.param(
+            pa.UnionArray.from_sparse(
+                pa.array([1, 0, 1, 0], type=pa.int8()),
+                [
+                    pa.array([None, 1, None, None], type=pa.int64()),
+                    pa.array([99, None, 2, None], type=pa.int32()),
+                ],
+            ).slice(1),
+            id="sliced-sparse",
+        ),
+    ],
+)
+def test_union_leaf_uses_selected_child_validity(values):
+    model = build(rf.Number("value"))
+    source = convert(pa.table({"value": values}), namespace="union", offset=0)
+
+    field = coalesce(source, schema=model.schema, strata=Strata.train)["record/value"]
+
+    assert field.dense.tolist() == [
+        [Tokens.valued.value],
+        [Tokens.valued.value],
+        [Tokens.null.value],
+    ]
+    assert field.values.to_pylist() == [1, 2]
+    assert field.placement.to_pylist() == [0, 1]
+
+    encoded = model.encode(source.data, strata=Strata.predict, mask=False)["record/value"]
+    assert encoded.content.tolist() == [[1.0], [2.0], [0.0]]
+    assert encoded.state.tolist() == field.dense.tolist()
+
+
 def test_coalesce_rejects_modeled_field_missing_from_arrow_schema():
     model = build(rf.Number("value"))
 
@@ -107,6 +203,39 @@ def test_tail_overflow_finishes_before_leaf_codec_observes_values():
     assert field.dense.tolist() == [[[Tokens.valued.value, Tokens.valued.value]]]
     assert field.values.to_pylist() == [[2, 3], [4, 5]]
     assert field.placement.to_pylist() == [0, 1]
+
+
+def test_branch_overflow_precedes_queries_on_discarded_children():
+    model = build(
+        rf.Branch(
+            rf.Number("value", query='attributes["x"]'),
+            name="items",
+            length=1,
+            overflow="head",
+        )
+    )
+    item = pa.struct([pa.field("attributes", pa.map_(pa.string(), pa.float64()))])
+    source = pa.table(
+        {
+            "items": pa.array(
+                [
+                    [
+                        {"attributes": [("x", 1.0)]},
+                        {"attributes": [("x", 2.0), ("x", 3.0)]},
+                    ]
+                ],
+                type=pa.list_(item),
+            )
+        }
+    )
+
+    field = coalesce(
+        convert(source, namespace="overflow", offset=0),
+        schema=model.schema,
+        strata=Strata.train,
+    )["record/items/value"]
+
+    assert field.values.to_pylist() == [1.0]
 
 
 def test_error_overflow_names_address_and_axis():

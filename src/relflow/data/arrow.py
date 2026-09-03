@@ -150,6 +150,29 @@ def ordinal(values: np.ndarray) -> pa.Array:
     return pa.FixedSizeBinaryArray.from_buffers(pa.binary(8), len(wire), [None, pa.py_buffer(wire)])
 
 
+def variants(values: pa.Array) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return logical type codes and child offsets for a sliced Arrow union."""
+
+    if not isinstance(values, pa.UnionArray):
+        raise TypeError(f"variants values must be an Arrow UnionArray, got {type(values).__name__}")
+    buffers = values.buffers()
+    codes = pa.Array.from_buffers(
+        pa.int8(),
+        len(values),
+        [None, buffers[1]],
+        offset=values.offset,
+    ).to_numpy(zero_copy_only=False)
+    if values.type.mode != "dense":
+        return codes, None
+    offsets = pa.Array.from_buffers(
+        pa.int32(),
+        len(values),
+        [None, buffers[2]],
+        offset=values.offset,
+    ).to_numpy(zero_copy_only=False)
+    return codes, offsets
+
+
 def join(prefix: pa.Array | pa.ChunkedArray, marker: bytes, suffix: pa.Array) -> pa.Array | pa.ChunkedArray:
     """Append a tagged fixed-width suffix to Arrow binary order values."""
 

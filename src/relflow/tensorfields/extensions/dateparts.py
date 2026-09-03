@@ -16,6 +16,7 @@ import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
+from relflow.data.arrow import variants
 from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
@@ -168,6 +169,42 @@ def _(arr: np.ndarray) -> np.ndarray:
 dateparts: Plugin = Plugin(name="dateparts", types=(str | date | datetime,))
 
 
+def parse(
+    values: pa.Array | pa.ChunkedArray,
+    pattern: str | None,
+) -> pa.Array | pa.ChunkedArray:
+    """Convert a heterogeneous date union to second-resolution timestamps."""
+
+    datatype = pa.timestamp("s")
+    if isinstance(values, pa.ChunkedArray):
+        return pa.chunked_array([parse(chunk, pattern) for chunk in values.chunks], type=datatype)
+    if pa.types.is_dictionary(values.type):
+        return parse(pc.take(values.dictionary, values.indices), pattern)
+    if isinstance(values, pa.ExtensionArray):
+        return parse(values.storage, pattern)
+    if not pa.types.is_union(values.type):
+        if pa.types.is_string(values.type) or pa.types.is_large_string(values.type):
+            return pc.strptime(values, format=pattern, unit="s") if pattern is not None else pc.cast(values, datatype)
+        return pc.cast(values, datatype, safe=True)
+
+    codes, offsets = variants(values)
+    result = pa.nulls(len(values), type=datatype)
+    for index, code in enumerate(values.type.type_codes):
+        selected = codes == code
+        positions = np.flatnonzero(selected).astype(np.int64, copy=False)
+        if not len(positions):
+            continue
+        indices = offsets[selected] if offsets is not None else positions
+        child = pc.take(values.field(index), pa.array(indices, type=pa.int64()))
+        placed = pc.scatter(
+            parse(child, pattern),
+            pa.array(positions, type=pa.int64()),
+            max_index=len(values) - 1,
+        )
+        result = pc.coalesce(result, placed)
+    return result
+
+
 @dateparts.register
 class Request(RequestBase):
     """Date/time tensorfield request that extracts configured calendar parts."""
@@ -247,10 +284,15 @@ class TensorField(TensorFieldBase):
         strata: Strata,
     ) -> TensorFieldBase:
         request: RequestBase = schema.requests[address]
-        values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
         try:
-            if request.pattern is not None:
+            if pa.types.is_union(field.values.type):
+                values = parse(field.values, request.pattern)
+            else:
+                values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+            if request.pattern is not None and not pa.types.is_timestamp(values.type):
                 values = pc.strptime(values, format=request.pattern, unit="s")
+            if isinstance(values, pa.ChunkedArray):
+                values = values.combine_chunks()
             date_values = values.to_numpy(zero_copy_only=False).astype("datetime64[s]")
         except (pa.ArrowException, TypeError, ValueError) as error:
             raise ValueError(f"dateparts field at '{address}' contains invalid date values") from error

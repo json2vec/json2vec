@@ -161,17 +161,17 @@ map lookup. Data-dependent logic remains in preprocessing. See
 
 The coalescing phase prepares every selected leaf for its datatype codec:
 
-1. compose ancestor and leaf selectors into an expression;
-2. execute that expression against the Arrow table;
-3. apply the declared branch capacities and overflow rules;
-4. retain valued leaves and final coordinate state in an Arrow-backed
+1. build the singleton root layout;
+2. evaluate each active repeated-branch selector and overflow policy once;
+3. reuse each retained branch layout for all active descendants;
+4. project each leaf and retain its values and coordinate state in an Arrow-backed
    `RaggedField`;
 5. validate its whole Arrow leaf type with the owning plugin, then invoke the
    datatype codec once for the complete field batch.
 
-Compiled plans are cached per complete leaf expression and Arrow type. The
-current engine still evaluates and regularizes each leaf independently;
-reusing materialized query prefixes across siblings is deferred.
+Branch and leaf plans bind independently and are cached by expression, Arrow
+type, and model address. Branch layouts carry retained records, shape, and
+dense placement; a sibling leaf does not repeat its ancestors' structural work.
 
 `RaggedField` is a structural carrier, not a catalogue of allowed datatypes.
 Each tensorfield plugin registers the raw atom compatibility families it
@@ -272,7 +272,7 @@ chooses to expose them.
 | Source adaptation | establishes rows | Arrow |
 | Preprocessor | yes, with lineage methods | `rf.Batch` |
 | Sampling/shuffling | yes | `rf.Batch` |
-| Query/coalescing | no | Arrow, with transient Awkward structural kernels |
+| Query/coalescing | no | Arrow arrays with NumPy offset/placement geometry |
 | Plugin encoding | no | tensors internally |
 | Plugin writing | no | Arrow arrays |
 | Postprocessor | no | `rf.Batch` |

@@ -8,7 +8,7 @@ import pytest
 from lightning.pytorch import Callback
 
 from relflow.structs.enums import Component, Strata
-from relflow.structs.tree import Node
+from relflow.structs.tree import Address, Node
 from relflow.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
@@ -162,9 +162,65 @@ def test_custom_arrow_matcher_sees_extension_type_before_storage():
     try:
         assert plugin.accepts(datatype)
         assert bytes_plugin.accepts(datatype)
+
+        values = pa.ExtensionArray.from_storage(
+            datatype,
+            pa.array([b"0123456789abcdef"], type=pa.binary(16)),
+        )
+        assert plugin.prepare(values, address=Address("record/value")) is values
+        prepared = bytes_plugin.prepare(values, address=Address("record/value"))
+        assert prepared.type == pa.binary(16)
+        assert prepared.to_pylist() == [b"0123456789abcdef"]
     finally:
         TENSORFIELDS.pop(name, None)
         TENSORFIELDS.pop(bytes_name, None)
+
+
+def test_plugin_prepare_decodes_dictionary_wrappers_recursively():
+    plugin = Plugin(name=_plugin_name("dictionary"), types=(str,))
+    dictionary = pa.DictionaryArray.from_arrays(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array(["A", "B"]),
+    )
+    values = pa.ListArray.from_arrays(pa.array([0, 2, 3]), dictionary)
+    try:
+        prepared = plugin.prepare(values, address=Address("record/value"))
+
+        assert prepared.type == pa.list_(pa.string())
+        assert prepared.to_pylist() == [["A", "B"], ["A"]]
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_prepare_promotes_compatible_unions_recursively():
+    plugin = Plugin(name=_plugin_name("union"), types=(int | float,))
+    union = pa.UnionArray.from_dense(
+        pa.array([0, 1, 0], type=pa.int8()),
+        pa.array([0, 0, 1], type=pa.int32()),
+        [pa.array([1, 3], type=pa.int64()), pa.array([2.5], type=pa.float64())],
+    )
+    values = pa.ListArray.from_arrays(pa.array([0, 2, 3]), union)
+    try:
+        prepared = plugin.prepare(values, address=Address("record/value"))
+
+        assert prepared.type == pa.list_(pa.float64())
+        assert prepared.to_pylist() == [[1.0, 2.5], [3.0]]
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+def test_plugin_prepare_reports_unsafe_union_promotion_with_context():
+    plugin = Plugin(name=_plugin_name("unsafeunion"), types=(int,))
+    values = pa.UnionArray.from_dense(
+        pa.array([0, 1], type=pa.int8()),
+        pa.array([0, 0], type=pa.int32()),
+        [pa.array([1], type=pa.int64()), pa.array([2**63], type=pa.uint64())],
+    )
+    try:
+        with pytest.raises(TypeError, match=f"plugin '{plugin.name}'.*record/value.*cannot safely normalize"):
+            plugin.prepare(values, address=Address("record/value"))
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
 
 
 def test_custom_matchers_preserve_declared_union_family_boundaries():

@@ -14,12 +14,14 @@ from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, get_a
 import numpy as np
 import pluggy
 import pyarrow as pa
+import pyarrow.compute as pc
 import torch
 from lightning.pytorch import Callback
 from rich.text import Text
 from tensordict import TensorDict
 
 from relflow.architecture.pool import LearnedQueryCrossAttention, MeanPool
+from relflow.data.arrow import variants
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address, Leaf, Renderable
@@ -545,6 +547,100 @@ class Plugin:
             families.update(matches)
         return len(families) <= 1
 
+    def canonical(self, datatype: pa.DataType) -> pa.DataType:
+        """Resolve Arrow encodings that wrap a plugin's declared atom types."""
+
+        if pa.types.is_dictionary(datatype):
+            return self.canonical(datatype.value_type)
+        if pa.types.is_union(datatype):
+            children = [self.canonical(field.type) for field in datatype]
+            try:
+                return (
+                    pa.unify_schemas(
+                        [pa.schema([pa.field("value", child)]) for child in children],
+                        promote_options="permissive",
+                    )
+                    .field("value")
+                    .type
+                )
+            except pa.ArrowException:
+                return datatype
+        if pa.types.is_list(datatype) or pa.types.is_large_list(datatype) or pa.types.is_fixed_size_list(datatype):
+            child = self.canonical(datatype.value_type)
+            if child == datatype.value_type:
+                return datatype
+            field = pa.field(
+                datatype.value_field.name,
+                child,
+                nullable=datatype.value_field.nullable,
+                metadata=datatype.value_field.metadata,
+            )
+            if pa.types.is_large_list(datatype):
+                return pa.large_list(field)
+            if pa.types.is_fixed_size_list(datatype):
+                return pa.list_(field, datatype.list_size)
+            return pa.list_(field)
+        if isinstance(datatype, pa.ExtensionType):
+            direct = any(matcher(datatype) for matcher in self.matchers.values())
+            return datatype if direct else self.canonical(datatype.storage_type)
+        return datatype
+
+    def normalize(
+        self,
+        values: pa.Array | pa.ChunkedArray,
+        datatype: pa.DataType,
+    ) -> pa.Array | pa.ChunkedArray:
+        """Normalize Arrow wrappers to one codec-ready physical representation."""
+
+        if values.type == datatype:
+            return values
+        if isinstance(values, pa.ChunkedArray):
+            return pa.chunked_array(
+                [self.normalize(chunk, datatype) for chunk in values.chunks],
+                type=datatype,
+            )
+        if pa.types.is_dictionary(values.type):
+            decoded = pc.take(values.dictionary, values.indices)
+            return self.normalize(decoded, datatype)
+        if isinstance(values, pa.ExtensionArray) and not isinstance(datatype, pa.ExtensionType):
+            return self.normalize(values.storage, datatype)
+        if pa.types.is_union(values.type) and not pa.types.is_union(datatype):
+            codes, offsets = variants(values)
+            result = pa.nulls(len(values), type=datatype)
+            for index, code in enumerate(values.type.type_codes):
+                selected = codes == code
+                positions = np.flatnonzero(selected).astype(np.int64, copy=False)
+                if not len(positions):
+                    continue
+                indices = offsets[selected] if offsets is not None else positions
+                child = pc.take(values.field(index), pa.array(indices, type=pa.int64()))
+                normalized = self.normalize(child, datatype)
+                placed = pc.scatter(normalized, pa.array(positions, type=pa.int64()), max_index=len(values) - 1)
+                result = pc.coalesce(result, placed)
+            return result
+        if (
+            pa.types.is_list(values.type)
+            or pa.types.is_large_list(values.type)
+            or pa.types.is_fixed_size_list(values.type)
+        ) and (pa.types.is_list(datatype) or pa.types.is_large_list(datatype) or pa.types.is_fixed_size_list(datatype)):
+            mask = pc.is_null(values)
+            if pa.types.is_fixed_size_list(values.type):
+                start = values.offset * values.type.list_size
+                length = len(values) * values.type.list_size
+                child = values.values.slice(start, length)
+            else:
+                start = values.offsets[0].as_py()
+                stop = values.offsets[-1].as_py()
+                child = values.values.slice(start, stop - start)
+            child = self.normalize(child, datatype.value_type)
+            if pa.types.is_fixed_size_list(datatype):
+                return pa.FixedSizeListArray.from_arrays(child, type=datatype, mask=mask)
+            offsets = pc.subtract(values.offsets, values.offsets[0])
+            if pa.types.is_large_list(datatype):
+                return pa.LargeListArray.from_arrays(offsets, child, type=datatype, mask=mask)
+            return pa.ListArray.from_arrays(pc.cast(offsets, pa.int32()), child, type=datatype, mask=mask)
+        return pc.cast(values, datatype, safe=True)
+
     def prepare(
         self,
         values: pa.Array | pa.ChunkedArray,
@@ -563,7 +659,14 @@ class Plugin:
                 f"plugin '{self.name}' at address '{address}' does not accept Arrow type {values.type}; "
                 f"expected terminal atoms compatible with {expected}; normalize it in a preprocessor"
             )
-        return values
+        datatype = self.canonical(values.type)
+        try:
+            return self.normalize(values, datatype)
+        except pa.ArrowException as error:
+            raise TypeError(
+                f"plugin '{self.name}' at address '{address}' cannot safely normalize Arrow type "
+                f"{values.type} to {datatype}; normalize it in a preprocessor"
+            ) from error
 
     @overload
     def register(self, obj: None, component: Component | str) -> None: ...

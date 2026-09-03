@@ -150,14 +150,17 @@ tokenization after overflow selects retained values.
 
 Direct selection is the default when a node's `query` is `None`. Explicit
 node-relative structural queries are parsed once, bind against an Arrow schema,
-and execute columnarly. Coalescing still evaluates each complete leaf path and
-regularizes each leaf separately; caching common prefix results is a remaining
-optimization opportunity. All `RaggedField` objects are ready before the first
-datatype codec runs. Do not add queries that merely restate schema names.
+and execute columnarly. RelFlow walks each active schema branch once per model
+batch. A branch's query, retained records, overflow decision, shape, and dense
+placement are shared by all active descendants; each leaf evaluates only its
+node-relative selector and builds its own null/value state. All `RaggedField`
+objects are ready before the first datatype codec runs. Do not add queries that
+merely restate schema names.
 
-Arrow compute functions run native columnar kernels, and Awkward performs
-vectorized operations over ragged layouts; there is no RelFlow JIT switch to
-enable. A preprocessor can still dominate when it calls Python once per value.
+Arrow compute kernels and NumPy offset/placement operations perform this
+shared structural work; there is no RelFlow JIT switch to enable. Awkward can
+still be useful as a transient view inside a user preprocessor. A preprocessor
+can dominate when it calls Python once per value.
 Prefer column expressions and whole ragged collection transforms, measure them
 separately, and increase the model batch only within the memory budget. Polars
 converts once at ingress; profile that boundary when frames are large.

@@ -56,8 +56,9 @@ this legend when reading the detailed design below:
   rejected for callable factories until coordinated materialization exists;
 - `requires` and `produces` are validated dependency metadata, but `requires`
   does not yet drive Dataset Scanner projection pushdown;
-- queries bind and cache by complete expression/type/address, then execute and
-  regularize per leaf. Materialized shared-prefix reuse is deferred;
+- branch and leaf queries bind and cache by expression/type/address. Each active
+  branch layout and overflow decision is materialized once and reused by its
+  descendants;
 - the data-module seed controls sampling and row order. Torch masking, pruning,
   branch masks, and unavailable simulation are not identity- or chunk-invariant;
 - `pin_memory` is accepted for loader compatibility, but the encoded carrier
@@ -65,7 +66,7 @@ this legend when reading the detailed design below:
 
 **Roadmap:** coordinated source caches and indices, projection pushdown,
 replacement sampling, worker/rank scheduling, equal-step distributed plans,
-shared-prefix coalescing, byte-bounded shuffling, and request-scoped prediction
+byte-bounded shuffling, and request-scoped prediction
 masks/selections. Any later section that describes one of these mechanisms is
 a target design, not a statement that it ships. The implementation plan,
 required tests, benchmark plan, and acceptance criteria are forward-looking
@@ -90,8 +91,8 @@ Arrow owns RelFlow's CPU data plane from ingestion through prediction output.
 - Dataset stages exchange a thin `Batch` carrier whose per-observation data and
   lineage are Arrow tables and arrays. Static schema and execution plans remain
   ordinary Python metadata.
-- Awkward may provide transient ragged kernels over Arrow buffers inside
-  coalescing. It is not a dataset interchange format.
+- Awkward may be used as a transient view inside a user preprocessor. It is not
+  used by coalescing and is not a dataset interchange format.
 - Torch begins only at the tensorfield codec boundary. NumPy is used for
   vectorized lineage/scheduling kernels and as a short-lived contiguous bridge
   between Arrow and Torch; it never becomes a row carrier.
@@ -229,7 +230,7 @@ Each library has one role:
 | Ingress | PyArrow or Polars/custom/synthetic adapters | Produces Arrow |
 | Dataset transport | RelFlow `Batch` | Arrow table plus aligned Arrow identity |
 | Structural query | Arrow | Preserves offsets, validity, and coordinates |
-| Ragged regularization | Arrow with optional transient Awkward views | Produces `RaggedField` |
+| Ragged regularization | Arrow with NumPy offset/placement geometry | Produces `RaggedField` |
 | Datatype conversion | Plugin | Consumes whole Arrow leaf columns |
 | Model runtime | Torch | Dense content, state, targets, and masks |
 | Prediction conversion | Plugin plus shared writer | Produces typed Arrow arrays |
@@ -237,9 +238,9 @@ Each library has one role:
 | Persistence | PyArrow | Writes Arrow directly to Parquet |
 | HTTP JSON edge | Deployment serializer | One explicit Arrow-to-Python conversion |
 
-An Awkward array created from Arrow is a computational view, not another
-pipeline representation. It must not cause Python materialization, and it must
-not escape into dataset, preprocessor, or metadata APIs.
+An Awkward array created inside a user preprocessor is a computational view,
+not another pipeline representation. It must not cause Python materialization,
+and it must return to Arrow before leaving the preprocessor.
 
 ## Canonical Arrow Units
 
@@ -894,8 +895,7 @@ The executor uses Arrow structural kernels such as struct selection, list
 element, list slice, and map lookup. List traversal transforms child buffers
 and reuses parent offsets and validity. It never loops over Python values.
 
-The roadmap groups direct and explicit paths into one prefix tree per parent
-plan node:
+Direct and explicit paths form one schema tree of branch layouts:
 
 ```text
 payload
@@ -905,12 +905,11 @@ payload
     └── qty
 ```
 
-In that target, each shared prefix is evaluated once per model batch and branch
-projection/overflow results are reused by every descendant. Today each complete
-leaf path is evaluated and regularized separately. Branch geometry keeps the
-resulting schema slots aligned, but it is not a materialized shared-prefix
-cache. Identical text under different branches cannot share a result because
-its coordinate domain differs.
+Each active branch is evaluated once per model batch. Its retained records,
+projection/overflow result, shape, and dense placement are reused by every
+active descendant. Leaves still own their final selector and value/null state.
+Identical text under different branches cannot share a result because its
+coordinate domain differs.
 
 ### Strata Plans
 
@@ -1640,16 +1639,16 @@ performs structural work only.
 
 It performs these phases:
 
-1. bind and cache each exact query expression, input schema, and address;
-2. execute the selected projection for each leaf;
-3. regularize that leaf's declared model axes and capacity coordinates;
-4. combine selected validity, structural presence, and capacity padding into
-   final state;
+1. build the root layout and bind each node-relative query;
+2. select and regularize every active repeated branch once;
+3. carry retained records, declared geometry, and dense placement to children;
+4. project each leaf and combine selected validity, structural presence, and
+   capacity padding into final state;
 5. emit one raw Arrow-backed `RaggedField` per encoded address.
 
-Shared-prefix projection materialization and one reusable branch-geometry pass
-remain roadmap work. The shipped coalescer intentionally favors a small,
-uniform per-leaf implementation first.
+Sibling leaves reuse the same materialized branch geometry. Overflow is applied
+before descendant leaf queries, so discarded records do not enter a datatype
+or trigger query errors below that branch.
 
 The extension boundary becomes:
 

@@ -208,10 +208,12 @@ one globally chronological split.
 
 Use a schema `query` for structural selection such as
 `items[-32:][*].product.sku`. RelFlow compiles and evaluates the path columnarly;
-shared branch geometry keeps sibling schema slots aligned. Complete paths are
-currently evaluated per leaf, so shared-prefix result caching remains a future
-optimization. Use a preprocessor when you need a predicate, nested sort, or
-coordinated mutation.
+each active branch selection and overflow geometry is evaluated once, then its
+descendant leaves are projected from the retained records. Siblings therefore
+share coordinates without repeating ancestor traversal. Overflow runs before
+child queries, so malformed content in a discarded child is never inspected.
+Use a preprocessor when you need a predicate, nested sort, or coordinated
+mutation.
 
 Awkward Array is useful inside that preprocessor because it preserves Arrow's
 ragged layout:
