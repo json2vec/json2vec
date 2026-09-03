@@ -13,7 +13,7 @@ import numpy as np
 import pyarrow as pa
 
 from relflow.data.arrow import Batch
-from relflow.data.query import Projection, query
+from relflow.data.query import query
 from relflow.structs.enums import Overflow, Strata, Tokens
 from relflow.structs.tree import Address
 
@@ -49,74 +49,42 @@ def expression(request: Any, root: Branch) -> str:
     return append(result, request.query or member(request.name))
 
 
-def extract(
-    selected: Projection,
-    *,
-    address: Address,
-    leaf_axis: int,
-) -> tuple[ak.Array, ak.Array]:
-    """Lower an Arrow projection to Awkward values and model-state slots."""
-
-    try:
-        values = ak.from_arrow(selected.values)[:, np.newaxis]
-        present = ak.from_arrow(selected.present)[:, np.newaxis]
-        if present.ndim > leaf_axis + 1:
-            available = ~ak.is_none(present, axis=leaf_axis)
-        else:
-            available = ak.fill_none(present, False, axis=leaf_axis)
-        null = ak.is_none(values, axis=leaf_axis)
-        states = ak.where(
-            available,
-            ak.where(null, Tokens.null.value, Tokens.valued.value),
-            Tokens.padded.value,
-        )
-
-        return values, ak.values_astype(states, np.int8)
-    except (TypeError, ValueError, RuntimeError, OverflowError) as error:
-        raise TypeError(f"Arrow query result for address '{address}' is not Awkward-compatible") from error
-
-
 def regularize(
     values: ak.Array,
-    states: ak.Array,
     *,
     shape: tuple[int, ...],
     overflows: tuple[Overflow, ...],
     address: Address,
-) -> tuple[ak.Array, ak.Array]:
+) -> ak.Array:
     if len(shape) != len(overflows):
         raise ValueError(f"overflows length must match shape rank: expected {len(shape)}, got {len(overflows)}")
 
-    for axis, (capacity, overflow) in enumerate(zip(shape, overflows, strict=True)):
+    # Arrow fixes the batch axis and extraction inserts the singleton root.
+    # Only schema branches can be ragged.
+    axes = zip(shape[2:], overflows[2:], strict=True)
+    for axis, (capacity, overflow) in enumerate(axes, start=2):
         # Padding an outer axis creates option-valued parent slots. Before
         # descending, turn those absent parents into empty lists so the next
         # declared model axis can be regularized normally.
-        if axis > 0:
-            values = ak.fill_none(values, [], axis=axis - 1)
-            states = ak.fill_none(states, [], axis=axis - 1)
+        values = ak.fill_none(values, [], axis=axis - 1)
 
         overflow = Overflow(overflow)
         if overflow == Overflow.error:
             try:
-                exceeds = ak.num(states, axis=axis) > capacity
+                exceeds = ak.num(values, axis=axis) > capacity
             except ak.errors.AxisError:
                 exceeds = False
             overflowed = bool(ak.any(exceeds, axis=None)) if isinstance(exceeds, ak.Array) else bool(exceeds)
             if overflowed:
-                context = (
-                    "batch dimension 0" if axis == 0 else "root node dimension 1" if axis == 1 else f"dimension {axis}"
-                )
-                raise ValueError(f"branch overflow at {context} for {address}: capacity is {capacity}")
+                raise ValueError(f"branch overflow at dimension {axis} for {address}: capacity is {capacity}")
 
         start, stop = (-capacity, None) if overflow == Overflow.tail else (0, capacity)
         slices = (*((slice(None),) * axis), slice(start, stop))
         values = values[slices]
-        states = states[slices]
 
         values = ak.pad_none(values, capacity, axis=axis, clip=True)
-        states = ak.pad_none(states, capacity, axis=axis, clip=True)
 
-    return values, states
+    return values
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,29 +197,37 @@ def coalesce(
             address=address,
         )
         try:
-            projected_values, projected_states = extract(
-                selected,
-                address=address,
-                leaf_axis=len(shape) - 1,
+            leaf_axis = len(shape) - 1
+            projected_values = ak.from_arrow(selected.values)[:, np.newaxis]
+            projected_present = ak.from_arrow(selected.present)[:, np.newaxis]
+            if projected_present.ndim > leaf_axis + 1:
+                projected_present = ~ak.is_none(projected_present, axis=leaf_axis)
+            dense = ak.zip(
+                {"value": projected_values, "present": projected_present},
+                depth_limit=len(shape),
             )
-        except (TypeError, IndexError, ak.errors.AxisError) as error:
+        except (TypeError, ValueError, RuntimeError, OverflowError, IndexError, ak.errors.AxisError) as error:
             raise ValueError(
                 f"Arrow query for address '{address}' does not match its schema shape: "
                 f"{paths[address]!r} must produce {len(shape)} list axes"
             ) from error
 
         try:
-            dense_values, dense_states = regularize(
-                projected_values,
-                projected_states,
+            dense = regularize(
+                dense,
                 shape=shape,
                 overflows=schema.overflows(address),
                 address=address,
             )
-            state = np.asarray(
-                ak.to_numpy(ak.fill_none(dense_states, Tokens.padded.value, axis=len(shape) - 1)),
-                dtype=np.int64,
+            dense_values = dense["value"]
+            dense_present = dense["present"]
+            available = np.asarray(
+                ak.to_numpy(ak.fill_none(dense_present, False, axis=leaf_axis)),
+                dtype=bool,
             )
+            null = np.asarray(ak.to_numpy(ak.is_none(dense_values, axis=leaf_axis)), dtype=bool)
+            state = np.where(null, Tokens.null.value, Tokens.valued.value).astype(np.int8, copy=False)
+            state[~available] = Tokens.padded.value
             for _ in range(len(shape) - 1):
                 dense_values = ak.flatten(dense_values, axis=1)
         except (IndexError, ak.errors.AxisError) as error:

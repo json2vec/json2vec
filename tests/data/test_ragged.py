@@ -156,6 +156,21 @@ def test_all_empty_deep_branches_materialize_declared_geometry():
     assert field.placement.to_pylist() == []
 
 
+def test_typed_empty_nested_batch_preserves_declared_geometry():
+    model = build(rf.Branch(rf.Number("value"), name="items", length=3))
+    item = pa.struct([pa.field("value", pa.float64())])
+    field = coalesce(
+        arrow_batch([], schema=pa.schema([pa.field("items", pa.list_(item))])),
+        schema=model.schema,
+        strata=Strata.train,
+    )["record/items/value"]
+
+    assert field.shape == (0, 1, 3)
+    assert field.dense.shape == field.shape
+    assert field.values.to_pylist() == []
+    assert field.placement.to_pylist() == []
+
+
 def test_singleton_branch_accepts_one_item_list():
     model = build(rf.Branch(rf.Number("value"), name="details", length=1))
     field = coalesce(
