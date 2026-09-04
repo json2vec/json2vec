@@ -3,43 +3,44 @@ from __future__ import annotations
 
 import enum
 import math
-from typing import TYPE_CHECKING, Annotated, Any, Iterable, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
+from relflow.distributed import all_reduce_sum
+from relflow.helpers import Jitter
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.output import array, struct
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
 
-number: Plugin = Plugin(name="number")
+number: Extension = Extension(name="number", types=(int | float,))
 number.callback(CounterUpdateCallback)
 
 FOURIER_SAFE_MAX_ANGLE = float(1e4)
-
-
-def jitter(inputs: torch.Tensor, jitter_amount: torch.Tensor) -> torch.Tensor:
-    noise = torch.rand_like(inputs).sub(torch.rand_like(inputs)).mul(jitter_amount)
-    return inputs.add(noise)
 
 
 class Objective(enum.StrEnum):
@@ -62,7 +63,7 @@ class Request(RequestBase):
     """Numeric scalar tensorfield request."""
 
     type: Literal["number"] = "number"
-    jitter: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
+    jitter: Jitter = pydantic.Field(default_factory=Jitter)
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
     offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     alpha: Annotated[float | None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
@@ -104,103 +105,102 @@ class Request(RequestBase):
 
 
 @number.register
+def observe(
+    field: RaggedField,
+    *,
+    address: Address,
+    schema: Schema,
+    state: object | None,
+    learn: bool,
+) -> TensorDict | None:
+    """Summarize complete pristine numeric state and content."""
+
+    if not learn:
+        return None
+    values = pc.cast(field.values, pa.float64(), safe=True)
+    if isinstance(values, pa.ChunkedArray):
+        values = values.combine_chunks()
+    content = torch.from_numpy(values.to_numpy(zero_copy_only=False).copy())
+    return TensorDict(
+        {
+            TensorKey.state: tally(torch.from_numpy(field.dense.copy()), len(Tokens)),
+            TensorKey.content: moments(content),
+        },
+        batch_size=[],
+    )
+
+
+@number.register
 @tensorclass
 class TensorField(TensorFieldBase):
     content: torch.Tensor
     state: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        values: list,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
+        context: Context,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
+        def encode(field: RaggedField) -> torch.Tensor:
+            values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+            if (
+                pa.types.is_list(values.type)
+                or pa.types.is_large_list(values.type)
+                or pa.types.is_fixed_size_list(values.type)
+            ):
+                raise ValueError(f"number field at '{address}' expects scalar Arrow values, got {values.type}")
 
-        data, flags = pad(
-            nested=values,
-            shape=leading_shape,
-            dtype=np.float64,
-            pad_value=np.nan,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
+            encoded = pc.cast(values, pa.float64(), safe=True)
+            if isinstance(encoded, pa.ChunkedArray):
+                encoded = encoded.combine_chunks()
+            data = field.place(encoded.to_numpy(zero_copy_only=False), fill=0.0)
+            return torch.from_numpy(np.nan_to_num(data, nan=0.0)).to(dtype=torch.float32)
 
-        cdf = np.nan_to_num(data, nan=0.0)
-        content = torch.tensor(data=cdf, dtype=torch.float)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        content = content.masked_fill(literal_mask_tensor, 0.0)
-        state = torch.tensor(data=flags, dtype=torch.int64).masked_fill(literal_mask_tensor, Tokens.masked.value)
+        state = torch.from_numpy(input.dense)
 
         return cls(
-            content=content,
+            content=encode(input),
             state=state,
-            targets=TensorDict({}),
-            trainable=torch.zeros_like(input=content, dtype=torch.bool),
-            batch_size=len(values),
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: torch.from_numpy(target.dense),
+                    TensorKey.content: encode(target),
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked)
 
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-        self.state: torch.Tensor = self.state.masked_scatter(selected, mask_token)
+def moments(values: torch.Tensor) -> torch.Tensor:
+    """Reduce finite numeric values to count, sum, and squared sum."""
 
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-        self.content: torch.Tensor = self.content.masked_scatter(
-            selected, torch.full_like(input=self.content, fill_value=0.0)
+    finite = values.reshape(-1).to(dtype=torch.float64)
+    finite = finite.masked_select(torch.isfinite(finite))
+    if not finite.numel():
+        return torch.zeros(3, dtype=torch.float64, device=values.device)
+    return torch.stack(
+        (
+            finite.new_tensor(finite.numel()),
+            finite.sum(),
+            finite.square().sum(),
         )
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-
-        state = torch.full(shape, Tokens.masked)
-        content = torch.full(shape, 0.0)
-
-        return cls(
-            state=state,
-            content=content,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
-        )
+    )
 
 
 class GlobalOnlineNormalizer(torch.nn.Module):
@@ -216,12 +216,37 @@ class GlobalOnlineNormalizer(torch.nn.Module):
 
     @torch.no_grad()
     def update(self, values: torch.Tensor):
-        numel = values.numel()
-        if numel == 0:
+        self.merge(moments(values))
+
+    @torch.no_grad()
+    def learn(self, observation: torch.Tensor) -> None:
+        """Synchronize and apply one pristine numeric observation."""
+
+        if not isinstance(observation, torch.Tensor):
+            raise TypeError(f"normalizer observation must be a tensor, got {type(observation).__name__}")
+        if tuple(observation.shape) != (3,):
+            raise ValueError(f"normalizer observation must have shape (3,), got {tuple(observation.shape)}")
+        self.merge(all_reduce_sum(observation.to(device=self.mean.device, dtype=torch.float64).clone()))
+
+    @torch.no_grad()
+    def merge(self, observation: torch.Tensor) -> None:
+        """Merge count, sum, and squared sum into running statistics."""
+
+        if tuple(observation.shape) != (3,):
+            raise ValueError(f"normalizer observation must have shape (3,), got {tuple(observation.shape)}")
+        if not torch.isfinite(observation).all():
+            raise ValueError("normalizer observation must contain only finite values")
+        if observation[0] < 0:
+            raise ValueError("normalizer observation count cannot be negative")
+
+        batch_count = observation[0].to(device=self.count.device, dtype=self.count.dtype)
+        if not batch_count:
             return
 
-        batch_mean = values.mean()
-        batch_var = values.var(unbiased=False)
+        batch_mean = observation[1].div(observation[0]).to(device=self.mean.device, dtype=self.mean.dtype)
+        batch_var = (
+            observation[2].div(observation[0]).sub(observation[1].div(observation[0]).square()).clamp_min(0.0)
+        ).to(device=self.var.device, dtype=self.var.dtype)
 
         if self.alpha is not None:
             alpha: float = self.alpha
@@ -235,17 +260,17 @@ class GlobalOnlineNormalizer(torch.nn.Module):
             return
 
         old_count = self.count
-        new_count = old_count + numel
+        new_count = old_count + batch_count
 
         delta = batch_mean - self.mean
 
         # New mean
-        new_mean = self.mean + delta * (numel / new_count)
+        new_mean = self.mean + delta * (batch_count / new_count)
 
         # Variance update
         m_a = self.var * old_count
-        m_b = batch_var * numel
-        m_c = delta.pow(2) * old_count * numel / new_count
+        m_b = batch_var * batch_count
+        m_c = delta.pow(2) * old_count * batch_count / new_count
         new_var = (m_a + m_b + m_c) / new_count
 
         # Commit
@@ -283,10 +308,9 @@ class Embedder(EmbedderBase):
         weights = torch.logspace(start=-n_bands, end=offset, steps=n_bands + offset + 1, base=2)
         self.linear = torch.nn.Linear(2 * len(weights), schema.d_model)
         self.register_buffer("weights", weights.mul(math.pi).unsqueeze(dim=0))
-        self.register_buffer("jitter", torch.tensor(request.jitter))
         self.register_buffer("max_fourier_input", torch.tensor(FOURIER_SAFE_MAX_ANGLE) / self.weights.abs().max())
 
-        self.jitter: torch.Tensor
+        self.jitter: Jitter = request.jitter
         self.weights: torch.Tensor
         self.max_fourier_input: torch.Tensor
 
@@ -326,17 +350,21 @@ class Embedder(EmbedderBase):
         return torch.where(torch.isnan(clamped), torch.zeros_like(clamped), clamped)
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N, *dims = inputs.state.shape
         D = math.prod(tuple([N, *dims]))
 
         state = inputs.state.reshape(D)
         content = inputs.content.reshape(D)
+        eligible = state.eq(Tokens.valued) & torch.isfinite(content)
 
-        content = self.normalizer(inputs=content, mask=state.eq(Tokens.valued))
+        if self.training and not self.jitter.normalize:
+            content = self.jitter.apply(content, eligible)
 
-        if self.training:
-            content = jitter(content, jitter_amount=self.jitter)
+        content = self.normalizer(inputs=content, mask=state.eq(Tokens.valued), update=False)
+
+        if self.training and self.jitter.normalize:
+            content = self.jitter.apply(content, eligible)
 
         content = self.clamp(content=content, state=state)
 
@@ -352,10 +380,28 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=embeddings + projection,
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
         )
+
+
+@number.register
+def learn(
+    module: Model,
+    observation: TensorDict,
+    *,
+    address: Address,
+    strata: Strata,
+) -> None:
+    """Apply pristine numeric counts and normalization moments."""
+
+    if strata != Strata.train:
+        raise ValueError(f"number learner at '{address}' requires train strata, got {strata}")
+    embedder: Embedder = module.nodes[address].embedder
+    embedder.counter.learn(observation[TensorKey.state])
+    embedder.normalizer.learn(observation[TensorKey.content])
 
 
 @number.register
@@ -437,17 +483,11 @@ def loss(
 
 
 @number.register
-def write(module: Model, prediction: Prediction):
-    content: np.ndarray = prediction.payload[TensorKey.content].detach().double().cpu().numpy()
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    tokens: np.ndarray = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
+def output(module: Model, address: Address) -> pa.StructType:
+    return pa.struct([pa.field(TensorKey.content.name, pa.float64(), nullable=False)])
 
-    output: dict[str, Iterable] = {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: content,
-    }
 
-    return output
+@number.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content = array(prediction.payload[TensorKey.content], pa.float64())
+    return struct({TensorKey.content.name: content}, datatype)

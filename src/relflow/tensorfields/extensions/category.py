@@ -4,26 +4,29 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
 from loguru import logger
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.output import array, labels, struct, variable
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
@@ -31,7 +34,7 @@ if TYPE_CHECKING:
     from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
-category: Plugin = Plugin(name="category")
+category: Extension = Extension(name="category", types=(bool, int, float, str, bytes))
 
 category.callback(VocabularySyncCallback, CounterUpdateCallback)
 
@@ -163,62 +166,78 @@ class Request(RequestBase):
 
 
 @category.register
+def observe(
+    field: RaggedField,
+    *,
+    address: Address,
+    schema: Schema,
+    state: object | None,
+    learn: bool,
+) -> TensorDict | None:
+    """Reserve and count the complete pristine categorical exposure."""
+
+    if not learn:
+        return None
+    if not isinstance(state, VocabularyState):
+        raise RuntimeError(f"category field at '{address}' requires a vocabulary encoding context")
+
+    indices = state.indices(field.values, learn=True)
+    return TensorDict(
+        {
+            TensorKey.state: tally(torch.from_numpy(field.dense.copy()), len(Tokens)),
+            TensorKey.content: tally(torch.from_numpy(indices.copy()), schema.requests[address].size),
+        },
+        batch_size=[],
+    )
+
+
+@category.register
 @tensorclass
 class TensorField(TensorFieldBase):
     state: torch.Tensor
     content: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        values: list,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
-        interprocess_encoding_context: VocabularyState,
+        context: Context,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-        learn = strata == Strata.train
+        state = context.state
+        if state is not None and not isinstance(state, VocabularyState):
+            raise TypeError(
+                f"category field at '{address}' requires VocabularyState context, got {type(state).__name__}"
+            )
 
-        interprocess_encoding_context.reserve(values, learn=learn)
-        tokens = apply(values, interprocess_encoding_context.encode)
+        def encode(field: RaggedField) -> torch.Tensor:
+            if not len(field.values):
+                return torch.zeros(field.shape, dtype=torch.int64)
+            if state is None:
+                raise RuntimeError(f"category field at '{address}' requires a vocabulary encoding context")
+            tokens = state.indices(field.values, learn=False)
+            return torch.from_numpy(field.place(tokens, fill=0))
 
-        if len(interprocess_encoding_context) > (size := schema.requests[address].size):
+        content = encode(input)
+        target_content = encode(target)
+
+        if state is not None and len(state) > (size := schema.requests[address].size):
             logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
                 "vocabulary exceeds size={}", size
             )
 
-        data, states = pad(
-            nested=tokens,
-            shape=leading_shape,
-            dtype=np.int64,
-            pad_value=0,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        state_tensor = torch.tensor(states, dtype=torch.int64)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = state_tensor.masked_fill(literal_mask_tensor, Tokens.masked.value)
-        content = torch.tensor(data=data, dtype=torch.int64)
-        content = content.masked_fill(literal_mask_tensor, 0)
+        state_tensor = torch.from_numpy(input.dense)
+        target_state = torch.from_numpy(target.dense)
         if strata == Strata.train:
             p_unavailable: float = schema.requests[address].p_unavailable
             unavailable_index: int = schema.requests[address].size
@@ -228,62 +247,28 @@ class TensorField(TensorFieldBase):
                 # train split is exactly where the vocabulary is built. We simulate a small
                 # amount of OOV behavior so the content objective does not reward any real
                 # class for valued inputs whose categorical content is unavailable.
-                is_known = state_tensor.eq(Tokens.valued.value) & content.ne(unavailable_index)
-                if is_known.any():
-                    simulated = (
-                        torch.rand_like(input=state_tensor, dtype=torch.float).lt(other=p_unavailable) & is_known
-                    )
-                    if simulated.any():
-                        content = content.masked_fill(simulated, unavailable_index)
+                def regularize(values: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+                    known = state.eq(Tokens.valued.value) & values.ne(unavailable_index)
+                    selected = torch.rand_like(state, dtype=torch.float).lt(p_unavailable) & known
+                    return values.masked_fill(selected, unavailable_index)
+
+                content = regularize(content, state_tensor)
+                target_content = regularize(target_content, target_state)
 
         return cls(
             state=state_tensor,
             content=content,
-            trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=len(values),
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_scatter(selected, mask_token)
-        self.content = self.content.masked_fill(selected, 0)
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-
-        state = torch.full(shape, Tokens.masked)
-        content = torch.zeros(shape, dtype=torch.int64)
-
-        return cls(
-            state=state,
-            content=content,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: target_state,
+                    TensorKey.content: target_content,
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -319,7 +304,7 @@ class Embedder(EmbedderBase):
         )
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N: int
         dims: list[int]
 
@@ -341,14 +326,32 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=embeddings,
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
         )
 
     @property
-    def interprocess_encoding_context(self) -> VocabularyState:
+    def context(self) -> VocabularyState:
         return self.vocab.state
+
+
+@category.register
+def learn(
+    module: Model,
+    observation: TensorDict,
+    *,
+    address: Address,
+    strata: Strata,
+) -> None:
+    """Apply pristine categorical counts to model-owned resources."""
+
+    if strata != Strata.train:
+        raise ValueError(f"category learner at '{address}' requires train strata, got {strata}")
+    embedder: Embedder = module.nodes[address].embedder
+    embedder.counters[TensorKey.state.name].learn(observation[TensorKey.state])
+    embedder.counters[TensorKey.content.name].learn(observation[TensorKey.content])
 
 
 @category.register
@@ -477,69 +480,73 @@ def loss(
 
 
 @category.register
-def write(module: Model, prediction: Prediction):
-    node = module.nodes[prediction.address]
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    content_logits: torch.Tensor = prediction.payload[TensorKey.content]
+def output(module: Model, address: Address) -> pa.StructType:
+    candidate = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string(), nullable=False),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+        ]
+    )
+    content = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string()),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+            pa.field(TensorKey.topk.name, pa.list_(candidate), nullable=False),
+        ]
+    )
+    return pa.struct([pa.field(TensorKey.content.name, content, nullable=False)])
 
-    tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
 
-    vocab = np.array(node.embedder.vocab.snapshot(), dtype=object)
-    labels = vocab
-    content_shape = tuple(state_distribution.shape[:-1])
-    content_labels = np.full(content_shape, None, dtype=object)
-    content_probabilities = np.zeros(content_shape, dtype=np.float32)
+@category.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content_type = datatype.field(TensorKey.content.name).type
+    candidate_type = content_type.field(TensorKey.topk.name).type.value_type
+    logits = prediction.payload[TensorKey.content]
+    coordinates = logits.reshape(-1, logits.shape[-1])
+    vocabulary = labels(module.nodes[prediction.address].embedder.vocab)
+    size = len(vocabulary)
+    if size > coordinates.shape[-1]:
+        raise ValueError(
+            f"category vocabulary at {prediction.address!s} has {size} values but prediction width is "
+            f"{coordinates.shape[-1]}"
+        )
 
-    requested_ks: list[int] = module.schema.requests[prediction.address].topk
-    max_requested_k: int = max(requested_ks, default=0)
-
-    def _pack_candidates(labels: np.ndarray, probabilities: np.ndarray) -> list[dict[str, float]] | list:
-        if labels.ndim == 1:
-            return [
-                {"label": str(label), "probability": float(probability)}
-                for label, probability in zip(labels.tolist(), probabilities.tolist())
-            ]
-
-        return [_pack_candidates(labels[index], probabilities[index]) for index in range(labels.shape[0])]
-
-    def _empty_candidates(shape: tuple[int, ...]) -> list | None:
-        if len(shape) == 0:
-            return []
-
-        return [_empty_candidates(shape[1:]) for _ in range(shape[0])]
-
-    topk_payload: list | None = _empty_candidates(content_shape)
-    if len(vocab) > 0:
-        candidate_indices = torch.arange(len(vocab), device=content_logits.device, dtype=torch.int64)
-        candidate_logits = content_logits.index_select(dim=-1, index=candidate_indices)
-        log_norm = candidate_logits.logsumexp(dim=-1, keepdim=True)
-        max_logits, max_indices = candidate_logits.max(dim=-1)
-        content_probabilities = (max_logits - log_norm.squeeze(-1)).exp().detach().float().cpu().numpy()
-
-        max_indices_np: np.ndarray = max_indices.detach().cpu().numpy().astype(np.int32)
-        content_labels = labels[max_indices_np]
-
-        if max_requested_k > 0:
-            topk: int = min(max_requested_k, candidate_logits.shape[-1])
-            topk_logits, topk_indices = candidate_logits.topk(k=topk, dim=-1)
-            topk_probabilities = (topk_logits - log_norm).exp()
-
-            topk_indices_np: np.ndarray = topk_indices.detach().cpu().numpy().astype(np.int32)
-            topk_labels_np: np.ndarray = labels[topk_indices_np]
-            topk_probabilities_np: np.ndarray = topk_probabilities.detach().float().cpu().numpy()
-            topk_payload = _pack_candidates(
-                labels=topk_labels_np,
-                probabilities=topk_probabilities_np,
-            )
-
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: {
-            TensorKey.value.name: content_labels,
-            TensorKey.probability.name: content_probabilities,
-            TensorKey.topk.name: topk_payload,
+    count = coordinates.shape[0]
+    best_labels: pa.Array = pa.nulls(count, type=pa.large_string())
+    best_probabilities = torch.zeros(count, dtype=torch.float32, device=logits.device)
+    candidates = struct(
+        {
+            TensorKey.value.name: pa.array([], type=pa.large_string()),
+            TensorKey.probability.name: pa.array([], type=pa.float32()),
         },
-    }
+        candidate_type,
+    )
+    candidate_counts = torch.zeros(count, dtype=torch.int64)
+
+    if size:
+        probabilities = coordinates[:, :size].softmax(dim=-1)
+        best_probabilities, best_indices = probabilities.max(dim=-1)
+        best_labels = pc.take(vocabulary, array(best_indices, pa.int64()))
+
+        request: Request = module.schema.requests[prediction.address]
+        width = min(max(request.topk, default=0), size)
+        if width:
+            top_probabilities, top_indices = probabilities.topk(k=width, dim=-1)
+            candidates = struct(
+                {
+                    TensorKey.value.name: pc.take(vocabulary, array(top_indices, pa.int64())),
+                    TensorKey.probability.name: array(top_probabilities, pa.float32()),
+                },
+                candidate_type,
+            )
+            candidate_counts = torch.full((count,), width, dtype=torch.int64)
+
+    content = struct(
+        {
+            TensorKey.value.name: best_labels,
+            TensorKey.probability.name: array(best_probabilities, pa.float32()),
+            TensorKey.topk.name: variable(candidates, candidate_counts),
+        },
+        content_type,
+    )
+    return struct({TensorKey.content.name: content}, datatype)

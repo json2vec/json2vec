@@ -1,0 +1,188 @@
+---
+marimo-static-output: true
+pyproject: |
+  requires-python = ">=3.12"
+  dependencies = [
+    "awkward>=2.13.0",
+    "blake3>=1.0.8",
+    "marimo>=0.23.8",
+    "relflow @ git+https://github.com/relflow/relflow.git",
+  ]
+---
+
+# Jitter And Input Noise
+
+Use `rf.Jitter` to add bounded, training-only noise to continuous field
+representations. It is available on `Number`, `Vector`, `DateParts`, and
+`Text`.
+
+```{python .marimo}
+#| echo: true
+#| output: true
+
+import relflow as rf
+
+noise = rf.Jitter(add=0.05, multiply=0.10)
+
+amount = rf.Number("amount", jitter=noise)
+embedding = rf.Vector("embedding", n_dim=128, jitter=noise)
+created_at = rf.DateParts(
+    "created_at",
+    dateparts=["day_of_week", "hour_of_day"],
+    jitter=noise,
+)
+message = rf.Text("message", jitter=noise)
+
+noise
+```
+
+Jitter is regularization, not preprocessing. RelFlow draws new noise during
+each training forward pass. Evaluation, prediction, and serving use the
+unperturbed representation. Stored inputs and reconstruction targets remain
+pristine.
+
+## Affine Noise
+
+When both components are enabled, RelFlow draws four independent values
+$U_1, U_2, U_3, U_4 \sim \operatorname{Uniform}(0, 1)$ for each eligible
+continuous coordinate $v$ and applies:
+
+$$
+J(v) = v\left[1 + m(U_1-U_2)\right] + a(U_3-U_4)
+$$
+
+Here, `multiply=m` controls proportional noise and `add=a` controls an offset.
+Each difference of uniforms is triangular on $[-1, 1]`: small changes are more
+likely than changes near the configured bound, and the expected change is
+zero. Each enabled component draws its own pair; a disabled component draws
+nothing.
+
+- `add=a` contributes an offset in $[-a, a]$.
+- `multiply=m` contributes a factor in $[1-m, 1+m]$.
+- Both components use independent draws and may be combined.
+- `rf.Jitter()` is an identity operation and consumes no random numbers.
+- Magnitudes must be finite and non-negative. `multiply > 1` can reverse a
+  coordinate's sign.
+
+`Jitter.apply` does not clip noisy values to an application domain. A consumer
+may still enforce its own numerical safety bounds afterward; for example,
+`Number` protects its Fourier features from unsafe angles. Choose magnitudes
+that respect the domain and validate them against held-out data.
+
+## Where Noise Is Applied
+
+The helper is shared, but every field owns its meaningful continuous boundary.
+RelFlow never jitters strings, token IDs, timestamp integers, state tokens,
+padding, nulls, or masked values.
+
+| Field | Jittered representation | Boundary behavior |
+| --- | --- | --- |
+| `Number` | Scalar numeric value | `normalize=False` applies noise before the learned normalizer; `True` applies it afterward. |
+| `Vector` | Supplied `float32` coordinates | The built-in has one model-ready coordinate representation and does not fit a normalizer. |
+| `DateParts` | Generated `(sin, cos)` coordinates | Noise is applied to unit-circle coordinates, never to the source timestamp. |
+| `Text` | Pooled frozen-encoder coordinates | Noise is applied after Hugging Face encoding and before RelFlow's learned projection, never to text or token IDs. |
+
+`normalize` selects placement only when a tensorfield has distinct raw and
+normalized continuous representations. `Number` currently has both. The other
+built-ins have one continuous representation, so they apply jitter at that
+boundary for either setting; `normalize` does not create a new normalizer.
+
+This distinction matters for magnitude selection. `rf.Jitter(add=0.05)` means
+`0.05` standardized units for the default `Number`, but `0.05` coordinate
+units for `Vector`, a `DateParts` circle pair, or a Text encoder embedding.
+
+## Configuration
+
+| Field | Default | Contract |
+| --- | --- | --- |
+| `add` | `0.0` | Maximum absolute additive offset. Must be finite and non-negative. |
+| `multiply` | `0.0` | Maximum multiplier deviation from `1.0`. Must be finite and non-negative. |
+| `normalize` | `True` | Prefer a consumer's normalized boundary when it has one. Must be a Boolean. |
+
+`Jitter` is a frozen Pydantic model: create a new value instead of mutating an
+existing one. Unknown fields, Boolean or non-finite magnitudes, negative
+magnitudes, and legacy scalar forms such as `jitter=0.05` are rejected.
+
+## Configuration Recipes
+
+Use additive noise when an absolute displacement makes sense:
+
+```python
+temperature = rf.Number(
+    jitter=rf.Jitter(add=0.5, normalize=False),
+)
+```
+
+Use multiplicative noise when uncertainty is proportional to a coordinate:
+
+```python
+embedding = rf.Vector(
+    n_dim=128,
+    jitter=rf.Jitter(multiply=0.02),
+)
+```
+
+Combine both for proportional and fixed uncertainty:
+
+```python
+measurement = rf.Number(
+    jitter=rf.Jitter(
+        multiply=0.02,
+        add=0.1,
+        normalize=False,
+    )
+)
+```
+
+For latent representations such as Text embeddings, begin with small values
+and compare downstream validation metrics. Coordinate scales depend on the
+chosen external encoder.
+
+## Masks, Targets, And Missing Values
+
+Jitter and `rf.Mask` solve different problems and compose safely:
+
+- A mask controls visibility, skipping, dropout, and reconstruction.
+- Jitter changes only visible, valued, finite continuous coordinates during
+  training.
+- Non-valued state embeddings are never jittered.
+- Reconstruction targets are encoded from the original values and never
+  jittered. A coordinate hidden for reconstruction is not a visible, valued
+  input and therefore receives no jitter either.
+
+Jitter can perturb the still-visible context used to reconstruct another
+coordinate without corrupting the answer the decoder learns to recover. It
+does not turn the hidden target coordinate itself into a noisy input.
+
+## Reproducibility
+
+Noise uses the active Torch random-number generator. A Torch seed makes draws
+repeatable only while device placement, batch geometry, execution order, and
+distributed topology remain fixed. Changing batch size can assign different
+draws to the same observation. Treat jitter as stochastic model behavior, not
+as a persisted data transformation.
+
+## Custom Tensorfields
+
+Extension authors can reuse the same helper at a field-owned continuous
+boundary:
+
+```python
+valued = state.eq(rf.Tokens.valued).unsqueeze(-1).expand_as(content)
+finite = torch.isfinite(content)
+
+if self.training:
+    content = self.jitter.apply(content, valued & finite)
+```
+
+The consumer remains responsible for training/evaluation gating, mask shape,
+finite-value eligibility, normalization placement, and keeping targets
+pristine.
+
+## Where Next
+
+- See [Number](../data-types/number.qmd) for raw versus standardized units.
+- See [Vector](../data-types/vector.qmd), [DateParts](../data-types/dateparts.qmd),
+  and [Text](../data-types/text.qmd) for each representation boundary.
+- See [Dynamic Masking](dynamic-masking.qmd) for visibility, dropout,
+  reconstruction, and structural skipping.

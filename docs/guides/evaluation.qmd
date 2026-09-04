@@ -46,7 +46,7 @@ datamodule = rf.PolarsDataModule(
     model=model,
     train=train_frame,
     validate=validate_frame,
-    sample_rate={"train": 0.25, "validate": 1.0},
+    sample={"train": 0.25, "validate": 1.0},
 )
 ```
 
@@ -75,23 +75,23 @@ the installed throughput callback. Do not expect it in
 Metrics for one schema leaf use:
 
 ```text
-<address-with-colons>/<stage>:<metric>:<component>
+<address-with-dots>/<stage>.<metric>.<component>
 ```
 
-Slashes in the schema address become colons so the first slash still separates
-the logger group. For a `Category` target at `record/fraud`, representative
+Slashes in the schema address become dots so the first remaining slash
+separates the logger group. For a `Category` target at `record/fraud`, representative
 names are:
 
 ```text
-record:fraud/validate:loss:state
-record:fraud/validate:accuracy:state
-record:fraud/validate:loss:content
-record:fraud/validate:accuracy:content
-record:fraud/validate:vocabulary:size
+record.fraud/validate.loss.state
+record.fraud/validate.accuracy.state
+record.fraud/validate.loss.content
+record.fraud/validate.accuracy.content
+record.fraud/validate.vocabulary.size
 ```
 
 A configured category `topk=[3]` additionally emits
-`record:fraud/validate:accuracy:top3`. Metric availability is datatype-specific;
+`record.fraud/validate.accuracy.top3`. Metric availability is datatype-specific;
 each [datatype reference](../core-concepts/data-types.qmd) lists the metrics it
 owns.
 
@@ -111,13 +111,14 @@ loss when weights differ from `1.0`.
 
 Global loss is appropriate for optimization and often for early stopping, but
 it is not automatically the best product metric. A lower aggregate loss can
-hide a regression on the one target the application cares about. Track that
-target's content metric and a business-facing metric alongside it.
+hide a regression on the one reconstructed field the application cares about.
+Track that field's content metric and a business-facing metric alongside it.
 
 ::: {.callout-note}
 If a batch contains no trainable fields, RelFlow returns a differentiable zero
-loss and logs a warning. Repeated warnings usually mean the queries, targets,
-masking rates, or split contents are not producing learning examples.
+loss and logs a warning. Repeated warnings usually mean the queries,
+reconstructing mask selections, or split contents are not producing learning
+examples.
 :::
 
 ## State And Content Need Separate Interpretation
@@ -152,7 +153,7 @@ model report several operating points:
 
 ```python
 converted = rf.Boolean(
-    target=True,
+    mask=True,
     threshold=[0.5, 0.7, 0.9, 0.7],
 )
 ```
@@ -208,7 +209,7 @@ When the primary product target is one leaf, monitoring its metric can be more
 appropriate than global loss:
 
 ```text
-record:fraud/validate:accuracy:content
+record.fraud/validate.accuracy.content
 ```
 
 Accuracy can be unstable on small or imbalanced splits, so make this choice
@@ -227,8 +228,9 @@ A validation metric is useful only when the split represents future use.
 - Fit vocabularies and numeric normalization from training observations. Do not
   send validation records through the training dataloader merely to populate
   preprocessing state.
-- Apply the same RelFlow preprocessor code and bound parameters to every
-  split, while allowing stage-aware behavior only when it is intentional.
+- Apply the same ordered RelFlow preprocessor pipeline, declarations, and bound
+  parameters to every split, while allowing stage-aware behavior only when it
+  is intentional.
 - Keep labels and post-outcome events out of visible nested context.
 
 Using the training frame as validation is acceptable only in a tiny API
@@ -244,12 +246,12 @@ Before promoting a checkpoint:
 
 1. Compare against a simple baseline, such as the majority class, a constant
    numeric predictor, or the existing production system.
-2. Confirm global and primary-target metrics improve on a genuinely held-out
+2. Confirm global and primary-objective metrics improve on a genuinely held-out
    split.
 3. Slice results by important cohorts and by value state; aggregate scores can
    hide failures on null, rare, or long-history observations.
 4. Inspect prediction payloads, including `inferred`, rather than assuming
-   every decoded field was requested as a target.
+   every decoded field was requested for inference.
 5. Re-run the exact saved artifact through the intended interactive, batch, or
    serving path.
 

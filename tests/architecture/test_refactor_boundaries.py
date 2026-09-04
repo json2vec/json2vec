@@ -14,7 +14,7 @@ from relflow.structs import experiment, selectors
 def _model() -> rf.Model:
     return rf.Model(
         rf.Number(name="amount"),
-        rf.Category(name="label", target=True, size=4),
+        rf.Category(name="label", mask=True, size=4),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -43,7 +43,7 @@ def test_model_mutations_emit_structured_logs() -> None:
     try:
         model.update(rf.where("name") == "amount", weight=2.0)
         model.update(rf.where("name") == "amount", benchmark="schema_api", allow_extra=True)
-        model.update(rf.where("name") == "amount", target=True)
+        model.update(rf.where("name") == "amount", mask=True)
         model.extend(rf.where("name") == "record", rf.Category(name="extra", size=4))
         model.reset(rf.where("name") == "amount")
         with model.override(rf.where("name") == "amount", weight=3.0):
@@ -64,7 +64,7 @@ def test_model_mutations_emit_structured_logs() -> None:
         for event in mutation_events
     )
     assert any(
-        event.get("attribute") == "target" and event.get("definition_attribute") is False for event in mutation_events
+        event.get("attribute") == "mask" and event.get("definition_attribute") is True for event in mutation_events
     )
     assert any(
         event.get("address") == "record/amount"

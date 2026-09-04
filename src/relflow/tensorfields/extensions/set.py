@@ -1,28 +1,32 @@
 # ty: ignore[invalid-method-override,unknown-argument]
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.output import array, labels, struct, variable
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
@@ -30,7 +34,7 @@ if TYPE_CHECKING:
     from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
-sets: Plugin = Plugin(name="set")
+sets: Extension = Extension(name="set", types=(bool, int, float, str, bytes))
 sets.callback(VocabularySyncCallback, CounterUpdateCallback)
 
 
@@ -103,28 +107,35 @@ class Request(RequestBase):
         return data
 
 
-def _encode_set_content(value: Any, state: VocabularyState, n_tokens: int) -> np.ndarray:
-    encoded = np.zeros(n_tokens, dtype=np.float32)
+@sets.register
+def observe(
+    field: RaggedField,
+    *,
+    address: Address,
+    schema: Schema,
+    state: object | None,
+    learn: bool,
+) -> TensorDict | None:
+    """Reserve and count the complete pristine set exposure."""
 
-    if value is None:
-        return encoded
+    if not learn:
+        return None
+    if not isinstance(state, VocabularyState):
+        raise RuntimeError(f"set field at '{address}' requires a vocabulary encoding context")
 
-    if isinstance(value, str):
-        items = (value,)
-    elif isinstance(value, Iterable):
-        items = value
-    else:
-        items = (value,)
-
-    for item in items:
-        if item is None:
-            continue
-
-        index = state.encode(item)
-        if index is not None and index < n_tokens:
-            encoded[index] = 1.0
-
-    return encoded
+    values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+    if pa.types.is_list(values.type) or pa.types.is_large_list(values.type) or pa.types.is_fixed_size_list(values.type):
+        values = pc.list_flatten(values)
+    if values.null_count:
+        values = pc.filter(values, pc.is_valid(values))
+    indices = state.indices(values, learn=True)
+    return TensorDict(
+        {
+            TensorKey.state: tally(torch.from_numpy(field.dense.copy()), len(Tokens)),
+            TensorKey.content: tally(torch.from_numpy(indices.copy()), schema.requests[address].size),
+        },
+        batch_size=[],
+    )
 
 
 @sets.register
@@ -132,117 +143,86 @@ def _encode_set_content(value: Any, state: VocabularyState, n_tokens: int) -> np
 class TensorField(TensorFieldBase):
     state: torch.Tensor
     content: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        values: list,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
-        interprocess_encoding_context: VocabularyState,
+        context: Context,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
-        shape: tuple[int, ...] = (len(values), *schema.shapes[address])
         n_tokens: int = request.size
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(shape),
-        )
-        learn = strata == Strata.train
+        state = context.state
+        if state is not None and not isinstance(state, VocabularyState):
+            raise TypeError(f"set field at '{address}' requires VocabularyState context, got {type(state).__name__}")
 
-        interprocess_encoding_context.reserve(values, learn=learn)
+        def encode(field: RaggedField) -> torch.Tensor:
+            values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+            encoded = np.zeros((len(values), n_tokens), dtype=np.float32)
+            if not len(values):
+                return torch.from_numpy(field.place(encoded, fill=0.0, value_shape=(n_tokens,)))
+            if state is None:
+                raise RuntimeError(f"set field at '{address}' requires a vocabulary encoding context")
+            if (
+                pa.types.is_list(values.type)
+                or pa.types.is_large_list(values.type)
+                or pa.types.is_fixed_size_list(values.type)
+            ):
+                parents = pc.list_parent_indices(values)
+                flattened = pc.list_flatten(values)
+            else:
+                parents = pa.array(np.arange(len(values), dtype=np.int64))
+                flattened = values
+            if flattened.null_count:
+                valid = pc.is_valid(flattened)
+                flattened = pc.filter(flattened, valid)
+                parents = pc.filter(parents, valid)
+            indices = state.indices(flattened, learn=False)
+            if len(indices):
+                rows = parents.to_numpy(zero_copy_only=False)
+                known = indices < n_tokens
+                encoded[rows[known], indices[known]] = 1.0
+            return torch.from_numpy(field.place(encoded, fill=0.0, value_shape=(n_tokens,)))
 
-        data, states = pad(
-            nested=values,
-            shape=shape,
-            dtype=np.float32,
-            pad_value=0.0,
-            overflows=schema.overflows(address),
-            address=address,
-            value_shape=(n_tokens,),
-            encode=lambda value: _encode_set_content(
-                value=value,
-                state=interprocess_encoding_context,
-                n_tokens=n_tokens,
-            ),
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        state_tensor = torch.tensor(states, dtype=torch.int64)
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = state_tensor.masked_fill(literal_mask_tensor, Tokens.masked.value)
-        content = torch.tensor(data=data, dtype=torch.float32)
-        content = content.masked_fill(literal_mask_tensor.unsqueeze(-1), 0.0)
+        state_tensor = torch.from_numpy(input.dense)
+        content = encode(input)
+        target_content = encode(target)
 
         if strata == Strata.train and request.p_unavailable > 0.0:
             # Training learns vocabulary online, so known set labels rarely look OOV.
             # Simulate partial observation by randomly dropping positive labels.
-            known = content.bool()
-            simulated = torch.rand_like(content).lt(request.p_unavailable) & known
-            if simulated.any():
-                content = content.masked_fill(simulated, 0.0)
+            def regularize(values: torch.Tensor) -> torch.Tensor:
+                selected = torch.rand_like(values).lt(request.p_unavailable) & values.bool()
+                return values.masked_fill(selected, 0.0)
+
+            content = regularize(content)
+            target_content = regularize(target_content)
 
         return cls(
             state=state_tensor,
             content=content,
-            trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=len(values),
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_scatter(selected, mask_token)
-        self.content = self.content.masked_fill(selected.unsqueeze(-1), 0.0)
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        request: Request = schema.requests[address]
-        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-
-        state = torch.full(shape, Tokens.masked)
-        content = torch.zeros((*shape, request.size), dtype=torch.float32)
-
-        return cls(
-            state=state,
-            content=content,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: torch.from_numpy(target.dense),
+                    TensorKey.content: target_content,
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -273,11 +253,12 @@ class Embedder(EmbedderBase):
         self.counters = torch.nn.ModuleDict(
             {
                 TensorKey.state.name: Counter(address=address, size=len(Tokens)),
+                TensorKey.content.name: Counter(address=address, size=request.size),
             }
         )
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N: int
         dims: list[int]
 
@@ -299,14 +280,32 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=embeddings,
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
         )
 
     @property
-    def interprocess_encoding_context(self) -> VocabularyState:
+    def context(self) -> VocabularyState:
         return self.vocab.state
+
+
+@sets.register
+def learn(
+    module: Model,
+    observation: TensorDict,
+    *,
+    address: Address,
+    strata: Strata,
+) -> None:
+    """Apply pristine set-state counts to the model resource."""
+
+    if strata != Strata.train:
+        raise ValueError(f"set learner at '{address}' requires train strata, got {strata}")
+    embedder: Embedder = module.nodes[address].embedder
+    embedder.counters[TensorKey.state.name].learn(observation[TensorKey.state])
+    embedder.counters[TensorKey.content.name].learn(observation[TensorKey.content])
 
 
 @sets.register
@@ -403,37 +402,47 @@ def loss(
 
 
 @sets.register
-def write(module: Model, prediction: Prediction):
-    node = module.nodes[prediction.address]
+def output(module: Model, address: Address) -> pa.StructType:
+    candidate = pa.struct(
+        [
+            pa.field(TensorKey.value.name, pa.large_string(), nullable=False),
+            pa.field(TensorKey.probability.name, pa.float32(), nullable=False),
+        ]
+    )
+    return pa.struct([pa.field(TensorKey.content.name, pa.list_(candidate), nullable=False)])
+
+
+@sets.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    content_type = datatype.field(TensorKey.content.name).type
+    candidate_type = content_type.value_type
+    logits = prediction.payload[TensorKey.content]
+    coordinates = logits.reshape(-1, logits.shape[-1])
+    vocabulary = labels(module.nodes[prediction.address].embedder.vocab)
+    size = len(vocabulary)
+    if size > coordinates.shape[-1]:
+        raise ValueError(
+            f"set vocabulary at {prediction.address!s} has {size} values but prediction width is "
+            f"{coordinates.shape[-1]}"
+        )
+
+    probabilities = coordinates[:, :size].sigmoid()
     request: Request = module.schema.requests[prediction.address]
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    content_logits: torch.Tensor = prediction.payload[TensorKey.content]
-
-    tokens = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
-
-    vocab = node.embedder.vocab.snapshot()
-    probabilities = content_logits[..., : len(vocab)].sigmoid().detach().float().cpu().numpy()
     if request.threshold is None:
-        content_payload = {str(label): probabilities[..., index] for index, label in enumerate(vocab)}
+        counts = torch.full((coordinates.shape[0],), size, dtype=torch.int64)
+        indices = torch.arange(size, device=logits.device).expand(coordinates.shape[0], size).reshape(-1)
+        selected = probabilities.reshape(-1)
     else:
-        labels = np.asarray(vocab, dtype=object)
+        keep = probabilities.ge(request.threshold)
+        counts = keep.sum(dim=-1, dtype=torch.int64)
+        indices = keep.nonzero(as_tuple=False)[:, 1]
+        selected = probabilities[keep]
 
-        def pack_thresholded(values: np.ndarray) -> dict[str, float] | list:
-            if values.ndim == 1:
-                keep = values >= request.threshold
-                return {
-                    str(label): float(probability)
-                    for label, probability in zip(labels[keep].tolist(), values[keep].tolist())
-                }
-
-            return [pack_thresholded(values[index]) for index in range(values.shape[0])]
-
-        content_payload = pack_thresholded(probabilities)
-
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: content_payload,
-    }
+    candidates = struct(
+        {
+            TensorKey.value.name: pc.take(vocabulary, array(indices, pa.int64())),
+            TensorKey.probability.name: array(selected, pa.float32()),
+        },
+        candidate_type,
+    )
+    return struct({TensorKey.content.name: variable(candidates, counts)}, datatype)

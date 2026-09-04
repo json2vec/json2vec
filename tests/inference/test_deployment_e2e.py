@@ -12,8 +12,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+
 from relflow.architecture.root import Model
-from relflow.data.iterables import encode
 from relflow.structs.enums import Strata
 from relflow.structs.experiment import Schema
 
@@ -37,22 +38,22 @@ Deployment(
 """
 
 
-def _repo_root() -> Path:
+def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _free_port() -> int:
+def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         sock.listen(1)
         return int(sock.getsockname()[1])
 
 
-def _health_url(base_url: str) -> str:
+def health_url(base_url: str) -> str:
     return f"{base_url}/health"
 
 
-def _tail_text(path: Path, lines: int = 40) -> str:
+def tail_text(path: Path, lines: int = 40) -> str:
     if not path.exists():
         return ""
 
@@ -60,18 +61,18 @@ def _tail_text(path: Path, lines: int = 40) -> str:
     return "\n".join(content[-lines:])
 
 
-def _wait_for_server(base_url: str, process: subprocess.Popen[str], log_path: Path, timeout: float = 60.0) -> None:
+def wait_for_server(base_url: str, process: subprocess.Popen[str], log_path: Path, timeout: float = 60.0) -> None:
     deadline = time.monotonic() + timeout
     last_error = "server did not respond"
 
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise AssertionError(
-                f"deployment exited before readiness probe succeeded\nlog tail:\n{_tail_text(log_path)}"
+                f"deployment exited before readiness probe succeeded\nlog tail:\n{tail_text(log_path)}"
             )
 
         try:
-            with urllib.request.urlopen(_health_url(base_url), timeout=1.0) as response:
+            with urllib.request.urlopen(health_url(base_url), timeout=1.0) as response:
                 if response.status == 200:
                     return
         except urllib.error.URLError as exc:
@@ -81,10 +82,10 @@ def _wait_for_server(base_url: str, process: subprocess.Popen[str], log_path: Pa
 
         time.sleep(0.1)
 
-    raise AssertionError(f"timed out waiting for deployment readiness: {last_error}\nlog tail:\n{_tail_text(log_path)}")
+    raise AssertionError(f"timed out waiting for deployment readiness: {last_error}\nlog tail:\n{tail_text(log_path)}")
 
 
-def _stop_process(process: subprocess.Popen[str], timeout: float = 10.0) -> None:
+def stop_process(process: subprocess.Popen[str], timeout: float = 10.0) -> None:
     try:
         if process.poll() is None:
             try:
@@ -107,7 +108,7 @@ def _stop_process(process: subprocess.Popen[str], timeout: float = 10.0) -> None
             log_handle.close()
 
 
-def _post_json(url: str, payload: Any, timeout: float = 30.0) -> tuple[int, Any]:
+def post_json(url: str, payload: Any, timeout: float = 30.0) -> tuple[int, Any]:
     request = urllib.request.Request(
         url=url,
         data=json.dumps(payload).encode("utf-8"),
@@ -123,7 +124,7 @@ def _post_json(url: str, payload: Any, timeout: float = 30.0) -> tuple[int, Any]
         raise AssertionError(f"deployment returned HTTP {exc.code}: {body}") from exc
 
 
-def _schema() -> Schema:
+def schema() -> Schema:
     return Schema.model_validate(
         {
             "d_model": 8,
@@ -136,7 +137,6 @@ def _schema() -> Schema:
                     {
                         "name": "label",
                         "type": "category",
-                        "query": "[*].label",
                         "embed": True,
                         "size": 32,
                     }
@@ -146,36 +146,34 @@ def _schema() -> Schema:
     )
 
 
-def _write_fake_records(path: Path) -> list[dict[str, str]]:
+def write_fake_records(path: Path) -> list[dict[str, str]]:
     records = [{"label": "alpha"}, {"label": "beta"}]
     path.write_text("\n".join(json.dumps(record) for record in records), encoding="utf-8")
     return records
 
 
-def _build_checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
+def build_checkpoint(tmp_path: Path) -> tuple[Path, Schema]:
     dataset_path = tmp_path / "fake_records.ndjson"
-    records = _write_fake_records(dataset_path)
-    schema = _schema()
-    model = Model(schema=schema, batch_size=2)
+    records = write_fake_records(dataset_path)
+    model_schema = schema()
+    model = Model(schema=model_schema, batch_size=2)
 
-    inputs = encode(
-        batch=[[record] for record in records],
-        schema=schema,
+    inputs = model.encode(
+        pa.Table.from_pylist(records),
         strata=Strata.train,
-        interprocess_encoding_context=model.interprocess_encoding_context,
     )
     model.forward(inputs, strata=Strata.train)
 
     checkpoint_path = tmp_path / "fake_model.ckpt"
     model.save(checkpoint_path)
-    return checkpoint_path, schema
+    return checkpoint_path, model_schema
 
 
-def _launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subprocess.Popen[str]:
+def launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subprocess.Popen[str]:
     log_handle = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
         [sys.executable, "-u", "-c", SERVER_SCRIPT, str(checkpoint), str(port)],
-        cwd=_repo_root(),
+        cwd=repo_root(),
         stdout=log_handle,
         stderr=subprocess.STDOUT,
         text=True,
@@ -186,38 +184,38 @@ def _launch_deployment(checkpoint: Path, port: int, log_path: Path) -> subproces
 
 
 def test_deployment_serves_embeddings_from_temporary_checkpoint(tmp_path: Path) -> None:
-    checkpoint_path, schema = _build_checkpoint(tmp_path)
-    port = _free_port()
+    checkpoint_path, model_schema = build_checkpoint(tmp_path)
+    port = free_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "deployment.log"
-    process = _launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
+    process = launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
 
     try:
-        _wait_for_server(base_url=base_url, process=process, log_path=log_path)
-        status, payload = _post_json(f"{base_url}/predict", {"label": "alpha"})
+        wait_for_server(base_url=base_url, process=process, log_path=log_path)
+        status, payload = post_json(f"{base_url}/predict", {"label": "alpha"})
     finally:
-        _stop_process(process)
+        stop_process(process)
 
     assert status == 200
     assert "root/label" in payload["predictions"]
 
     embedding = payload["predictions"]["root/label"]["embedding"]
-    assert len(embedding) == schema.d_model
+    assert len(embedding) == model_schema.d_model
     assert all(isinstance(value, float) for value in embedding)
 
 
 def test_deployment_accepts_multiple_inputs_in_one_request(tmp_path: Path) -> None:
-    checkpoint_path, schema = _build_checkpoint(tmp_path)
-    port = _free_port()
+    checkpoint_path, model_schema = build_checkpoint(tmp_path)
+    port = free_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "deployment.log"
-    process = _launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
+    process = launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
 
     try:
-        _wait_for_server(base_url=base_url, process=process, log_path=log_path)
-        status, payload = _post_json(f"{base_url}/predict", [{"label": "alpha"}, {"label": "beta"}])
+        wait_for_server(base_url=base_url, process=process, log_path=log_path)
+        status, payload = post_json(f"{base_url}/predict", [{"label": "alpha"}, {"label": "beta"}])
     finally:
-        _stop_process(process)
+        stop_process(process)
 
     assert status == 200
     assert isinstance(payload, list)
@@ -225,22 +223,22 @@ def test_deployment_accepts_multiple_inputs_in_one_request(tmp_path: Path) -> No
     for item in payload:
         assert "root/label" in item["predictions"]
         embedding = item["predictions"]["root/label"]["embedding"]
-        assert len(embedding) == schema.d_model
+        assert len(embedding) == model_schema.d_model
 
 
 def test_deployment_accepts_unseen_category_values_at_runtime(tmp_path: Path) -> None:
-    checkpoint_path, _ = _build_checkpoint(tmp_path)
-    port = _free_port()
+    checkpoint_path, _ = build_checkpoint(tmp_path)
+    port = free_port()
     base_url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "deployment.log"
-    process = _launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
+    process = launch_deployment(checkpoint=checkpoint_path, port=port, log_path=log_path)
 
     try:
-        _wait_for_server(base_url=base_url, process=process, log_path=log_path)
-        _, alpha_payload = _post_json(f"{base_url}/predict", {"label": "alpha"})
-        status, gamma_payload = _post_json(f"{base_url}/predict", {"label": "gamma"})
+        wait_for_server(base_url=base_url, process=process, log_path=log_path)
+        _, alpha_payload = post_json(f"{base_url}/predict", {"label": "alpha"})
+        status, gamma_payload = post_json(f"{base_url}/predict", {"label": "gamma"})
     finally:
-        _stop_process(process)
+        stop_process(process)
 
     assert status == 200
     assert "root/label" in alpha_payload["predictions"]

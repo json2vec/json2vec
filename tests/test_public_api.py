@@ -1,31 +1,47 @@
+from typing import get_type_hints
+
 import relflow
+import relflow.tensorfields as tensorfields
 
 
 def test_common_resources_are_available_from_package_root():
     assert relflow.Model.__name__ == "Model"
     assert relflow.AttentionMode.mha == "mha"
     assert not hasattr(relflow, "Dataset")
+    assert relflow.ArrowDataModule.__name__ == "ArrowDataModule"
     assert relflow.CustomDataModule.__name__ == "CustomDataModule"
     assert relflow.PolarsDataModule.__name__ == "PolarsDataModule"
-    assert relflow.StreamingDataModule.__name__ == "StreamingDataModule"
+    assert not hasattr(relflow, "StreamingDataModule")
     assert relflow.SyntheticDataModule.__name__ == "SyntheticDataModule"
     assert relflow.Schema.__name__ == "Schema"
     assert relflow.Address("root", "label") == "root/label"
     assert relflow.Branch.__name__ == "Branch"
+    assert relflow.Extension.__name__ == "Extension"
+    assert tensorfields.Extension is relflow.Extension
+    assert not hasattr(relflow, "Plugin")
+    assert not hasattr(tensorfields, "Plugin")
+    assert relflow.Mask.model_fields["rate"].default is None
+    assert relflow.Jitter.model_fields["add"].default == 0.0
+    assert relflow.Jitter.model_fields["multiply"].default == 0.0
+    assert relflow.Jitter.model_fields["normalize"].default is True
+    for tensorfield in (relflow.Number, relflow.Vector, relflow.DateParts, relflow.Text):
+        assert isinstance(tensorfield.model_fields["jitter"].default_factory(), relflow.Jitter)
     assert relflow.where("type").name == "type"
     assert relflow.preprocess.__name__ == "preprocess"
     assert relflow.postprocess.__name__ == "postprocess"
     assert relflow.Preprocessor.__name__ == "Preprocessor"
     assert relflow.PreprocessorProvider.strata == "strata"
-    assert relflow.Observation.__name__ == "Observation"
-    assert relflow.Observation({"id": 1}).data == {"id": 1}
+    assert relflow.Batch.__name__ == "Batch"
+    assert relflow.Context().state is None
+    assert relflow.Context().salt == 0
+    assert not hasattr(relflow, "Observation")
     assert not hasattr(relflow, "observe")
     assert relflow.OptimizerConfig is not None
     assert relflow.SchedulerConfig is not None
     assert relflow.RollbackCheckpoint.__name__ == "RollbackCheckpoint"
     assert relflow.Writer.__name__ == "Writer"
     assert relflow.Postprocessor is not None
-    assert relflow.PostprocessorProvider.metadata == "metadata"
+    assert not hasattr(relflow, "PostprocessorProvider")
     assert relflow.Deployment.__name__ == "Deployment"
     assert relflow.Accelerator.cpu == "cpu"
     assert relflow.JSONBackend.orjson == "orjson"
@@ -49,3 +65,17 @@ def test_common_resources_are_available_from_package_root():
     assert "entity" not in relflow.TENSORFIELDS
     assert "static_entity" not in relflow.TENSORFIELDS
     assert "hashable" not in relflow.TENSORFIELDS
+
+
+def test_data_module_constructor_annotations_resolve_at_runtime():
+    for module in (
+        relflow.ArrowDataModule,
+        relflow.CustomDataModule,
+        relflow.PolarsDataModule,
+        relflow.SyntheticDataModule,
+    ):
+        hints = get_type_hints(module.__init__)
+        assert hints["model"] is relflow.Model
+
+    writer_hints = get_type_hints(relflow.Writer.write_on_batch_end)
+    assert writer_hints["output"] is relflow.Batch

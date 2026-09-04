@@ -40,7 +40,6 @@ class ModelGraph:
             nodes[address] = NodeModule(
                 schema=schema,
                 address=address,
-                batch_size=batch_size,
             )
 
         return nodes, ModelGraph.example_forward_kwargs(schema=schema, batch_size=batch_size)
@@ -101,7 +100,6 @@ class ModelGraph:
             module.nodes[address] = NodeModule(
                 schema=module.schema,
                 address=address,
-                batch_size=module.batch_size,
             )
 
         module.example_input_array = ModelGraph.example_forward_kwargs(

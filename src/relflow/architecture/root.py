@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Self, cast
 
 import lightning.pytorch as lit
+import pyarrow as pa
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
@@ -26,8 +27,10 @@ from relflow.architecture.mutations import (
     SchemaEditor,
     immutable,
 )
-from relflow.architecture.runtime import ModelRuntime, Postprocessor, Preprocessor, step
-from relflow.data.datasets.base import EncodedBatch, EncodedInput
+from relflow.architecture.runtime import ModelRuntime, PredictionInput, Retain, step
+from relflow.data.arrow import Batch, Encoded
+from relflow.data.datasets.base import EncodedInput
+from relflow.data.processors import PostprocessorInput, PreprocessorInput
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata
 from relflow.structs.experiment import (
@@ -38,8 +41,8 @@ from relflow.structs.experiment import (
     TreeFieldInput,
 )
 from relflow.structs.packages import Prediction
-from relflow.structs.tree import Address, Node, Rate, Renderable
-from relflow.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
+from relflow.structs.tree import Address, MaskInput, Node, Rate, Renderable
+from relflow.tensorfields.base import TENSORFIELDS, Extension, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
@@ -65,7 +68,7 @@ class Model(lit.LightningModule, Renderable):
 
         model = rf.Model(
             rf.Category("segment", size=32),
-            rf.Category("label", target=True, size=4),
+            rf.Category("label", mask=True, size=4),
             d_model=16,
             n_layers=1,
             n_heads=4,
@@ -85,11 +88,13 @@ class Model(lit.LightningModule, Renderable):
         batch_size: int = 1,
         fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
+        query: str | None = None,
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
         n_linear: int = 1,
         dropout: Rate | None = None,
+        mask: MaskInput = False,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
         **field_kwargs: TreeFieldInput,
@@ -110,6 +115,7 @@ class Model(lit.LightningModule, Renderable):
                 Lightning example inputs.
             fields: Optional sequence form of `field_args`.
             name: Root branch name. Defaults to `record`.
+            query: Optional source path selected by the generated root.
             description: Optional description on the generated root branch.
             embed: Configure the generated root branch as an embedding output.
             attention: Attention mode for the generated root branch.
@@ -117,6 +123,8 @@ class Model(lit.LightningModule, Renderable):
                 generated root branch. Each block also contains a feed-forward
                 network.
             dropout: Optional dropout rate on the generated root branch.
+            mask: One mask policy or a list/tuple of policies applied to the
+                generated root and all active descendants.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
 
@@ -131,11 +139,13 @@ class Model(lit.LightningModule, Renderable):
             batch_size=batch_size,
             fields=fields,
             name=name,
+            query=query,
             description=description,
             embed=embed,
             attention=attention,
             n_linear=n_linear,
             dropout=dropout,
+            mask=mask,
             optimizer=optimizer,
             scheduler=scheduler,
             **field_kwargs,
@@ -152,11 +162,13 @@ class Model(lit.LightningModule, Renderable):
         batch_size: int = 1,
         fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
+        query: str | None = None,
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
         n_linear: int = 1,
         dropout: Rate | None = None,
+        mask: MaskInput = False,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
         **field_kwargs: Any,
@@ -174,7 +186,7 @@ class Model(lit.LightningModule, Renderable):
             field_args = ()
 
         if schema is not None:
-            if field_args or fields is not None or field_kwargs:
+            if field_args or fields is not None or field_kwargs or mask is not False:
                 raise TypeError("schema cannot be combined with tree fields")
             if d_model is not None or n_layers is not None or n_heads is not None:
                 raise TypeError("schema cannot be combined with d_model, n_layers, or n_heads")
@@ -192,11 +204,13 @@ class Model(lit.LightningModule, Renderable):
                 n_heads=cast(int, n_heads),
                 fields=fields,
                 name=name,
+                query=query,
                 description=description,
                 embed=embed,
                 attention=attention,
                 n_linear=n_linear,
                 dropout=dropout,
+                mask=mask,
                 **field_kwargs,
             )
 
@@ -214,6 +228,7 @@ class Model(lit.LightningModule, Renderable):
         self._schema_editor: SchemaEditor = SchemaEditor(self)
         self._contract_generation: int = 0
         self._contract_scheduler: ContractScheduler = ContractScheduler()
+        self.output_plans: dict[Any, Any] = {}
 
         self._build()
 
@@ -240,6 +255,7 @@ class Model(lit.LightningModule, Renderable):
     def _reset_contracts(self) -> None:
         self._contract_generation += 1
         self._contract_scheduler.reset()
+        self.output_plans.clear()
 
     def __rich_console__(self, console, options):
         parameters = sum(parameter.numel() for parameter in self.parameters())
@@ -253,7 +269,7 @@ class Model(lit.LightningModule, Renderable):
             ("parameters", f"{parameters:,}"),
             ("branches", len(self.schema.branches)),
             ("fields", len(self.schema.active_requests)),
-            ("targets", len(self.schema.target)),
+            ("reconstruct", len(self.schema.reconstruct)),
             ("embeds", len(self.schema.embed)),
         ):
             heading.append(" ")
@@ -300,9 +316,6 @@ class Model(lit.LightningModule, Renderable):
         **values: Any,
     ) -> None:
         """Mutate selected schema nodes and rebuild compatible modules.
-
-        `target=True` is shorthand for `p_prune=1.0`; `target=False` clears
-        target behavior by setting `p_prune=0.0`.
 
         Args:
             *predicates: Predicates used to select nodes.
@@ -395,8 +408,8 @@ class Model(lit.LightningModule, Renderable):
             callbacks.append(ThroughputLogger())
 
         for request in self.schema.active_requests.values():
-            plugin: Plugin = TENSORFIELDS[request.type]
-            for factory in plugin.callback_factories:
+            extension: Extension = TENSORFIELDS[request.type]
+            for factory in extension.callback_factories:
                 if factory in factories:
                     continue
 
@@ -416,6 +429,13 @@ class Model(lit.LightningModule, Renderable):
         )
 
         return callbacks
+
+    def on_fit_start(self) -> None:
+        if not self.schema.objectives:
+            raise RuntimeError(
+                "model has no reconstruction objectives; configure at least one active node "
+                "with mask=True or Mask(reconstruct=True) before fitting"
+            )
 
     def track(self, names: tuple[str, ...], /, value: torch.Tensor | TorchMetric) -> torch.Tensor | TorchMetric:
         def groupname(names: tuple[str, ...]) -> str:
@@ -444,11 +464,12 @@ class Model(lit.LightningModule, Renderable):
 
     @property
     def interprocess_encoding_context(self) -> dict[Address, Any]:
-        return {
-            Address(str(address)): node.embedder.interprocess_encoding_context
-            for address, node in self.nodes.items()
-            if hasattr(node, "embedder") and hasattr(node.embedder, "interprocess_encoding_context")
-        }
+        contexts: dict[Address, Any] = {}
+        for address in self.schema.active_requests:
+            state = cast(Any, self.nodes[address]).embedder.context
+            if state is not None:
+                contexts[Address(str(address))] = state
+        return contexts
 
     @beartype
     def save(self, pathname: str | Path) -> str | Path:
@@ -502,39 +523,70 @@ class Model(lit.LightningModule, Renderable):
 
     from_checkpoint = load
 
-    def write(self, predictions: list[Prediction]) -> dict[Address, dict[str, Any]]:
-        return ModelRuntime.write(self, predictions)
+    def write(
+        self,
+        predictions: list[Prediction],
+        *,
+        source: Batch,
+        retain: Retain = (),
+    ) -> Batch:
+        """Convert tensor predictions into the canonical Arrow output batch."""
+
+        return ModelRuntime.write(self, predictions, source=source, retain=retain)
 
     @immutable("inference")
     def encode(
         self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: Preprocessor | None = None,
+        batch: Batch | pa.Table | pa.RecordBatch,
+        preprocess: PreprocessorInput = (),
         strata: Strata | str = Strata.predict,
-        mask: bool = True,
+        seed: int = 0,
+        epoch: int = 0,
     ) -> EncodedInput:
-        """Return encoded tensorfield inputs for raw or processed observations."""
+        """Return encoded tensorfield inputs for one Arrow input unit."""
         return ModelRuntime.encode(
             self,
             batch=batch,
             preprocess=preprocess,
             strata=strata,
-            mask=mask,
+            seed=seed,
+            epoch=epoch,
         )
 
     @immutable("inference")
     def predict(
         self,
-        batch: EncodedBatch | list[dict[str, Any]],
-        preprocess: Preprocessor | None = None,
-        postprocess: Postprocessor | None = None,
-    ) -> dict[Address, dict[str, Any]]:
+        batch: PredictionInput,
+        preprocess: PreprocessorInput = (),
+        postprocess: PostprocessorInput = (),
+        retain: Retain = (),
+    ) -> pa.Table:
+        """Predict one Arrow input unit and return a typed Arrow table."""
+
         return ModelRuntime.predict(
             self,
             batch=batch,
             preprocess=preprocess,
             postprocess=postprocess,
+            retain=retain,
         )
+
+    def transfer_batch_to_device(
+        self,
+        batch: Any,
+        device: torch.device,
+        dataloader_idx: int,
+    ) -> Any:
+        """Move encoded tensors while retaining Arrow data on CPU."""
+
+        if isinstance(batch, Encoded):
+            return Encoded(
+                tensors=batch.tensors.to(device),
+                source=batch.source,
+                retain=batch.retain,
+                observations={address: value.to(device) for address, value in batch.observations.items()},
+            )
+        return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     training_step = partialmethod(step, strata=Strata.train)
     validation_step = partialmethod(step, strata=Strata.validate)

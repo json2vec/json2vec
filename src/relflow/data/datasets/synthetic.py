@@ -1,71 +1,93 @@
-"""Lightning data modules for generated synthetic observations."""
+"""Synthetic mapping ingress for the canonical Arrow data module."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, TypeAlias
+from collections.abc import Callable, Iterator, Mapping
+from typing import Any, TypeAlias
 
-from torch.utils.data import IterableDataset
+import pyarrow as pa
 
-from relflow.data.datasets.base import NonNegativeInt, PositiveInt, RawObservation, SampleRate, StrataMap
-from relflow.data.datasets.custom import CustomDataModule
-from relflow.data.processors import Preprocessor
+import relflow
+from relflow.data.datasets.arrow import ArrowDataModule, ArrowStream, Retain
+from relflow.data.datasets.custom import adapt, schemas
+from relflow.data.processors import PreprocessorInput
+from relflow.structs.enums import Strata
 
-if TYPE_CHECKING:
-    from relflow.architecture.root import Model
-else:
-    Model = "relflow.architecture.root.Model"
-
-Generator: TypeAlias = Callable[[], Iterator[RawObservation]]
+Generator: TypeAlias = Callable[[], Iterator[Mapping[str, Any]]]
 
 
-class _SyntheticDataset(IterableDataset):
-    """A restartable iterable dataset backed by a generator function.
-
-    The generator is called whenever the dataset is iterated, including once in
-    each data-loader worker. It may produce either a finite or infinite stream
-    of raw observation dictionaries.
-    """
-
-    def __init__(self, generator: Generator):
-        super().__init__()
-
-        if not callable(generator):
-            raise TypeError("generator must be callable")
-
-        self.generator = generator
-
-    def __iter__(self) -> Iterator[RawObservation]:
-        yield from self.generator()
-
-
-class SyntheticDataModule(CustomDataModule):
-    """Lightning data module whose splits are defined by generator functions."""
+class SyntheticDataModule(ArrowDataModule):
+    """Adapt restartable mapping generators to bounded Arrow record batches."""
 
     def __init__(
         self,
-        model: Model,
+        model: relflow.Model,
+        *,
         train: Generator | None = None,
         validate: Generator | None = None,
         test: Generator | None = None,
         predict: Generator | None = None,
-        preprocessor: Preprocessor | None = None,
-        num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
-        persistent_workers: bool | StrataMap[bool] = True,
-        pin_memory: bool | StrataMap[bool] = True,
-        observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
-        sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+        arrow_schema: pa.Schema | Mapping[Strata | str, pa.Schema] | None = None,
+        ingress_rows: int = 4096,
+        preprocessor: PreprocessorInput | Mapping[Strata | str, PreprocessorInput] = (),
+        seed: int = 0,
+        shuffle: bool | None | Mapping[Strata | str, bool | None] = None,
+        sample: float | Mapping[Strata | str, float] = 1.0,
+        replacement: bool | Mapping[Strata | str, bool] = False,
+        epoch_size: int | None | Mapping[Strata | str, int | None] = None,
+        shuffle_rows: int | None | Mapping[Strata | str, int | None] = None,
+        drop_last: bool | Mapping[Strata | str, bool] = False,
+        num_workers: int | Mapping[Strata | str, int] = 0,
+        persistent_workers: bool | Mapping[Strata | str, bool] = False,
+        pin_memory: bool | Mapping[Strata | str, bool] = False,
+        retain: Retain | Mapping[Strata | str, Retain] = (),
     ):
+        if not isinstance(ingress_rows, int) or isinstance(ingress_rows, bool) or ingress_rows < 1:
+            raise ValueError("ingress_rows must be a positive integer")
+
+        generators = {
+            Strata.train: train,
+            Strata.validate: validate,
+            Strata.test: test,
+            Strata.predict: predict,
+        }
+        configured = {strata for strata, generator in generators.items() if generator is not None}
+        if not configured:
+            raise ValueError("at least one named data split is required")
+        resolved_schemas = schemas(arrow_schema, configured=configured)
+
+        sources: dict[Strata, Callable[[], ArrowStream]] = {}
+        for strata, generator in generators.items():
+            if generator is None:
+                continue
+            if not callable(generator):
+                raise TypeError(f"{strata} generator must be callable, got {type(generator).__name__}")
+            sources[strata] = adapt(
+                generator,
+                schema=resolved_schemas[strata],
+                rows=ingress_rows,
+                name=str(strata),
+            )
+
         super().__init__(
             model=model,
-            train=_SyntheticDataset(train) if train is not None else None,
-            validate=_SyntheticDataset(validate) if validate is not None else None,
-            test=_SyntheticDataset(test) if test is not None else None,
-            predict=_SyntheticDataset(predict) if predict is not None else None,
+            train=sources.get(Strata.train),
+            validate=sources.get(Strata.validate),
+            test=sources.get(Strata.test),
+            predict=sources.get(Strata.predict),
             preprocessor=preprocessor,
+            seed=seed,
+            shuffle=shuffle,
+            sample=sample,
+            replacement=replacement,
+            epoch_size=epoch_size,
+            shuffle_rows=shuffle_rows,
+            drop_last=drop_last,
             num_workers=num_workers,
             persistent_workers=persistent_workers,
             pin_memory=pin_memory,
-            observation_buffer_size=observation_buffer_size,
-            sample_rate=sample_rate,
+            retain=retain,
         )
+
+
+__all__ = ["SyntheticDataModule"]

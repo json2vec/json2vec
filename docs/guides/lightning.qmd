@@ -20,11 +20,11 @@ and [Evaluation And Metrics](evaluation.qmd) for interpreting the result.
 
 | Concern | Owner |
 | --- | --- |
-| Schema, addresses, queries, targets, embeddings | RelFlow model |
+| Schema, addresses, queries, mask policies, embeddings | RelFlow model |
 | Tensorization, value state, datatype losses and metrics | RelFlow model and data module |
 | Optimizer and scheduler factories | `rf.Model` configuration |
 | Epochs, devices, precision, callbacks, loggers, checkpoints | Lightning `Trainer` |
-| Data loading, workers, preprocessing, masking, sharding | RelFlow data module |
+| Arrow loading, preprocessing, sampling, shuffling, masking | RelFlow data module |
 | Batch prediction files | `Trainer.predict(...)` with `rf.Writer` |
 
 Normal Lightning callbacks, loggers, device placement, precision modes, and
@@ -42,12 +42,12 @@ as evidence of generalization.
 #| output: true
 
 import lightning.pytorch as lit
-import polars as pl
+import pyarrow as pa
 import torch
 
 import relflow as rf
 
-records = pl.DataFrame(
+records = pa.table(
     {
         "amount": [12.5, 8.0, 19.0, 27.5],
         "merchant": ["books", "coffee", "books", "grocery"],
@@ -66,10 +66,10 @@ model = rf.Model(
     ),
     amount=rf.Number,
     merchant=rf.Category(size=3),
-    fraud=rf.Category(target=True, size=2),
+    fraud=rf.Category(mask=True, size=2),
 )
 
-datamodule = rf.PolarsDataModule(
+datamodule = rf.ArrowDataModule(
     model=model,
     train=records,
     validate=records,
@@ -179,26 +179,27 @@ Do not set `save_weights_only=True` for `RollbackCheckpoint`. For persistence,
 resuming, and checkpoint compatibility, see
 [Model Lifecycle](model-lifecycle.qmd).
 
-## Interactive Prediction Is A Separate Convenience Path
+## Interactive Prediction Is A Separate Arrow Path
 
-For a small list of raw dictionaries, `model.predict(...)` handles encoding,
-inference mode, and output writing without creating a Trainer:
+For one bounded Arrow unit, `model.predict(...)` handles encoding, inference
+mode, and output writing without creating a Trainer:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-predictions = model.predict(
-    [
-        {"amount": 12.5, "merchant": "books"},
-        {"amount": 8.0, "merchant": "coffee"},
-    ]
+requests = pa.table(
+    {
+        "amount": [12.5, 8.0],
+        "merchant": ["books", "coffee"],
+    }
 )
+predictions = model.predict(requests)
 ```
 
 Use it for notebooks, smoke tests, and small request batches. It is not a
 replacement for a data module and `trainer.predict(...)` in a large job. See
-[Prediction Output](prediction-output.qmd) for the returned mapping and
+[Prediction Output](prediction-output.qmd) for the returned Arrow table and
 [Batch Inference](batch-inference.qmd) for Parquet output.
 
 ## Mutation And Active Loops
@@ -226,7 +227,7 @@ Tune these layers independently and measure the result:
 
 - model width, depth, attention, branch lengths, and vocabulary capacities;
 - `model.batch_size` and Lightning precision/device strategy;
-- data-module workers, buffers, sampling, and sharding; and
+- Arrow storage layout, shuffle window, sampling, and source scan cost; and
 - checkpoint frequency and logger overhead.
 
 The built-in throughput measurement estimates processed observations from
@@ -244,7 +245,7 @@ for `throughput/predict` in the attached logger rather than
 | An explicit loop has no data | Add the matching `validate`, `test`, or `predict` split. |
 | Checkpoint monitor is missing | Inspect exact keys in `trainer.callback_metrics` and ensure validation runs each epoch. |
 | Mutation raises during a callback | Move the mutation between complete Lightning runs. |
-| Notebook settings are slow on a server | Tune workers, pinning, devices, precision, and batch size for that environment. |
+| Notebook settings are slow on a server | Tune Arrow storage/chunks, pinning, devices, precision, and batch size; the current data module requires `num_workers=0`. |
 | Metrics are good only on the tutorial frame | Build a non-overlapping, leakage-safe validation split. |
 
 ## Where Next

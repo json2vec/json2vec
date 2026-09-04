@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -74,7 +75,7 @@ categorical content is unavailable.
 | `p_unavailable` | `0.01` | Probability of replacing each known valued label with unavailable content during training. Must be between `0` and `1`. |
 | `topk` | `[]` | Optional top-k accuracy values and prediction candidates. Values are deduplicated and sorted; each must be a positive integer other than `1` and less than `size`. |
 
-Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
+Shared options such as `mask`, `embed`, and `weight` are
 described in [Built-In Data Types](../core-concepts/data-types.qmd) and
 [Learning Modes & Embeddings](../core-concepts/embeddings.qmd).
 
@@ -82,7 +83,7 @@ described in [Built-In Data Types](../core-concepts/data-types.qmd) and
 #| echo: true
 #| output: true
 
-fraud = rf.Category("fraud", target=True, size=2)
+fraud = rf.Category("fraud", mask=True, size=2)
 
 fraud
 ```
@@ -137,8 +138,9 @@ training count. It excludes unused capacity, the unavailable sentinel, nulls,
 and padded positions. These are model-training exposures, not source-dataset
 frequencies: presenting the same observation in another epoch or through
 repeated sampling increments its count again. The counter's internal smoothing
-prior is removed from the public values. When a valued input is masked during
-training, its original target label still counts as an exposure.
+prior is removed from the public values. Counts come from the canonical pristine
+field, so a valued label still counts when a mask removes or replaces its
+encoder input.
 
 `Category.counts(...)` requires a model because counters are model state. In a
 distributed run, a snapshot taken during an epoch can still be rank-local;
@@ -151,22 +153,35 @@ inference-only preprocessor can deliberately turn unseen values into `null`
 instead of leaving them as valued-but-unavailable content:
 
 ```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
 @rf.preprocess
 def null_unseen_category(
-    record: dict,
+    batch: rf.Batch,
     *,
     encoding_context,
-) -> rf.Observation:
+) -> rf.Batch:
     vocabulary = rf.Category.vocabulary(
         encoding_context,
         "record/merchant_category",
     )
-    value = record["merchant_category"].strip().lower()
-
-    return rf.Observation({
-        **record,
-        "merchant_category": value if value in vocabulary else None,
-    })
+    values = pc.utf8_lower(
+        pc.utf8_trim_whitespace(batch.data["merchant_category"])
+    )
+    known = pc.is_in(
+        values,
+        value_set=pa.array(vocabulary, type=pa.large_string()),
+    )
+    values = pc.if_else(
+        known,
+        values,
+        pa.scalar(None, type=pa.large_string()),
+    )
+    index = batch.data.schema.get_field_index("merchant_category")
+    return batch.replace(
+        batch.data.set_column(index, "merchant_category", values)
+    )
 
 
 predictions = model.predict(
@@ -207,8 +222,7 @@ to emit an unavailable class.
 
 ## Loss And Metrics
 
-When a `Category` is trainable because it is masked, pruned, or a supervised
-target, the decoder produces:
+When a `Category` is selected for reconstruction, the decoder produces:
 
 - five state logits for the shared state vocabulary; and
 - exactly `size` content logits for real categorical classes.
@@ -234,29 +248,23 @@ unseen input.
 
 This excerpt emphasizes `Category` content; the
 [Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
-defines the complete shared `state` and `inferred` members:
+defines the complete shared `state` and `inferred` members. Prediction output is
+an Arrow table; use struct kernels to select this address without converting
+rows to Python:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+import pyarrow.compute as pc
 
-{
-    "record/merchant_category": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": {
-            "value": ...,
-            "probability": ...,
-            "topk": ...,
-        },
-        "inferred": ...,
-    }
-}
+merchant = pc.struct_field(
+    result["predictions"],
+    "record/merchant_category",
+)
+state = pc.struct_field(merchant, "state")
+content = pc.struct_field(merchant, "content")
+value = pc.struct_field(content, "value")
+probability = pc.struct_field(content, "probability")
+topk = pc.struct_field(content, "topk")
+inferred = pc.struct_field(merchant, "inferred")
 ```
 
 `topk` serves two related roles:
@@ -270,8 +278,9 @@ Top-1 is already represented by `content.value` and `content.probability`, so
 emitted. There is no separate availability probability: use upstream
 vocabulary monitoring when availability itself matters.
 
-Rendered examples use string addresses for readability. The dictionary returned
-by `Model.predict(...)` is keyed by `rf.Address` objects.
+The address remains a slash-delimited Arrow struct field name. `rf.Address`
+still identifies model-tree nodes in schema and extension APIs; it is not the
+container type returned by `Model.predict(...)`.
 
 ## Capacity And Compute
 

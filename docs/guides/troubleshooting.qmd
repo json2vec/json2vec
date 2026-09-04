@@ -8,37 +8,43 @@ eval: false
 **Example status — excerpt:** diagnostic blocks assume the model and data from
 the failing workflow.
 
-Most RelFlow failures come from one of four contracts: source-to-query shape,
-state/content encoding, schema capacity, or artifact/runtime parity. Inspect the
-smallest raw observation before changing the architecture.
+Most RelFlow failures come from one of four contracts: post-preprocessor Arrow
+schema, state/content encoding, schema capacity, or artifact/runtime parity.
+Inspect the smallest Arrow table and its schema before changing the
+architecture.
 
 ## First Five Checks
 
-1. Print the model and confirm names, addresses, lengths, targets, and active
+1. Print the model and confirm names, addresses, lengths, reconstruction roles, and active
    fields.
-2. Run `model.encode([one_record])` and inspect state/content shapes.
-3. Evaluate the exact request query with `jmespath.search(...)` when binding is
-   uncertain.
-4. Verify that training contains targets and prediction requests omit them.
+2. Run `model.encode(one_row_table)` and inspect state/content shapes.
+3. Print the post-preprocessor `pa.Schema`; read every query relative to its
+   parent model node.
+4. Verify that fitting data contains reconstruction values and prediction
+   requests omit unconditional reconstructed fields.
 5. Reproduce on CPU with one observation and no data-loader workers.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-import jmespath
+import pyarrow as pa
 
 import relflow as rf
 
-record = {
-    "events": [
-        {"kind": "login", "amount": 10.0},
-        {"kind": "purchase", "amount": 20.0},
+records = pa.Table.from_pylist(
+    [
+        {
+            "events": [
+                {"kind": "login", "amount": 10.0},
+                {"kind": "purchase", "amount": 20.0},
+            ]
+        }
     ]
-}
+)
 
-print(jmespath.search("events[*].kind", record))
-print(model.encode([record]))
+print(records.schema)
+print(model.encode(records))
 ```
 
 The snippet is a diagnostic excerpt; use the model from the page where the
@@ -48,14 +54,19 @@ problem occurred.
 
 | Symptom | Likely cause | Check or fix |
 | --- | --- | --- |
-| Field is all null or padded | Inferred/custom query does not match the processed record shape | Evaluate the query against one processed observation; remember the model's internal batch selector is not part of a user-authored single-record query. |
-| Unexpected extra list dimension | Query was written against an already batched shape | Write queries from one processed observation and follow the conventions in Binding Data. |
+| Directly bound field is all null or padded | The processed field is null or nested under a different parent | Compare the post-preprocessor Arrow schema with model names and nesting. |
+| Query binding fails | A segment is absent or incompatible with its Arrow parent type | Read the reported segment relative to its parent model node; inspect that Arrow field type. |
+| Unexpected extra list dimension | A processed branch or explicit query result contains an extra collection layer | Preserve one list axis per child Branch, including `Branch(length=1)`. |
+| Sibling values shift after preprocessing | A custom nested transform filtered leaf arrays independently | Filter whole structs together in Awkward/Arrow; let one Branch query own the shared collection. |
 | Branch truncates useful events | `length` is too small or `overflow` keeps the wrong side | Measure lengths; choose `head`, `tail`, or `error` from event ordering. |
 | Overflow raises | Branch uses `overflow="error"` and input exceeds `length` | Window upstream, increase length after profiling, or select an intentional truncation policy. |
-| `nullable=False` raises | A query returned `None` or source data contains null | Repair/coerce in a preprocessor or make null part of the contract. Do not replace it silently with a valued default. |
-| Loss is zero / “no trainable fields” | No target, mask, or prune selection is active for the batch | Add a supervised target or reconstruction policy; inspect `trainable` and target state in encoded input. |
-| Prediction has no decoded value | Visible input fields are not decoded by default | Configure `target`, masking, or the supported prediction role. `embed=True` requests an embedding and may also invoke decoding, but it is not a target. |
-| Prediction address is missing | Root/branch name differs, field is inactive, or writer returned no public content | Print the model, use `rf.Address(...)`, and inspect the canonical prediction-output contract. |
+| `nullable=False` raises | Direct input or a query result contains an explicit `None` | Repair/coerce in a preprocessor or make null part of the contract. Do not replace it silently with a valued default. |
+| Arrow/Awkward conversion rejects a value | A modeled value contains an opaque object or an unstable physical type | Normalize it at ingress or in the preprocessor and return one exact Arrow schema. |
+| Extension rejects an Arrow union | The leaf contains terminals from more than one incompatible `Extension(types=...)` family; built-in examples include Category, Cluster, Hash, and Set labels | Normalize the column to one deliberate Arrow type in a preprocessor; custom extensions should declare separate entries for incompatible types and a union for types that may promote. |
+| Set rejects an iterable container | A Set leaf received a `set`, `range`, generator, mapping, or another unsupported iterable | Emit a list, tuple, or NumPy array; scalar `str`, `bytes`, and non-iterable values are already treated as singleton labels. |
+| Loss is zero / “no trainable fields” | No reconstructing mask selection is active for the batch | Add `mask=True` or an explicit policy with `reconstruct=True`; inspect `trainable` and target state in encoded input. |
+| Prediction has no decoded value | Visible inputs and stochastic-only objectives are not decoded by default | Configure a deterministic reconstructing mask. `embed=True` requests an embedding and may also invoke decoding, but it does not create an objective. |
+| Prediction address is missing | Root/branch name differs, field is inactive, or its extension declares no public decoded content | Print the model and inspect fields inside the Arrow `predictions` struct. |
 | `topk` validation fails | `1` is redundant or requested `k >= size` | Remove `1`; choose `1 < k < size`. Runtime candidates are capped by the populated vocabulary. |
 | Category vocabulary warning | Training observed more distinct labels than `size` | Confirm cardinality and split roles; increase deliberate capacity or choose another representation. |
 | New Category value is not predicted as “unavailable” | Unavailable is not a prediction class | It remains valued with zero input content. Predictions rank populated known labels; do not treat low confidence as calibrated OOD detection. |
@@ -66,8 +77,8 @@ problem occurred.
 | Loaded built-in model has different vocabulary or normalizer behavior | Wrong artifact or unsupported manual reconstruction | Load the saved RelFlow/Lightning checkpoint that owns schema state; do not reconstruct it from copied constructor code. Dynamically registered custom request types do not currently support artifact round-trips. |
 | Serving symbol import fails | Optional serving dependencies are absent | Install the `serving` extra in the service environment. |
 | Text construction/import fails | Optional tokenizer/model dependencies are absent | Install the `text` extra and pin the tokenizer/model artifact used in training. |
-| Distributed results duplicate records | Input sharding does not match files/workers/ranks | Check sharding strategy, worker count, file discovery, and output partitions. |
-| Accelerator is idle | Input/query/preprocessor or output serialization is the bottleneck | Benchmark preparation, forward, and writing separately; tune workers and output before scaling ranks. |
+| Workers or distributed Arrow loading raises | Deterministic worker/rank ownership is not implemented in the first Arrow release | Use one process with `num_workers=0`; do not bypass the guard. |
+| Accelerator is idle | Input/preprocessor/query/tensorization or output serialization is the bottleneck | Benchmark preparation, forward, and writing separately; tune workers and output before scaling ranks. |
 | NaN/unstable loss | Invalid numeric input, aggressive optimizer, precision issue, or empty metric selection | Inspect raw/encoded values, lower learning rate, reproduce at full precision, and identify the exact address/content loss. |
 
 ## Understand State Before Content
@@ -77,36 +88,45 @@ Each leaf keeps value state separate from content. The shared states are:
 - `valued`: a value was present; datatype content may still be unavailable;
 - `null`: an explicit null;
 - `padded`: an unused fixed-shape position;
-- `masked`: content hidden for inference or training;
+- `masked`: a selected input represented by the learned mask token;
 - `other`: reserved for datatype-specific extensions.
 
-Pruning is an operation that changes visible input to `masked` while caching
-targets. It is not a separate `pruned` state. See
+A structurally skipped input is omitted from model routing through `present`;
+it does not acquire another state token. See
 [Data Types And Value State](../core-concepts/data-types.qmd) before debugging a
 content value in isolation.
 
 ## Debug A Preprocessor
 
 A RelFlow preprocessor is an object produced by `@rf.preprocess` and must return
-`rf.Observation`, `None`, or an iterable of those. A plain dictionary helper is
-an upstream transformation, not a pipeline preprocessor.
+`rf.Batch`, `None`, or an iterable of batches. A processor argument may contain
+one such object, a list, a tuple, or `None`; RelFlow snapshots it as an immutable
+tuple and runs it left to right. A bare Arrow table drops lineage and is not a
+valid processor result.
 
-Call the decorated object directly for a simple function, then exercise it
-through `model.encode` to include runtime-provided values:
+Exercise it through `model.encode` to include RelFlow identity and any
+runtime-provided values:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-@rf.preprocess
-def rename_amount(observation):
-    return rf.Observation({"amount": observation["raw_amount"]})
+@rf.preprocess(requires=("raw_amount",), produces=("amount",))
+def rename_amount(batch: rf.Batch) -> rf.Batch:
+    data = batch.data.rename_columns(
+        ["amount" if name == "raw_amount" else name for name in batch.data.column_names]
+    )
+    return batch.replace(data)
 
+@rf.preprocess(requires=("amount",), produces=("amount_copy",))
+def derive_features(batch: rf.Batch) -> rf.Batch:
+    data = batch.data.append_column("amount_copy", batch.data["amount"])
+    return batch.replace(data)
 
-assert rename_amount({"raw_amount": 12.5}).data == {"amount": 12.5}
+records = pa.table({"raw_amount": [12.5]})
 encoded = model.encode(
-    [{"raw_amount": 12.5}],
-    preprocess=rename_amount,
+    records,
+    preprocess=(rename_amount, derive_features),
 )
 ```
 
@@ -114,36 +134,44 @@ If the preprocessor requests `strata`, `schema`, or `encoding_context`, test it
 through a data module or `model.encode(..., strata=...)` so those providers are
 present. Bind required user parameters with `.partial(...)`.
 
+When a pipeline fails, inspect the named stage's actual input schema. RelFlow
+checks `requires` before every stage and `produces` on every emitted output; it
+does not move a producer ahead of its consumer. A missing requirement therefore
+usually means the tuple is reversed, an earlier stage dropped a column, or that
+stage did not return a declared output. For mixed scopes, remember that each
+dataset-scoped stage materializes all upstream outputs exactly where it appears.
+
 ## Debug Prediction Output
 
-The result is keyed by `rf.Address`, not display strings. Check exact keys:
+The result is an Arrow table. Check its top-level schema and address fields:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
 predictions = model.predict(records)
-print([str(address) for address in predictions])
+print(predictions.schema)
+print(predictions.schema.field("predictions").type)
 ```
 
-Decoded payloads can contain `state`, datatype-specific `content`, `inferred`,
-and optional `embedding`. `inferred` is positional: it marks values that were
-masked in prediction input. Read [Prediction Output](prediction-output.qmd) for
-the full envelope before flattening it in a postprocessor.
+Decoded address structs can contain `state`, datatype-specific `content`,
+`inferred`, and optional `embedding`. `inferred` is positional: it marks values
+that were masked in prediction input. Read [Prediction Output](prediction-output.qmd)
+for the full envelope before flattening it in a postprocessor.
+
+Postprocessor arguments use the same singleton/list/tuple/`None` forms and run
+strictly left to right. RelFlow checks `requires` before each stage, then checks
+`produces`, row count, identity, and nonempty output on that stage's result. If
+a later stage cannot see `inputs`, confirm both that prediction retained the
+needed source columns and that no earlier postprocessor removed the canonical
+envelope.
 
 ## Reduce A Distributed Failure
 
-When a problem occurs only with workers or multiple ranks:
-
-1. reproduce with `devices=1`, `num_workers=0`, and a fixed local data slice;
-2. add workers without adding ranks;
-3. add ranks with one worker each;
-4. confirm each rank receives different input shards;
-5. compare vocabulary snapshots and callback order;
-6. add remote I/O only after the local run agrees.
-
-Do not “fix” a collective hang by disabling synchronization until you know
-which ranks skipped a data-dependent path.
+The first Arrow scheduler explicitly rejects DataLoader workers and distributed
+rank scheduling. Reproduce with `devices=1`, `num_workers=0`, and a fixed local
+table. Do not bypass those guards: they prevent duplicate records and unequal
+distributed steps until stable ownership is implemented.
 
 ## Report A Reproducible Issue
 
@@ -152,7 +180,7 @@ Include:
 - RelFlow, Python, PyTorch, Lightning, and accelerator versions;
 - operating system and device;
 - the smallest model schema and one redacted raw observation;
-- split/strata and preprocessor/query involved;
+- split/strata and preprocessor or explicit query involved;
 - full exception and the first failing address;
 - whether it reproduces with CPU, one process, and no workers;
 - model save/checkpoint origin for load or serving failures.
@@ -160,7 +188,8 @@ Include:
 ## Where Next
 
 - Use [Binding Data](../core-concepts/binding-data.qmd) and
-  [Query Paths](../core-concepts/querypaths.qmd) for shape problems.
+  [Query Paths](../core-concepts/querypaths.qmd) for binding and shape
+  problems.
 - Use [Evaluation and Metrics](evaluation.qmd) for unexpected metric names or
   model-selection behavior.
 - Use [Model Lifecycle](model-lifecycle.qmd) for artifact parity.

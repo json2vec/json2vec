@@ -10,15 +10,13 @@ authors = [
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
+    "awkward>=2.13.0",
     "beartype>=0.21.0",
-    "pluggy>=1.6.0",
     "rich>=14.0.0",
     "pydantic>=2.11.7",
-    "jmespath>=1.0.1",
     "loguru>=0.7.3",
     "anytree>=2.13.0",
     "pyarrow>=21.0.0",
-    "polars>=1.35.2",
     "numpy>=2.2.6",
     "blake3>=1.0.8",
     "msgspec>=0.21.1",
@@ -29,6 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+polars = [
+    "polars>=1.35.2",
+]
 serving = [
     "fastapi>=0.124.0",
     "orjson>=3.10.0",
@@ -40,6 +41,7 @@ text = [
 ]
 docs = [
     "marimo>=0.23.8",
+    "polars>=1.35.2",
 ]
 
 [dependency-groups]
@@ -57,6 +59,7 @@ dev = [
     "uvicorn>=0.38.0",
     "ty>=0.0.1a20",
     "pre-commit>=4.3.0",
+    "polars>=1.35.2",
 ]
 
 [build-system]
@@ -80,7 +83,7 @@ line-length = 120
 lint.extend-select = ["I"]
 
 [tool.ty.rules]
-# Keep ty as a green baseline while the dynamic plugin/Torch/Lightning surfaces
+# Keep ty as a green baseline while the dynamic extension/Torch/Lightning surfaces
 # are covered by runtime tests and can be tightened incrementally.
 unresolved-attribute = "ignore"
 invalid-type-form = "ignore"

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import inspect
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -11,7 +10,7 @@ from relflow.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
 )
 
 if TYPE_CHECKING:
@@ -19,18 +18,19 @@ if TYPE_CHECKING:
 
 
 class NodeModule(torch.nn.Module):
-    def __init__(self, schema: Schema, address: Address, batch_size: int):
+    def __init__(self, schema: Schema, address: Address):
         super().__init__()
 
         if address in schema.requests:
             request: Node = schema.requests[address]
-            plugin: Plugin = TENSORFIELDS[request.type]
-            embedder_kwargs: dict[str, Any] = dict(schema=schema, address=address)
-            if "batch_size" in inspect.signature(plugin.Embedder.__init__).parameters:
-                embedder_kwargs["batch_size"] = batch_size
-
-            self.embedder: EmbedderBase = plugin.Embedder(**embedder_kwargs)
-            self.decoder: DecoderBase = plugin.Decoder(schema=schema, address=address)
+            extension: Extension = TENSORFIELDS[request.type]
+            self.embedder: EmbedderBase = extension.Embedder(schema=schema, address=address)
+            if address in schema.objectives or address in schema.embed:
+                self.decoder: DecoderBase = extension.Decoder(schema=schema, address=address)
+            if address in schema.objectives:
+                loss = extension.loss
+                if not callable(loss):
+                    raise TypeError(f"extension '{extension.name}' loss must be callable for objective '{address}'")
 
         elif address in schema.branches:
             self.encoder: BranchEncoder = BranchEncoder(schema=schema, address=address)

@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[text] @ git+https://github.com/relflow/relflow.git",
@@ -34,6 +35,7 @@ body = rf.Text(
     "body",
     max_length=128,
     encoder_pooling="mean",
+    jitter=rf.Jitter(add=0.05),
 )
 
 body
@@ -118,6 +120,9 @@ python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.gi
 ```
 
 ```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
 import relflow as rf
 
 model = rf.Model(
@@ -133,15 +138,18 @@ model = rf.Model(
     ),
 )
 
-records = [
-    {"message": "Refund was approved after manual review."},
-    {"message": "Customer asked for shipment tracking details."},
-]
+records = pa.Table.from_pylist(
+    [
+        {"message": "Refund was approved after manual review."},
+        {"message": "Customer asked for shipment tracking details."},
+    ]
+)
 
-predictions = model.predict(records)
-record_embedding = predictions[rf.Address("record")]["embedding"]
+result = model.predict(records)
+record = pc.struct_field(result["predictions"], "record")
+record_embedding = pc.struct_field(record, "embedding")
 
-print(len(record_embedding), len(record_embedding[0]))
+print(len(record_embedding), record_embedding.type.list_size)
 ```
 
 This is a wiring smoke test, not a trained classifier. It exercises tokenizer
@@ -157,13 +165,37 @@ output.
 | `encoder_batch_size` | `32` | Maximum number of length-grouped, flattened text values per Hugging Face forward pass. |
 | `encoder_pooling` | `"cls"` | Pooling mode: `"cls"`, `"mean"`, or `"pooler"`. |
 | `objective` | `"l2"` | Hidden-embedding reconstruction objective: `"l1"` or `"l2"`. |
+| `jitter` | `rf.Jitter()` | Training-only affine noise applied to the frozen encoder's pooled continuous embedding. |
 
 `encoder_pooling="pooler"` requires the selected Hugging Face model to expose
 `pooler_output`. The `"cls"` and `"mean"` modes require `last_hidden_state`.
 
-## Target Behavior
+## Jitter
 
-When `Text` is masked or used as a target, the decoder predicts:
+`Text` applies configured jitter to the pooled, continuous Hugging Face
+embedding immediately before RelFlow's trainable projection. It never perturbs
+source strings, token IDs, attention masks, or the frozen encoder itself.
+
+```python
+message = rf.Text(
+    jitter=rf.Jitter(add=0.05, multiply=0.02),
+)
+```
+
+Jitter runs only during training and only on finite coordinates belonging to
+valued text. Evaluation and prediction are deterministic. Reconstruction
+targets are separately encoded from pristine text, so jitter limits the input
+signal without corrupting the target embedding.
+
+Text has neither a continuous source value nor a separate learned normalization
+boundary: its first continuous representation is the frozen encoder embedding.
+Both values of `jitter.normalize` therefore use this same boundary. The option
+changes placement only for consumers, such as `Number`, that have distinct raw
+and normalized representations.
+
+## Reconstruction Behavior
+
+When `Text` is selected for reconstruction, the decoder predicts:
 
 - `state`: logits for `valued`, `null`, `padded`, `masked`, and reserved
   `other`.
@@ -172,10 +204,10 @@ When `Text` is masked or used as a target, the decoder predicts:
 The decoder does not generate text tokens. It reconstructs the frozen text
 embedding used as the target representation.
 
-For partial masking, the original frozen embedding is computed once and reused
-both as the reconstruction target and, after applying the current visibility
-mask, as input for values that remain visible. The frozen encoder is not run a
-second time for those visible values.
+RelFlow resolves visibility before tensorization. Visible strings run through
+the frozen encoder for input content; selected original strings run through it
+for target content. A skipped or learned-mask value never leaks through the
+input projection.
 
 State uses frequency-weighted cross entropy and reports state accuracy. Valued
 targets use the configured `l1` or `l2` content objective and report MAE and

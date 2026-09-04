@@ -93,8 +93,8 @@ def sanitize(
         require_registered_tensorfield(module, address, tensorfield)
         require_core_tensors(module, address, tensorfield)
         require_tensor_devices(module, address, tensorfield)
-        require_target_contract(module, address, tensorfield, strata=normalized)
-        require_mask_contract(module, address, tensorfield, strata=normalized)
+        require_objective_contract(module, address, tensorfield)
+        require_routing_contract(module, address, tensorfield, strata=normalized)
 
 
 def is_backoff_index(index: int, *, periodic_interval: int) -> bool:
@@ -124,7 +124,9 @@ def batch_signature(module: "Model", inputs: Any) -> ContractSignature:
                 str(address),
                 qualified_name(type(tensorfield)),
                 tensor_signature(getattr(tensorfield, TensorKey.state, None)),
+                tensor_signature(getattr(tensorfield, TensorKey.present, None)),
                 tensor_signature(getattr(tensorfield, TensorKey.trainable, None)),
+                tensor_signature(getattr(tensorfield, TensorKey.inferred, None)),
                 tensor_tree_signature(getattr(tensorfield, TensorKey.content, None)),
                 tensor_tree_signature(getattr(tensorfield, TensorKey.targets, None)),
             )
@@ -172,13 +174,8 @@ def require_forward_addresses(
     *,
     strata: Strata,
 ) -> None:
-    keys = set(inputs.keys())
-    metadata_keys = {key for key in keys if key == TensorKey.metadata}
-    addresses = {Address(str(key)) for key in keys if key != TensorKey.metadata}
+    addresses = {Address(str(key)) for key in inputs.keys()}
     expected = set(module.schema.active_requests)
-
-    if metadata_keys and strata != Strata.predict:
-        raise ForwardContractError(f"forward input contains {TensorKey.metadata} outside predict strata")
 
     missing = expected - addresses
     if missing:
@@ -220,7 +217,9 @@ def require_registered_tensorfield(module: "Model", address: Address, value: Any
 
 def require_core_tensors(module: "Model", address: Address, tensorfield: TensorFieldBase) -> None:
     state = require_tensor_attribute(address, tensorfield, TensorKey.state)
+    present = require_tensor_attribute(address, tensorfield, TensorKey.present)
     trainable = require_tensor_attribute(address, tensorfield, TensorKey.trainable)
+    inferred = require_tensor_attribute(address, tensorfield, TensorKey.inferred)
     content = require_tensor_tree(
         address,
         TensorKey.content,
@@ -243,13 +242,17 @@ def require_core_tensors(module: "Model", address: Address, tensorfield: TensorF
     if state.dtype not in INTEGER_DTYPES:
         raise TypeError(f"forward input '{address}' state must use an integer dtype, got {state.dtype}")
 
-    if tuple(trainable.shape) != tuple(state.shape):
-        raise ForwardContractError(
-            f"forward input '{address}' trainable must have shape {tuple(state.shape)}, got {tuple(trainable.shape)}"
-        )
-
-    if trainable.dtype != torch.bool:
-        raise TypeError(f"forward input '{address}' trainable must use bool dtype, got {trainable.dtype}")
+    for name, values in (
+        (TensorKey.present, present),
+        (TensorKey.trainable, trainable),
+        (TensorKey.inferred, inferred),
+    ):
+        if tuple(values.shape) != tuple(state.shape):
+            raise ForwardContractError(
+                f"forward input '{address}' {name} must have shape {tuple(state.shape)}, got {tuple(values.shape)}"
+            )
+        if values.dtype != torch.bool:
+            raise TypeError(f"forward input '{address}' {name} must use bool dtype, got {values.dtype}")
 
     require_token_values(address, TensorKey.state, state)
     require_content_prefix_shapes(address, content, state)
@@ -287,13 +290,13 @@ def require_tensor_devices(module: "Model", address: Address, tensorfield: Tenso
         raise ForwardContractError(f"forward input '{address}' tensors must share one device, got {formatted}")
 
     module_device = getattr(module, "device", None)
-    if isinstance(module_device, torch.device) and devices and not _same_device(next(iter(devices)), module_device):
+    if isinstance(module_device, torch.device) and devices and not same_device(next(iter(devices)), module_device):
         raise ForwardContractError(
             f"forward input '{address}' tensors must be on module device {module_device}, got {next(iter(devices))}"
         )
 
 
-def _canonical_device(device: torch.device) -> tuple[str, int | None]:
+def canonical_device(device: torch.device) -> tuple[str, int | None]:
     if device.type == "mps":
         return (device.type, 0 if device.index is None else device.index)
 
@@ -306,21 +309,33 @@ def _canonical_device(device: torch.device) -> tuple[str, int | None]:
     return (device.type, device.index)
 
 
-def _same_device(left: torch.device, right: torch.device) -> bool:
-    return _canonical_device(left) == _canonical_device(right)
+def same_device(left: torch.device, right: torch.device) -> bool:
+    return canonical_device(left) == canonical_device(right)
 
 
-def require_mask_contract(module: "Model", address: Address, tensorfield: TensorFieldBase, *, strata: Strata) -> None:
+def require_routing_contract(
+    module: "Model",
+    address: Address,
+    tensorfield: TensorFieldBase,
+    *,
+    strata: Strata,
+) -> None:
     state = tensorfield.state
+    present = tensorfield.present
     trainable = tensorfield.trainable
-    is_masked = state.eq(Tokens.masked.value)
-    is_target = address in module.schema.target
+    inferred = tensorfield.inferred
+    padded = state.eq(Tokens.padded.value)
 
-    if trainable.any() and not state.masked_select(trainable).eq(Tokens.masked.value).all():
-        raise ForwardContractError(f"forward input '{address}' trainable positions must have masked state")
+    if not torch.equal(present, ~padded):
+        raise ForwardContractError(f"forward input '{address}' present must be true exactly where state is not padded")
 
-    if strata != Strata.predict and not is_target and (is_masked & ~trainable).any():
-        raise ForwardContractError(f"forward input '{address}' has masked state where trainable is false")
+    if (trainable & inferred).any():
+        raise ForwardContractError(f"forward input '{address}' cannot be trainable and inferred at one coordinate")
+
+    if strata == Strata.predict and trainable.any():
+        raise ForwardContractError(f"forward input '{address}' cannot be trainable during prediction")
+    if strata != Strata.predict and inferred.any():
+        raise ForwardContractError(f"forward input '{address}' cannot be inferred during {strata}")
 
     if not trainable.any():
         return
@@ -331,25 +346,23 @@ def require_mask_contract(module: "Model", address: Address, tensorfield: Tensor
             raise ForwardContractError(f"forward input '{address}' has trainable positions but lacks targets[{key}]")
 
     target_state = targets[TensorKey.state]
-    if target_state.masked_select(trainable).eq(Tokens.masked.value).any():
-        raise ForwardContractError(f"forward input '{address}' targets[{TensorKey.state}] must not be masked")
+    unavailable = target_state.masked_select(trainable)
+    if unavailable.eq(Tokens.masked.value).any() or unavailable.eq(Tokens.padded.value).any():
+        raise ForwardContractError(
+            f"forward input '{address}' targets[{TensorKey.state}] must contain original trainable state"
+        )
 
 
-def require_target_contract(
+def require_objective_contract(
     module: "Model",
     address: Address,
     tensorfield: TensorFieldBase,
-    *,
-    strata: Strata | None,
 ) -> None:
-    if address not in module.schema.target:
-        return
-
-    if not tensorfield.state.eq(Tokens.masked.value).all():
-        raise ForwardContractError(f"target field '{address}' must not contain visible input state")
-
-    if strata in (Strata.train, Strata.validate, Strata.test) and not tensorfield.trainable.any():
-        raise ForwardContractError(f"target field '{address}' must have trainable positions in {strata} strata")
+    objective = address in module.schema.objectives
+    if tensorfield.trainable.any() and not objective:
+        raise ForwardContractError(f"forward input '{address}' is trainable but is not a reconstruction objective")
+    if tensorfield.inferred.any() and address not in module.schema.decodes:
+        raise ForwardContractError(f"forward input '{address}' is inferred but is not a prediction decode")
 
 
 def require_tensor_attribute(address: Address, tensorfield: TensorFieldBase, name: str) -> torch.Tensor:
@@ -451,7 +464,14 @@ def iter_tensor_leaves(value: Any, path: tuple[str, ...] = ()) -> Iterator[tuple
         return
 
     if isinstance(value, TensorFieldBase):
-        for name in (TensorKey.state, TensorKey.trainable, TensorKey.content, TensorKey.targets):
+        for name in (
+            TensorKey.state,
+            TensorKey.present,
+            TensorKey.trainable,
+            TensorKey.inferred,
+            TensorKey.content,
+            TensorKey.targets,
+        ):
             yield from iter_tensor_leaves(getattr(value, name, None), (*path, name))
         return
 

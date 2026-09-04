@@ -1,11 +1,19 @@
+from types import SimpleNamespace
+
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS, Context
 from relflow.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
+from relflow.tensorfields.extensions.set import output as output_type
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
+from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/tags"
 
@@ -14,12 +22,13 @@ def _structure_payload(
     *,
     p_unavailable: float | None = None,
     threshold: float | None = None,
+    mask: bool | Mask = False,
 ) -> dict:
     field: dict = {
         "name": "tags",
         "type": "set",
-        "query": "[*].items[*].tags",
         "size": 8,
+        "mask": mask,
     }
     if p_unavailable is not None:
         field["p_unavailable"] = p_unavailable
@@ -48,6 +57,26 @@ def _state(size: int = 8):
     return OnlineVocabularyModel(size=size).state
 
 
+def _new_tensorfield(
+    *,
+    values: list,
+    schema: Schema,
+    strata: Strata,
+    state,
+) -> TensorField:
+    batch = arrow_batch([{"items": [{"tags": value} for value in root]} for (root,) in values])
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["set"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        context=Context(state=state),
+    )
+
+
 def test_set_request_is_available_in_schema():
     structure = Schema.model_validate(_structure_payload())
     request = structure.requests[ADDRESS]
@@ -66,12 +95,11 @@ def test_set_tensorfield_encodes_multi_hot_content():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state()
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -91,16 +119,31 @@ def test_set_tensorfield_encodes_multi_hot_content():
     assert field.content[1, 0, 0, 1] == 1.0
 
 
+def test_set_nested_mask_string_is_an_ordinary_label():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    state = _state()
+
+    field = _new_tensorfield(
+        values=[[[["<MASK>", "ALPHA"]]]],
+        schema=structure,
+        strata=Strata.train,
+        state=state,
+    )
+
+    assert state.vocab == ["<MASK>", "ALPHA"]
+    assert field.state.tolist() == [[[Tokens.valued.value, Tokens.padded.value]]]
+    assert field.content[0, 0, 0, :2].tolist() == [1.0, 1.0]
+
+
 def test_set_tensorfield_reserves_real_vocabulary_in_batch():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     vocabulary = OnlineVocabularyModel(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
+    _new_tensorfield(
         values=[[[["ALPHA", "BETA"], ["ALPHA"]]], [[["BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=vocabulary.state,
+        state=vocabulary.state,
     )
 
     assert vocabulary.snapshot() == ["ALPHA", "BETA"]
@@ -110,20 +153,18 @@ def test_set_tensorfield_zeros_oov_content_without_changing_state():
     structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
     state = _state(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
+    _new_tensorfield(
         values=[[[["ALPHA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["OMEGA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.validate,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert field.state[0, 0, 0] == Tokens.valued.value
@@ -134,12 +175,11 @@ def test_set_tensorfield_simulated_unavailable_zeros_content():
     structure = Schema.model_validate(_structure_payload(p_unavailable=1.0))
     state = _state(size=structure.requests[ADDRESS].size)
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[[["ALPHA", "BETA"]]]],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert field.content.shape[-1] == structure.requests[ADDRESS].size
@@ -171,7 +211,7 @@ class _DummyModule:
         return value
 
 
-def test_set_write_emits_probability_for_each_known_vocab_item():
+def test_set_write_emits_candidates_for_each_known_vocab_item():
     module = _DummyModule(schema=Schema.model_validate(_structure_payload()))
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
@@ -193,14 +233,16 @@ def test_set_write_emits_probability_for_each_known_vocab_item():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    state_payload = output[TensorKey.state.name]
-    content_payload = output[TensorKey.content.name]
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
+    content = output.field(TensorKey.content.name).to_pylist()
 
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    assert set(content_payload.keys()) == {"ALPHA", "BETA"}
-    assert content_payload["ALPHA"].shape == (2, 1)
-    assert content_payload["BETA"][0, 0] > content_payload["ALPHA"][0, 0]
+    assert output.type == datatype
+    assert [[candidate[TensorKey.value.name] for candidate in row] for row in content] == [
+        ["ALPHA", "BETA"],
+        ["ALPHA", "BETA"],
+    ]
+    assert content[0][1][TensorKey.probability.name] > content[0][0][TensorKey.probability.name]
 
 
 def test_set_write_filters_content_when_threshold_is_configured():
@@ -223,27 +265,46 @@ def test_set_write_filters_content_when_threshold_is_configured():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
+    output = write(module=module, prediction=prediction, datatype=output_type(module, ADDRESS))
     expected_probability = torch.sigmoid(torch.tensor(2.0)).item()
+    content = output.field(TensorKey.content.name).to_pylist()
 
-    assert output[TensorKey.content.name] == [
-        [{"BETA": expected_probability}],
-        [{"ALPHA": expected_probability}],
+    assert content == [
+        [{TensorKey.value.name: "BETA", TensorKey.probability.name: expected_probability}],
+        [{TensorKey.value.name: "ALPHA", TensorKey.probability.name: expected_probability}],
     ]
 
 
-def test_set_loss_does_not_mutate_counter():
-    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
-    state = _state()
-    field = TensorField.new(
-        values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
+def test_set_empty_vocabulary_keeps_declared_schema():
+    structure = Schema.model_validate(_structure_payload())
+    module = _DummyModule(schema=structure, embedder=SimpleNamespace(vocab=OnlineVocabularyModel(size=8)))
+    prediction = Prediction(
         address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(1, 1, len(Tokens)),
+                TensorKey.content: torch.zeros(1, 1, 8),
+            },
+            batch_size=[1],
+        ),
+    )
+
+    datatype = output_type(module, ADDRESS)
+    written = write(module=module, prediction=prediction, datatype=datatype)
+
+    assert written.type == datatype
+    assert written.field(TensorKey.content.name).to_pylist() == [[]]
+
+
+def test_set_loss_does_not_mutate_counter():
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0, mask=Mask(reconstruct=True)))
+    state = _state()
+    field = _new_tensorfield(
+        values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _DummyModule(schema=structure, embedder=embedder, decoder=decoder)

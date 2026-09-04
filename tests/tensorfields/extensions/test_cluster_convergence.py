@@ -126,7 +126,7 @@ def _format(trajectory: list[dict[str, float]]) -> str:
 
 @pytest.mark.skipif("not config.getoption('--run-slow')", reason="Only run when --run-slow is given")
 def test_cluster_n_committed_converges_to_true_k_when_loss_engaged():
-    """When the loss is engaged (via ``p_mask``), K must converge close to true K.
+    """When reconstruction is engaged, K must converge close to true K.
 
     The mechanism should reach K in [true_K - 1, true_K + 2] within 30 epochs,
     and MUST NOT stick at either boundary.
@@ -141,8 +141,12 @@ def test_cluster_n_committed_converges_to_true_k_when_loss_engaged():
         n_heads=4,
         batch_size=64,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=3e-3),
-        merchant_id=rf.Cluster(capacity=64, n_clusters=(LOWER, UPPER), p_mask=0.5),
-        label=rf.Category(target=True, size=TRUE_K, p_unavailable=0.0),
+        merchant_id=rf.Cluster(
+            capacity=64,
+            n_clusters=(LOWER, UPPER),
+            mask=rf.Mask(rate=0.5, reconstruct=True),
+        ),
+        label=rf.Category(mask=True, size=TRUE_K, p_unavailable=0.0),
     )
 
     datamodule = rf.PolarsDataModule(
@@ -198,7 +202,7 @@ def test_cluster_loss_is_dormant_when_field_is_plain_input():
 
     This is the actual root cause of the "n_committed anchored at init" symptom
     reported in benchmarks: if the user does not opt into training the cluster
-    (via ``p_mask``, ``p_prune``, or ``target=True``), K is frozen at whatever
+    (via a reconstructing ``Mask``), K is frozen at whatever
     the embedder was initialized to.
     """
     torch.manual_seed(0)
@@ -212,7 +216,7 @@ def test_cluster_loss_is_dormant_when_field_is_plain_input():
         batch_size=64,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=3e-3),
         merchant_id=rf.Cluster(capacity=64, n_clusters=(LOWER, UPPER)),
-        label=rf.Category(target=True, size=TRUE_K, p_unavailable=0.0),
+        label=rf.Category(mask=True, size=TRUE_K, p_unavailable=0.0),
     )
 
     datamodule = rf.PolarsDataModule(
@@ -265,9 +269,13 @@ def test_cluster_n_committed_converges_via_regime_regression():
         n_heads=4,
         batch_size=128,
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=3e-3),
-        id=rf.Cluster(capacity=128, n_clusters=(LOWER, UPPER), p_mask=0.5),
+        id=rf.Cluster(
+            capacity=128,
+            n_clusters=(LOWER, UPPER),
+            mask=rf.Mask(rate=0.5, reconstruct=True),
+        ),
         x=rf.Number,
-        y=rf.Number(target=True),
+        y=rf.Number(mask=True),
     )
 
     datamodule = rf.PolarsDataModule(

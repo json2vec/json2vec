@@ -1,8 +1,5 @@
-"""Helper utilities kept outside the core `relflow` namespace."""
+"""Shared helper primitives."""
 
-from relflow.helpers.inference import InferenceConfig, infer_schema
+from relflow.helpers.jitter import Jitter
 
-__all__ = [
-    "InferenceConfig",
-    "infer_schema",
-]
+__all__ = ["Jitter"]

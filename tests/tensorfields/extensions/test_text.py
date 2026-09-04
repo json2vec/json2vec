@@ -6,9 +6,13 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import coalesce
+from relflow.helpers import Jitter
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.text import (
     ATTENTION_MASK,
     DEFAULT_TEXT_MODEL,
@@ -18,23 +22,33 @@ from relflow.tensorfields.extensions.text import (
     Embedder,
     TensorField,
     loss,
-    write,
 )
+from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/body"
 
 
-def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", encoder_batch_size: int = 2) -> dict:
+def _structure_payload(
+    *,
+    objective: str = "l2",
+    encoder_pooling: str = "cls",
+    encoder_batch_size: int = 2,
+    mask: bool | Mask = False,
+    jitter: Jitter | dict[str, object] | None = None,
+) -> dict:
     field: dict = {
         "name": "body",
         "type": "text",
-        "query": "[*].items[*].body",
         "model": "bert-base-uncased",
         "max_length": 4,
         "encoder_batch_size": encoder_batch_size,
         "encoder_pooling": encoder_pooling,
         "objective": objective,
+        "mask": mask,
     }
+    if jitter is not None:
+        field["jitter"] = jitter
     return {
         "d_model": 16,
         "fields": {
@@ -58,6 +72,19 @@ def _values() -> list:
         [["alpha", "beta"]],
         [["gamma", "delta"]],
     ]
+
+
+def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
+    batch = arrow_batch([{"items": [{"body": value} for value in root]} for (root,) in values])
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["text"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+    )
 
 
 class FakeTokenizer:
@@ -181,6 +208,19 @@ def test_text_request_strips_model():
     assert request.model == "bert-base-uncased"
 
 
+def test_text_request_hydrates_jitter_from_mapping():
+    structure = Schema.model_validate(_structure_payload(jitter={"add": 0.2, "multiply": 0.1}))
+
+    assert structure.requests[ADDRESS].jitter == Jitter(add=0.2, multiply=0.1)
+
+
+@pytest.mark.parametrize("normalize", [True, False])
+def test_text_accepts_jitter_normalization_modes(normalize: bool):
+    structure = Schema.model_validate(_structure_payload(jitter=Jitter(add=0.2, normalize=normalize)))
+
+    assert structure.requests[ADDRESS].jitter == Jitter(add=0.2, normalize=normalize)
+
+
 def test_text_raises_when_transformers_is_missing(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(CachedModel, "_models", {})
     monkeypatch.delitem(sys.modules, "transformers", raising=False)
@@ -267,9 +307,8 @@ def test_text_tensorfield_tokenizes_strings(monkeypatch: pytest.MonkeyPatch):
 
     structure = Schema.model_validate(_structure_payload())
     schema = structure
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -285,50 +324,99 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
 
     structure = Schema.model_validate(_structure_payload(encoder_batch_size=1))
     schema = structure
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
 
     embedder = Embedder(schema=structure, address=ADDRESS)
-    parcel = embedder(field)
+    parcel = embedder.embed(field)
     assert parcel.payload.shape == (2, 1, 2, 16)
     assert fake_model.calls == 4
 
     decoder = Decoder(schema=structure, address=ADDRESS)
-    prediction = decoder([parcel])
+    prediction = decoder(
+        [parcel],
+        batch_size=field.state.shape[0],
+        device=parcel.payload.device,
+    )
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 4)
 
 
-def test_text_partial_mask_reuses_target_embeddings_for_visible_input_and_loss(
+@pytest.mark.parametrize("normalize", [True, False])
+def test_text_jitters_only_training_valued_finite_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
+    normalize: bool,
+):
+    _patch_hf(monkeypatch)
+
+    payload = _structure_payload(jitter=Jitter(add=0.5, normalize=normalize))
+    payload["d_model"] = 4
+    structure = Schema.model_validate(payload)
+    field = _new_tensorfield(
+        values=[[["alpha", None]], [["gamma", "delta"]]],
+        schema=structure,
+        strata=Strata.train,
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    embedder.linear = torch.nn.Identity()
+    with torch.no_grad():
+        embedder.embeddings.weight.zero_()
+
+    encoded = torch.arange(field.state.numel() * embedder.hidden_size, dtype=torch.float32).reshape(
+        *field.state.shape, embedder.hidden_size
+    )
+    encoded[0, 0, 0, 2] = torch.nan
+    monkeypatch.setattr(embedder, "encode", lambda content, state: encoded.clone())
+
+    draws = iter((torch.ones(11), torch.zeros(11)))
+    monkeypatch.setattr(torch, "rand_like", lambda values: next(draws).to(values))
+
+    embedder.train()
+    training = embedder.embed(field).payload
+    expected = encoded.clone()
+    valued = field.state.eq(Tokens.valued.value).unsqueeze(-1).expand_as(expected)
+    expected[valued & torch.isfinite(expected)] += 0.5
+    expected[~valued] = 0.0
+
+    assert torch.equal(torch.isnan(training), torch.isnan(expected))
+    assert torch.allclose(torch.nan_to_num(training), torch.nan_to_num(expected))
+
+    embedder.eval()
+    evaluation = embedder.embed(field).payload
+    pristine = encoded.clone()
+    pristine[~valued] = 0.0
+    assert torch.equal(torch.isnan(evaluation), torch.isnan(pristine))
+    assert torch.allclose(torch.nan_to_num(evaluation), torch.nan_to_num(pristine))
+
+
+def test_text_forward_never_reads_reconstruction_targets(
     monkeypatch: pytest.MonkeyPatch,
 ):
     fake_model = _patch_hf(monkeypatch)
 
-    structure = Schema.model_validate(_structure_payload(encoder_batch_size=2))
-    field = TensorField.new(
+    structure = Schema.model_validate(
+        _structure_payload(
+            encoder_batch_size=2,
+            mask=Mask(reconstruct=True),
+        )
+    )
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
-    selected = torch.zeros_like(field.state, dtype=torch.bool)
-    selected[..., 0] = True
-    field.hide(selected)
 
     embedder = Embedder(schema=structure, address=ADDRESS)
-    parcel = embedder(field)
+    parcel = embedder.embed(field)
 
-    # The original four values fit in two encoder batches. Visible values must
-    # reuse those target embeddings instead of requiring a third model call.
-    assert fake_model.calls == 2
-    target_embeddings = field.targets[TensorKey.embedding]
-    valued = field.state.eq(Tokens.valued.value).unsqueeze(-1)
-    expected = embedder.embeddings(field.state) + embedder.linear(target_embeddings) * valued
-    assert torch.allclose(parcel.payload, expected)
+    assert fake_model.calls == 0
+    assert torch.all(field.state == Tokens.masked.value)
+    assert torch.count_nonzero(field.content[INPUT_IDS]) == 0
+    assert torch.count_nonzero(field.targets[TensorKey.content][INPUT_IDS]) > 0
+    assert torch.allclose(parcel.payload, embedder.embeddings(field.state))
 
     state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
     state_logits[..., Tokens.valued.value] = 50.0
@@ -337,7 +425,7 @@ def test_text_partial_mask_reuses_target_embeddings_for_visible_input_and_loss(
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
-                TensorKey.content: target_embeddings.clone(),
+                TensorKey.content: torch.zeros(*field.state.shape, embedder.hidden_size),
             },
             batch_size=[2],
         ),
@@ -359,13 +447,12 @@ def test_text_encoder_buckets_by_length_trims_batches_and_restores_order(
     payload = _structure_payload(encoder_batch_size=2, encoder_pooling=encoder_pooling)
     payload["fields"]["fields"][0]["fields"][0]["max_length"] = 5
     structure = Schema.model_validate(payload)
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[
             [["a", "abcde"]],
             [["ab", "abcd"]],
             [["abc", None]],
         ],
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -427,9 +514,8 @@ def test_text_encoder_keeps_full_width_for_left_padding(monkeypatch: pytest.Monk
     payload = _structure_payload(encoder_batch_size=2, encoder_pooling="mean")
     payload["fields"]["fields"][0]["fields"][0]["max_length"] = 5
     structure = Schema.model_validate(payload)
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -473,9 +559,8 @@ def test_text_encoder_keeps_full_width_for_valued_row_without_attended_tokens(
 ):
     fake_model = _patch_hf(monkeypatch)
     structure = Schema.model_validate(_structure_payload())
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=structure,
         strata=Strata.train,
     )
@@ -515,23 +600,67 @@ class _DummyModule:
         return value
 
 
+def test_text_loss_encodes_pristine_targets_without_jitter(monkeypatch: pytest.MonkeyPatch):
+    _patch_hf(monkeypatch)
+
+    structure = Schema.model_validate(
+        _structure_payload(
+            jitter=Jitter(add=0.5),
+            mask=Mask(reconstruct=True),
+        )
+    )
+    field = _new_tensorfield(values=_values(), schema=structure, strata=Strata.train)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    pristine = torch.arange(field.state.numel() * embedder.hidden_size, dtype=torch.float32).reshape(
+        *field.state.shape,
+        embedder.hidden_size,
+    )
+
+    monkeypatch.setattr(embedder, "encode", lambda content, state: pristine.clone())
+
+    def reject(self: Jitter, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        pytest.fail("Text reconstruction targets must bypass Jitter.apply")
+
+    monkeypatch.setattr(Jitter, "apply", reject)
+
+    state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
+    state_logits[..., Tokens.valued.value] = 50.0
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: state_logits,
+                TensorKey.content: torch.zeros_like(pristine),
+            },
+            batch_size=[field.state.shape[0]],
+        ),
+    )
+    module = _DummyModule(structure, embedder, Decoder(schema=structure, address=ADDRESS))
+
+    output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+
+    assert torch.isfinite(output)
+    assert torch.equal(field.targets[TensorKey.embedding], pristine)
+
+
 @pytest.mark.parametrize(("objective", "expected"), [("l1", 2.0), ("l2", 4.0)])
 def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch, objective: str, expected: float):
     _patch_hf(monkeypatch)
 
-    structure = Schema.model_validate(_structure_payload(objective=objective))
+    structure = Schema.model_validate(_structure_payload(objective=objective, mask=Mask(reconstruct=True)))
     schema = structure
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=_values(),
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
-    targets = embedder.target_embeddings(field)
+    targets = embedder.encode(
+        content=field.targets[TensorKey.content],
+        state=field.targets[TensorKey.state],
+    )
+    field.targets[TensorKey.embedding] = targets
     state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
     state_logits[..., Tokens.valued.value] = 50.0
     prediction = Prediction(
@@ -548,22 +677,3 @@ def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch
     module = _DummyModule(structure, embedder, decoder)
     output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
     assert torch.isclose(output, torch.tensor(expected, dtype=output.dtype), atol=1e-3)
-
-
-def test_text_write_returns_no_payload(monkeypatch: pytest.MonkeyPatch):
-    _patch_hf(monkeypatch)
-
-    structure = Schema.model_validate(_structure_payload())
-    prediction = Prediction(
-        address=ADDRESS,
-        payload=TensorDict(
-            {
-                TensorKey.state: torch.zeros(2, 2, len(Tokens)),
-                TensorKey.content: torch.zeros(2, 2, 4),
-            },
-            batch_size=[2],
-        ),
-    )
-
-    output = write(module=_DummyModule(structure, None, None), prediction=prediction)
-    assert output is None

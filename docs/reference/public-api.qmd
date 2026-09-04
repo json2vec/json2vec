@@ -28,7 +28,8 @@ extension internals and should be treated as more version-coupled.
 | --- | --- | --- |
 | `Model` | Build, train, mutate, save, load, encode, and predict with a schema-backed Lightning module. | [Getting Started](../getting-started.qmd), [Model Configuration](../guides/model-configuration.qmd) |
 | `Branch` | Define a fixed-length nested/repeated context. | [Branch](../data-types/branch.qmd) |
-| `Mask` | Define positional masking on a repeated branch. | [Dynamic Masking](../core-concepts/dynamic-masking.qmd) |
+| `Mask` | Select coordinates and configure learned masking, structural skipping, dropout, or reconstruction on any node. | [Dynamic Masking](../core-concepts/dynamic-masking.qmd) |
+| `Jitter` | Configure bounded additive and multiplicative triangular noise for continuous `Number`, `Vector`, `DateParts`, and `Text` representations. | [Jitter And Input Noise](../core-concepts/jitter.qmd) |
 | `Address` | Represent a stable slash-delimited node/output path. | [Model Tree](../core-concepts/model-tree.qmd) |
 | `Schema`, `SchemaField` | Inspect or integrate with the validated schema representation. Most users construct it through `Model`. | [Model Tree](../core-concepts/model-tree.qmd) |
 | `where`, `predicate`, `NodePredicate`, `NodeAttribute` | Select nodes for inspection and schema mutation. | [Schema Mutation](../guides/schema-mutation.qmd) |
@@ -47,6 +48,7 @@ extension internals and should be treated as more version-coupled.
 | `name` | `"record"` | Generated singleton root name and address prefix. |
 | `description` | `None` | Human-readable root metadata. |
 | `embed` | `False` | Emit the normalized root embedding during prediction. |
+| `mask` | `False` | One root mask shorthand or a list/tuple of `Mask` policies, applied atomically to all active descendants. |
 | `attention` | `"mha"` | Root self-attention mode: `mha`, `gqa`, `mqa`, or `none`. |
 | `n_linear` | `1` | Root learned-query cross-attention pooling block count. Each block also contains a feed-forward network. |
 | `dropout` | `None` | Root attention/feed-forward dropout rate. |
@@ -67,6 +69,7 @@ when available.
 | `Number` | Continuous scalar with meaningful distance | Numeric value |
 | `Boolean` | Strict Boolean | Probability of `True` |
 | `Category` | One bounded persistent label | Best known label, probability, optional top-k |
+| `Cluster` | High-cardinality label with shared latent groups | Best cluster plus best known label and probabilities |
 | `Set` | Multiple bounded persistent labels | Known labels and probabilities, optionally thresholded |
 | `Hash` | Hashed identifier equality | Training metrics; no decoded identity label |
 | `DateParts` | Datetime parsed into configured cyclical parts | No decoded public calendar value currently |
@@ -76,55 +79,66 @@ when available.
 Use [Data Types And Value State](../core-concepts/data-types.qmd) to choose a
 type, then use its individual reference for options and limitations.
 
+Every leaf constructor accepts the shared optional `query` parameter. Its
+default is `None`, which uses direct parent-relative name selection during
+coalescing. A non-empty string opts that node into RelFlow's Arrow-native
+structural path language. The generated root and child branches also accept
+queries. Direct and explicit paths converge before paired value/state
+regularization, and all `RaggedField` objects are ready before datatype codecs
+run. See
+[Binding Data](../core-concepts/binding-data.qmd) and
+[Query Paths](../core-concepts/querypaths.qmd).
+
 ## Data And Processors
 
 | Export | Purpose | Guide |
 | --- | --- | --- |
-| `SyntheticDataModule` | Define synthetic data splits with generator functions. | [Data Modules](../guides/data-modules.qmd) |
-| `PolarsDataModule` | In-memory Polars-backed train/validate/test/predict data. | [Data Modules](../guides/data-modules.qmd) |
-| `StreamingDataModule` | Local/S3 file streaming, sharding, buffering, and sampling. | [Data Modules](../guides/data-modules.qmd) |
-| `CustomDataModule` | Integrate custom iterable sources with the shared encoding path. | [Data Modules](../guides/data-modules.qmd) |
-| `preprocess`, `Preprocessor`, `Observation` | Turn raw records into zero, one, or multiple model-facing observations. | [Binding Data](../core-concepts/binding-data.qmd) |
-| `postprocess`, `Postprocessor`, `Predictions`, `PostprocessorResult` | Reshape or filter address-keyed prediction output. | [Postprocessors](../guides/postprocessors.qmd) |
-| `RawObservation`, `RawBatch`, `Metadata` | Public typing aliases for processor integrations. | [Data Modules](../guides/data-modules.qmd) |
-| `MASK_LITERAL`, `MaskLiteral` | Mark literal positions as masked in processed input. | [Dynamic Masking](../core-concepts/dynamic-masking.qmd) |
-| `helpers` | Namespace for `infer_schema` and `InferenceConfig`, which derive a best-effort starting schema from sample records. | [Schema inference helper](#schema-inference-helper) |
+| `Batch` | Carry a `pa.Table` with protected, aligned row identity through processors and writers. | [Working With Arrow](../guides/working-with-arrow.qmd) |
+| `ArrowDataModule` | Canonical in-memory, Dataset, or restartable Arrow input. | [Data Modules](../guides/data-modules.qmd) |
+| `PolarsDataModule` | Convert collected Polars frames once and delegate to Arrow. | [Data Modules](../guides/data-modules.qmd) |
+| `CustomDataModule` | Convert bounded `IterableDataset` mapping groups to Arrow. | [Data Modules](../guides/data-modules.qmd) |
+| `SyntheticDataModule` | Convert bounded restartable mapping generators to Arrow. | [Data Modules](../guides/data-modules.qmd) |
+| `preprocess`, `Preprocessor` | Define one stage in an ordered Arrow input pipeline, including dynamic mask selectors. | [Binding Data](../core-concepts/binding-data.qmd), [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) |
+| `postprocess`, `Postprocessor` | Define one stage in an ordered, same-row Arrow output pipeline. | [Postprocessors](../guides/postprocessors.qmd) |
 
-Provider enums `PreprocessorProvider` and `PostprocessorProvider` describe names
-the pipeline can inject into decorated function signatures. Most users request
-providers by their documented parameter names rather than reading these enums.
+`PreprocessorProvider` describes the optional `strata`, `schema`, and
+`encoding_context` names that the pipeline can inject after `batch`. All other
+keyword-only parameters are bound by users with `.partial(...)`.
+Both decorators accept top-level `requires=(...)` and `produces=(...)`
+declarations. Processor arguments accept a decorated singleton, list, tuple,
+or `None`, normalize it to an immutable tuple, and execute it left to right.
+RelFlow validates declared columns at every stage and never topologically sorts
+the tuple.
 
-### Schema inference helper
-
-`rf.helpers.infer_schema(...)` profiles sample records and returns field
-constructors ready to pass positionally to `Model`. Its guesses are a starting
-point, not a substitute for reviewing semantics, target leakage, category
-capacity, branch lengths, and overflow behavior.
+### Direct model data methods
 
 ```python
-records = [
-    {"amount": 12.5, "merchant": "A", "label": "ok"},
-    {"amount": 8.0, "merchant": "B", "label": "review"},
-]
-
-fields = rf.helpers.infer_schema(
-    records,
-    config=rf.helpers.InferenceConfig(target="label"),
-    explain=True,
+encoded = model.encode(
+    batch,
+    preprocess=(normalize, derive),
+    strata="predict",
 )
 
-model = rf.Model(*fields, d_model=32, n_layers=1, n_heads=4)
+result = model.predict(
+    batch,
+    preprocess=(normalize, derive),
+    postprocess=(flatten, decide),
+    retain=(),
+)
 ```
 
-Pass either an `InferenceConfig` or its fields as keyword overrides, not both.
-Inference samples from the front of large inputs, so use a representative,
-training-only sample and inspect every returned request before training.
+`batch` is normally `rf.Batch`, `pa.Table`, or `pa.RecordBatch`. `predict` also
+accepts a nonempty sequence of mappings for a small request and converts it to
+one Arrow table; typed Arrow is required when the input is empty.
+`model.encode(...)` remains Arrow-only. `predict` returns a `pa.Table`. The
+lower-level `model.write(predictions, source=batch, retain=())` returns an
+identity-aligned `rf.Batch`.
 
 ## Prediction And Operation
 
 | Export | Purpose | Guide |
 | --- | --- | --- |
-| `Writer` | Write rank-partitioned batch prediction output. | [Batch Inference](../guides/batch-inference.qmd) |
+| `Writer` | Write already-built Arrow prediction batches directly to Parquet. | [Batch Inference](../guides/batch-inference.qmd) |
 | `Deployment` | Build a FastAPI-backed dynamically batched prediction service. Requires the `serving` extra. | [Serving](../guides/serving.qmd) |
 | `Accelerator` | Serving device selection: auto, CPU, CUDA, or MPS. | [Serving](../guides/serving.qmd) |
 | `JSONBackend` | Serving JSON implementation selection. | [Serving](../guides/serving.qmd) |
@@ -149,30 +163,31 @@ installation error with the required command.
 | Export | Values / role |
 | --- | --- |
 | `Tokens` | `valued`, `null`, `padded`, `masked`, reserved `other` |
-| `TensorKey` | Shared tensor/payload keys such as state, content, targets, embedding, and inferred |
+| `TensorKey` | Shared tensor/payload keys such as state, content, present, trainable, targets, embedding, and inferred |
 | `Strata` | train, validate, test, predict |
 | `Metric` | Shared metric labels such as loss, accuracy, MAE, RMSE, and throughput |
 | `AttentionMode` | mha, gqa, mqa, none |
 | `Overflow` | head, tail, error |
-| `ShardingStrategy` | file, chunk, record |
-| `Suffix` | Supported streaming file suffixes |
-| `Component` | Tensorfield plugin component names |
+| `Component` | Tensorfield extension components, including optional `observe`/`learn` and Arrow `output`/`write` hooks |
 
-## Experimental Extension Internals
+## Experimental Extension Surface
 
 | Export | Purpose |
 | --- | --- |
-| `Plugin`, `TENSORFIELDS` | Register and inspect tensorfield implementations. |
+| `Extension`, `TENSORFIELDS` | Register and inspect tensorfield implementations; `Extension(types=..., arrow=...)` declares canonical Arrow atom compatibility families and custom physical matchers. |
 | `RequestBase` | Base request/schema leaf. |
+| `RaggedField` | Arrow-backed extension boundary with retained `values`, flat `int8` `state`, flat `int64` `placement`, explicit model `shape`, a dense NumPy state array, and `place(...)` for scattering encoded content. |
 | `TensorFieldBase` | Base state/content tensor container contract. |
-| `EmbedderBase` | Base visible-input encoder. |
+| `TensorInput` | Compact state/content view passed to a datatype embedder for present coordinates only. |
+| `EmbedderBase` | Base encoder that gathers present coordinates and scatters extension payloads back into fixed geometry. |
 | `DecoderBase` | Base heritage pooling and prediction decoder. |
 
 These objects are importable, but the extension surface is experimental rather
-than a stable plugin SDK. In particular, dynamically registered request types
-do not currently survive `Model.save(...)` / `Model.load(...)` schema
-validation. Keep experiments in one process, pin the package, and follow the
-limits in [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd).
+than a stable extension SDK. A dynamically registered request type can round-trip
+through `Model.save(...)` / `Model.load(...)` when the same extension is registered
+before loading. The artifact does not package or import extension code for you.
+Pin the package and extension revisions and follow the limits in
+[Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd).
 
 ## Inspect Configuration Programmatically
 
@@ -224,8 +239,8 @@ Support maturity differs by workflow:
 | --- | --- |
 | Built-in schema, training, persistence, and interactive/batch prediction | Covered by the repository test suite; pin a revision because no long-term compatibility window is published. |
 | Online serving | Provided and tested, but version-coupled and without an availability or compatibility guarantee. See [Online Serving](../guides/serving.qmd). |
-| Distributed training and streaming | Supported through Lightning/data-module paths, but topology, sharding, vocabulary synchronization, and artifact parity must be validated on the target cluster. See [Performance And Scaling](../guides/performance.qmd). |
-| Custom tensorfields | Experimental same-process surface; dynamically registered request types are not artifact-compatible. See [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd). |
+| Dataset and factory input | Arrow-native and currently single-process with `num_workers=0`; distributed ownership and coordinated caching are deferred. See [Data Modules](../guides/data-modules.qmd). |
+| Custom tensorfields | Experimental extension surface; artifacts require the same extension registration and compatible code before loading. See [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd). |
 
 When upgrading:
 

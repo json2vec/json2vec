@@ -9,8 +9,9 @@ eval: false
 contract but require a trained artifact and a service-specific process setup.
 
 `rf.Deployment` exposes a saved RelFlow model through a FastAPI application.
-It loads one checkpoint, batches concurrent requests, runs prediction, and
-returns an HTTP-safe form of the canonical address-keyed output.
+It loads one checkpoint, gathers concurrent requests into one Arrow microbatch,
+runs the same model prediction and postprocessing path as offline inference,
+and performs one terminal Arrow-to-Python conversion for JSON.
 
 ::: {.callout-warning title="Operational maturity"}
 The repository provides and tests this serving runtime, but it does not define
@@ -50,6 +51,7 @@ deployment = rf.Deployment(
     port=8000,
     max_batch_size=128,
     batch_timeout=0.005,
+    retain=(),
 )
 
 deployment.serve()
@@ -60,8 +62,29 @@ process, use `deployment.app()` to obtain the FastAPI application instead.
 
 The runtime exposes:
 
-- `GET /health`, returning `{"status": "ok"}`; and
-- `POST /predict`, accepting one JSON object or an array of JSON objects.
+- `GET /health`, returning `{"status": "ok"}`;
+- `POST /predict`, accepting JSON or an Arrow IPC stream according to the
+  request's `Content-Type` header.
+
+## Discover The Wire Formats
+
+Every deployment publishes the contract as OpenAPI 3.1 at `/openapi.json` and
+through FastAPI's interactive `/docs` and `/redoc` pages. The `/predict`
+operation lists both request and successful-response representations under the
+standard OpenAPI `content` map:
+
+- `application/json` for one object or an array of objects; and
+- `application/vnd.apache.arrow.stream` for a binary Arrow IPC stream.
+
+This follows [OpenAPI 3.1's representation model](https://spec.openapis.org/oas/v3.1.1.html#media-type-object):
+the media-type key describes raw binary content, so the Arrow entry does not
+use the older OpenAPI 3.0 `format: binary` schema. The Arrow media type is
+[registered with IANA](https://www.iana.org/assignments/media-types/application/vnd.apache.arrow.stream).
+
+For this operation, a successful response uses the same representation as the
+request. OpenAPI enumerates both alternatives but cannot express that pairing,
+so the operation and `200` response descriptions state it explicitly. RelFlow
+does not independently negotiate the response with `Accept`.
 
 ## Send Requests
 
@@ -84,12 +107,20 @@ A successful single-record response is:
       "content": {"value": "no", "probability": 0.78, "topk": []},
       "inferred": true
     }
+  },
+  "model": {
+    "version": "0.2.0",
+    "checkpoint": "fraud-model.ckpt"
   }
 }
 ```
 
-Scores are illustrative. See [Prediction Output](prediction-output.qmd) for the
-full envelope and datatype-specific differences.
+Scores and the version are illustrative. The `model.version` value comes from
+the loaded model's immutable checkpoint provenance. `model.checkpoint` is only
+the configured checkpoint's filename, never its directory path. It is `null`
+when the deployment uses an in-memory model instead of a checkpoint file. See
+[Prediction Output](prediction-output.qmd) for the full prediction envelope and
+datatype-specific differences.
 
 Post an array to submit several independent records:
 
@@ -100,6 +131,59 @@ curl -X POST http://localhost:8000/predict \
 ```
 
 The response is an array with one response object per input, in input order.
+
+## Send Arrow IPC Batches
+
+Use the same prediction endpoint with the Arrow media type for trusted bulk
+clients that already own typed Arrow data. It avoids JSON parsing, Python row
+materialization, and JSON response encoding:
+
+```python
+import urllib.request
+
+import pyarrow as pa
+import pyarrow.ipc as ipc
+
+source = pa.table(
+    {
+        "amount": [12.5, 8.0],
+        "merchant": ["books", "coffee"],
+    }
+)
+sink = pa.BufferOutputStream()
+with ipc.new_stream(sink, source.schema) as writer:
+    writer.write_table(source)
+
+request = urllib.request.Request(
+    "http://localhost:8000/predict",
+    data=sink.getvalue().to_pybytes(),
+    headers={"content-type": "application/vnd.apache.arrow.stream"},
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    predictions = ipc.open_stream(pa.BufferReader(response.read())).read_all()
+```
+
+The output table has the same columns as the deployment's Arrow postprocessing
+result plus a `model` struct containing `version` and `checkpoint`. Without a
+postprocessor, its columns are `"predictions"` and `"model"`. Provenance is
+repeated per row so JSON and Arrow have the same record-level contract. The
+endpoint preserves row order and splits a table larger than `max_batch_size`
+into bounded model calls before concatenating their outputs.
+
+An Arrow request bypasses Pydantic request and response signatures. Its Arrow
+schema and values are validated by preprocessing and the model's tensorfield
+extensions instead. Invalid IPC framing produces a JSON `400` response;
+model-input contract failures remain request failures. Each IPC request is one
+bulk submission, so clients seeking maximum throughput should form batches
+deliberately rather than sending one-row Arrow streams.
+
+`application/json` selects JSON input and output;
+`application/vnd.apache.arrow.stream` selects Arrow IPC input and output. Other
+or missing content types produce HTTP `415`. RelFlow does not sniff the body,
+so malformed data cannot be mistaken for the other wire format. The `415`
+response includes an `Accept` header listing both supported request media
+types, following [HTTP semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.16).
 
 ## Configure Dynamic Batching
 
@@ -137,43 +221,97 @@ present.
 FastAPI's standard JSON parsing and response class. Validate numerical and
 non-string-key behavior if you switch backends.
 
-## Reuse The Training Preprocessor
+## Reuse Arrow Processors
 
-Attach the same decorated RelFlow preprocessor and bound arguments used by the
-training data module:
+Attach the same decorated RelFlow preprocessor pipeline and bound arguments
+used by the training data module. `.preprocess(...)` and `.postprocess(...)`
+each accept a decorated singleton, a list, a tuple, or `None` and snapshot it
+as an immutable ordered tuple.
 
-The excerpt assumes `normalize_transaction` and `compact_response` are
-decorated with `@rf.preprocess` and `@rf.postprocess`, respectively.
+In online serving, each HTTP object must produce exactly one
+processed Arrow observation. The runtime validates JSON objects individually,
+converts all valid objects with one `pa.Table.from_pylist(...)`, and enters the
+preprocessor pipeline with one Arrow batch. Processing is vectorized over rows,
+not called once per request. Stages execute strictly left to right; `requires`
+and `produces` are checked at each boundary. If a preprocessor emits several
+batches, each downstream partition-scoped stage runs once for each emitted
+batch; a dataset-scoped stage merges its upstream stream at that point. Final
+preprocessor outputs are merged before one model call, and each postprocessor
+stage then runs once on that model microbatch.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+A preprocessor pipeline may reorder valid rows because protected identity
+restores caller order, but its final result may not drop or expand them at the
+request boundary. A one-to-zero or one-to-many result fails instead of
+associating a prediction with the wrong caller.
+
+`max_batch_size` bounds that contract: a larger request list is split into
+separate Arrow/model microbatches. Preprocessor fan-out semantics apply inside
+each one.
+Pydantic validation remains item-wise so malformed requests can fail without
+discarding valid neighbors.
+
+A deployment postprocessor receives the same canonical output `rf.Batch` as
+interactive prediction and `rf.Writer`. It has no request, observation,
+metadata, tensor, or batch-index providers. Retain every processed request
+field it needs on the deployment:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "probability"),
+)
+def compact_response(batch: rf.Batch) -> rf.Batch:
+    inputs = batch.data["inputs"]
+    predictions = batch.data["predictions"]
+    fraud = pc.struct_field(predictions, "record/fraud")
+    content = pc.struct_field(fraud, "content")
+    return batch.replace(
+        pa.table(
+            {
+                "request_id": pc.struct_field(inputs, "request_id"),
+                "fraud": pc.struct_field(content, "value"),
+                "probability": pc.struct_field(content, "probability"),
+            }
+        )
+    )
+
+@rf.postprocess(requires=("request_id", "fraud", "probability"))
+def public_response(batch: rf.Batch) -> rf.Batch:
+    return batch.replace(batch.data.drop(["request_id"]))
+
+# `prepare` is the ordered tuple installed on the training data module.
+prepare = training_preprocessors
+output = (compact_response, public_response)
 
 deployment = (
-    rf.Deployment(checkpoint="artifacts/fraud-model.ckpt")
-    .preprocess(normalize_transaction)
-    .postprocess(compact_response)
+    rf.Deployment(
+        checkpoint="artifacts/fraud-model.ckpt",
+        retain=("request_id",),
+    )
+    .preprocess(prepare)
+    .postprocess(output)
 )
 ```
 
-In online serving, each HTTP object must produce exactly one
-`rf.Observation`. A preprocessor that drops the request or yields several
-observations produces an error envelope whose internal `status_code` is `422`.
-For an otherwise valid object/array request, the current `/predict` transport
-still returns HTTP `200`; clients must inspect the envelope. Data-module
-preprocessors may expand a source record into multiple training observations,
-so not every training preprocessor is valid at the request boundary.
+The names `preprocess` and `postprocess` stay singular even when their value is
+a collection. Reversing either tuple changes its meaning; RelFlow validates
+dependencies but never sorts stages. A dataset-scoped preprocessor has no
+special advantage for one request microbatch and should normally be avoided in
+latency-sensitive serving.
 
-A deployment postprocessor may request these named runtime values:
+Each builder method sets the complete pipeline. Calling `.preprocess(...)` or
+`.postprocess(...)` again replaces the earlier tuple; it does not append.
+Compose the intended order once and pass it in one call.
 
-- `request`: the validated request dictionary;
-- `observations`: processed model-facing observations;
-- `input`: encoded tensorfields; and
-- `metadata`: processed observation metadata from the encoded input.
-
-Providers from other runtimes, such as writer `batch_idx`, are unavailable. If
-one postprocessor is shared across entry points, unavailable parameters must be
-optional.
+Without a postprocessor, deployment discards the canonical `inputs` column and
+serializes `predictions` plus framework-owned `model` provenance. This prevents
+`retain` from exposing request data accidentally. With a postprocessor, its
+table columns define the application portion of each response row. `model` is a
+reserved response field, and framework identity is always removed before JSON
+serialization.
 
 ## Validate Request And Response Schemas
 
@@ -198,9 +336,11 @@ deployment = rf.Deployment(
 
 `forge(request=..., response=...)` accepts either model independently. The
 request model is validated before preprocessing. The response model validates
-the final, postprocessed response and also defines its OpenAPI schema. Because
-the default address-keyed response is dynamic, a fixed response model is most
-useful after a postprocessor creates an application-specific shape.
+the final, postprocessed application fields and also defines their OpenAPI
+schema; deployment adds the documented `model` provenance afterward. Because
+the default canonical `predictions` struct varies with the model schema, a
+fixed response model is most useful after a postprocessor creates an
+application-specific shape.
 
 Pydantic models document an interface; they do not provide authentication,
 authorization, request size limits, rate limiting, or backward-compatible
@@ -219,7 +359,7 @@ deployment = rf.Deployment(
     checkpoint="artifacts/fraud-model.ckpt"
 ).update(
     rf.where("name") == "fraud",
-    target=False,
+    mask=False,
 )
 ```
 
@@ -237,7 +377,7 @@ loads its own model and owns its own request queue.
 There are two important limits in the current launcher:
 
 1. each worker replicates model memory, including accelerator memory; and
-2. attached `forge`, `preprocess`, `postprocess`, and `update` builder state is
+2. attached `forge`, processor pipelines, and `update` builder state is
    not transferred to worker processes by `serve()`.
 
 Use a single worker when those attachments are required. For a multi-worker
@@ -261,20 +401,16 @@ environment variables:
 | `host` | `RELFLOW_HOST`, `HOST` |
 | `port` | `RELFLOW_PORT`, `PORT` |
 | `log_level` | `RELFLOW_LOG_LEVEL`, `LOG_LEVEL` |
-| `monitor_queries` | `RELFLOW_MONITOR_QUERIES`, `MONITOR_QUERIES` |
-| `query_monitor_every` | `RELFLOW_QUERY_MONITOR_EVERY`, `QUERY_MONITOR_EVERY` |
 | `json_backend` | `RELFLOW_JSON_BACKEND`, `JSON_BACKEND` |
-
-`monitor_queries=True` periodically checks for schema queries that resolve only
-to empty or null-like results and raises a diagnostic error. It is useful while
-validating an integration, but it is not full drift monitoring.
 
 ## Failure Behavior
 
 | Condition | Response or behavior |
 | --- | --- |
 | Model cannot load | Application startup fails; the server does not become ready. |
+| Missing or unsupported `Content-Type` | HTTP `415` with empty `predictions` and an `error` object. |
 | Malformed JSON | HTTP `400` with empty `predictions` and an `error` object. |
+| Malformed Arrow IPC | HTTP `400` with empty `predictions` and an `error` object. |
 | Body is not an object or array of objects | HTTP `422` with an error envelope. |
 | Request validation or preprocessing fails after an object is accepted | HTTP `200` with empty `predictions` and `error.status_code=422`; clients must inspect the body. |
 | Inference or postprocessing raises unexpectedly | Unhandled server error; log and monitor it as HTTP `500`. |

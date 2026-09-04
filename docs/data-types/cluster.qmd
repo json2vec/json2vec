@@ -1,322 +1,230 @@
 ---
-marimo-static-output: true
-pyproject: |
-  requires-python = ">=3.12"
-  dependencies = [
-    "marimo>=0.23.8",
-    "relflow[serving] @ git+https://github.com/relflow/relflow.git",
-  ]
+eval: false
 ---
 
 # Cluster
 
-**Example status — excerpt:** schema and payload blocks isolate Cluster
-behavior; use [Getting Started](../getting-started.qmd) for a tested lifecycle.
+**Example status — reference:** examples use the shipped `Cluster` schema,
+runtime-inspection, and Arrow prediction contracts. Training is omitted so the
+page stays focused on the datatype.
 
-Use `Cluster` for a set of known data labels which must be associated into archetypes:
-unique identifiers (of a large quantity).
+Use `Cluster` for a high-cardinality scalar label when a learned bounded
+vocabulary is useful, but one independent embedding per label would be too
+expensive. Each known label learns an assignment over a smaller set of latent
+clusters. Labels assigned to the same cluster share the cluster representation.
 
-```json
-{
-  "merchant_id": "ACC-55412-X"
-}
-```
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
+```python
 import relflow as rf
 
-merchant_category = rf.Cluster(
-    "merchant_id",
-    capacity=128,
-    n_clusters=6,
-    p_unavailable=0.02,
+model = rf.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    merchant_id=rf.Cluster(
+        capacity=100_000,
+        bounds=64,
+        mask=rf.Mask(rate=0.15, reconstruct=True),
+        embed=True,
+    ),
+    fraud=rf.Category(mask=True, size=2),
 )
-
-merchant_category
 ```
 
-Use `Set` when several labels may be present at once. Use `Hash` when equality
-between large or unbounded identifiers matters without learning a vocabulary.
-Use `Text` when the words or subwords inside a string carry the signal. Use
-`Category` when each label carries special meaning worth learning.
+Here `capacity` bounds the learned label vocabulary and `bounds=64` fixes the
+latent cluster width at 64. The reconstructing mask creates sampled objectives
+from which the cluster head can learn.
 
-Unique identifiers are well-suited for a `Cluster` representation if it is 
-reasonable to accept that per-identifier personalization (or, put otherwise,
-a `Category` representation) is not necessary. `Cluster` excels at this scale of 
-data representation as the number of model parameters per leaf of type `Cluster` 
-scales as follows:
+Choose a different datatype when the intended signal differs:
 
-$$P(V, K, D) = 10D + 5 + K(V + 1 + 2D)$$
+- use [`Category`](category.qmd) when the bounded label deserves its own learned
+  representation;
+- use [`Hash`](hash.qmd) when equality matters but a persistent vocabulary does
+  not;
+- use [`Set`](set.qmd) when several unordered labels may be present;
+- use [`Text`](text.qmd) when meaning comes from words or subwords.
 
-Where:
+## Input Contract
 
-- V represents the leaf's `capacity`
-- K represents the (upper-bound of) the number of clusters
-- D represents the model's latent space dimension
+`Cluster` accepts one scalar Boolean, integer, floating-point, string, or binary
+label per modeled position. One field must use one compatible Arrow terminal
+type family throughout a split; normalize mixed source types in a preprocessor.
+`None` is the shared `null` state, not a label.
 
-## Input Values
+Training observations add first-seen labels until `capacity` is full.
+Validation, test, and prediction reuse the learned vocabulary without extending
+it. A supplied label that is not in that vocabulary remains in the `valued`
+state but uses an internal unavailable-content row:
 
-`Cluster` expects one hashable scalar label. Strings are the usual input. Use
-a preprocessor when upstream labels need normalization so that, for example,
-`"Grocery"` and `"grocery"` intentionally map to the same label. `None` has
-state `null`; a missing slot in a repeated branch has state `padded`.
-
-The online vocabulary distinguishes two kinds of valued input:
-
-| Input | State | Categorical content |
+| Source value | State | Content route |
 | --- | --- | --- |
-| Label in the learned vocabulary | `valued` | Its index from `0` through `capacity - 1` |
-| Label outside the learned vocabulary | `valued` | Internal unavailable sentinel `capacity` |
+| known label | `valued` | learned label-to-cluster assignment |
+| unknown label | `valued` | shared unavailable assignment |
+| `None` | `null` | no label content |
+| absent repeated position | `padded` | no label content |
 
-The sentinel is not a vocabulary label, decoder class, or prediction candidate.
-It uses the reserved assignment-table row at `capacity` to record that a source
-value was present but its categorical content is unavailable.
+The unavailable row is not a public class or a vocabulary label. This preserves
+the distinction between “a value was supplied but is unknown” and “no value was
+supplied.”
 
 ## Configuration
 
-| Option | Default | Notes |
+| Option | Default | Meaning |
 | --- | --- | --- |
-| `capacity` | `1024` | Maximum number of real labels in the learned vocabulary. Must be positive. There is no extra unavailable class. |
-| `n_clusters` | `(16,16)` | The number of clusters allowed to be selected, in the form (lower_bound, upper_bound). 0 < lower_bound ≤ upper_bound. |
-| `p_unavailable` | `0.01` | Probability of replacing each known valued label with unavailable content during training. Must be between `0` and `1`. |
+| `capacity` | `1024` | Maximum number of learned source labels. Must be positive. |
+| `bounds` | required | An integer `K` fixes exactly `K` latent clusters; `(lower, upper)` enables an adaptive committed count within that inclusive range. |
+| `p_unavailable` | `0.01` | Training probability of routing a known valued label through the unavailable row. |
+| `ema_decay` | `0.99` | Smoothing factor for cluster-usage and range-adherence statistics. |
+| `revive_temperature` | `10.0` | Epoch-scale revival schedule for inactive columns with ranged bounds; `0.0` disables revival. |
 
-Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
-described in [Built-In Data Types](../core-concepts/data-types.qmd) and
-[Learning Modes & Embeddings](../core-concepts/embeddings.qmd).
+`0 < lower <= upper` is required. The upper bound determines the physical
+cluster width and therefore the length of assignment probability vectors.
+With ranged bounds, the training loss tracks usage and balances the currently
+committed columns; epoch callbacks may revive inactive columns or merge highly
+similar active columns. Treat the range as a learned-capacity mechanism, not a
+guarantee that every column will receive equal semantic use.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Shared options such as `mask`, `embed`, and `weight` are
+documented in [Built-In Data Types](../core-concepts/data-types.qmd).
 
-fraud = rf.Cluster("account-id", target=True, n_clusters=(6,30))
+::: {.callout-important}
+A `Cluster` used only as a visible input does not create a reconstruction loss
+for its cluster head, so adaptive cluster selection cannot learn. Configure a
+mask with `reconstruct=True`, or use `mask=True` for an always-skipped target,
+when that head should train.
+:::
 
-fraud
-```
+`p_unavailable` uses Torch randomness during training. The data-module seed
+reproduces row sampling and ordering; it does not make unavailable simulation
+identity- or chunk-invariant. Seed the Torch/Lightning runtime as well when
+run-level reproducibility matters.
 
-Here `n_clusters=(6,30)` indicates that there is not a pre-defined number of 
-clusters desired. `Cluster` will, by construction, enforce that there are no 
-more than 30 clusters possible. The implementation of `Cluster` will provide 
-reasonable enforcement of a lower-bound through harsh penalties--a relaxed constraint.
-This is achieved via a Sinkhorn-Knopp implementation of online clustering.
+## Vocabulary And Cluster State
 
-## Clustering Vocabulary Lifecycle
-
-Training observations add first-seen labels until `capacity` is full. The shared
-online vocabulary coordinates encoding workers and distributed ranks, and the
-resulting label-to-cluster mapping is saved in model and checkpoint state.
-Validation, test, and prediction observations reuse the mapping without adding
-labels.
-
-Once the vocabulary is full, every new label is unavailable. Monitor the
-field-level `vocabulary/capacity` metric and the upstream rate of unseen labels. A
-vocabulary at capacity is not automatically a problem, but frequent unavailable
-values may indicate insufficient capacity, drift, or inconsistent preprocessing.
-
-## State, Content, And Encoder Input
-
-State and categorical content make separate contributions to the encoder:
-
-- Every position receives the learned embedding for its state: `valued`,
-  `null`, `padded`, `masked`, or the reserved `other` state.
-- Every valued position receives a learned cluster-content embedding. In-vocab
-  labels route through their assigned cluster row; out-of-vocabulary labels
-  route through a reserved sentinel row that learns a cluster distribution
-  from `p_unavailable`-simulated OOV rows during training.
-- Non-valued positions contribute zero cluster content while retaining
-  their distinct state embedding.
-
-This is an internal encoder representation. It is not the normalized public
-embedding returned by `embed=True`; see
-[Internal And Exported Embeddings](../core-concepts/embeddings.qmd#internal-and-exported-embeddings).
-
-`p_unavailable` simulates the sentinel-routing path for known labels during
-training. It does not create a new state or teach the model to emit an
-unavailable class.
-
-## Runtime State And Assignments
-
-Read the populated vocabulary from either the model or the pipeline's
-`InterprocessEncodingContext`:
+After training data has populated the field, inspect immutable snapshots by
+model address:
 
 ```python
 vocabulary = rf.Cluster.vocabulary(model, "record/merchant_id")
-
-@rf.preprocess
-def preprocess_merchant(record: dict, *, encoding_context) -> rf.Observation:
-    vocabulary = rf.Cluster.vocabulary(
-        encoding_context,
-        "record/merchant_id",
-    )
-    merchant_id = record["merchant_id"].strip().upper()
-
-    return rf.Observation({
-        **record,
-        "merchant_id": merchant_id if merchant_id in vocabulary else None,
-    })
-
-
-predictions = model.predict(records, preprocess=preprocess_merchant)
-```
-
-The result is an immutable tuple in categorical-index order. It contains only
-populated labels, not the unavailable sentinel or unused capacity. Each call is
-a snapshot, so later vocabulary changes do not alter a previously returned
-tuple. Vocabulary-dependent preprocessing should run only at inference time:
-during training, the current observation is not reserved until after
-preprocessing, making such decisions dependent on data and worker order.
-
-Two model-only bindings expose the learned clustering state:
-
-```python
 assignments = rf.Cluster.assignments(model, "record/merchant_id")
 status = rf.Cluster.status(model, "record/merchant_id")
 ```
 
-`assignments` maps every populated label to its softmax assignment
-probabilities and evaluation-time cluster ID. Each probability tuple covers all
-configured cluster columns, including columns that are currently uncommitted:
+- `vocabulary` is a tuple in categorical-index order.
+- `assignments[label]` contains the evaluation-time `cluster` argmax and the
+  probability tuple across all configured columns.
+- `status["committed"]` lists committed column IDs and `status["usage"]`
+  contains the usage EMA aligned to every configured column.
 
-```python
-{
-    "ACC-55412-X": {
-        "cluster": 3,
-        "probabilities": (0.02, 0.05, 0.08, 0.75, 0.05, 0.05),
-    },
-}
-```
+The usage EMA is model activity, not a count of vocabulary labels. During
+distributed model training these inspection methods expose local model state;
+they do not aggregate buffers across ranks.
 
-The cluster ID is the `argmax` used by the encoder in evaluation mode. The
-unavailable sentinel assignment is excluded. `status` returns the currently
-committed cluster IDs and the usage EMA aligned by cluster ID:
+Monitor the address-qualified `vocabulary.size` metric alongside upstream
+unknown-label rates. A full vocabulary is not inherently an error, but a high
+unavailable rate can indicate drift, inconsistent normalization, or insufficient
+capacity.
 
-```python
-{
-    "committed": (0, 1, 3),
-    "usage": (0.31, 0.27, 0.04, 0.28, 0.05, 0.05),
-}
-```
+### Explicit assignments
 
-Usage is the training-time EMA of the decoder's predicted cluster activity. It
-is not a count or distribution of vocabulary labels assigned to each cluster.
-During distributed training, usage and commitment reflect the local rank; these
-bindings do not aggregate the buffers. Both results contain detached CPU-native
-snapshots rather than live tensors. Call them again after training to observe
-new state; `assignments` also reflects subsequent runtime assignments.
-
-The sentinel row gives every OOV label the same average cluster. When a
-specific new label should route to a specific cluster, add a persistent
-assignment directly through `Cluster`:
+An idle model can persistently assign a label to a cluster:
 
 ```python
 rf.Cluster.assign(model, "record/merchant_id", "new-merchant", 3)
 ```
 
-The assignment may be an integer cluster ID, as above, or a full probability
-vector:
+The assignment may instead be a probability vector whose length equals the
+configured upper bound and whose non-negative values sum to one:
 
 ```python
+probabilities = [0.0] * 64
+probabilities[2] = 0.7
+probabilities[3] = 0.3
+
 rf.Cluster.assign(
     model,
     "record/merchant_id",
     "uncertain-merchant",
-    [0.05, 0.05, 0.60, 0.30],
+    probabilities,
 )
 ```
 
-A persistent assignment writes the label into the field's vocabulary, sets its
-cluster assignment row, and consumes one vocabulary slot. Use a scoped override
-when the mapping should exist only for one operation:
+Assigning a new label consumes a vocabulary slot. Use a scoped override when a
+mapping should exist for one operation only:
 
 ```python
+import pyarrow as pa
+
+requests = pa.Table.from_pylist([{"merchant_id": "new-merchant"}])
+
 with rf.Cluster.override(
     model,
     "record/merchant_id",
     {"new-merchant": 3},
 ):
-    predictions = model.predict([{"merchant_id": "new-merchant"}])
+    result = model.predict(requests)
 ```
 
-Vocabulary and embedding state are restored when the context exits, including
-when prediction raises. This is useful when an inferred assignment from one
-call should become input context for a subsequent call without permanently
-consuming a vocabulary slot.
-
-Both APIs replace the sentinel path for the persistently assigned or temporarily
-overridden label. They do not touch the sentinel row itself. Assignment changes
-require an idle model with local vocabulary state. While an override scope is
-open, model mutation and checkpointing are blocked so the temporary value cannot
-become persistent.
+The original vocabulary and assignment rows are restored even if prediction
+raises. Assignment changes require an idle model and available local vocabulary
+state; saving or rebuilding while an override is open is rejected.
 
 ## Loss And Metrics
 
-When a `Cluster` is trainable because it is masked, pruned, or a target, the decoder
-produces:
+For positions selected for reconstruction, `Cluster` learns the shared state
+classification objective and label reconstruction through latent cluster
+probabilities. Content accuracy includes only valued targets whose labels are
+known. Training also records cluster balance and activity diagnostics,
+including committed count, usage entropy, and unavailable sentinel share.
 
-- five state logits for the shared state vocabulary; and
-- exactly `capacity` content logits for real `clusters`
-
-State accuracy is tracked for selected positions. Content accuracy is tracked only
-where the original target is both valued and available. Additionally, the number of
-clusters selected (activated) by the model is tracked in all cases. This is trivial,
-though validating, in the case that no range of clusters is provided, in favor instead
-of a static number of clusters. In the case that a range of clusters is provided,
-the concept of cluster `adherence` is tracked, which measures how much activation is
-recorded in previously inactive clusters.
+Metric names are address- and stage-qualified. For example, the vocabulary
+size for this field is logged under a name ending in
+`record.merchant_id/train.vocabulary.size`.
 
 ## Prediction Output
 
-The writer scores only labels currently present in the vocabulary snapshot. It
-renormalizes probabilities over that populated vocabulary, excluding unused
-capacity logits. During training, however, all `capacity` logits participate in the
-content objective. This means prediction confidence can change as the
-vocabulary fills, and a low top probability is not a calibrated detector for
-unseen input.
+`Cluster` emits both the most likely latent cluster and the most likely known
+vocabulary label:
 
-`Cluster` returns both the selected latent cluster and the most likely known
-content label. The
-[Prediction Output guide](../guides/prediction-output.qmd#the-canonical-payload)
-defines the shared `state` and `inferred` members:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-{
-    "record/merchant_id": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "cluster": {
-            "value": ...,
-            "probability": ...,
-        },
-        "content": {
-            "value": ...,
-            "probability": ...,
-        },
-        "inferred": ...,
-    }
-}
+```text
+struct<
+  state: struct<valued: float32, null: float32, padded: float32,
+                masked: float32, other: float32>,
+  cluster: struct<value: int32, probability: float32>,
+  content: struct<value: large_string, probability: float32>,
+  inferred: bool,
+  embedding: fixed_size_list<float32>[d_model]  # only with embed=True
+>
 ```
 
-Rendered examples use string addresses for readability. The dictionary returned
-by `Model.predict(...)` is keyed by `rf.Address` objects.
+The shared runtime owns `state` and `inferred`; the extension owns `content` and
+`cluster`. Label probabilities are normalized over the vocabulary populated at
+write time, excluding unused capacity. If the vocabulary is empty, the content
+label is null and its probability is zero. Non-string source labels are exposed
+through the canonical `large_string` output label.
 
-## Capacity And Compute
+Read the typed Arrow fields without converting rows to Python:
 
+```python
+import pyarrow.compute as pc
+
+merchant = pc.struct_field(result["predictions"], "record/merchant_id")
+cluster = pc.struct_field(merchant, "cluster")
+content = pc.struct_field(merchant, "content")
+
+cluster_id = pc.struct_field(cluster, "value")
+cluster_probability = pc.struct_field(cluster, "probability")
+label = pc.struct_field(content, "value")
+label_probability = pc.struct_field(content, "probability")
+```
+
+See [Prediction Output](../guides/prediction-output.qmd#the-canonical-payload)
+for the complete `pyarrow.Table` envelope and repeated-axis rules.
 
 ## Where Next
 
-- Use [Set](set.qmd) for unordered multi-label values.
-- Use [Hash](hash.qmd) for large or unbounded identifiers when equality is
-  useful without a learned vocabulary.
-- Use [Text](text.qmd) when subword meaning matters.
-- Read [Built-In Data Types](../core-concepts/data-types.qmd) for shared state,
-  training, and prediction semantics.
+- Read [Dynamic Masking](../core-concepts/dynamic-masking.qmd) to choose the
+  reconstruction policy that trains the cluster head.
+- Use [Working With Arrow](../guides/working-with-arrow.qmd) to normalize label
+  columns without Python row loops.
+- Use [Model Configuration](../guides/model-configuration.qmd) to tune bounded
+  vocabularies and track drift.

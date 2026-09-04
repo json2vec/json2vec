@@ -1,312 +1,370 @@
 ---
-marimo-static-output: true
 eval: false
 ---
 
 # Postprocessors
 
-**Example status — excerpt:** functions show individual output transformations
-and assume predictions from a complete interactive, batch, or serving path.
+**Example status — reference:** snippets use the shipped same-row `rf.Batch`
+postprocessor contract and Arrow compute kernels.
 
-A RelFlow postprocessor shapes decoded predictions after model writing. Use one
-when the canonical address-keyed output is correct but an API, batch job, or
-warehouse needs a different external contract.
+A postprocessor turns RelFlow's canonical Arrow prediction envelope into the
+table an application actually wants. It receives and returns `rf.Batch`:
 
-This is distinct from an arbitrary Python transformation: supported entry
-points require the `rf.Postprocessor` object returned by `@rf.postprocess`.
-The wrapper validates its signature and supplies only the runtime values that
-entry point owns.
+```python
+@rf.postprocess
+def reshape(batch: rf.Batch) -> rf.Batch:
+    ...
+```
 
-## Define The Contract
+Use one to flatten address fields, rename columns, derive decisions, redact
+values, or build a warehouse schema. Arrow remains the boundary; there are no
+mutable prediction dictionaries or runtime provider arguments.
 
-The first parameter must be named `predictions`. Any additional parameter must
-be keyword-only:
+## Complete Example
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Suppose `record/fraud` is a reconstructed Category and the caller needs a compact
+request/label/score table:
 
-from typing import Any
-
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
 import relflow as rf
 
-Predictions = dict[rf.Address, dict[str, Any]]
-
-
-@rf.postprocess
-def compact_predictions(predictions, *, metadata):
-    label = predictions.get(
-        rf.Address("record", "fraud"), {}
-    ).get("content", {})
-
-    return {
-        "fraud": label.get("value"),
-        "fraud_probability": label.get("probability"),
-        "metadata": metadata,
-    }
-```
-
-Return a mapping to replace the canonical predictions. Return `None` only after
-mutating `predictions` in place. Returning any other value is an error.
-
-The model-facing input is always keyed by `rf.Address`. A postprocessor may
-return string keys when the surrounding runtime supports an application-specific
-shape. After that transformation, the returned mapping—not the default
-RelFlow envelope—is the contract you must version and test.
-
-## Where They Run
-
-| Entry point | Invocation |
-| --- | --- |
-| `Model.predict(..., postprocess=processor)` | After `model.write(...)`; returns the processed mapping directly. |
-| `rf.Writer(..., postprocessor=processor)` | Before each prediction batch is converted to a Parquet table. |
-| `rf.Deployment(...).postprocess(processor)` | Once per request, before the HTTP response is denested and serialized. |
-
-The runtimes do not supply the same context. Request only the named providers
-the processor actually needs:
-
-| Provider | Interactive | Writer | Deployment |
-| --- | :---: | :---: | :---: |
-| `batch` | Raw batch passed to `Model.predict` | Encoded tensorfield batch | — |
-| `observations` | Processed model-facing observations | — | Processed model-facing observations |
-| `input` | Encoded tensorfields | Encoded tensorfields | Encoded tensorfields |
-| `metadata` | Processed observation metadata | Row-aligned processed observations | Processed observation metadata |
-| `request` | — | — | Validated request dictionary |
-| `batch_indices` | — | Lightning value when supplied | — |
-| `batch_idx` | — | Prediction batch index | — |
-| `dataloader_idx` | — | Prediction dataloader index | — |
-
-If a requested provider is unavailable and the parameter is required, the
-postprocessor raises an error. Make the parameter optional to share one
-processor across compatible runtimes:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-@rf.postprocess
-def audit_shape(
-    predictions,
-    *,
-    request: dict | None = None,
-    batch_idx: int | None = None,
-):
-    return {
-        "predictions": predictions,
-        "request": request,
-        "batch_idx": batch_idx,
-    }
-```
-
-The runtime supplies `None` for an unavailable optional provider. Avoid a
-single processor with many optional inputs when separate batch and API
-contracts would be clearer.
-
-## Metadata Is Processed Input
-
-`metadata` does not necessarily contain the original source dictionary. It is
-the model-facing observation after the RelFlow preprocessor runs. Each batch
-item is represented as a list containing its record; for the common one-to-one
-case, read `observation[0]`:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-def request_ids(metadata):
-    return [
-        observation[0].get("request_id")
-        for observation in metadata
-    ]
-```
-
-Use interactive `batch` or deployment `request` when the unprocessed caller
-input is specifically required. Prefer carrying stable join identifiers into
-the processed observation so batch output remains self-describing.
-
-## Flatten Interactive Output
-
-`Model.predict(...)` preserves the leading input batch dimension. A compact
-postprocessor therefore returns lists for batched values:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-@rf.postprocess
-def compact_interactive(predictions, *, batch):
-    payload = predictions.get(rf.Address("record", "fraud"), {})
-    content = payload.get("content", {})
-
-    return {
-        "fraud": content.get("value"),
-        "probability": content.get("probability"),
-        "input_count": len(batch),
-    }
-
-
-response = model.predict(
-    [{"amount": 12.5, "merchant": "books"}],
-    postprocess=compact_interactive,
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "fraud_probability"),
 )
-```
+def warehouse(batch: rf.Batch) -> rf.Batch:
+    inputs = batch.data["inputs"]
+    predictions = batch.data["predictions"]
+    fraud = pc.struct_field(predictions, "record/fraud")
+    content = pc.struct_field(fraud, "content")
+    probability = pc.struct_field(content, "probability")
 
-For a one-row request, `fraud` and `probability` remain one-element lists. This
-differs from deployment, which denests the one-row response before JSON
-serialization. See [Prediction Output](prediction-output.qmd) before sharing a
-consumer between those transports.
-
-## Build An API Response
-
-A deployment postprocessor can hide schema addresses and attach request data:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-@rf.postprocess
-def api_response(predictions, *, request):
-    payload = predictions.get(rf.Address("record", "fraud"), {})
-    content = payload.get("content", {})
-
-    return {
-        "request_id": request.get("request_id"),
-        "fraud": content.get("value"),
-        "probability": content.get("probability"),
-    }
-
-
-deployment = rf.Deployment(
-    checkpoint="artifacts/fraud-model.ckpt"
-).postprocess(api_response)
-```
-
-The serving runtime denests the returned one-row lists. Attach a Pydantic
-response signature with `deployment.forge(response=...)` when this external
-shape should also be validated and published in OpenAPI.
-
-## Add Derived Flags
-
-Derived values should make their policy explicit. Bind user-controlled
-parameters with `.partial(...)`; provider names cannot be user-bound:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import copy
-
-
-@rf.postprocess
-def add_confidence_flags(predictions, *, threshold: float):
-    output = copy.deepcopy(predictions)
-    payload = output.get(rf.Address("record", "fraud"), {})
-    content = payload.get("content", {})
-    probabilities = content.get("probability")
-
-    if isinstance(probabilities, list):
-        content["high_confidence"] = [
-            score >= threshold if score is not None else None
-            for score in probabilities
-        ]
-
-    return output
-
-
-production_flags = add_confidence_flags.partial(threshold=0.80)
-```
-
-The name `high_confidence` is an application policy, not model calibration.
-Choose thresholds on held-out data and version them with the response contract.
-
-## Create Writer-Compatible Rows
-
-A writer postprocessor must return row-aligned mappings that Polars can convert
-to a stable table:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-@rf.postprocess
-def warehouse_rows(predictions, *, metadata):
-    payload = predictions.get(rf.Address("record", "fraud"), {})
-    content = payload.get("content", {})
-
-    return {
-        rf.Address("record", "warehouse_row"): {
-            "request_id": request_ids(metadata),
-            "fraud": content.get("value"),
-            "fraud_probability": content.get("probability"),
+    table = pa.table(
+        {
+            "request_id": pc.struct_field(inputs, "request_id"),
+            "fraud": pc.struct_field(content, "value"),
+            "fraud_probability": probability,
         }
-    }
+    )
+    return batch.replace(table)
 
+@rf.postprocess(
+    requires=("fraud_probability",),
+    produces=("send_to_review",),
+)
+def review(batch: rf.Batch, *, threshold: float) -> rf.Batch:
+    selected = pc.greater_equal(batch.data["fraud_probability"], threshold)
+    return batch.replace(batch.data.append_column("send_to_review", selected))
 
-writer = rf.Writer(
-    "predictions/warehouse-run",
-    postprocessor=warehouse_rows,
+review_stage = review.partial(threshold=0.8)
+output = (warehouse, review_stage)
+
+result = model.predict(
+    requests,
+    retain=("request_id",),
+    postprocess=output,
 )
 ```
 
-Keep every returned list the same length as the prediction batch, with stable
-keys and value types across batches. The first writer batch establishes the
-Arrow schema used by later batches.
+`result` is the replacement `pyarrow.Table`, not a Python mapping and not the
+original `inputs` / `predictions` envelope. `warehouse` runs first and replaces
+that envelope; `review` then reads the column declared and returned by
+`warehouse`.
 
-## Remove Embeddings Or Sensitive Fields
+## Build An Ordered Pipeline
 
-Embeddings can be large or sensitive. Remove them at a public boundary when the
-consumer does not require them:
+Every postprocessor argument accepts one decorated postprocessor, a list, a
+tuple, or `None`. RelFlow snapshots the value as an immutable tuple:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+| Supplied value | Canonical pipeline |
+| --- | --- |
+| `None` | `()` |
+| `warehouse` | `(warehouse,)` |
+| `[warehouse, review_stage]` | `(warehouse, review_stage)` |
+| `(warehouse, review_stage)` | `(warehouse, review_stage)` |
 
-import copy
+Only objects returned by `@rf.postprocess` are accepted. Execution is strictly
+left to right; RelFlow never topologically sorts stages. Prefer a tuple for a
+pipeline reused by interactive prediction, a writer, and deployment.
 
+`@rf.postprocess` accepts the same top-level `requires` and `produces`
+declarations as `@rf.preprocess`. Before each stage, RelFlow checks that its
+declared requirements exist in the actual input table. Afterward, it checks
+that every declared output exists. Reversing `(warehouse, review_stage)` therefore
+fails because `fraud_probability` does not exist before `warehouse` creates it.
+Declarations validate composition; they do not preserve columns, infer what
+Python code reads, or reorder the pipeline.
 
-@rf.postprocess
-def without_embeddings(predictions):
-    output = copy.deepcopy(predictions)
+The canonical prediction envelope is assembled before the first stage. Thus
+the first postprocessor can require `predictions` and, when `retain` is not
+empty, `inputs`. A later stage sees exactly the table returned by its
+predecessor.
 
-    for payload in output.values():
-        payload.pop("embedding", None)
+## The Same-Row Contract
 
-    return output
+A postprocessor may:
+
+- select or reorder columns;
+- flatten nested structs;
+- rename or cast fields;
+- derive columns with Arrow compute;
+- create nested structs or lists;
+- redact inputs or predictions;
+- replace the canonical envelope completely.
+
+No stage may:
+
+- filter rows;
+- reorder rows;
+- expand or group observations;
+- return `None`;
+- return a bare `pa.Table`;
+- return a zero-column table.
+
+Return `batch.replace(table)`. After every stage, RelFlow validates the same row
+count, the same identity, and at least one Arrow column. This identifies the
+stage that violated the contract instead of allowing a later transform to hide
+it. Preserving value order is also part of your contract: `replace` cannot
+discover that arbitrary user code reordered values before constructing a
+same-length table.
+
+If a row-changing operation should affect model execution, put it in a
+preprocessor and use `batch.filter`, `order`, `expand`, `explode`, or `group`.
+If it is merely downstream reporting, perform it explicitly after
+`Model.predict` or after reading Parquet.
+
+## Read Canonical Fields
+
+Without a prior postprocessor, `batch.data` has:
+
+```text
+inputs: struct<retained processed fields> or null
+predictions: struct<address fields> or null
 ```
 
-This changes only written output. It does not disable embedding computation;
-remove `embed=True` from the schema when avoiding that computation is the goal.
+Use Arrow's struct kernel at every nested level:
 
-## When Not To Use One
+```python
+predictions = batch.data["predictions"]
+field = pc.struct_field(predictions, "record/fraud")
+state = pc.struct_field(field, "state")
+content = pc.struct_field(field, "content")
 
-Do not use a postprocessor to repair a model input or learning problem.
+valued_probability = pc.struct_field(state, "valued")
+label = pc.struct_field(content, "value")
+score = pc.struct_field(content, "probability")
+inferred = pc.struct_field(field, "inferred")
+```
 
-- If a field reads the wrong source value, fix its query or the RelFlow
-  preprocessor.
-- If the wrong thing is trained or embedded, change `target`, `p_mask`,
-  `p_prune`, or `embed` in the schema.
-- If the model is poorly calibrated, evaluate and retrain it; renaming a score
-  does not create confidence.
-- If an external enrichment can fail or block, keep it outside the model path
-  unless the service explicitly owns that dependency and failure policy.
+Address strings include `/`; they are ordinary Arrow struct field names, not
+paths interpreted by `struct_field`.
 
-Postprocessors are best for naming, filtering, thresholding, redaction,
-metadata joins, and stable response/warehouse shaping.
+## Retain Every Source Value You Need
 
-## Common Failures
+The output `inputs` struct contains only explicit `retain` columns. A
+postprocessor cannot retroactively read a source column that prediction did not
+carry:
 
-| Symptom | Likely cause or next check |
-| --- | --- |
-| Callable is rejected | Decorate it with `@rf.postprocess`; an ordinary transformation is not a processor object. |
-| A provider is unavailable | Use the correct runtime or make that keyword-only parameter optional. |
-| `metadata` items have no `.get` | Each item is a list; read its model-facing record at `observation[0]`. |
-| Writer fails on a later batch | Keys, row counts, or value types changed after the first Arrow schema was established. |
-| Interactive and HTTP shapes differ | Interactive preserves the batch dimension; deployment denests each request. |
-| Processor returns an error | Return a mapping or mutate `predictions` and return `None`. |
+```python
+result = model.predict(
+    requests,
+    retain=("request_id", "event_time"),
+    postprocess=warehouse,
+)
+```
 
-## Where Next
+Retention resolves after preprocessing. This is useful when `request_id` is
+renamed or derived there. It is independent of model binding: an unmodeled
+identifier can be retained, and a modeled feature is not retained by default.
 
-- Understand the source envelope in [Prediction Output](prediction-output.qmd).
-- Use writer-specific shaping in [Batch Inference](batch-inference.qmd).
-- Wire and validate API responses in [Online Serving](serving.qmd).
-- Use [Data Modules](data-modules.qmd#preprocessors) for input-side processing.
+Use `retain="*"` only when the output contract intentionally includes every
+processed source column. Explicit tuples are safer for APIs and stable
+warehouse schemas.
+
+## Bind Application Configuration
+
+The first argument must be named `batch`. Every additional parameter is
+keyword-only and user-owned. Configure it immutably with `.partial(...)`:
+
+```python
+@rf.postprocess(
+    requires=("predictions",),
+    produces=("queue", "score", "selected"),
+)
+def decide(
+    batch: rf.Batch,
+    *,
+    threshold: float,
+    queue: str = "manual-review",
+) -> rf.Batch:
+    predictions = batch.data["predictions"]
+    field = pc.struct_field(predictions, "record/fraud")
+    content = pc.struct_field(field, "content")
+    probability = pc.struct_field(content, "probability")
+    size = len(batch)
+
+    table = pa.table(
+        {
+            "queue": pa.repeat(pa.scalar(queue), size),
+            "score": probability,
+            "selected": pc.greater_equal(probability, threshold),
+        }
+    )
+    return batch.replace(table)
+
+review = decide.partial(threshold=0.8, queue="fraud-review")
+```
+
+RelFlow reports a missing required value, unknown name, or second binding of
+the same parameter before running the function. The decorated processor remains
+reusable; `.partial` returns a new configured object.
+
+Postprocessors have no `strata`, `schema`, `request`, `metadata`,
+`observations`, `batch_idx`, `dataloader_idx`, or other injected providers.
+Everything dynamic is already in the Arrow batch. This keeps interactive,
+callback, and deployment behavior identical.
+
+## Preserve The Canonical Envelope Selectively
+
+A postprocessor does not have to flatten everything. This example drops
+retained inputs while preserving typed predictions:
+
+```python
+@rf.postprocess
+def predictions_only(batch: rf.Batch) -> rf.Batch:
+    return batch.replace(pa.table({"predictions": batch.data["predictions"]}))
+```
+
+This example exposes an identifier and the complete prediction struct:
+
+```python
+@rf.postprocess
+def with_id(batch: rf.Batch) -> rf.Batch:
+    inputs = batch.data["inputs"]
+    return batch.replace(
+        pa.table(
+            {
+                "request_id": pc.struct_field(inputs, "request_id"),
+                "predictions": batch.data["predictions"],
+            }
+        )
+    )
+```
+
+## Handle Predicted State Explicitly
+
+Datatype content can exist even when the state decoder favors a non-valued
+state. An application may null content unless `valued` wins:
+
+```python
+@rf.postprocess
+def nullable_label(batch: rf.Batch) -> rf.Batch:
+    predictions = batch.data["predictions"]
+    field = pc.struct_field(predictions, "record/fraud")
+    state = pc.struct_field(field, "state")
+    content = pc.struct_field(field, "content")
+
+    state_names = ("valued", "null", "padded", "masked", "other")
+    scores = pa.table(
+        {name: pc.struct_field(state, name) for name in state_names}
+    )
+    winner = pc.max_element_wise(*scores.columns)
+    is_valued = pc.equal(pc.struct_field(state, "valued"), winner)
+    label = pc.if_else(
+        is_valued,
+        pc.struct_field(content, "value"),
+        pa.scalar(None, pa.large_string()),
+    )
+    return batch.replace(pa.table({"fraud": label}))
+```
+
+Tie behavior in that example treats a tied `valued` score as valued. If ties
+matter, define a deterministic policy explicitly. Do not treat `inferred` as a
+confidence score; it records whether input was masked.
+
+## Install A Postprocessor Pipeline
+
+Interactive prediction uses `postprocess=` with either one stage or an ordered
+collection:
+
+```python
+result = model.predict(
+    requests,
+    retain=("request_id",),
+    postprocess=output,
+)
+```
+
+The Parquet callback uses `postprocessor=`:
+
+```python
+writer = rf.Writer(
+    "predictions",
+    postprocessor=output,
+)
+```
+
+In both cases every stage runs once, in order, on each already-written model
+batch. The writer then prepends protected identity and locks the first result's
+exact Arrow schema. Deployment runs the same pipeline once per valid
+microbatch before its terminal JSON conversion.
+
+## Schema Stability
+
+The final postprocessor-pipeline Arrow schema is part of the consumer contract:
+
+- keep field names and order stable;
+- choose explicit physical types;
+- ensure empty and all-null arrays retain those types;
+- do not add fields only when a value happens to appear;
+- do not infer schema from the first non-empty prediction;
+- test one-row and multi-row inputs.
+
+`rf.Writer` uses the first final pipeline result to open its Parquet schema. A later field
+addition, removal, reordering, or type change is an error; it is never silently
+cast through Python or Polars.
+
+## Testing A Postprocessor Pipeline
+
+Test it through `Model.predict` for a true end-to-end contract:
+
+```python
+result = model.predict(
+    requests,
+    retain=("request_id",),
+    postprocess=output,
+)
+
+assert result.column_names == [
+    "request_id",
+    "fraud",
+    "fraud_probability",
+    "send_to_review",
+]
+assert result.num_rows == requests.num_rows
+assert result.schema.field("fraud").type == pa.large_string()
+assert result.schema.field("fraud_probability").type == pa.float32()
+```
+
+Also test each stage directly, the complete tuple, typed empty output if your
+source can be empty, and an order-sensitive identifier column so an accidental
+reorder cannot hide behind equal row count.
+
+## Common Mistakes
+
+- Forgetting to name a needed source column in `retain`.
+- Reversing stages and expecting RelFlow to infer dependency order.
+- Declaring `produces=("score",)` but returning a table without `score`.
+- Returning `pa.Table` instead of `batch.replace(table)`.
+- Filtering inside the postprocessor.
+- Calling `.to_pylist()` merely to rename or select fields.
+- Mutating shared state across prediction batches.
+- Inferring output fields from whichever labels occur in one batch.
+- Confusing Category probability with calibrated confidence.
+- Returning an empty table after redaction; keep at least one column.
+
+See [Prediction Output](prediction-output.qmd) for the canonical input schema,
+[Batch Inference](batch-inference.qmd) for persistence, and
+[Working With Arrow](working-with-arrow.qmd) for Arrow column recipes.

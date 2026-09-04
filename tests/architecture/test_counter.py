@@ -4,7 +4,7 @@ import torch
 
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import TENSORFIELDS
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 
 
 def test_counter():
@@ -55,6 +55,20 @@ def test_counter_ignores_values_outside_counter_size():
 
     assert torch.equal(counter.counts, torch.tensor([2, 2, 1], dtype=torch.int64))
     assert torch.equal(counter._pending_counts, torch.tensor([1, 1, 0], dtype=torch.int64))  # noqa: SLF001
+
+
+def test_counter_learns_precounted_observations_outside_module_train_mode():
+    counter = Counter(address=Address("pristine"), size=3).eval()
+
+    counter.learn(torch.tensor([2, 0, 3], dtype=torch.int64))
+
+    assert torch.equal(counter.counts, torch.tensor([3, 1, 4], dtype=torch.int64))
+    assert torch.equal(counter._pending_counts, torch.tensor([2, 0, 3], dtype=torch.int64))  # noqa: SLF001
+
+
+def test_tally_returns_fixed_width_counts_for_empty_and_out_of_range_values():
+    assert torch.equal(tally(torch.tensor([], dtype=torch.int64), 3), torch.zeros(3, dtype=torch.int64))
+    assert torch.equal(tally(torch.tensor([-1, 0, 2, 3]), 3), torch.tensor([1, 0, 1]))
 
 
 def test_counter_sync_reduces_pending_delta_only(monkeypatch):

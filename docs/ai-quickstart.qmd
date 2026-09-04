@@ -41,7 +41,7 @@ model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -74,56 +74,68 @@ record = {
 }
 ```
 
-Same-named fields infer queries such as `[*].customer_tier` and
-`[*].line_items[*].sku`. Use an explicit `query=...` for stable source-path
-differences and a `@rf.preprocess` object for Python logic, normalization,
-sorting, or windowing. See [Binding Data](core-concepts/binding-data.qmd) and
-[Advanced Query Paths](core-concepts/querypaths.qmd).
+Arrow field names and nesting match the schema: `customer_tier` is a root field
+and `sku` is a field on each `line_items` struct. This direct binding is the
+default. Put an Arrow-native structural `query=...` on a root, branch, or leaf
+when the source path differs; use an `@rf.preprocess` object for coordinated
+reshaping, normalization, sorting, filtering, joins, or windowing.
+See [Binding Data](core-concepts/binding-data.qmd) and
+[Query Paths](core-concepts/querypaths.qmd).
 
 ## Assign Learning Roles
 
 | Configuration | Input behavior | Output / learning behavior |
 | --- | --- | --- |
 | plain leaf | visible when present | context only by default |
-| `target=True` | always hidden | supervised decode and loss |
-| `p_mask=x` | sampled positions hidden | reconstruction at selected positions |
-| `p_prune=x` | whole leaf instances sampled and hidden | reconstruction of the pruned field |
-| branch `mask=rf.Mask(...)` | descendant sampling is limited to candidate coordinates/windows | each descendant samples independently within those candidates |
+| `mask=True` | always skipped by the encoder | supervised reconstruction |
+| `mask=x` | sampled positions use a learned mask during training | context regularization only |
+| `mask=rf.Mask(rate=x, reconstruct=True)` | sampled positions use a learned mask | reconstruction at selected positions |
+| `mask=rf.Mask(query="selected", skip=True)` | selected positions are omitted from encoder work | train-only dropout by default |
+| branch `mask=...` | one decision is shared by the entire selected branch coordinate | atomic subtree masking or skipping |
 | `embed=True` | does not hide input | exports an embedding at the address |
 | `active=False` | excluded from execution | remains in the serializable schema |
 
-`target=True` is shorthand for `p_prune=1.0`. See
+`mask=True` is shorthand for
+`rf.Mask(skip=True, dropout=False, reconstruct=True)`. See
 [Learning Modes & Embeddings](core-concepts/embeddings.qmd) for the canonical
 role definitions and [Dynamic Masking](core-concepts/dynamic-masking.qmd) for
-repeated-window selection.
+selection and branch atomicity. A policy with a remaining fractional `rate` is
+inactive during ordinary prediction; use a deterministic Boolean selector for
+request-time routing. See
+[Dynamic Mask Preprocessors](guides/dynamic-mask-preprocessors.qmd) for complete
+Arrow and Awkward selector recipes.
 
 ## Run The Lifecycle
 
 RelFlow uses ordinary Lightning loops for training and large-batch prediction:
 
 ```python
-datamodule = rf.PolarsDataModule(
+import lightning.pytorch as lit
+import pyarrow as pa
+
+datamodule = rf.ArrowDataModule(
     model=model,
-    train=train_frame,
-    validate=validate_frame,
+    train=train_table,
+    validate=validate_table,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
 )
 
+trainer = lit.Trainer(max_epochs=1)
 trainer.fit(model=model, datamodule=datamodule)
 metrics = trainer.validate(model=model, datamodule=datamodule)
 
 model.save("model.pt")
 restored = rf.Model.load("model.pt")
 
-predictions = restored.predict(
-    [{"customer_tier": "gold", "line_items": []}]
-)
+requests = validate_table.drop(["returned"]).slice(0, 1)
+result = restored.predict(requests)
 ```
 
-Prediction requests normally omit fields configured with `target=True`. Output
-is keyed by `rf.Address`; decoded leaves include `state`, type-specific
+Prediction requests normally omit fields configured with `mask=True`.
+`Model.predict` returns a `pyarrow.Table`; its `predictions` struct has one
+field per schema address. Decoded leaves include `state`, type-specific
 `content`, and `inferred`, while configured nodes can include `embedding`.
 
 Use [Training With Lightning](guides/lightning.qmd) for trainer behavior,
@@ -135,33 +147,49 @@ rank-partitioned Parquet output.
 
 ## Shape The Boundaries
 
-A preprocessor is part of the input contract:
+A preprocessor is part of the Arrow input contract:
 
 ```python
-@rf.preprocess
-def normalize_order(record: dict) -> rf.Observation:
-    return rf.Observation(
+import pyarrow as pa
+import pyarrow.compute as pc
+
+@rf.preprocess(
+    requires=("tier", "items"),
+    produces=("customer_tier", "line_items"),
+)
+def normalize_order(batch: rf.Batch) -> rf.Batch:
+    tier = pc.utf8_lower(pc.utf8_trim_whitespace(batch.data["tier"]))
+    data = pa.table(
         {
-            "customer_tier": record["tier"].strip().lower(),
-            "line_items": record["items"],
+            "customer_tier": tier,
+            "line_items": batch.data["items"],
         }
     )
-
-raw_requests = [{"tier": " Gold ", "items": []}]
-predictions = restored.predict(raw_requests, preprocess=normalize_order)
+    return batch.replace(data)
 ```
 
 A postprocessor is part of the application output contract:
 
 ```python
-@rf.postprocess
-def response(predictions):
-    field = predictions[rf.Address("order", "returned")]
-    return {"returned": field["content"]["value"]}
+@rf.postprocess(
+    requires=("predictions",),
+    produces=("returned",),
+)
+def response(batch: rf.Batch) -> rf.Batch:
+    predictions = batch.data["predictions"]
+    returned = pc.struct_field(predictions, "order/returned")
+    content = pc.struct_field(returned, "content")
+    return batch.replace(
+        pa.table({"returned": pc.struct_field(content, "value")})
+    )
 ```
 
-Pass the same preprocessor through training and inference. Keep the stable,
-address-keyed model output intact until the postprocessor boundary. See
+Each processor argument accepts a decorated singleton, list, tuple, or `None`
+and snapshots it as an immutable tuple. A multi-stage pipeline runs strictly
+left to right; `requires` and `produces` validate each boundary but never
+reorder it. Pass the same ordered preprocessor tuple through training and
+inference. Keep the stable, typed model output intact until the first
+postprocessor stage. See
 [Data Flow](core-concepts/data-flow.qmd) and
 [Postprocessors](guides/postprocessors.qmd).
 
@@ -171,10 +199,11 @@ address-keyed model output intact until the postprocessor boundary. See
 | --- | --- | --- |
 | Root model | `rf.Model(...)` | [Model Tree](core-concepts/model-tree.qmd) |
 | Repeated context | `rf.Branch(...)` | [Branch](data-types/branch.qmd) |
-| Typed leaves | `rf.Number`, `Category`, `Set`, `Hash`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
-| In-memory / streaming input | `rf.PolarsDataModule`, `rf.StreamingDataModule` | [Data Modules](guides/data-modules.qmd) |
+| Typed leaves | `rf.Number`, `Category`, `Cluster`, `Set`, `Hash`, `DateParts`, `Boolean`, `Vector`, `Text` | [Built-In Data Types](core-concepts/data-types.qmd) |
+| Arrow input | `rf.ArrowDataModule` | [Data Modules](guides/data-modules.qmd) |
+| Input adapters | `rf.PolarsDataModule`, `rf.CustomDataModule`, `rf.SyntheticDataModule` | [Data Modules](guides/data-modules.qmd) |
 | Interactive prediction | `model.predict(...)` | [Getting Started](getting-started.qmd#interpret-the-prediction) |
-| Prediction contract | address-keyed `state`, `content`, `inferred`, `embedding` | [Prediction Output](guides/prediction-output.qmd) |
+| Prediction contract | Arrow `inputs` and address-named `predictions` structs | [Prediction Output](guides/prediction-output.qmd) |
 | Batch prediction | `rf.Writer(...)` | [Batch Inference](guides/batch-inference.qmd) |
 | Online prediction | `rf.Deployment(...)` | [Serving](guides/serving.qmd) |
 | Input / output transforms | `@rf.preprocess`, `@rf.postprocess` | [Binding Data](core-concepts/binding-data.qmd), [Postprocessors](guides/postprocessors.qmd) |
@@ -190,10 +219,12 @@ address-keyed model output intact until the postprocessor boundary. See
 - Use `Hash` for large identifiers whose equality matters. Matching values
   align across leaves in one encoded batch, though branch pooling can discard
   token-level correspondence.
-- Set bounded capacity for Category and Set fields, then monitor vocabulary
-  growth rather than inventing a missing-value class.
+- Use `Cluster` when a high-cardinality learned vocabulary should share a much
+  smaller set of latent representations.
+- Set bounded capacity for Category, Cluster, and Set fields, then monitor
+  vocabulary growth rather than inventing a missing-value class.
 - Use `overflow="tail"` only when source order places the newest values last.
-- Include targets in train/validation data; omit them from ordinary prediction
-  requests.
+- Include reconstruction values in train/validation data; prediction may omit
+  only unconditional deterministic reconstructions such as `mask=True`.
 - Preserve the same preprocessing, schema, vocabulary/normalizer state, and
   weights across evaluation and inference.

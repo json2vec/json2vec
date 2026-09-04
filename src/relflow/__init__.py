@@ -3,12 +3,11 @@
 The top-level package exports the constructors and helpers used by most
 applications: `Model(...)` for model construction, tensorfield
 request constructors such as `Category` and `Number`, data modules, schema
-mutation predicates, and the `@preprocess` decorator.
+mutation predicates, and the `@preprocess` and `@postprocess` decorators.
 """
 
 from typing import TYPE_CHECKING, Any
 
-from relflow import helpers as helpers
 from relflow._version import __version__
 from relflow.architecture.checkpoint import RollbackCheckpoint
 from relflow.architecture.mutations import MutationLockCallback, RuntimePlacementCallback
@@ -17,31 +16,24 @@ from relflow.architecture.root import (
     OptimizerConfig,
     SchedulerConfig,
 )
-from relflow.data.datasets import CustomDataModule, PolarsDataModule, StreamingDataModule, SyntheticDataModule
-from relflow.data.nested import MASK_LITERAL, MaskLiteral
+from relflow.data.arrow import Batch
+from relflow.data.datasets import ArrowDataModule, CustomDataModule, PolarsDataModule, SyntheticDataModule
 from relflow.data.processors import (
-    Metadata,
-    Observation,
     Postprocessor,
-    PostprocessorProvider,
-    PostprocessorResult,
-    Predictions,
     Preprocessor,
     PreprocessorProvider,
-    RawBatch,
-    RawObservation,
     postprocess,
     preprocess,
 )
+from relflow.data.ragged import RaggedField
+from relflow.helpers import Jitter
 from relflow.inference.callback import Writer
 from relflow.structs.enums import (
     AttentionMode,
     Component,
     Metric,
     Overflow,
-    ShardingStrategy,
     Strata,
-    Suffix,
     TensorKey,
     Tokens,
 )
@@ -55,7 +47,16 @@ from relflow.structs.experiment import (
 )
 from relflow.structs.structure import Branch, Mask
 from relflow.structs.tree import Address, Leaf
-from relflow.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
+from relflow.tensorfields import (
+    TENSORFIELDS,
+    Context,
+    DecoderBase,
+    EmbedderBase,
+    Extension,
+    RequestBase,
+    TensorFieldBase,
+    TensorInput,
+)
 from relflow.tensorfields.extensions.boolean import Request as Boolean
 from relflow.tensorfields.extensions.category import Request as Category
 from relflow.tensorfields.extensions.cluster import Request as Cluster
@@ -116,57 +117,50 @@ __all__ = [
     "Branch",
     "Boolean",
     "AttentionMode",
+    "ArrowDataModule",
+    "Batch",
     "Cluster",
     "Category",
     "Component",
+    "Context",
     "CustomDataModule",
     "DateParts",
     "DecoderBase",
     "Deployment",
     "EmbedderBase",
     "Hash",
-    "helpers",
     "Schema",
     "Input",
     "JSONBackend",
+    "Jitter",
     "Leaf",
     "Metric",
-    "MASK_LITERAL",
     "Mask",
-    "MaskLiteral",
-    "Metadata",
     "Model",
     "ModelSource",
     "MutationLockCallback",
     "NodeAttribute",
     "NodePredicate",
     "Number",
-    "Observation",
     "OptimizerConfig",
     "Overflow",
-    "Plugin",
+    "Extension",
     "PolarsDataModule",
     "Postprocessor",
-    "PostprocessorProvider",
-    "PostprocessorResult",
-    "Predictions",
     "Preprocessor",
     "PreprocessorProvider",
-    "RawBatch",
-    "RawObservation",
+    "RaggedField",
     "RequestBase",
     "RollbackCheckpoint",
     "RuntimePlacementCallback",
     "Set",
     "SchedulerConfig",
     "SchemaField",
-    "ShardingStrategy",
-    "StreamingDataModule",
     "SyntheticDataModule",
     "Strata",
-    "Suffix",
     "TENSORFIELDS",
     "TensorFieldBase",
+    "TensorInput",
     "TensorKey",
     "Text",
     "Tokens",

@@ -9,7 +9,7 @@ eval: false
 they illustrate an ablation procedure rather than a standalone benchmark.
 
 Field importance measures how much a trained supervised model depends on each
-input leaf. The pattern is simple: train with stochastic input pruning so the
+input leaf. The pattern is simple: train with stochastic structural skipping so the
 model has seen missing fields, test a baseline with all inputs active, then
 temporarily deactivate one input leaf at a time and compare the test loss.
 
@@ -17,12 +17,12 @@ This is a model-behavior diagnostic, not a causal explanation. Higher loss
 after deactivation means the model depended more on that field under this
 training run, schema, data split, and random seed.
 
-## Train With Prunable Inputs
+## Train With Skippable Inputs
 
-Use `p_prune` on candidate input fields. During training, some whole leaf
-instances are withheld and reconstructed, which makes later deactivation less
-out-of-distribution than abruptly removing a field from a model that always saw
-it.
+Use a reconstructing `skip` policy on candidate input fields. Some leaf
+coordinates are omitted from input tensorization and reconstructed, which makes
+later deactivation less out-of-distribution than abruptly removing a field from
+a model that always saw it.
 
 ```{python .marimo}
 #| echo: true
@@ -45,11 +45,19 @@ model = rf.Model(
     n_heads=4,
     batch_size=32,
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-3),
-    sepal_length=rf.Number(p_prune=0.20),
-    sepal_width=rf.Number(p_prune=0.20),
-    petal_length=rf.Number(p_prune=0.20),
-    petal_width=rf.Number(p_prune=0.20),
-    species=rf.Category(target=True, size=3, topk=[2]),
+    sepal_length=rf.Number(
+        mask=rf.Mask(rate=0.20, skip=True, reconstruct=True),
+    ),
+    sepal_width=rf.Number(
+        mask=rf.Mask(rate=0.20, skip=True, reconstruct=True),
+    ),
+    petal_length=rf.Number(
+        mask=rf.Mask(rate=0.20, skip=True, reconstruct=True),
+    ),
+    petal_width=rf.Number(
+        mask=rf.Mask(rate=0.20, skip=True, reconstruct=True),
+    ),
+    species=rf.Category(mask=True, size=3, topk=[2]),
 )
 
 train_records.head(3)
@@ -71,9 +79,8 @@ datamodule = rf.PolarsDataModule(
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    observation_buffer_size=256,
-    chunk_batch_size=32,
-    sample_rate=1.0,
+    seed=42,
+    sample=1.0,
 )
 
 trainer = lit.Trainer(
@@ -94,7 +101,7 @@ use domain-appropriate time, identity, or grouped boundaries; see
 
 ## Score Ablations
 
-For scoring, clear input pruning so the baseline uses all active inputs. Then
+For scoring, clear the sampled skip policies so the baseline uses all active inputs. Then
 temporarily set `active=False` on one leaf for a single test run. The
 `model.override(...)` context manager restores the schema afterward.
 
@@ -102,7 +109,7 @@ temporarily set `active=False` on one leaf for a single test run. The
 #| echo: true
 #| output: true
 
-model.update(rf.where("type") == "number", p_prune=0.0)
+model.update(rf.where("type") == "number", mask=False)
 
 baseline = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
 print(f"baseline: {baseline['loss/test']:.4f}")
@@ -147,17 +154,17 @@ Treat the output as an operational diagnostic:
 - A negative `delta` can happen when a field adds noise or when the training run
   is too short to be stable.
 
-Run the same workflow across seeds and validation splits before making pruning
+Run the same workflow across seeds and validation splits before making removal
 decisions. For nested schemas, compare leaves within the same semantic branch
 before comparing unrelated branches.
 
 ## Caveats
 
 Do not deactivate fields that the model was never trained to survive without.
-Use `p_prune` or a related reconstruction objective if ablation is part of the
-evaluation plan. The current pipeline applies configured pruning in train,
-validation, and test, so account for stochastic evaluation when the rate is
-between zero and one.
+Use a sampled `skip` policy or related reconstruction objective if ablation is
+part of the evaluation plan. A reconstructing policy applies during fitting
+strata, so clear it before the baseline and ablation test passes as shown
+above.
 
 This workflow tests one field at a time. It does not measure interactions
 between fields unless you explicitly deactivate groups with a selector that

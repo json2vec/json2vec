@@ -10,7 +10,8 @@ contracts; individual datatype references own their complete behavior.
 Data types are the structural and typed nodes in a `relflow` schema. `Branch`
 names a shared context for child fields, usually a repeated collection such as
 transactions or sessions. Tensorfields are typed leaves that read values,
-encode state and content, hide selected positions, and decode targets.
+encode state and content, apply selected mask policies, and decode
+reconstruction objectives.
 
 Use constructor names from the package root in Python. Serialized schemas use
 the lower-case `type` value.
@@ -19,8 +20,11 @@ Every leaf follows the same high-level path while owning its type-specific
 content contract:
 
 ```text
-query -> validate -> tensorize state/content -> embed visible input
-      -> optionally decode selected targets -> write a public payload
+direct Arrow field selection OR explicit structural query
+  -> canonical ragged field -> resolve masks -> validate -> tensorize projections
+  -> embed visible input
+  -> optionally decode selected targets
+  -> write a public payload
 ```
 
 ## Choose A Data Type
@@ -30,6 +34,7 @@ query -> validate -> tensorize state/content -> embed visible input
 | Continuous scalar | [`Number`](../data-types/number.qmd) | Numeric value is an ID, code, or class label. |
 | Boolean | [`Boolean`](../data-types/boolean.qmd) | The source has more than two valued labels; use `Category`. |
 | One bounded label | [`Category`](../data-types/category.qmd) | The value is a massive or unstable identifier; keep it as metadata or use `Hash` for equality without a vocabulary. |
+| High-cardinality label with shared latent groups | [`Cluster`](../data-types/cluster.qmd) | Each label needs an independent representation; use `Category`. |
 | Zero or more labels | [`Set`](../data-types/set.qmd) | Labels have attributes or order; use `Branch`. |
 | Repeated objects | [`Branch`](../data-types/branch.qmd) | Repetition is only an upstream storage artifact; preprocess or flatten. |
 | Timestamp/calendar value | [`DateParts`](../data-types/dateparts.qmd) | Elapsed time or recency matters; derive a `Number`. |
@@ -47,6 +52,39 @@ The same raw shape can have different meaning:
 - `[{"name": "red"}, {"name": "sale"}]` is a `Branch` if each item has
   fields or position.
 
+## Keep Arrow Value Types Stable
+
+Identity-backed `Category`, `Cluster`, and `Hash` fields require one declared
+compatibility family per Arrow leaf. `Set` applies the same rule to its member
+labels. Their built-in declarations place `str` and `bytes` in separate
+families, preventing an Arrow union from silently changing label identity.
+Normalize source columns in a preprocessor. For `Set`, a string or binary
+scalar is one label rather than a sequence of characters or bytes.
+
+These rules are owned by each datatype extension through `Extension(types=...)`; the
+ragged engine does not contain a list of built-in leaf names. Tuple entries are
+separate compatibility families, so `types=(str, bytes)` accepts a string or
+binary Arrow leaf but rejects an Arrow union containing both. A union is one
+compatible family, so `types=(int | float,)` permits numeric promotion within a
+field. PyArrow may canonicalize mixed Python inputs before this boundary; use
+an explicit Arrow schema when original Python-type provenance matters.
+
+The public declaration uses Python types, but `Extension.prepare(...)` validates
+each whole Arrow leaf against their Arrow equivalents before a datatype codec
+runs. It traverses Arrow list, fixed-size-list, dictionary, extension, and union
+types to find terminal types. It then safely decodes dictionary wrappers,
+including dictionaries nested in list containers. A logical extension type is
+preserved when a declared matcher accepts it directly; otherwise its storage
+type crosses the codec boundary. Compatible union children are promoted to a
+common Arrow type when Arrow defines a safe promotion. A heterogeneous union
+without a common representation remains extension-owned.
+
+`None` is a core null state rather than an extension atom type. String values have
+no reserved sentinel and remain ordinary content. Container shape and datatype
+meaning remain the tensorfield's responsibility. Custom Python atoms add
+extension-owned physical predicates with `Extension(..., arrow={Type: matcher})`; see
+[Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd).
+
 ## Value State And Content {#value-state}
 
 State says what happened to a position; content carries the datatype-specific
@@ -57,13 +95,13 @@ value. They are deliberately separate.
 | `valued` | A source value exists. This does not guarantee that vocabulary-backed content is known. |
 | `null` | The source value is explicitly `None`. |
 | `padded` | A fixed branch shape contains a slot with no source item. |
-| `masked` | The input at this position is intentionally hidden. |
+| `masked` | The input remains present as a learned mask representation. |
 | `other` | Reserved for extension-specific state. Current built-in tensorizers do not produce it from ordinary source data. |
 
-There is no `pruned` state token. Pruning is an operation: a selected field is
-hidden with input state `masked`, its original state and content are cached as
-targets, and its trainable mask marks the positions that contribute to loss.
-`target=True` is the always-pruned configuration.
+There is no separate skipped state token. A learned mask uses input state
+`masked`; a structurally skipped coordinate is absent from routing and uses
+`present` to distinguish that omission from original padding. A reconstructing
+policy separately marks the original state and content as a decoder target.
 
 Likewise, unavailable is not a universal state. It is a type-specific content
 condition:
@@ -87,7 +125,7 @@ its label” from `null`, padding, or an intentionally hidden input.
 
 For `Set("tags")`, `["vip"]` and `[]` are both valued. `null` is a null field
 state. A missing repeated slot inside a `Branch` is padded. If a leaf has
-`nullable=False`, encoding raises when its extracted input contains an explicit
+`nullable=False`, encoding raises when its projected input contains an explicit
 null.
 
 Do not infer state from a numeric or categorical content sentinel. Neutral zero
@@ -106,8 +144,8 @@ children instead of reading one leaf value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `name` | `None`; inferred when bound | Public schema name. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. If `query` is omitted, the bound name is also the inferred source key. |
-| `query` | inferred | JMESPath expression for the source value. See [Query Paths](querypaths.qmd). |
+| `name` | `None`; inferred when bound | Public schema name and default processed-observation key. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. |
+| `query` | `None` | Optional node-relative structural source path. `None` selects the node's own schema name from its parent. Explicit and direct values converge during coalescing before fixed-geometry projection. See [Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields remain in the schema but are ignored by encoding, loss, and prediction. |
 | `nullable` | `True` | Allows explicit `None` input. `False` raises whenever the encoded leaf contains state `null`. |
@@ -116,20 +154,30 @@ children instead of reading one leaf value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `target` | `False` | Exact shorthand for `p_prune=1.0`; withholds the leaf from input and trains it as a supervised reconstruction target. |
-| `p_mask` | `0.0` | Bernoulli rate for independently selecting leaf positions during non-predict masking. Must be less than `1.0`. |
-| `p_prune` | `0.0` | Probability of selecting an observation and hiding the whole leaf instance for that observation. |
+| `mask` | `False` | One mask shorthand or a list/tuple of `rf.Mask` objects. The stored value is always a canonical tuple. |
 | `weight` | `1.0` | Positive multiplier applied to this field's total loss. |
 
-The current `p_mask` implementation samples every configured position, including
-null and padded positions, rather than valued positions only. `p_prune` samples
-once per observation and expands that choice across all positions of the leaf.
-Their cached original states allow state loss to learn what was hidden; each
-datatype decides which selected targets contribute to content loss. See
-[Dynamic Masking](dynamic-masking.qmd) for the exact behavior and branch masks.
+`mask=False` means no policy. `mask=0.15` is a uniform train-only learned mask;
+`mask=True` is an always-skipped supervised reconstruction target. Use an
+explicit policy when the shorthand is not precise enough:
 
-`target=True` and `p_prune=1.0` are the supported always-hidden APIs.
-`p_mask=1.0` is invalid because `p_mask` is constrained to rates below `1.0`.
+```python
+field = rf.Number(
+    mask=rf.Mask(
+        query="eligible",
+        rate=0.15,
+        skip=True,
+        reconstruct=True,
+    )
+)
+```
+
+`query` supplies Boolean eligibility, `rate` samples eligible coordinates,
+`skip` omits selected inputs from tensorization and routing, `dropout` makes a
+policy train-only, and `reconstruct` creates decoder targets. `dropout` defaults
+to the opposite of `reconstruct`; setting both true is invalid. Branch-owned
+policies make one atomic decision for the full descendant subtree. See
+[Dynamic Masking](dynamic-masking.qmd) for the complete contract.
 
 ### Decoder And Output Options
 
@@ -148,7 +196,8 @@ datatype decides which selected targets contribute to content loss. See
 | `Number` | Scalar value | Yes | MAE and RMSE are reported in original value scale. |
 | `Boolean` | Probability of `True` | Yes | Vocabulary-free binary decoding; configured thresholds affect metrics only. |
 | `Category` | Best populated-vocabulary label plus optional candidates | Yes | The unavailable sentinel is internal and never a class. |
-| `Set` | Per-label probabilities or thresholded labels | Yes | Unknown labels and unused capacity are omitted. |
+| `Cluster` | Best latent cluster and best populated-vocabulary label | Yes | Unknown labels share an internal unavailable assignment. |
+| `Set` | Candidate list of label/probability pairs | Yes | Unknown labels and unused capacity are omitted. |
 | `Vector` | Reconstructed vector | Yes | Non-valued tensorized content is a zero vector. |
 | `DateParts` | None | No public payload | Trains state accuracy plus per-part cosine loss and angular error. |
 | `Hash` | None | No public payload | Reconstructs quantized hash lanes for training diagnostics. |
@@ -161,27 +210,27 @@ emit an embedding when configured with `embed=True`.
 
 ## Prediction Envelope
 
-Decoded leaf writers share one address-keyed outer contract. The complete
-structure and transport-specific shapes are documented in
+Decoded leaf writers share one typed Arrow outer contract. The complete
+structure and transport boundaries are documented in
 [Prediction Output](../guides/prediction-output.qmd). In summary:
 
 - `state` contains a probability for each token in the five-state vocabulary.
-  Its arrays follow the schema shape for that leaf.
+  Its Arrow arrays follow the schema shape for that leaf.
 - `content` is owned by the datatype. It may be a number, Boolean payload,
   label/candidate payload, Set probability mapping, or vector.
 - `inferred` is a Boolean mask, not a confidence score. During prediction it is
-  true exactly where the encoded input state was `masked`.
+  true exactly where prediction requested a reconstruction.
 
-An always-hidden `target=True` field and a predict-time `"<MASK>"` placeholder
-therefore have `inferred=true` at their hidden positions. A visible leaf decoded
+An always-skipped `mask=True` field therefore has `inferred=true` at its requested
+positions. A visible leaf decoded
 because it has `embed=True` may still produce state and content with
 `inferred=false`. Consumers should use `inferred` to distinguish requested
 inference from an auxiliary visible-field decode.
 
 Root and branch embedding-only outputs do not have this decoded-leaf envelope.
 They contain `embedding`; datatype pages explicitly say when their leaf writer
-does not expose state or content. Rendered examples often use string paths for
-readability, while the Python dictionary is keyed by `rf.Address` objects.
+does not expose state or content. Address strings such as `record/fraud` are
+fields inside the canonical Arrow `predictions` struct.
 
 The public `embedding` is also distinct from tensorized content and the
 datatype's internal input embedding. See
@@ -191,8 +240,10 @@ datatype's internal input embedding. See
 
 - Open the selected datatype page for its accepted input, encoding, loss,
   metrics, options, output, and limits.
-- Use [Learning Modes & Embeddings](embeddings.qmd) to choose `target`, masking,
-  pruning, and exported embeddings.
+- Use [Learning Modes & Embeddings](embeddings.qmd) to choose reconstruction,
+  masking, structural skipping, and exported embeddings.
 - Use [Dynamic Masking](dynamic-masking.qmd) for exact leaf and repeated-branch
   selection behavior.
-- Use [Query Paths](querypaths.qmd) when source keys and schema names differ.
+- Use [Binding Data](binding-data.qmd) to choose direct projection, an explicit
+  query, or preprocessing.
+- Use [Query Paths](querypaths.qmd) for node-relative Arrow structural paths.

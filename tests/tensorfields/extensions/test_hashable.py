@@ -2,13 +2,19 @@ import pytest
 import torch
 
 import relflow as rf
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS, Context
 from relflow.tensorfields.extensions.hashable import (
     Decoder,
     Embedder,
     TensorField,
 )
+from tests.arrow import batch as arrow_batch
+from tests.arrow import table
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/identifier"
 
@@ -20,15 +26,16 @@ def _structure_payload(
     n_bands: int = 4,
     offset: int = 2,
     n_buckets: int = 4,
+    mask: bool | Mask = False,
 ) -> dict:
     field: dict = {
         "name": "identifier",
         "type": "hash",
-        "query": "[*].items[*].id",
         "n_hashes": n_hashes,
         "n_bands": n_bands,
         "offset": offset,
         "n_buckets": n_buckets,
+        "mask": mask,
     }
     return {
         "d_model": 16,
@@ -46,6 +53,26 @@ def _structure_payload(
             ],
         },
     }
+
+
+def _new_tensorfield(
+    *,
+    values: list,
+    schema: Schema,
+    strata: Strata,
+    salt: int = 0,
+) -> TensorField:
+    batch = arrow_batch([{"items": [{"identifier": value} for value in root]} for (root,) in values])
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["hash"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        context=Context(salt=salt),
+    )
 
 
 # --- request / schema validation --------------------------------------------------
@@ -101,11 +128,21 @@ def test_hash_vector_channels_are_independent():
     assert outputs.unique().numel() == outputs.numel()
 
 
-def test_hash_value_distinguishes_common_python_types():
-    integer, string, boolean, floating = _hash_matrix([1, "1", True, 1.0], n_hashes=4)
+def test_hash_value_preserves_python_scalar_identity_across_batches():
+    integer = _hash_matrix([1], n_hashes=4)[0]
+    string = _hash_matrix(["1"], n_hashes=4)[0]
+    boolean = _hash_matrix([True], n_hashes=4)[0]
+    floating = _hash_matrix([1.0], n_hashes=4)[0]
+
     assert not torch.equal(integer, string)
     assert not torch.equal(boolean, integer)
     assert not torch.equal(floating, integer)
+
+
+def test_hash_value_uses_one_canonical_arrow_type_within_a_batch():
+    outputs = _hash_matrix([1, 1.0], n_hashes=4)
+
+    assert torch.equal(outputs[0], outputs[1])
 
 
 # --- tensorfield content behaviour ------------------------------------------------
@@ -118,9 +155,8 @@ def test_hashable_tensorfield_content_is_deterministic_across_observations():
         [["alice", "carol"]],
     ]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -138,9 +174,8 @@ def test_hashable_tensorfield_zero_pads_nulls_and_padding():
         [["alice"]],
     ]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
@@ -153,43 +188,49 @@ def test_hashable_tensorfield_zero_pads_nulls_and_padding():
     assert torch.all(field.content[1, 0, 1] == 0.0)
 
 
-@pytest.mark.parametrize("unsupported", [[1, 2], object()])
-def test_hashable_tensorfield_rejects_unsupported_values(unsupported):
+def test_hashable_tensorfield_rejects_non_scalar_values():
     schema = Schema.model_validate(_structure_payload())
     values = [
-        [[unsupported, "ok"]],
-        [["x", "y"]],
+        [[[1, 2], [3, 4]]],
+        [[[5, 6], [7, 8]]],
     ]
 
-    with pytest.raises(ValueError, match="only accepts MessagePack-compatible hashable scalar values"):
-        TensorField.new(
+    with pytest.raises(ValueError, match="expects scalar Arrow values"):
+        _new_tensorfield(
             values=values,
-            address=ADDRESS,
             schema=schema,
             strata=Strata.train,
         )
 
 
-def test_hashable_mask_caches_targets_before_zeroing():
-    schema = Schema.model_validate(_structure_payload(n_hashes=4))
+def test_hashable_rejects_arrow_struct_values():
+    schema = Schema.model_validate(_structure_payload())
+    values = [[[{"key": 1}, {"key": 2}]], [[{"key": 3}, {"key": 4}]]]
+
+    with pytest.raises(TypeError, match="root/items/identifier.*does not accept Arrow type"):
+        _new_tensorfield(values=values, schema=schema, strata=Strata.train)
+
+
+def test_hashable_reconstruction_projects_targets_before_zeroing_input():
+    schema = Schema.model_validate(_structure_payload(n_hashes=4, mask=Mask(reconstruct=True)))
     values = [
         [["a", "b"]],
         [["c", "d"]],
     ]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
-    original_state = field.state.clone()
-    original_content = field.content.clone()
+    visible = _new_tensorfield(
+        values=values,
+        schema=Schema.model_validate(_structure_payload(n_hashes=4)),
+        strata=Strata.train,
+    )
 
-    field.mask(1.0)
-
-    assert torch.equal(field.targets[TensorKey.state], original_state)
-    assert torch.equal(field.targets[TensorKey.content], original_content)
+    assert torch.equal(field.targets[TensorKey.state], visible.state)
+    assert torch.equal(field.targets[TensorKey.content], visible.content)
     assert torch.all(field.state == Tokens.masked.value)
     assert torch.all(field.content == 0.0)
 
@@ -200,9 +241,8 @@ def test_hashable_mask_caches_targets_before_zeroing():
 def _hash_matrix(values, n_hashes: int, *, salt: int = 0) -> torch.Tensor:
     """Tensorize values into a `(len(values), n_hashes)` integer matrix."""
     schema = Schema.model_validate(_structure_payload(length=len(values), n_hashes=n_hashes))
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[values]],
-        address=ADDRESS,
         schema=schema,
         strata=Strata.test,
         salt=salt,
@@ -332,12 +372,13 @@ def test_hashable_embedder_forward_produces_finite_projections():
         batch_size=2,
     )
     inputs = model.encode(
-        [
-            {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
-            {"items": [{"id": "d"}, {"id": "e"}, {"id": None}]},
-        ],
+        table(
+            [
+                {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+                {"items": [{"id": "d"}, {"id": "e"}, {"id": None}]},
+            ]
+        ),
         strata=Strata.train,
-        mask=False,
     )
 
     predictions = model(inputs, strata=Strata.train)
@@ -352,7 +393,12 @@ def test_hashable_training_loss_covers_state_and_content_heads():
     n_buckets = 4
     model = rf.Model(
         rf.Branch(
-            rf.Hash("id", n_hashes=n_hashes, n_buckets=n_buckets),
+            rf.Hash(
+                "id",
+                n_hashes=n_hashes,
+                n_buckets=n_buckets,
+                mask=rf.Mask(reconstruct=True),
+            ),
             name="items",
             length=3,
         ),
@@ -363,15 +409,14 @@ def test_hashable_training_loss_covers_state_and_content_heads():
     )
     address = "record/items/id"
     inputs = model.encode(
-        [
-            {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
-            {"items": [{"id": "d"}, {"id": "e"}, {"id": "f"}]},
-        ],
+        table(
+            [
+                {"items": [{"id": "a"}, {"id": "b"}, {"id": "c"}]},
+                {"items": [{"id": "d"}, {"id": "e"}, {"id": "f"}]},
+            ]
+        ),
         strata=Strata.train,
-        mask=False,
     )
-    field = inputs[address]
-    field.hide(torch.ones_like(field.state, dtype=torch.bool))
 
     predictions = model(inputs, strata=Strata.train)
     prediction = next(p for p in predictions if p.address == address)
@@ -384,23 +429,18 @@ def test_hashable_training_loss_covers_state_and_content_heads():
 
 
 def test_hashable_content_target_matches_deterministic_recomputation():
-    schema = Schema.model_validate(_structure_payload(n_hashes=5, length=2))
+    schema = Schema.model_validate(_structure_payload(n_hashes=5, length=2, mask=Mask(reconstruct=True)))
     values = [[["alice", "bob"]], [["carol", "dave"]]]
 
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=values,
-        address=ADDRESS,
         schema=schema,
         strata=Strata.train,
     )
 
-    # Cache targets then re-derive from a fresh TensorField and compare.
-    field.mask(1.0)
-
-    fresh = TensorField.new(
+    fresh = _new_tensorfield(
         values=values,
-        address=ADDRESS,
-        schema=schema,
+        schema=Schema.model_validate(_structure_payload(n_hashes=5, length=2)),
         strata=Strata.train,
     )
 
@@ -420,14 +460,13 @@ def test_hashable_decoder_content_head_width_matches_n_hashes():
 def test_hashable_embedder_uses_raw_sinusoidal_content_and_state_embeddings():
     schema = Schema.model_validate(_structure_payload(n_hashes=3, n_bands=4, offset=2))
     embedder = Embedder(schema=schema, address=ADDRESS)
-    field = TensorField.new(
+    field = _new_tensorfield(
         values=[[["alice", "bob"]]],
-        address=ADDRESS,
         schema=schema,
         strata=Strata.test,
     )
 
-    output = embedder(field).payload
+    output = embedder.embed(field).payload
     normalized = field.content.reshape(-1, 3).to(embedder.weights.dtype).div(1 << 63)
     weighted = normalized.unsqueeze(-1).mul(embedder.weights)
     expected = torch.stack([torch.sin(weighted), torch.cos(weighted)], dim=-1)
@@ -457,7 +496,7 @@ def _hashable_model(**kwargs) -> "rf.Model":
 
 
 def test_hashable_fields_keep_state_embeddings_and_decoders_local():
-    model = _hashable_model()
+    model = _hashable_model(mask=True)
     items = model.nodes["record/items/id"]
     owner = model.nodes["record/owner"]
 
@@ -469,16 +508,17 @@ def test_hashable_fields_keep_state_embeddings_and_decoders_local():
 def test_hashable_gives_same_input_value_identical_raw_embeddings_across_fields():
     model = _hashable_model()
     inputs = model.encode(
-        [
-            {"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"},
-            {"items": [{"id": "carol"}, {"id": "dave"}], "owner": "carol"},
-        ],
+        table(
+            [
+                {"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"},
+                {"items": [{"id": "carol"}, {"id": "dave"}], "owner": "carol"},
+            ]
+        ),
         strata=Strata.train,
-        mask=False,
     )
 
-    items_projection = model.nodes["record/items/id"].embedder(inputs["record/items/id"]).payload
-    owner_projection = model.nodes["record/owner"].embedder(inputs["record/owner"]).payload
+    items_projection = model.nodes["record/items/id"].embedder.embed(inputs["record/items/id"]).payload
+    owner_projection = model.nodes["record/owner"].embedder.embed(inputs["record/owner"]).payload
 
     assert torch.allclose(items_projection[0, 0, 0], owner_projection[0, 0])
     assert torch.allclose(items_projection[1, 0, 0], owner_projection[1, 0])
@@ -498,9 +538,9 @@ def test_tensorfield_content_reflects_explicit_salt():
     schema = Schema.model_validate(_structure_payload(length=2, n_hashes=4))
     values = [[["alice", "bob"]]]
 
-    field_a = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=0)
-    field_b = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=1)
-    field_c = TensorField.new(values=values, address=ADDRESS, schema=schema, strata=Strata.train, salt=0)
+    field_a = _new_tensorfield(values=values, schema=schema, strata=Strata.train, salt=0)
+    field_b = _new_tensorfield(values=values, schema=schema, strata=Strata.train, salt=1)
+    field_c = _new_tensorfield(values=values, schema=schema, strata=Strata.train, salt=0)
 
     assert not torch.equal(field_a.content, field_b.content)
     assert torch.equal(field_a.content, field_c.content)
@@ -510,15 +550,15 @@ def test_equal_values_stay_matched_within_each_rotating_batch(monkeypatch: pytes
     from relflow.data import iterables
 
     model = _hashable_model()
-    records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
+    records = table([{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}])
     salts = iter((1, 2, 3))
     monkeypatch.setattr(iterables.random, "getrandbits", lambda bits: next(salts))
 
     projections_by_batch: list[tuple[torch.Tensor, torch.Tensor]] = []
     for _ in range(3):
-        inputs = model.encode(records, strata=Strata.train, mask=False)
-        items_projection = model.nodes["record/items/id"].embedder(inputs["record/items/id"]).payload
-        owner_projection = model.nodes["record/owner"].embedder(inputs["record/owner"]).payload
+        inputs = model.encode(records, strata=Strata.train)
+        items_projection = model.nodes["record/items/id"].embedder.embed(inputs["record/items/id"]).payload
+        owner_projection = model.nodes["record/owner"].embedder.embed(inputs["record/owner"]).payload
         projections_by_batch.append((items_projection[0, 0, 0].detach(), owner_projection[0, 0].detach()))
 
     for items_alice, owner_alice in projections_by_batch:
@@ -533,15 +573,15 @@ def test_inference_uses_stable_unsalted_hashes(strata: Strata, monkeypatch: pyte
     from relflow.data import iterables
 
     model = _hashable_model()
-    records = [{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}]
+    records = table([{"items": [{"id": "alice"}, {"id": "bob"}], "owner": "alice"}])
 
     def unexpected_random_salt(bits: int) -> int:
         raise AssertionError("inference must not generate a random salt")
 
     monkeypatch.setattr(iterables.random, "getrandbits", unexpected_random_salt)
 
-    first = model.encode(records, strata=strata, mask=False)
-    second = model.encode(records, strata=strata, mask=False)
+    first = model.encode(records, strata=strata)
+    second = model.encode(records, strata=strata)
 
     assert torch.equal(first["record/items/id"].content, second["record/items/id"].content)
     assert torch.equal(first["record/owner"].content, second["record/owner"].content)
