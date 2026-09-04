@@ -19,7 +19,7 @@ model = rf.Model(
     n_layers=1,
     n_heads=4,
     events=rf.Branch(length=8, succeeded=rf.Boolean),
-    converted=rf.Boolean(target=True, threshold=[0.5, 0.8]),
+    converted=rf.Boolean(mask=True, threshold=[0.5, 0.8]),
 )
 ```
 
@@ -57,7 +57,7 @@ embedding requested with `embed=True`.
 | --- | --- | --- |
 | `threshold` | `0.5` | One metric threshold, or a nonempty list of metric thresholds, from `0` through `1`. Duplicate list values are removed while preserving their first-seen order. Every unique threshold receives its own decision metrics; thresholds do not change prediction content. |
 
-Shared leaf options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight`
+Shared leaf options such as `mask`, `embed`, and `weight`
 are described in [Built-In Data Types](../core-concepts/data-types.qmd).
 
 ## Loss And Metrics
@@ -93,12 +93,13 @@ counts = rf.Boolean.counts(model, "record/converted")
 ```
 
 The returned dictionary contains valued training presentations only; null and
-padded content do not count. When a valued input is masked during training, its
-original target still counts as an exposure. Counts accumulate again when
-observations are presented in later epochs or through repeated sampling, so
-they are not necessarily source-dataset frequencies. The internal smoothing
-prior is removed. During distributed training, mid-epoch snapshots can be
-rank-local because counters synchronize at epoch end.
+padded content do not count. Counts come from the canonical pristine field, so
+a valued coordinate still counts when a mask removes or replaces its encoder
+input. Counts accumulate again when observations are presented in later epochs
+or through repeated sampling, so they are not necessarily source-dataset
+frequencies. The internal smoothing prior is removed. During distributed
+training, mid-epoch snapshots can be rank-local because counters synchronize at
+epoch end.
 
 ## Prediction Output
 

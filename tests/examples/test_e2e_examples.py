@@ -57,6 +57,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/guides/batch-inference.qmd",
         "docs/guides/custom-tensorfields.qmd",
         "docs/guides/data-modules.qmd",
+        "docs/guides/dynamic-mask-preprocessors.qmd",
         "docs/guides/evaluation.qmd",
         "docs/guides/field-importance.qmd",
         "docs/guides/field-stacking.qmd",
@@ -138,7 +139,7 @@ def test_documented_contracts_match_public_enums_and_requests() -> None:
     assert "`second_of_minute`" in dateparts
     assert "One extra internal bucket is reserved" not in published
     assert "reserved unavailable bucket" not in published
-    assert "Pruning is an operation" in data_types
+    assert "There is no separate skipped state token" in data_types
 
     common_fields = set(rf.RequestBase.model_fields)
     for name in ("Number", "Boolean", "Category", "Set", "Hash", "DateParts", "Vector", "Text"):
@@ -182,8 +183,7 @@ def test_datatype_option_tables_cover_public_type_specific_fields() -> None:
         "nullable",
         "pooling",
         "weight",
-        "p_mask",
-        "p_prune",
+        "mask",
         "n_linear",
     }
     pages = {
@@ -275,7 +275,7 @@ def test_documented_prediction_envelope_is_executable() -> None:
         batch_size=1,
         embed=True,
         amount=rf.Number,
-        label=rf.Category(target=True, size=2, p_unavailable=0.0),
+        label=rf.Category(mask=True, size=2, p_unavailable=0.0),
     )
     model.encode(
         pa.table({"amount": [1.0, 2.0], "label": ["no", "yes"]}),
@@ -323,7 +323,7 @@ def test_getting_started_lifecycle_is_executable(tmp_path: Path) -> None:
         optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
         sepal_length=rf.Number,
         petal_length=rf.Number,
-        species=rf.Category(target=True, size=3, topk=[2]),
+        species=rf.Category(mask=True, size=3, topk=[2]),
     )
     datamodule = rf.PolarsDataModule(
         model=model,
@@ -376,7 +376,7 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
         sepal_width=rf.Number,
         petal_length=rf.Number,
         petal_width=rf.Number,
-        species=rf.Category(target=True, size=3, p_unavailable=0.0),
+        species=rf.Category(mask=True, size=3, p_unavailable=0.0),
     )
     datamodule = rf.PolarsDataModule(
         model=model,
@@ -406,7 +406,7 @@ def test_iris_case_study_reproduces_documented_result(tmp_path: Path) -> None:
 
     trainer.fit(model=model, datamodule=datamodule)
     metrics = trainer.test(model=model, datamodule=datamodule, verbose=False)[0]
-    assert metrics["flower.species/test.accuracy.content"] == pytest.approx(14 / 15)
+    assert metrics["flower.species/test.accuracy.content"] == pytest.approx(9 / 10)
 
     artifact = tmp_path / "iris-model.rf"
     model.save(artifact)

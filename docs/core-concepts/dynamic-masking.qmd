@@ -3,375 +3,646 @@ marimo-static-output: true
 eval: false
 ---
 
-# Dynamic Masking
+# Masking, Skipping, and Reconstruction
 
-**Example status — excerpt:** masking blocks isolate selection behavior; apply
-them to a tested training workflow before comparing quality.
+RelFlow uses one `mask` argument on every leaf, branch, and generated model
+root. The same `rf.Mask` object covers feature dropout, denoising objectives,
+supervised targets, persistent ablations, and data-dependent routing.
 
-Dynamic masking hides values in non-predict loops so the model can learn and be
-evaluated on reconstruction from surrounding context. Leaf fields support local
-stochastic masking with `p_mask`, pruning with `p_prune`, and supervised targets
-with `target=True`. Branch masks add one more control: they define candidate
-slices of a repeated context for descendant tensorfields.
+The flexibility is useful, but it means a mask answers three separate
+questions:
 
-Use branch masks when the hiding rule is about a repeated coordinate rather than
-one leaf value. Common examples are "sample from the last 10 retained events"
-or "sample three early line items." A branch mask supplies the shared candidate
-window, but the current implementation samples each affected leaf separately.
+1. **Which owner coordinates are selected?** `query` and `rate`.
+2. **What reaches the encoder?** `skip` chooses structural absence instead of
+   a learned mask representation.
+3. **Why and when is it selected?** `dropout` controls activation by stratum;
+   `reconstruct` creates a decoder objective.
 
-## Leaf Masking Versus Branch Masking
+Keep those axes separate. Most confusing configurations become mechanical once
+selection, routing, and purpose are considered in that order.
 
-Use the narrowest mechanism that matches the modeling intent.
+**Example status — tested:** the complete explicit Mask matrix and
+representative Arrow/Awkward recipes are exercised in
+`tests/examples/test_masking_docs.py`.
 
-| Mechanism | Configure on | What gets hidden |
-| --- | --- | --- |
-| `target=True` | leaf tensorfield | Every instance of that leaf, for supervised prediction. |
-| `p_prune=...` | leaf tensorfield | One decision per observation, expanded across every position of that leaf. |
-| `p_mask=...` | leaf tensorfield | Every configured position sampled independently, including null and padded positions. |
-| `rf.Mask(...)` | `Branch` | Non-padded repeated coordinates sampled independently for each affected descendant leaf. |
+## Choose a Recipe First
 
-Leaf masking is appropriate when each position may be sampled from the entire
-leaf. Branch masking adds a repeated-coordinate window—often a recency
-window—and leaf exclusions. It does **not** currently provide atomic row masking
-across several sibling fields.
+| Goal | Configuration |
+| --- | --- |
+| Ordinary input | `mask=False` |
+| Random learned-mask dropout | `mask=0.10` |
+| Random structural dropout | `mask=rf.Mask(rate=0.10, skip=True)` |
+| Reconstruct every value from a learned mask | `mask=rf.Mask(reconstruct=True)` |
+| Supervised target; never encode its input | `mask=True` |
+| Persistently replace a feature with its learned mask | `mask=rf.Mask(dropout=False)` |
+| Persistently remove a feature from the encoder | `mask=rf.Mask(skip=True, dropout=False)` |
+| Apply any of the above only where a Boolean selector is true | add `query="selector"` |
+| Sample only among eligible records | combine `query="eligible"` and `rate=...` |
+| Apply several independent or overlapping policies | pass a tuple of `rf.Mask` objects |
 
-## Current Selection Semantics
+The two random-dropout forms are regularization. Reconstruction adds a loss.
+Persistent ablation changes evaluation and deterministic prediction as well as
+training.
 
-All three configured mechanisms replace selected input state with `masked`,
-zero the selected datatype content, cache the original state/content as targets,
-and mark the positions trainable. The selection masks differ:
+## The Public Shape
 
-- `p_mask` draws a Bernoulli sample for every configured position from the
-  original state snapshot. In normal non-predict ingestion it can select valued,
-  null, or padded positions.
-- `p_prune` draws one Bernoulli sample per batch observation, then expands it
-  across every branch position belonging to that leaf. `target=True` is
-  `p_prune=1.0`.
-- a branch `Mask` treats every state except `padded` as occupied. Its candidates
-  in normal ingestion are therefore valued or null. A custom tensorfield that
-  constructs another non-padded state follows the same rule. Sampling is rerun
-  for each non-excluded descendant leaf.
+```python
+rf.Mask(
+    query=None,
+    rate=None,
+    skip=False,
+    dropout=None,
+    reconstruct=False,
+)
+```
 
-::: {.callout-warning}
-The current data path applies `p_mask`, `p_prune`, and branch masks in train,
-validation, and test strata; only prediction bypasses these configured policies.
-Consequently, stochastic validation/test metrics evaluate a sampled masking
-distribution and can vary across passes. Fix random seeds and aggregate repeated
-evaluation when that variance matters, or use deterministic `target=True` for a
-fixed supervised target. Lightning evaluation mode does not disable masking.
-These draws use Torch's random stream; they are not keyed by `Batch.identity`
-and are not invariant to model-batch or source-chunk boundaries.
+| Field | Meaning |
+| --- | --- |
+| `query` | Optional node-relative path to one non-null Arrow Boolean per owner coordinate. |
+| `rate` | Optional uniform probability applied after the query eligibility test. |
+| `skip` | If true, remove selected coordinates from encoder input. If false, use the datatype's learned mask state. |
+| `dropout` | If true, run only during training. When omitted, defaults to `not reconstruct`. |
+| `reconstruct` | If true, make selected observed values decoder targets during fitting and requested inference coordinates during deterministic prediction. |
+
+`rf.Mask` is immutable and rejects unknown fields. Its ordinary Pydantic scalar
+parsing still applies, so prefer correctly typed Python values rather than
+depending on coercion.
+
+### Accepted `mask=` values
+
+Every node immediately normalizes its `mask` value to a tuple:
+
+| Input | Stored policy tuple |
+| --- | --- |
+| `False` | `()` |
+| `[]` or `()` | `()` |
+| `0.0` | `()` |
+| `0.10` | `(Mask(rate=0.10, dropout=True),)` |
+| `1.0` | `(Mask(dropout=True),)` |
+| `True` | `(Mask(skip=True, dropout=False, reconstruct=True),)` |
+| `rf.Mask(...)` | One-item tuple |
+| `[first, second]` or `(first, second)` | Immutable tuple, with exact duplicates removed |
+
+`None` is invalid. Integer shorthands such as `mask=0` and `mask=1` are also
+invalid; use `False`, `True`, `0.0`, or `1.0` deliberately. Items inside a list
+or tuple must already be `rf.Mask` objects, so `[0.10]` and `[True]` are not
+accepted.
+
+::: {.callout-important}
+`mask=True` and `mask=1.0` are deliberately different. `True` is an
+always-skipped reconstruction target. `1.0` is full, train-only learned-mask
+dropout.
 :::
 
-Every selected position can contribute to state loss because its original state
-is cached. Content-loss eligibility remains datatype-specific; for example,
-Category content accuracy excludes unavailable targets, while Boolean content
-metrics use valued targets only. Do not read `trainable=true` as “the original
-content was valued.”
+Rates must be finite and between zero and one. Endpoint normalization matters:
 
-## Branch Masks
+- `rate=0` removes the complete policy, even if it also has a query or
+  reconstruction effect;
+- `rate=1` becomes `rate=None`, making the policy deterministic;
+- a remaining `0 < rate < 1` is stochastic and never runs during ordinary
+  prediction.
 
-Attach `rf.Mask(...)` to a `Branch(...)` with `mask=` or `masks=`:
+## The Complete Configuration Space
 
-```{python .marimo}
-#| echo: true
-#| output: true
+There are four selection modes, two encoder effects, and three valid purposes:
+`4 × 2 × 3 = 24` logical configurations. They compose orthogonally; there is no
+hidden target or prune mode.
 
-import relflow as rf
+### Axis 1: selection
 
-model = rf.Model(
-    name="customer",
-    d_model=64,
-    n_layers=2,
-    n_heads=4,
-    events=rf.Branch(
-        length=64,
-        overflow="tail",
-        mask=rf.Mask(rate=0.50, window=10),
-        event_type=rf.Category(size=128),
-        amount=rf.Number,
-    ),
-)
-
-model
-```
-
-For each active descendant leaf, this finds its last 10 retained, non-padded
-`events` slots and independently masks about half of those candidates. Amount
-and event type therefore use the same window but are not guaranteed to hide the
-same rows. Use `exclude` to keep a leaf entirely outside this policy.
-
-`mask=` is shorthand for a one-item list. Use `masks=` when one branch needs
-more than one masking policy:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-rf.Branch(
-    name="line_items",
-    length=128,
-    masks=[
-        rf.Mask(name="recent", rate=0.25, window=32),
-        rf.Mask(name="early", count=3, window=20, start=True),
-    ],
-    sku=rf.Category(size=4096),
-    quantity=rf.Number,
-)
-```
-
-Each policy is applied in list order to each affected leaf. Policies may select
-overlapping positions; all of them use the leaf state snapshot from before the
-policy sequence when constructing candidates.
-
-## Mask Options
-
-Each `Mask` chooses a candidate window, then samples from that window.
-
-| Option | Default | Meaning |
+| `query` | `rate` | Selected owner coordinates |
 | --- | --- | --- |
-| `rate` | `None` | Bernoulli probability for each candidate slot. Mutually exclusive with `count`. |
-| `count` | `None` | Exact number of candidate slots to sample per parent coordinate, capped by available candidates. Mutually exclusive with `rate`. |
-| `window` | `None` | Candidate span length. `None` means all slots in the selected coordinate space. |
-| `branch` | `False` | Position the window against the fixed branch length rather than the retained non-padded extent. Padded slots are still removed from candidates. |
-| `start` | `False` | Take the window from the start instead of the end. |
-| `offset` | `0` | Skip slots away from the selected edge before taking the window. |
-| `exclude` | `None` | One predicate, or a list of predicates, for descendant leaves that should not receive this mask. |
+| `None` | `None` | Every retained owner coordinate |
+| Boolean path | `None` | Coordinates where the selector is `True` |
+| `None` | `0 < rate < 1` | A reproducible uniform sample |
+| Boolean path | `0 < rate < 1` | A reproducible sample only among `True` candidates |
 
-Exactly one of `rate` or `count` is required.
+The unit sampled is the node occurrence, not an element inside the datatype.
+A Text leaf policy selects whole Text values, not tokenizer positions. A Set
+leaf policy selects whole Set values, not individual members. A branch policy
+selects whole retained branch records.
 
-The default coordinate mode is `branch=False, start=False`, which means "the end
-of the retained non-padded positions." This is usually the right choice for recency
-histories, especially with `overflow="tail"`.
+### Axes 2 and 3: routing and purpose
 
-## Window Coordinates
+Each row below can use any of the four selectors above.
 
-Mask windows are resolved after preprocessing, source binding (direct schema
-projection or explicit query extraction), overflow handling, and padding.
-Branch masks never select padding. Null positions count as occupied and remain
-eligible. Awkward preprocessing ends at tensorization; mask sampling and
-state/content hiding remain vectorized Torch operations.
+| Purpose | Learned-mask routing (`skip=False`) | Structural routing (`skip=True`) | Target? | Activation |
+| --- | --- | --- | ---: | --- |
+| Dropout | `Mask(...)` | `Mask(..., skip=True)` | No | Train only |
+| Reconstruction | `Mask(..., reconstruct=True)` | `Mask(..., skip=True, reconstruct=True)` | Yes | Train, validation, test; deterministic policies also predict |
+| Ablation | `Mask(..., dropout=False)` | `Mask(..., skip=True, dropout=False)` | No | Train, validation, test; deterministic policies also predict |
 
-For a branch with `length=8`, `window=3`, and retained values shaped like
-this:
+The one invalid purpose is `dropout=True, reconstruct=True`: training-only
+corruption and a validation/test reconstruction objective contradict each
+other. `skip` does not affect when a policy runs.
 
-```text
-slot:   0 1 2 3 4 5 6 7
-state:  V V V V V P P P
+### What happens to one selected coordinate
+
+For an observed value selected by an active policy:
+
+| `skip` | `reconstruct` | Input state | `present` | Fitting `trainable` | Prediction `inferred` |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| `False` | `False` | `masked` | `True` | `False` | `False` |
+| `True` | `False` | `padded` | `False` | `False` | `False` |
+| `False` | `True` | `masked` | `True` | `True` | `True` when active in prediction |
+| `True` | `True` | `padded` | `False` | `True` | `True` when active in prediction |
+
+Here `trainable` means eligible for this field's reconstruction loss. It does
+not mean the input value is a trainable parameter. A learned mask embedding can
+still receive gradients from another objective.
+
+An explicit Arrow null is observed state and can be a nullable reconstruction
+target. Padding and structural absence never become fitting targets. At
+prediction time, a deterministic reconstruction request may create an inferred
+position where the source value is absent.
+
+## Exactly When a Policy Runs
+
+`dropout` defaults to `not reconstruct`. These are the normalized rules:
+
+| Policy purpose | Train | Validate | Test | Predict |
+| --- | --- | --- | --- | --- |
+| `dropout=True`, `reconstruct=False` | Active | Off | Off | Off |
+| `dropout=False`, `reconstruct=True`, `rate=None` | Active target | Active target | Active target | Active inference request |
+| `dropout=False`, `reconstruct=True`, `0 < rate < 1` | Sampled target | Stable sampled target | Stable sampled target | Off |
+| `dropout=False`, `reconstruct=False`, `rate=None` | Active ablation | Active ablation | Active ablation | Active ablation |
+| `dropout=False`, `reconstruct=False`, `0 < rate < 1` | Sampled ablation | Stable sampled ablation | Stable sampled ablation | Off |
+
+A mask query is evaluated only when its policy is active. Consequently, a
+selector used only by train-time dropout need not be present in direct
+validation or prediction input. A selector used by a deterministic
+reconstruction or persistent ablation must be available in every stratum where
+that policy runs.
+
+Validation and test sampling use stable but separately salted decisions.
+Changing the training epoch changes the score stream, although a small finite
+selection can coincide by chance. Prediction never samples a remaining
+fractional rate. A public prediction field exists only when the tensorfield
+plugin supplies its Arrow output/write components.
+
+## Learned Mask Versus Skip
+
+Without `skip`, the selected coordinate remains in the fixed model geometry
+with a datatype-owned learned mask representation:
+
+```python
+description=rf.Text(mask=rf.Mask(rate=0.15))
 ```
 
-The candidate windows are:
+Use this when the model should be explicitly told that a field was hidden.
 
-| Configuration | Candidate slots |
-| --- | --- |
-| `rf.Mask(rate=0.2, window=3, start=True)` | `0, 1, 2` |
-| `rf.Mask(rate=0.2, window=3)` | `2, 3, 4` |
-| `rf.Mask(rate=0.2, window=3, branch=True, start=True)` | `0, 1, 2` |
-| `rf.Mask(rate=0.2, window=3, branch=True)` | none, because fixed slots `5, 6, 7` are padded |
+With `skip`, the selected coordinate contributes no present input
+representation:
 
-`offset` skips away from the chosen edge. With the same values and `offset=2`:
+```python
+description=rf.Text(mask=rf.Mask(rate=0.15, skip=True))
+```
 
-| Configuration | Candidate slots |
-| --- | --- |
-| `rf.Mask(rate=0.2, window=3, start=True, offset=2)` | `2, 3, 4` |
-| `rf.Mask(rate=0.2, window=3, offset=2)` | `0, 1, 2` |
+Use this when the experiment asks “what if this information were unavailable?”
+or when expensive input embedding should be avoided for selected values.
 
-## Nested Branches
+`skip=True` is an encoder-routing boundary, not secure deletion:
 
-A branch mask is resolved at the branch that owns it. If that branch is nested,
-the mask is computed independently for each parent coordinate.
+- plugin type validation and `prepare` still see pristine Arrow values;
+- training vocabulary/statistics observers still learn from pristine values;
+- a reconstructing skip still tensorizes its target representation;
+- `retain="*"` can still copy source columns into prediction output;
+- only input tensorization, input embedding, attention participation, and
+  pooling are omitted for the selected coordinate.
 
-This example masks two letters from the last two retained letters in each word:
+For Text, structural skip avoids tokenizing and frozen-encoding the input. A
+Text reconstruction target may still need target-side encoding for its loss.
+Use a preprocessor to redact source data before plugin processing when secrecy
+or data minimization is the requirement.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Skipping preserves fixed schema geometry. Tensorfields carry Boolean presence,
+the shared embedder gathers the `K` present coordinates, embeds a compact
+`[K, d_model]` input, then scatters it back. Attention and pooling ignore absent
+positions. Dense attention still uses the fixed sequence extent, so skip saves
+selected input tensorization and embedding work but does not shrink its
+quadratic attention matrix.
 
-from __future__ import annotations
+## Mask Queries Are Owner-Relative
 
-import random
-import string
+`Mask.query` selects a Boolean path from the record that owns the policy. It is
+not evaluated against the modeled leaf's scalar value.
 
-import pyarrow as pa
-from rich import print
+Consider:
 
-import relflow as rf
-
-ALPHABET = string.ascii_uppercase
-ADDRESS = "record/words/letters/letter"
-
-
-def consecutive_letters(rng: random.Random) -> list[dict[str, str]]:
-    length = rng.randint(3, 8)
-    start = rng.randint(0, len(ALPHABET) - length)
-    return [{"letter": value} for value in ALPHABET[start : start + length]]
-
-
-def words(rng: random.Random) -> list[dict[str, list[dict[str, str]]]]:
-    return [{"letters": consecutive_letters(rng)} for _ in range(rng.randint(2, 4))]
-
-
-rng = random.Random(7)
-data = pa.Table.from_pylist([{"words": words(rng)} for _ in range(5)])
-
+```python
 model = rf.Model(
-    d_model=16,
+    d_model=32,
     n_layers=1,
     n_heads=4,
-    words=rf.Branch(
-        length=3,
-        letters=rf.Branch(
-            length=8,
-            mask=rf.Mask(count=2, window=2),
-            letter=rf.Category(size=len(ALPHABET), p_unavailable=0.0),
+    amount=rf.Number(
+        query="features.gross_amount",
+        mask=rf.Mask(
+            query="routing.hide_amount",
+            skip=True,
+            dropout=False,
         ),
     ),
 )
-
-inputs = model.encode(data, strata=rf.Strata.train, mask=False)
-masked = model.encode(data, strata=rf.Strata.train, mask=True)
-
-print(inputs[ADDRESS])
-print(masked[ADDRESS])
 ```
 
-The tensorfield display shows the first batch item and the generated root
-singleton dimension. Nested branches are printed with one row per inner branch:
+Both paths start at the root record:
 
 ```text
-TensorField [tensorfield] state=(5, 1, 3, 8) device=cpu trainable=0
- counts V=54 N=0 P=66 M=0 O=0
- state V V V V P P P P
-       V V V V V V V V
-       V V V P P P P P
+root record
+├── features.gross_amount   <- Number.query supplies the modeled value
+└── routing.hide_amount     <- Mask.query supplies the Boolean decision
 ```
 
-After masking, selected values become `M` and cached targets are present:
+The mask query does not start at `gross_amount`. The same rule applies at every
+level:
 
-```text
-TensorField [tensorfield] state=(5, 1, 3, 8) device=cpu trainable=22
- counts V=32 N=0 P=66 M=22 O=0
- state V V M M P P P P
-       V V V V V V M M
-       V M M P P P P P
- targets=content, state
-```
+| Mask owner | Query starts from | One decision per |
+| --- | --- | --- |
+| Generated model root | The object selected by `Model(query=...)` | Observation |
+| Repeated `Branch` | Each child record retained by the branch query and overflow rule | Retained branch record |
+| Leaf | The leaf's containing root or branch record | Leaf occurrence |
 
-Here `count=2` equals the two-coordinate candidate `window`, so every eligible
-window is fully selected and the displayed positions are deterministic for
-these records. Use a smaller `count` than `window` when you want stochastic
-selection within the window.
+### Leaf selector inside a repeated branch
 
-## Debugging Encodes
-
-`Model.encode(...)` applies masking by default. Pass `mask=False` when you want
-to inspect the raw tensorized state before any dynamic masks, `p_mask`, or
-`target=True` pruning are applied:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-# `records` is a pyarrow.Table matching `model`.
-unmasked = model.encode(records, strata=rf.Strata.train, mask=False)
-masked = model.encode(records, strata=rf.Strata.train, mask=True)
-```
-
-This is most useful when validating mask windows for ragged branches. In the
-rendered tensorfield state:
-
-| Symbol | Token |
-| --- | --- |
-| `V` | observed valued input |
-| `N` | explicit null |
-| `P` | padded slot |
-| `M` | masked hidden input |
-| `O` | other reserved state |
-
-The first tensor dimension is batch. The second dimension is the generated root
-singleton. The display previews `state[0, 0]`.
-
-## Excluding Leaves
-
-Use `exclude=` when a branch-mask policy should sample some descendant fields
-but leave others untouched. `exclude=` accepts a single address or a tuple of
-addresses. Each address is either the full slash-delimited path to a leaf (the
-same key you would see in `model.schema.requests`) or a path relative to the
-branch which owns the mask:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-rf.Branch(
-    name="transactions",
-    length=128,
-    mask=rf.Mask(
-        rate=0.25,
-        window=32,
-        exclude="country",
+```python
+events=rf.Branch(
+    length=64,
+    amount=rf.Number(
+        mask=rf.Mask(query="routing.hide_amount", skip=True),
     ),
-    merchant=rf.Category(size=4096),
+)
+```
+
+`routing.hide_amount` lives inside each event struct. It returns one Boolean per
+retained event. The default `dropout=True` makes this example train-only.
+
+### Atomic branch selector
+
+```python
+events=rf.Branch(
+    length=64,
+    mask=rf.Mask(query="routing.hide_event", skip=True, dropout=False),
+    kind=rf.Category(size=128),
     amount=rf.Number,
-    country=rf.Category(size=256),
+    note=rf.Text,
 )
 ```
 
-Full addresses are also accepted. Pass a tuple to exclude multiple leaves:
+RelFlow resolves `hide_event` once for each retained event and broadcasts that
+ancestor decision to `kind`, `amount`, `note`, and all nested descendants. Use
+a branch policy when sibling fields must share one decision.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+“Atomic” describes the shared ancestor decision, not necessarily identical
+final tensors. One child may be null or structurally absent, and a descendant
+may have additional local masks.
 
-rf.Mask(
-    rate=0.25,
-    window=32,
-    exclude=(
-        "record/transactions/amount",
-        "country",
+### Branch and root reconstruction expand to leaves
+
+A reconstructing branch policy makes every active descendant leaf an
+objective:
+
+```python
+model = rf.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    customer_id=rf.Hash,
+    events=rf.Branch(
+        length=64,
+        mask=True,
+        kind=rf.Category(size=128),
+        amount=rf.Number,
     ),
 )
 ```
 
-## Prediction Requests
+Here every observed `events.kind` and `events.amount` coordinate is skipped and
+reconstructed from context outside the selected event subtree. The branch is a
+policy owner, not a decoded datatype; objectives and outputs still belong to
+its descendant leaves. `active=False` descendants are excluded.
 
-There is no reserved value literal for per-observation prediction masking.
-Strings that resemble mask tokens remain ordinary source content. Omit fields
-configured with `target=True` from prediction input; their masked coordinates
-come from the model schema. User-supplied per-observation selection arguments
-are part of the separate mask redesign and are not shipped by this Arrow pass.
+Schema construction validates the expansion up front. Every affected active
+leaf plugin must provide both a decoder and a loss component. If one cannot be
+reconstructed, model construction fails with the policy owner and leaf address
+instead of discovering the mismatch during training. Public prediction output
+also depends on whether that leaf plugin provides Arrow output/write
+components.
 
-## Validation
+The same rule applies to a reconstructing mask on the generated root: it
+expands to every active leaf in the model. Use root reconstruction sparingly;
+it can remove all encoder context unless another visible route remains.
 
-Mask configuration is validated when the schema is bound:
+### Root selector
 
-- `Mask` requires exactly one of `rate` or `count`.
-- `rate` must be between `0` and `1`.
-- `count` must be non-negative.
-- `window` must be positive when provided.
-- `offset` must be non-negative and smaller than the owning branch's `length`.
-- Passing both `mask=` and `masks=` to one branch is invalid.
-- Masks on the generated root branch are not supported.
-- A masked branch must have at least one active descendant leaf.
-- `exclude` cannot remove every active descendant leaf.
-- Duplicate non-null mask names on the same branch are invalid.
+```python
+model = rf.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    mask=rf.Mask(query="routing.hide_observation", skip=True),
+    amount=rf.Number,
+    merchant=rf.Category(size=1024),
+)
+```
 
-## Performance Notes
+One root decision broadcasts through the entire observation. This is usually a
+stress test or whole-record dropout. A leaf cannot opt back in beneath a
+selected ancestor policy.
 
-Mask resolution happens once per active leaf tensorfield. `rate` masks are fully
-vectorized and usually add little overhead. `count` masks sample an exact number
-of slots per parent coordinate and are more expensive, especially for large
-nested batches or many descendant leaves.
+### Selector requirements
 
-For very large schemas, prefer `rate` when exact counts are not required. If
-multiple leaves share the same branch mask, expect cost to scale with the number
-of affected leaves.
+An active mask query must return exactly one Arrow `bool` scalar for each
+retained owner coordinate. All selector positions must be structurally present
+and non-null.
+
+| Selector result | Outcome |
+| --- | --- |
+| `True` or `False` for every owner | Valid |
+| Arrow integer `0` / `1` | Type error; cast explicitly to Boolean |
+| Null Boolean | Error; fill it explicitly |
+| Field absent from the Arrow schema | Query-binding error |
+| Existing path beneath a null/missing parent | Structural-absence error |
+| Boolean list | Shape error; a policy needs one scalar per owner |
+
+The path syntax is structural: members, quoted names, literal map keys, and list
+positions that end in one scalar. List slices and traversal are grammatical for
+ordinary field queries, but a mask query cannot finish with a list axis because
+selection requires one Boolean scalar per owner. Predicates, filters,
+functions, pipes, and arbitrary expressions belong in a preprocessor.
+
+::: {.callout-warning}
+A selector derived from the hidden value can leak information through the mask
+pattern. If exactly negative amounts are hidden, the fact of being hidden
+reveals the sign. A dynamic mask is an intervention, not an automatic
+information barrier.
+:::
+
+## Query and Rate Together
+
+`query` defines the eligible set; `rate` samples within it:
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(
+        query="routing.eligible",
+        rate=0.25,
+        skip=True,
+    ),
+)
+```
+
+Only eligible amounts can be skipped, and approximately 25 percent of those are
+selected each training epoch. Because dropout defaults to true, the selector is
+not evaluated in validation, test, or prediction.
+
+For a stable evaluation-time sampled intervention, set `dropout=False`:
+
+```python
+mask=rf.Mask(query="routing.eligible", rate=0.25, skip=True, dropout=False)
+```
+
+That sample is stable within validation and within test, but the remaining rate
+still makes the policy inactive during prediction. If prediction needs a fixed
+subset, materialize the final Boolean decision in preprocessing and omit
+`rate`.
+
+## Multiple Policies and Overlap
+
+Pass a single mask or a list/tuple of masks through the same `mask` argument:
+
+```python
+amount=rf.Number(
+    mask=(
+        rf.Mask(rate=0.10),
+        rf.Mask(query="routing.ablate", skip=True, dropout=False),
+        rf.Mask(query="routing.predict_amount", reconstruct=True),
+    ),
+)
+```
+
+Active policy effects form monotonic unions:
+
+- any selected `skip=True` policy removes the coordinate from encoder input;
+- any selected `reconstruct=True` policy requests a target;
+- overlap between skip and reconstruction becomes a skipped reconstruction
+  target;
+- dropout never erases a target selected by another policy;
+- declaration order does not change the result;
+- `mask=False` on a descendant cannot undo an ancestor policy.
+
+Exact duplicate normalized policies are collapsed. Policies on the same owner
+with identical `(query, rate)` deliberately share the same sampled selection,
+even when their `skip` or `reconstruct` effects differ. Different owner
+addresses are separately salted, so equal rates on sibling leaves are not
+correlated. Put the policy on their common branch—or compute one shared Boolean
+selector in preprocessing—when correlation is required.
+
+## Reconstruction Patterns
+
+### Learned-mask denoising
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(rate=0.15, reconstruct=True),
+)
+```
+
+Training, validation, and test sample reconstruction targets. Because a
+fractional rate remains, this policy causes no prediction decoder work or
+public `amount` output.
+
+### Deterministic learned-mask reconstruction
+
+```python
+notes=rf.Text(
+    mask=rf.Mask(reconstruct=True),
+)
+```
+
+Every observed owner coordinate is replaced by a learned mask representation
+and is a target in fitting. Prediction requests every owner coordinate,
+including an owned position whose value is missing.
+
+### Supervised target
+
+```python
+fraud=rf.Boolean(mask=True)
+```
+
+This normalizes to deterministic skipped reconstruction. Training data includes
+`fraud`; prediction input may omit this directly bound field entirely.
+
+### Conditional reconstruction
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(query="routing.predict_amount", reconstruct=True),
+)
+```
+
+The supplied selector chooses which values are hidden and reconstructed. The
+output retains fixed compiled geometry; consumers must use the output's
+`inferred` flag and ignore decoded values where it is false.
+
+## Prediction and Source Omission
+
+Prediction behavior depends on whether reconstruction geometry can be inferred
+without the source value:
+
+| Reconstruction policy | May omit the target value entirely? | Why |
+| --- | ---: | --- |
+| Direct leaf, unconditional and deterministic, such as `mask=True` | Yes | Root geometry supplies one target position per row |
+| Direct leaf, `Mask(reconstruct=True)` | Yes | Same geometry; a learned mask parcel is created |
+| Repeated direct leaf with unconditional deterministic reconstruction | Leaf value may be omitted, but its containing branches must remain | Branch lists define output cardinality |
+| Query-backed reconstruction | No | Current routing needs the queried source structure as well as its selector |
+| Any policy with `0 < rate < 1` | No prediction request | Fractional policies are inactive during prediction |
+
+For a query-backed target, prediction supplies the target field with its Arrow
+schema plus the selector. Individual requested values may be null or absent
+within that established structure, but omitting the entire queried target
+column is not supported. Prefer a directly bound target when source-less
+prediction is required.
+
+During fitting, the reconstruction field and its queried source structure must
+be bindable; a wholly absent objective field is an error. Within that structure,
+only selected valued or explicit-null positions become targets. Per-coordinate
+structural absence is allowed and contributes no target. RelFlow never invents
+labels for train, validation, or test.
+
+## Preprocessor-Defined Selectors
+
+A mask query reads an ordinary Arrow Boolean field. The field may arrive in
+source data or be added by an `rf.Preprocessor` before mask resolution. The
+schema owns what the selector means; the processor owns how it is calculated:
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(
+        query="mask_amount",
+        skip=True,
+        dropout=False,
+    ),
+)
+```
+
+Attach the processor with `preprocessor=prepare` on a data module,
+`preprocess=prepare` on `model.encode`/`model.predict`, and
+`.preprocess(prepare)` on a deployment. The same function should normally serve
+training, batch inference, and online inference to avoid skew.
+
+Preprocessing runs before mask resolution and, in an `ArrowDataModule`, before
+sampling, shuffling, and model rebatching. `requires` and `produces` name
+top-level Arrow columns. A nested edit therefore declares the containing branch
+column, such as `produces=("events",)`.
+
+See [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) for
+complete Arrow and Awkward recipes covering nested selectors, exact counts,
+shared decisions, stratum-aware rules, user-bound thresholds, schema stability,
+and wiring.
+
+## Reproducible Uniform Selection
+
+Random masks use a stateless score derived from:
+
+```text
+seed + stratum + training epoch + Batch identity
+     + owner address + normalized (query, rate) + nested slot
+```
+
+This gives the following contract when the same `rf.Batch.identity` and nested
+geometry are preserved:
+
+- rebatching, Arrow rechunking, filtering, and shuffling do not change which
+  logical coordinates are selected;
+- changing the training epoch changes the score stream;
+- repeated validation selections are stable;
+- repeated test selections are stable, but separately salted from validation;
+- changes to `skip`, `dropout`, or `reconstruct` preserve selection when
+  `(query, rate)` and owner are unchanged.
+
+Nested reordering, a different overflow/capacity result, or a different owner
+address changes the coordinate identity. Each direct call with a raw Arrow
+table restarts positional identity at zero; it is deterministic but not
+content-keyed, so separately sliced calls do not match one full-table call.
+Preserve an `rf.Batch` when comparing selections across manual slices or calls.
+
+For diagnostics, pass explicit controls:
+
+```python
+encoded = model.encode(
+    arrow_table,
+    preprocess=prepare,
+    strata="train",
+    seed=17,
+    epoch=3,
+)
+```
+
+Use `Mask.rate` for reproducible epoch-varying randomness. A preprocessor is a
+better home for deterministic eligibility, exact-K selection, windows, or
+correlated decisions.
+
+## Inspecting Resolved Routing
+
+Every encoded tensorfield exposes routing tensors with the same fixed
+coordinate shape as `state`:
+
+| Tensor | Meaning |
+| --- | --- |
+| `present` | Coordinate participates in input embedding and model routing |
+| `trainable` | Coordinate contributes this field's reconstruction loss in train, validation, or test |
+| `inferred` | Coordinate was requested for reconstruction in prediction |
+
+```python
+encoded = model.encode(
+    table,
+    preprocess=prepare,
+    strata="train",
+)
+field = encoded[rf.Address("record/amount")]
+
+print(field.state)
+print(field.present)
+print(field.trainable)
+print(field.inferred)
+```
+
+The rich state preview uses:
+
+| Symbol | State |
+| --- | --- |
+| `V` | Valued input |
+| `N` | Explicit null |
+| `P` | Padding, structural absence, or skipped input |
+| `M` | Learned mask representation |
+| `O` | Plugin-defined other state |
+
+There is no `Model.encode(mask=False)` runtime bypass. Mask behavior is part of
+the schema and selected by stratum. For a temporary persistent experiment, use
+`Model.override(..., mask=False)` or a separately checkpointed schema.
+
+## Common Failures
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Selector works in training but is ignored in validation | `dropout` defaulted to `True` | Use `dropout=False` for reconstruction or persistent ablation |
+| Selector works in validation but is ignored in prediction | A fractional `rate` remains | Materialize a deterministic Boolean selector and omit `rate` |
+| “must return Boolean” | Selector is integer/string or a Boolean list | Cast to one Arrow Boolean scalar per owner |
+| “structurally absent” or null-selector error | Missing path, missing parent struct, or null decision | Make the decision explicit, often with `fill_null(..., False)` |
+| Sibling fields choose different random coordinates | Policies live on separate leaf addresses | Put one mask on their common branch or share a preprocessed selector |
+| A child remains hidden after `mask=False` | An ancestor policy selected it | Ancestor effects cannot be undone; move or narrow the ancestor policy |
+| Vocabulary/statistics include skipped values | Plugins observe pristine training data | This is intentional; redact in preprocessing if necessary |
+| Query-backed target cannot be omitted in prediction | Source-less vacancy is only available to directly bound unconditional targets | Keep the queried structure or bind the target directly |
+| Changing model batch size changes a manual test | Raw tables were submitted in separate calls | Preserve `rf.Batch.identity` across slices |
 
 ## Where Next
 
-- Use [Learning Modes & Embeddings](embeddings.qmd) for `target=True`,
-  `p_mask`, `p_prune`, and embedding export patterns.
-- Use [Branch](../data-types/branch.qmd) for repeated-context configuration,
-  `length`, and `overflow`.
-- Use [Data Modules](../guides/data-modules.qmd) to see where preprocessing,
-  queries, overflow, and masking run in the batch path.
+- [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) gives
+  complete source-to-model recipes.
+- [Query Paths](querypaths.qmd) defines the node-relative Arrow path grammar.
+- [Working with Arrow](../guides/working-with-arrow.qmd) covers processor scope,
+  lineage, Arrow kernels, and Awkward round trips.
+- [Learning Modes & Embeddings](embeddings.qmd) explains decoder and output
+  roles.
+- [Unified Mask Design Spec](../unified-mask-design-spec.md) records the lower-
+  level execution and extension contracts.

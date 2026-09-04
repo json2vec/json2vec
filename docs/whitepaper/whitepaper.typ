@@ -12,9 +12,10 @@
   stroke: 1pt + rgb("#b7791f"),
 )[
   *Historical API notice.* This manuscript predates RelFlow's Arrow-native
-  breaking release. Its JMESPath, `rf.Observation`, Python-row preprocessing,
-  and dictionary prediction examples are retained as design history and are
-  not current API guidance. Use the rendered documentation for supported code.
+  breaking release. Its legacy YAML schema fragments, root-relative query
+  notation, `rf.Observation`, Python-row preprocessing, and dictionary
+  prediction examples are retained as design history and are not current API
+  guidance. Use the rendered documentation for supported code.
 ]
 
 #let link-color = rgb("#0b5cad")
@@ -36,7 +37,9 @@
 ]
 
 #let querynote() = sidenote[
-  Conceptual query/input pair only. Fields bind directly by schema address when `query` is omitted; use an explicit `jmespath` query when the source needs declarative selection. See @sec:jmespath[Querying with JMESPath].
+  Conceptual query/input pair only. Fields bind directly by schema address when
+  `query` is omitted; use an explicit node-relative structural query when the
+  source path differs. See @sec:query[Structural Queries].
 ]
 
 #let pullquote(body) = block(
@@ -70,7 +73,7 @@ This is a common but under-discussed constraint in applied machine learning: som
 Business data rarely starts as a clean table. It is usually nested, historical, heterogeneous, and relational: customers have accounts, accounts have transactions, customers have login sessions, sessions have clickstream events, and every level may contain useful signal in the form of data fields. Traditional modeling workflows force practitioners to flatten that structure into handcrafted tabular features. The result is expensive, time-consuming, error-prone, and difficult to keep consistent between training and real-time serving.
 
 #figure(
-  image("diagrams/tree.drawio.typst.svg", width: 92%),
+  image("../diagrams/tree.drawio.typst.svg", width: 92%),
   caption: [
     Example of a nested business-data structure.
   ],
@@ -127,7 +130,7 @@ guarantees that the current experimental registry does not yet provide.
 
 However, architecture flexibility alone is not enough. An organization's foundation model is only practical across many use cases if its schema can evolve. Teams need to add and remove fields as their use cases change. An _overloaded_ foundation model is pretrained on every available data field; it may be slow, expensive, unwieldy, and inappropriate for sensitive use cases, such as credit decisioning with personal information. An _underloaded_ foundation model is trained only on universally relevant fields; it may underperform task-specific models that use handcrafted features for the task at hand. Without use-case-specific information, such as device identifiers or biometrics for fraud, a foundation model may supplement model development but cannot act as a standalone implementation.
 
-Schema mutation provides a middle ground. Organizations can create and maintain foundation models with an appropriate set of general fields, then adapt them into child foundation models or task-specific models that add relevant fields and remove unnecessary ones. Developers can also explore the impact of removing fields at inference time with @sec:pruning[integrated ablations], one of several *explainability* techniques that `relflow` prioritizes.
+Schema mutation provides a middle ground. Organizations can create and maintain foundation models with an appropriate set of general fields, then adapt them into child foundation models or task-specific models that add relevant fields and remove unnecessary ones. Developers can also explore the impact of removing fields at inference time with @sec:skipping[integrated ablations], one of several *explainability* techniques that `relflow` prioritizes.
 
 Finally, even a powerful, flexible, and mutable architecture is not enough if batch data processes still dominate the model-development lifecycle. `relflow` therefore supports configuration-based data querying and registered user-defined functions that transform raw data inside the training and inference paths, reducing the need for separate batch feature pipelines. These techniques are described in more detail in @sec:integration.
 
@@ -200,7 +203,7 @@ These two categorical inputs are processed as follows:
 During pretraining, the model will randomly mask values according to a masking rate hyperparameter.
 It will then attempt to impute the masked values from the remaining available information.
 
-This is similar in nature to masked language modeling (MLM). While each training observation has only one value for `x1` and one value for `x2`, each training batch contains many such observations. By masking different values across a batch, the model learns to reconstruct `x1` from `x2`, `x2` from `x1`, or either field from the learned prior when no paired value is available. The result is a generalizable representation of the data structure, and developers can later `prune` `x1` or `x2` and finetune the model to specialize in either task.
+This is similar in nature to masked language modeling (MLM). While each training observation has only one value for `x1` and one value for `x2`, each training batch contains many such observations. By masking different values across a batch, the model learns to reconstruct `x1` from `x2`, `x2` from `x1`, or either field from the learned prior when no paired value is available. The result is a generalizable representation of the data structure, and developers can later structurally skip `x1` or `x2` and finetune the model to specialize in either task.
 
 === Basic BERT-like Model
 
@@ -295,19 +298,20 @@ then make `sentiment` and `part_of_speech` supervised targets while keeping
 `tokens` visible:
 
 ```python
-model.update(rf.where("name") == "sentiment", target=True)
-model.update(rf.where("name") == "part_of_speech", target=True)
+model.update(rf.where("name") == "sentiment", mask=True)
+model.update(rf.where("name") == "part_of_speech", mask=True)
 ```
 
-`target=True` is the public shorthand for `p_prune=1.0`: the selected leaf is
-always hidden from encoder input while its original value remains the training
-target. After finetuning, input may omit these target fields and the model will
+`mask=True` is the public shorthand for
+`Mask(skip=True, dropout=False, reconstruct=True)`: the selected leaf never
+enters encoder input while its original value remains the training objective.
+After finetuning, input may omit these reconstructed fields and the model will
 decode them from the visible wordpiece tokens.
 
 The same underlying code handles pretraining and finetuning. This is discussed in more detail in @sec:training.
 
 In short: a supervised finetuning configuration is a special case in which a
-subset of fields use `target=True`; other fields may remain visible or retain
+subset of fields use `mask=True`; other fields may remain visible or retain
 intentional stochastic reconstruction objectives.
 
 === Basic Chess Encoding
@@ -472,12 +476,10 @@ fields:
   - name: origin
     type: category
     size: ...
-    query: "[*].origin"
 
   - name: destination
     type: category
     size: ...
-    query: "[*].destination"
 ```
 
 Sample input:
@@ -508,25 +510,33 @@ fields:
       - name: location
         type: category
         size: ...
-        query: "[*].[origin, destination]"
 ```
 
-Sample input:
+Sample processed input:
 
 ```json
 {
-  "origin": "IAD",
-  "destination": "SFO"
+  "locations": [
+    {"location": "IAD"},
+    {"location": "SFO"}
+  ]
 }
 ```
 
 #querynote()
 
-Now, `itinerary/locations/location` will share parameters. This requires no change to the source data because the `jmespath` query reshapes the values at encode time. Querying is discussed further in @sec:jmespath.
+Now, `itinerary/locations/location` shares parameters. An Arrow preprocessor
+stacks the original sibling columns into this repeated struct while preserving
+batch identity. Querying is discussed further in @sec:query.
 
-`jmespath` querying enables succinct extraction of data from complex `json`-like data structures without modifying the data on the fly. It is an explicit per-field option: fields without `query` use direct schema-address binding, and RelFlow does not infer an expression.
+Structural querying enables succinct navigation through complex Arrow structs,
+lists, and maps without modifying the source on the fly. It is an explicit
+per-node option: fields without `query` use direct schema-address binding, and
+RelFlow does not infer an expression.
 
-Broadly speaking, support for `jmespath` is meant to enable modeling from many source shapes: a dictionary of lists, a list of dictionaries, a dictionary of dictionaries of lists, or whatever else appears in the source system.
+Broadly speaking, structural queries let the schema adapt to stable path
+differences. Filters, sorting, joins, derived values, and field stacking remain
+preprocessor work.
 
 === Fraud Detection
 
@@ -663,7 +673,7 @@ This schema may be pretrained on slices of a customer's event history: time-wind
 This can be done at scale by streaming customer data, sampling a time window, and filtering the data down to that window.
 One customer may yield multiple observations, but it is typically prudent to prevent leakage by stratifying training, validation, and testing data by a unique customer identifier.
 
-After pretraining the model on customer behavior, developers can finetune multiple fraud models with different tagging strategies at different levels. For example, they may create the field `customer/transaction/is_account_takeover_fraud` at the transaction level and then `prune` it so the model focuses on imputing whether each transaction is indicative of account takeover fraud. Alternatively, they may create the field `customer/is_first_party_fraud` to predict first-party fraud at the customer level.
+After pretraining the model on customer behavior, developers can finetune multiple fraud models with different tagging strategies at different levels. For example, they may create the field `customer/transaction/is_account_takeover_fraud` at the transaction level and configure `mask=True` so the model reconstructs whether each transaction is indicative of account takeover fraud without seeing the answer. Alternatively, they may create the field `customer/is_first_party_fraud` to predict first-party fraud at the customer level.
 
 Keep in mind that nested contexts require significant GPU resources. Shaping the transformer encoder blocks, including input pooling, number of heads, and number of layers, becomes critical for keeping the model performant and avoiding out-of-memory errors.
 
@@ -716,13 +726,12 @@ Schemas define the shape of the model, but datatype plugins define how each data
 Each plugin also declares its accepted raw atom compatibility families with `Plugin(types=(...))`. Separate tuple entries are incompatible—for example, `(str, bytes)` accepts either identity type but rejects a field that mixes them—while a union entry such as `(int | float,)` permits compatible numeric promotion. RelFlow applies this declaration recursively to list, tuple, and NumPy-array leaf atoms; the tensorfield remains responsible for semantic container shape and encoding.
 
 A field's `type` is not only a validation hint. It selects a small bundle of components that know how to:
-- Validate and canonicalize declared raw atom families before Awkward construction
+- Validate and canonicalize declared Arrow atom families
 - Validate datatype-specific schema parameters
-- Convert raw `json`-like values into tensors
-- Mask and prune values during training
-- Embed the field into the shared `d_model` representation
+- Tensorize separate input and target `RaggedField` projections
+- Embed compact present coordinates into the shared `d_model` representation
 - Decode model context back into datatype-specific predictions
-- Compute losses for masked or pruned targets
+- Compute losses for selected reconstruction targets
 - Serialize predictions for inference and evaluation
 
 This is the key abstraction that allows `relflow` to model categories, numbers, timestamps, text, embeddings, and entities with the same high-level training loop.
@@ -806,19 +815,31 @@ Every datatype needs to represent more than content. It also needs to represent 
 - `valued`: a source value exists, even if vocabulary-backed content is unavailable
 - `null`: the source value is explicitly absent (`None`)
 - `padded`: the value was introduced only to fill a fixed context shape
-- `masked`: the input value is hidden by masking, pruning, or a supervised target
+- `masked`: the input remains present as a learned mask representation
 - `other`: a reserved state for datatype-specific extensions
 
-Each `TensorField` therefore carries four pieces of information:
+Each `TensorField` therefore carries six pieces of information:
 - `content`: the datatype-specific tensor representation
 - `state`: the enumerable state token for each position
+- `present`: which coordinates participate in encoder routing
 - `trainable`: which positions should contribute to loss
 - `targets`: cached original values used when hidden positions are decoded
+- `inferred`: which positions prediction requested the decoder to infer
 
 This is what makes the training and finetuning path the same path.
-Pretraining masks sampled positions; pruning and `target=True` hide whole leaf instances. The current runtime applies configured masking and pruning in train, validation, and test; prediction bypasses those stochastic policies while supervised targets are still supplied as hidden inputs. All hiding operations set the selected _input_ state to `masked`, cache the original target, and mark trainable positions. Pruning is an operation, not a sixth state token. During prediction, a separate public `inferred` mask says which decoded positions were masked in the request.
+Pretraining policies can mask or structurally skip sampled positions;
+`mask=True` skips a whole leaf and reconstructs it. Arrow resolves policies
+against pristine values before datatype conversion and creates separate input
+and target projections. A learned mask sets input state to `masked`; a skipped
+coordinate is removed from routing through `present`. `reconstruct=True` marks
+the original value trainable during fitting, while `inferred` identifies
+deterministic reconstruction requests during prediction.
 
-Because this state system is shared, new datatypes get masking, pruning, padding, and missing-value behavior without inventing their own control flow. The datatype still decides what its `content` tensor means, which selected states contribute to content loss, and how to write decoded predictions. See the current #link("https://relflow.github.io/relflow/core-concepts/data-types.html")[Data Types reference] for the canonical state and prediction-envelope contract.
+Because this state system is shared, new datatypes get masking, structural
+skipping, padding, and missing-value behavior without inventing their own
+control flow. The datatype still decides what its `content` tensor means, which
+selected states contribute to content loss, and how to write decoded
+predictions. See the current #link("https://relflow.github.io/relflow/core-concepts/data-types.html")[Data Types reference] for the canonical state and prediction-envelope contract.
 
 === Built-In Hash Encoding
 
@@ -876,21 +897,21 @@ For example, a fraud model may need to know that a cardholder usually transacts 
 
 == Explainability is built-in <sec:explainability>
 
-=== Via Pruning <sec:pruning>
+=== Via Structural Skipping <sec:skipping>
 
-`relflow` treats pruning as a first-class modeling operation, not as an external ablation script.
+`relflow` treats structural skipping as a first-class mask effect, not as an external ablation script.
 
 This matters because the same mechanism used for supervised learning can also be used for explanation.
-When a field is pruned, its observed value is removed from the model input and cached as a target. The model must reconstruct that value from the remaining context. This makes a pruned field a natural question:
+When a reconstructing field is skipped, its observed value is omitted from input tensorization and routing while a separate target projection retains it. The model must reconstruct that value from the remaining context. This makes a skipped reconstruction a natural question:
 
 #pullquote[Given everything else in this observation, what does the model believe this hidden field should be?]
 
 For a fraud model, this can be used in several ways:
-- Prune `customer/transaction/is_fraud` to train or evaluate the fraud target.
-- Prune `customer/transaction/amount` to understand whether the surrounding context implies an unusual transaction amount.
-- Prune an entire class of fields across experiments and measure degradation in target quality.
+- Set `mask=True` on `customer/transaction/is_fraud` to train or evaluate the fraud objective.
+- Apply `Mask(skip=True, reconstruct=True)` to `customer/transaction/amount` to understand whether the surrounding context implies an unusual transaction amount.
+- Apply a persistent skip policy to a field or branch across experiments and measure degradation in prediction quality.
 
-The last case is especially useful. Because fields and contexts have stable addresses, a developer can run controlled experiments where a branch is removed and all other training settings remain fixed. If pruning `customer/login_sessions/clickstream_events` significantly harms account-takeover detection, that is a direct signal that clickstream behavior is contributing useful information. If pruning it has no effect, the branch may be low-signal or redundant.
+The last case is especially useful. Because fields and contexts have stable addresses, a developer can run controlled experiments where a branch is skipped and all other training settings remain fixed. If skipping `customer/login_sessions/clickstream_events` significantly harms account-takeover detection, that is a direct signal that clickstream behavior is contributing useful information. If skipping it has no effect, the branch may be low-signal or redundant.
 
 This is not meant to claim causal explanation. It is a practical model-behavior diagnostic: remove information, hold the rest of the pipeline constant, and measure how reconstruction, prediction, and embeddings change.
 
@@ -963,51 +984,70 @@ The data path is designed so that raw observations, schema-defined extraction, o
 
 This is important operationally. In many production ML systems, training data is prepared by one feature pipeline and real-time inference is prepared by a different service. That separation creates training-serving skew. `relflow` avoids this by putting extraction and transformation directly into the model pipeline.
 
-=== Querying with JMESPath <sec:jmespath>
+=== Structural Queries <sec:query>
 
-Every leaf field may opt into a `jmespath` query. Without one, RelFlow directly projects the same-named value at the leaf's schema address. An explicit query defines how that leaf is pulled from the incoming `json`-like observation before its result rejoins canonical ragged preparation and the datatype plugin converts it into tensors.
+Every node may opt into a structural `query`. Without one, RelFlow directly
+projects the same-named value relative to its parent schema node. An explicit
+query navigates Arrow structs, lists, and maps before the result rejoins
+canonical ragged preparation and the datatype plugin converts it into tensors.
 
 #sidenote[
-  The queries and sample inputs in this section are intentionally simple. They are not a required data format. `jmespath` is meant to let the schema adapt to the structure you already have: maps of arrays, arrays of maps, deeply nested objects, flattened records, or source-specific payloads. The field query is the bridge between your raw record shape and the model's schema.
+  Queries are node-relative and structural. They support field selection, list
+  traversal, indexing and slicing, and literal map lookup. They deliberately do
+  not implement filters, expressions, joins, sorting, or multiselects.
 ]
 
-For simple fields, the query is usually direct:
+For matching fields, no query is needed. Use one only when the path differs:
 
 ```yaml
 - name: amount
   type: number
-  query: "[*].amount"
+  query: "payment.gross_amount"
 ```
 
 Sample input:
 
 ```json
-{ "amount": 42.13 }
+{ "payment": {"gross_amount": 42.13} }
 ```
 
-For nested contexts, queries can reshape values without rewriting the source object:
+Put a repeated collection query on its branch, then make child queries relative
+to each selected item:
 
 ```yaml
-- name: location
-  type: category
-  size: 50000
-  query: "[*].[origin, destination]"
+- name: legs
+  context_size: 2
+  query: "journey.legs[-2:]"
+  fields:
+    - name: location
+      type: category
+      size: 50000
+      query: "airport.code"
 ```
 
 Sample input:
 
 ```json
 {
-  "origin": "IAD",
-  "destination": "SFO"
+  "journey": {
+    "legs": [
+      {"airport": {"code": "IAD"}},
+      {"airport": {"code": "SFO"}}
+    ]
+  }
 }
 ```
 
-This query can turn two sibling fields into a shared two-position context, allowing `origin` and `destination` to share one vocabulary and one embedding table.
+The branch chooses and slices the collection once. Every child inherits that
+same repeated coordinate system, so sibling fields remain aligned.
 
-More generally, `jmespath` makes the schema responsible for selecting data while preserving the raw record format. This is useful when source systems produce dictionaries of lists, lists of dictionaries, deeply nested event payloads, or records whose shape is awkward but stable.
+More generally, structural queries make the schema responsible for navigation
+while preserving the raw record format. A preprocessor handles transformations
+that create new values or change row cardinality.
 
-The implementation validates queries when schemas are loaded and compiles them for reuse during encoding. It also performs periodic spot checks to catch queries that consistently return empty results, which is one of the easiest ways to silently train a bad model.
+The implementation parses queries with the model, binds them to the
+post-preprocessor Arrow schema, and caches the compiled plans. Missing source
+fields and incompatible structures fail with the query and model address.
 
 === Wrangling with Preprocessors <sec:preprocessors>
 
@@ -1063,9 +1103,8 @@ Unifying self-supervised learning with supervised learning simplifies control fl
 
 The idea is simple: the same datatype-specific losses are used for self-supervised learning and supervised learning.
 
-During pretraining, all masked values are imputed regardless of their dimensionality. During supervised learning, all targeted values are predicted regardless of their dimensionality.
-The difference is that masking happens value-by-value according to the masking rate. Targeting removes a field from the input and trains the model to reconstruct it.
-`dropout` can be configured on branches or fields. `p_mask` and `p_prune` are configured explicitly on leaf fields. These rates do not inherit down the schema tree; broad updates are made deliberately with schema selections.
+During pretraining, selected values can be reconstructed regardless of their dimensionality. During supervised learning, an always-skipped field is reconstructed through the same decoder and loss.
+One `Mask` model separates selection (`query` and `rate`), encoder effect (`skip`), and purpose (`dropout` or `reconstruct`). A branch policy is inherited atomically by all active descendants; a leaf policy affects only that leaf.
 
 This means that the control flow is the same for pretraining and finetuning. The difference between pretraining and finetuning is configuration, not a separate model architecture.
 
@@ -1082,8 +1121,14 @@ model = rf.Model(
     merchant=rf.Category(size=4096),
     is_fraud=rf.Category(size=2),
 )
-model.update(rf.where("type") == "number", p_mask=0.15)
-model.update(rf.where("type") == "category", p_mask=0.05)
+model.update(
+    rf.where("type") == "number",
+    mask=rf.Mask(rate=0.15, reconstruct=True),
+)
+model.update(
+    rf.where("type") == "category",
+    mask=rf.Mask(rate=0.05, reconstruct=True),
+)
 ```
 
 ```python
@@ -1094,28 +1139,28 @@ model = rf.Model(
     batch_size=256,
     amount=rf.Number,
     merchant=rf.Category(size=4096),
-    is_fraud=rf.Category(target=True, size=2),
+    is_fraud=rf.Category(mask=True, size=2),
 )
 ```
 
 == Heritage-based Forward Pass <sec:forward-pass>
 
 The forward pass is easiest to understand as a flow of small packages of information through the schema tree.
-Internally, these packages are called `Parcel`s. A parcel has an `origin`, a `destination`, and a tensor payload. Leaf fields create parcels, context encoders consume child parcels and create parent parcels, and decoders use the available parcels along a field's path to make predictions.
+Internally, these packages are called `Parcel`s. A parcel has an `origin`, a `destination`, a tensor payload, and a `present` mask. Leaf fields create parcels, context encoders consume child parcels and create parent parcels, and decoders use the available parcels along a field's path to make predictions.
 
 The pass happens in three stages.
 
-1. *Embed every visible leaf field.*
-   Each leaf field has a datatype-specific embedder. A categorical field, numerical field, text field, entity field, or vector field may all start with different raw tensors, but each embedder converts its field into the shared `d_model` representation.
-   The resulting parcel is sent from the leaf field to its parent context.
+1. *Embed every present leaf coordinate.*
+   Each leaf field has a datatype-specific embedder. A categorical field, numerical field, text field, entity field, or vector field may all start with different raw tensors, but each embedder converts compact `TensorInput` coordinates into the shared `d_model` representation.
+   RelFlow scatters that payload into fixed schema geometry, attaches presence, and sends the parcel to its parent context.
 
 2. *Encode contexts from the leaves upward.*
    Once a context has received parcels from its children, its encoder concatenates those child representations, runs the context-specific transformer block, and pools the result into that context's own representation.
    That new context parcel is then sent to its parent.
    This repeats from the deepest contexts up to the root, so a clickstream event can influence a login-session embedding, the login-session embedding can influence a customer embedding, and so on.
 
-3. *Decode trainable or pruned targets from their heritage.*
-   A field is decoded when it has trainable targets, such as masked values during pretraining, or when the field is explicitly pruned as a supervised target.
+3. *Decode reconstruction objectives from their heritage.*
+   A field is decoded during fitting when a reconstructing mask reaches it, and during prediction when a deterministic reconstruction is requested.
    To decode that field, the model gathers the parcels produced along the field's heritage: the field itself when it is still visible, its parent context, its grandparent context, and every higher context that exists for that observation.
    The decoder then attends over those heritage parcels and emits datatype-specific prediction tensors.
 
@@ -1134,7 +1179,7 @@ If this field is masked, its decoder can use information from:
 - `customer/login_sessions`
 - `customer`
 
-If the field is pruned instead, the leaf parcel for `customer/login_sessions/clickstream_events/type` is omitted, and the decoder must rely on the surrounding context parcels.
+If the field is selected with `skip=True` instead, its leaf parcel is absent and the decoder must rely on the surrounding context parcels.
 
 This gives the decoder access to local evidence and broad context at the same time.
 The local clickstream context may explain what happened inside the session; the login-session context may explain device and region behavior; the customer context may explain whether the behavior is unusual for that customer.
@@ -1142,8 +1187,8 @@ The local clickstream context may explain what happened inside the session; the 
 This heritage-based design is important because each target may live at a different level of the schema.
 A transaction-level fraud target should not be forced to decode only from a root customer vector. A customer-level target should not be forced to inspect every raw event directly. The model routes information upward through contexts, then lets each decoder attend to the representations that are relevant to its own address.
 
-This also explains why pruning works cleanly.
-When a field is pruned, its own input parcel is omitted from the upward pass, preventing the model from seeing the answer. The decoder still receives the remaining heritage parcels, so it must reconstruct the hidden field from surrounding context rather than copying the original value.
+This also explains why structural skipping works cleanly.
+When a field is skipped, its own input parcel is omitted from the upward pass, preventing the model from seeing the answer. A reconstructing policy still runs the decoder with the remaining heritage parcels, so it must reconstruct the omitted field from surrounding context rather than copying the original value.
 
 = Future Improvements
 

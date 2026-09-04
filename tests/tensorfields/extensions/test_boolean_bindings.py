@@ -6,7 +6,6 @@ import pytest
 
 import relflow as rf
 from relflow.structs.enums import TensorKey
-from relflow.tensorfields.shared.counter import CounterUpdateCallback
 from tests.arrow import table
 
 ADDRESS = rf.Address("record/flag")
@@ -25,16 +24,9 @@ def build() -> rf.Model:
 
 
 def observe(model: rf.Model, *values: bool | None) -> None:
-    inputs = model.encode(
+    model.encode(
         table([{"flag": value} for value in values]),
         strata=rf.Strata.train,
-        mask=False,
-    )
-    CounterUpdateCallback().on_train_batch_start(
-        trainer=None,
-        pl_module=model,
-        batch=inputs,
-        batch_idx=0,
     )
 
 

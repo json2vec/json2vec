@@ -4,14 +4,14 @@
 - Date: 2026-08-29
 - Audit baseline: `e7cf72d`
 - Priority: Simplification and standardization first, speed second
-- Related design: [Unified Masking And Pruning](unified-mask-design-spec.md)
+- Related design: [Unified Mask](unified-mask-design-spec.md)
 
 This document records the first Awkward coalescing design and its recursive-loop
 audit. Its JMESPath, Python observation, persistent Awkward carrier, and staged
 Arrow migration details are not current API guidance. The shipped pipeline now
 keeps data in Arrow and uses Awkward only as a transient nested-kernel view.
 
-## Decision
+## Historical Decision
 
 Do not replace individual Python loops with isolated Awkward calls.
 
@@ -27,22 +27,20 @@ engine: maintaining two permanent correctness paths would work against the
 primary goal. Built-in and third-party tensorfields adopt the same new contract
 in one change; there is no Python-values adapter.
 
-The canonical design is one eager coalescing operation per processed batch. It
-prepares every address selected for encoding before any datatype codec runs and
-returns one `RaggedField` per encoded address. This avoids repeatedly
-materializing and walking the same nested records and can reuse Arrow/Polars
-buffers.
+The shipped design uses one eager coalescing operation per processed batch. It
+returns one `Projection` per active address, containing a pristine Arrow-backed
+`RaggedField` plus resolved visibility, presence, trainability, and inference
+bits. This avoids repeatedly materializing and walking the same nested records.
 
-Direct schema-address projection is the default. A leaf may explicitly opt
-into JMESPath with `query=...` when declarative source extraction is valuable.
-No JMESPath expression is inferred for an omitted query. The explicit path
-pays one extraction/materialization pass per queried leaf, then converges with
-direct projection before the shared paired value/state regularization. It is
-not a second padding, state, literal, overflow, or datatype engine.
+Direct schema-address projection is the default. Any node may opt into
+RelFlow's structural Arrow query syntax with `query=...`; no query is inferred
+when it is omitted. Data-dependent filters, joins, sorting, and derived values
+remain preprocessor work.
 
-Keep masking and model routing in PyTorch after tensorization. Most masking is
-already tensorized; introducing Awkward there would add a backend transition
-without simplifying the model contract.
+The shipped design resolves selectors and input/target projections against
+Arrow before datatype tensorization. Torch owns only the device-side
+`present`, `trainable`, and `inferred` bits used by routing, loss, and writing.
+Awkward remains an optional transient view for deriving nested selector fields.
 
 ## Goals
 
@@ -87,7 +85,7 @@ Polars / Arrow / Python source
        -> recursively clip/pad values
        -> recursively clip/pad literal-mask flags
        -> convert NumPy arrays to Torch
-  -> apply Torch mask/prune policies
+  -> apply legacy post-tensor mask policies
   -> model
 ```
 
@@ -216,7 +214,7 @@ exact-count loop. Explicit opt-in JMESPath evaluation, stateful codecs, and
 orchestration remain visible semantic work rather than being forced into
 Awkward array algebra.
 
-## Canonical Internal Boundary
+## Historical Proposed Internal Boundary
 
 Introduce one Awkward-backed field view:
 
@@ -301,7 +299,7 @@ for safe coalescing.
 tests assert the semantic truth table rather than treating the old engine as an
 oracle.
 
-## Canonical Eager Coalescer
+## Historical Proposed Eager Coalescer
 
 Awkward represents irregular list structure, option values, and record fields
 without object-dtype NumPy arrays. Once preprocessing has produced a batch, one
@@ -470,34 +468,16 @@ cast it for Torch. `RaggedField` instead standardizes its public boundary on
 `np.int64`, so `torch.from_numpy(field.state)` is a valid `nn.Embedding` index
 without another datatype-specific cast.
 
-## Before And After: Exact Branch Counts
+## Before And After: Mask Selection
 
-Awkward should not be introduced into masking merely to remove one Python loop.
-The current exact-count branch selector iterates each flattened candidate row.
-A PyTorch top-k scatter expresses it directly:
+The earlier prototype considered tensor-side exact-count and window selectors.
+The shipped unified API deliberately omits `count`, `window`, and offset
+controls. A preprocessor derives one aligned Boolean Arrow field for those
+business rules, and `Mask(query="selected")` consumes it. Uniform `rate`
+selection is a stateless Arrow-side decision keyed by stable batch identity.
 
-```python
-# candidates: [..., branch_length] boolean tensor
-count = int(mask.count)  # validated as non-null for a count policy
-k = min(count, candidates.shape[-1])
-scores = torch.rand(candidates.shape, device=candidates.device)
-scores.masked_fill_(~candidates, 2.0)
-
-indices = scores.topk(k, dim=-1, largest=False).indices
-valid = candidates.gather(-1, indices)
-
-selected = torch.zeros_like(candidates)
-selected.scatter_(-1, indices, valid)
-```
-
-This selects exactly `min(count, available)` randomly per row without leaving
-Torch or looping over rows. It is uniform in the absence of equal random scores;
-finite-precision ties use `topk`'s tie behavior. Rate-based leaf and branch
-masking is already tensorized and should remain there.
-
-Under the unified masking/pruning design, policy selections should be unioned
-and applied once. Structural `Prune` becomes parcel validity; it is not an
-Awkward option value and not a new state token.
+Policy selections are unioned once before datatype conversion. `skip=True`
+becomes parcel presence; it is not an Awkward option value or a new state token.
 
 ## Loops That Should Remain
 
@@ -516,17 +496,17 @@ flow.
 | Vector validation/coercion | Yes | Enforces semantic width/type errors per structured leaf. |
 | Datetime parsing | Yes | Arbitrary configured formats are not a simple universal ufunc. |
 | Hugging Face tokenization/microbatching | Yes | Already batched external model logic. |
-| Tensor masking and routing | Yes, in Torch | Already on the tensor backend used by the model. |
+| Mask routing and loss | Yes, in Torch | Arrow has already resolved selection; Torch consumes presence and trainability on device. |
 | Cold validation/diagnostic traversals | Usually | Clarity matters more than optimizing rare error paths. |
 
 ## Canonical Edge Semantics
 
-### Prediction Literal Scope
+### No Prediction Mask Literal
 
-`"<MASK>"` is interpreted and validated only at modeled fields and their
-declared structured-leaf boundary. The coalescer does not recursively scan
-unmodeled metadata for the reserved string. This removes a full raw-record
-traversal and makes the wire contract follow what the model actually consumes.
+The shipped pipeline has no in-band mask string or other sentinel. Every string
+remains ordinary plugin content. Deterministic reconstruction comes from schema
+policy, and source-less prediction uses an explicit vacant Arrow carrier with
+fixed owner geometry.
 
 ### Missing Key Versus Explicit Null
 
@@ -537,31 +517,23 @@ states. For a scalar field:
 [{}, {"f": None}, {"f": 1}]  # state = [padded, null, valued]
 ```
 
-A direct Awkward record projection can represent both missing and explicit null
-as option values. The coalescer pairs values with final `Tokens` state before
-regularization, so clipping and padding never compact a missing coordinate or
-misalign state from its value.
+Arrow selection can represent both missing and explicit null positions. The
+coalescer pairs values with final `Tokens` state before mask projection, so
+clipping and padding never compact a missing coordinate or misalign state from
+its value.
 
 ### Structured Leaves
 
 Set values and Vector embeddings are lists semantically, but not branch axes.
-Every operation stops at schema `leaf_depth`. `"<MASK>"` is recognized only
-when the projected leaf itself is the sentinel; the same string inside a
-structured leaf is ordinary codec input.
+Every structural operation stops at the schema leaf boundary; the owning plugin
+then validates and tensorizes that container.
 
 ### Heterogeneous Leaves
 
-The canonical carrier accepts Awkward-compatible strings, numbers, booleans,
-records, lists, and option values for directly bound modeled leaves. Explicit
-query results follow the same constraint when materialized. Preprocessors
-normalize UUID, Decimal, custom classes, and device tensors only when a modeled
-field or query selects them. Unmodeled metadata remains in the untouched source
-observation rather than entering the Awkward layout.
-
-Awkward may coerce heterogeneous Python scalars differently according to input
-order. Each datatype therefore declares accepted raw atom compatibility
-families when it creates its plugin. Separate tuple entries are incompatible;
-a PEP 604 union is one family whose members may safely promote together:
+The canonical carrier is Arrow-backed. Each datatype declares accepted terminal
+atom compatibility families when it creates its plugin. Separate tuple entries
+are incompatible; a PEP 604 union is one family whose members may safely
+promote together:
 
 ```python
 identity = Plugin(name="identity", types=(str, bytes))
@@ -578,20 +550,14 @@ NumPy scalar classes are prepared structurally and are not valid family
 entries. Record-valued extensions may register a concrete mapping type such
 as `dict` as a terminal atom.
 
-Before Awkward construction, the shared core converts NumPy scalar atoms to
-their Python equivalents and recursively prepares atoms inside list, tuple,
-and NumPy-array leaf values. It aggregates observed family indexes by field
-address and rejects more than one family. This is generic plugin dispatch: the
-core resolves `request.type` through the registry but never branches on it or
-names a concrete tensorfield.
-
-The `types` declaration describes carrier atoms, not semantic leaf shape. A
-tensorfield still validates a Set container, Vector width, date grammar, or
-other datatype meaning after overflow selects retained values. One-shot
-iterators are rejected rather than consumed. `None` and a whole-leaf
-prediction `"<MASK>"` are routing states outside plugin atom matching; the same
-string nested inside a structured leaf is an ordinary `str` atom. Directly
-bound leaves and explicit query results use the same contract.
+`Plugin.prepare(...)` validates the complete projected Arrow type and unwraps
+compatible dictionary, extension, and union representations before the codec.
+This is generic plugin dispatch: the shared engine never branches on a concrete
+tensorfield name. The `types` declaration describes carrier atoms, not semantic
+leaf shape. A tensorfield still validates a Set container, Vector width, date
+grammar, or other datatype meaning after overflow selects retained values.
+`None` is shared null state rather than a plugin atom. Directly bound leaves and
+explicit query results use the same contract.
 
 ### Overflow
 
@@ -826,7 +792,7 @@ The canonical engine must cover:
   leaves;
 - structured Set/Vector leaves;
 - mixed Hash inputs;
-- prediction literal placement and nested structured-leaf strings as codec
+- source-less prediction placement and nested structured-leaf strings as codec
   input;
 - vocabulary first-seen order and canonical exposure counts;
 - documented address/axis/type errors;

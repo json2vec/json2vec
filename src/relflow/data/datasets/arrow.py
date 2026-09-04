@@ -17,9 +17,9 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset
 
 import relflow
-from relflow.data.arrow import IDENTITY, Batch, Encoded, matrix, mix
+from relflow.data.arrow import IDENTITY, Batch, matrix, mix
 from relflow.data.datasets.base import InterprocessEncodingContext
-from relflow.data.iterables import encode, mask
+from relflow.data.iterables import encode
 from relflow.data.processors import Preprocessor
 from relflow.distributed import world_size
 from relflow.structs.enums import Strata
@@ -435,15 +435,15 @@ class ArrowDataset(IterableDataset):
             batches = limit(batches, size=self.epoch_size)
 
         for item in rebatch(batches, size=self.batch_size, drop_last=self.drop_last):
-            encoded = encode(
+            yield encode(
                 batch=item,
                 schema=self.schema,
                 strata=self.strata,
                 interprocess_encoding_context=self.encoding_context,
-                defer_target_masking=True,
+                seed=self.seed,
+                epoch=epoch,
+                retain=self.retain,
             )
-            tensors = next(mask((encoded,), schema=self.schema, strata=self.strata))
-            yield Encoded(tensors=tensors, source=item, retain=self.retain)
 
 
 def loader(

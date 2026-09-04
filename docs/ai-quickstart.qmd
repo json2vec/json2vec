@@ -41,7 +41,7 @@ model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -87,17 +87,23 @@ See [Binding Data](core-concepts/binding-data.qmd) and
 | Configuration | Input behavior | Output / learning behavior |
 | --- | --- | --- |
 | plain leaf | visible when present | context only by default |
-| `target=True` | always hidden | supervised decode and loss |
-| `p_mask=x` | sampled positions hidden | reconstruction at selected positions |
-| `p_prune=x` | whole leaf instances sampled and hidden | reconstruction of the pruned field |
-| branch `mask=rf.Mask(...)` | descendant sampling is limited to candidate coordinates/windows | each descendant samples independently within those candidates |
+| `mask=True` | always skipped by the encoder | supervised reconstruction |
+| `mask=x` | sampled positions use a learned mask during training | context regularization only |
+| `mask=rf.Mask(rate=x, reconstruct=True)` | sampled positions use a learned mask | reconstruction at selected positions |
+| `mask=rf.Mask(query="selected", skip=True)` | selected positions are omitted from encoder work | train-only dropout by default |
+| branch `mask=...` | one decision is shared by the entire selected branch coordinate | atomic subtree masking or skipping |
 | `embed=True` | does not hide input | exports an embedding at the address |
 | `active=False` | excluded from execution | remains in the serializable schema |
 
-`target=True` is shorthand for `p_prune=1.0`. See
+`mask=True` is shorthand for
+`rf.Mask(skip=True, dropout=False, reconstruct=True)`. See
 [Learning Modes & Embeddings](core-concepts/embeddings.qmd) for the canonical
 role definitions and [Dynamic Masking](core-concepts/dynamic-masking.qmd) for
-repeated-window selection.
+selection and branch atomicity. A policy with a remaining fractional `rate` is
+inactive during ordinary prediction; use a deterministic Boolean selector for
+request-time routing. See
+[Dynamic Mask Preprocessors](guides/dynamic-mask-preprocessors.qmd) for complete
+Arrow and Awkward selector recipes.
 
 ## Run The Lifecycle
 
@@ -127,7 +133,7 @@ requests = validate_table.drop(["returned"]).slice(0, 1)
 result = restored.predict(requests)
 ```
 
-Prediction requests normally omit fields configured with `target=True`.
+Prediction requests normally omit fields configured with `mask=True`.
 `Model.predict` returns a `pyarrow.Table`; its `predictions` struct has one
 field per schema address. Decoded leaves include `state`, type-specific
 `content`, and `inferred`, while configured nodes can include `embedding`.
@@ -208,7 +214,7 @@ typed model output intact until the postprocessor boundary. See
 - Set bounded capacity for Category, Cluster, and Set fields, then monitor
   vocabulary growth rather than inventing a missing-value class.
 - Use `overflow="tail"` only when source order places the newest values last.
-- Include targets in train/validation data; omit them from ordinary prediction
-  requests.
+- Include reconstruction values in train/validation data; prediction may omit
+  only unconditional deterministic reconstructions such as `mask=True`.
 - Preserve the same preprocessing, schema, vocabulary/normalizer state, and
   weights across evaluation and inference.

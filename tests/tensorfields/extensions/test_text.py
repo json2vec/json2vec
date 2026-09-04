@@ -1,6 +1,5 @@
 import builtins
 import sys
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +10,7 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.structs.tree import Mask
 from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.text import (
     ATTENTION_MASK,
@@ -24,11 +24,18 @@ from relflow.tensorfields.extensions.text import (
     write,
 )
 from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/body"
 
 
-def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", encoder_batch_size: int = 2) -> dict:
+def _structure_payload(
+    *,
+    objective: str = "l2",
+    encoder_pooling: str = "cls",
+    encoder_batch_size: int = 2,
+    mask: bool | Mask = False,
+) -> dict:
     field: dict = {
         "name": "body",
         "type": "text",
@@ -37,6 +44,7 @@ def _structure_payload(*, objective: str = "l2", encoder_pooling: str = "cls", e
         "encoder_batch_size": encoder_batch_size,
         "encoder_pooling": encoder_pooling,
         "objective": objective,
+        "mask": mask,
     }
     return {
         "d_model": 16,
@@ -65,9 +73,15 @@ def _values() -> list:
 
 def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
     batch = arrow_batch([{"items": [{"body": value} for value in root]} for (root,) in values])
-    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
-    field = replace(field, values=TENSORFIELDS["text"].prepare(field.values, address=ADDRESS))
-    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["text"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+    )
 
 
 class FakeTokenizer:
@@ -301,41 +315,45 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
     )
 
     embedder = Embedder(schema=structure, address=ADDRESS)
-    parcel = embedder(field)
+    parcel = embedder.embed(field)
     assert parcel.payload.shape == (2, 1, 2, 16)
     assert fake_model.calls == 4
 
     decoder = Decoder(schema=structure, address=ADDRESS)
-    prediction = decoder([parcel])
+    prediction = decoder(
+        [parcel],
+        batch_size=field.state.shape[0],
+        device=parcel.payload.device,
+    )
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 4)
 
 
-def test_text_partial_mask_reuses_target_embeddings_for_visible_input_and_loss(
+def test_text_forward_never_reads_reconstruction_targets(
     monkeypatch: pytest.MonkeyPatch,
 ):
     fake_model = _patch_hf(monkeypatch)
 
-    structure = Schema.model_validate(_structure_payload(encoder_batch_size=2))
+    structure = Schema.model_validate(
+        _structure_payload(
+            encoder_batch_size=2,
+            mask=Mask(reconstruct=True),
+        )
+    )
     field = _new_tensorfield(
         values=_values(),
         schema=structure,
         strata=Strata.train,
     )
-    selected = torch.zeros_like(field.state, dtype=torch.bool)
-    selected[..., 0] = True
-    field.hide(selected)
 
     embedder = Embedder(schema=structure, address=ADDRESS)
-    parcel = embedder(field)
+    parcel = embedder.embed(field)
 
-    # The original four values fit in two encoder batches. Visible values must
-    # reuse those target embeddings instead of requiring a third model call.
-    assert fake_model.calls == 2
-    target_embeddings = field.targets[TensorKey.embedding]
-    valued = field.state.eq(Tokens.valued.value).unsqueeze(-1)
-    expected = embedder.embeddings(field.state) + embedder.linear(target_embeddings) * valued
-    assert torch.allclose(parcel.payload, expected)
+    assert fake_model.calls == 0
+    assert torch.all(field.state == Tokens.masked.value)
+    assert torch.count_nonzero(field.content[INPUT_IDS]) == 0
+    assert torch.count_nonzero(field.targets[TensorKey.content][INPUT_IDS]) > 0
+    assert torch.allclose(parcel.payload, embedder.embeddings(field.state))
 
     state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
     state_logits[..., Tokens.valued.value] = 50.0
@@ -344,7 +362,7 @@ def test_text_partial_mask_reuses_target_embeddings_for_visible_input_and_loss(
         payload=TensorDict(
             {
                 TensorKey.state: state_logits,
-                TensorKey.content: target_embeddings.clone(),
+                TensorKey.content: torch.zeros(*field.state.shape, embedder.hidden_size),
             },
             batch_size=[2],
         ),
@@ -523,18 +541,20 @@ class _DummyModule:
 def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch, objective: str, expected: float):
     _patch_hf(monkeypatch)
 
-    structure = Schema.model_validate(_structure_payload(objective=objective))
+    structure = Schema.model_validate(_structure_payload(objective=objective, mask=Mask(reconstruct=True)))
     schema = structure
     field = _new_tensorfield(
         values=_values(),
         schema=schema,
         strata=Strata.train,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
-    targets = embedder.target_embeddings(field)
+    targets = embedder.encode(
+        content=field.targets[TensorKey.content],
+        state=field.targets[TensorKey.state],
+    )
+    field.targets[TensorKey.embedding] = targets
     state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
     state_logits[..., Tokens.valued.value] = 50.0
     prediction = Prediction(

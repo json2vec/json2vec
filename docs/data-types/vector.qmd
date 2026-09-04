@@ -79,9 +79,9 @@ Increasing `n_dim` grows the input projection, decoder output, activation
 memory, and prediction payload linearly. Prefer the smallest upstream
 representation that preserves the signal you need.
 
-## Target Behavior
+## Reconstruction Behavior
 
-When a `Vector` is masked or used as a target, the decoder predicts:
+When a `Vector` is selected for reconstruction, the decoder predicts:
 
 - `state`: probabilities for `valued`, `null`, `padded`, `masked`, and
   reserved `other`.

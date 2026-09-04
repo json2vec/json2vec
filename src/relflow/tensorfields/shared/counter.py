@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 from lightning.pytorch import Callback
-from tensordict import TensorDict
 
-from relflow.data.arrow import Encoded
 from relflow.distributed import all_reduce_sum, is_distributed, synchronize_epoch_metrics
-from relflow.structs.enums import TensorKey, Tokens
 from relflow.structs.tree import Address
 
 if TYPE_CHECKING:
@@ -45,23 +41,34 @@ class Counter(torch.nn.Module):
     @torch.no_grad()
     def observe(self, values: torch.Tensor) -> torch.Tensor:
         if self.training and not self.is_full:
-            observed = values.view(-1)
-            observed = observed.masked_select(observed.ge(0) & observed.lt(self.size))
-            update = torch.bincount(observed, minlength=self.counts.shape[0]).to(self.counts.dtype)
-
-            remaining = torch.iinfo(self.counts.dtype).max - self.counts
-            could_overflow = bool((update >= remaining).any().item())
-
-            if could_overflow:
-                # if we are approaching the max value, we stop counting and assume the counts are full
-                self.is_full = True
-                self._pending_counts.zero_()
-                return values
-
-            self.counts += update
-            self._pending_counts += update
+            self.learn(tally(values, self.size))
 
         return values
+
+    @torch.no_grad()
+    def learn(self, counts: torch.Tensor) -> None:
+        """Apply one already-counted pristine observation."""
+
+        if not isinstance(counts, torch.Tensor):
+            raise TypeError(f"counter counts must be a tensor, got {type(counts).__name__}")
+        if tuple(counts.shape) != tuple(self.counts.shape):
+            raise ValueError(f"counter counts must have shape {tuple(self.counts.shape)}, got {tuple(counts.shape)}")
+        if counts.is_floating_point() or counts.is_complex():
+            raise TypeError(f"counter counts must use an integer dtype, got {counts.dtype}")
+        if (counts < 0).any():
+            raise ValueError("counter counts cannot be negative")
+        if self.is_full:
+            return
+
+        update = counts.to(device=self.counts.device, dtype=self.counts.dtype)
+        remaining = torch.iinfo(self.counts.dtype).max - self.counts
+        if (update >= remaining).any():
+            self.is_full = True
+            self._pending_counts.zero_()
+            return
+
+        self.counts += update
+        self._pending_counts += update
 
     @torch.no_grad()
     def sync(self) -> None:
@@ -100,63 +107,6 @@ class Counter(torch.nn.Module):
 
 class CounterUpdateCallback(Callback):
     @torch.no_grad()
-    def on_train_batch_start(
-        self,
-        trainer: Trainer,
-        pl_module: Model,
-        batch: TensorDict | Encoded,
-        batch_idx: int,
-    ) -> None:  # ty:ignore[invalid-method-override]
-        inputs = batch.tensors if isinstance(batch, Encoded) else batch
-        for address in pl_module.schema.active_requests:
-            field = inputs[address]
-            embedder = pl_module.nodes[address].embedder
-            observed: set[int] = set()
-
-            def values_for(key: TensorKey) -> torch.Tensor | None:
-                targets = getattr(field, "targets", None)
-                if targets is not None and key in targets.keys():
-                    return targets[key]
-
-                value = getattr(field, key.name, None)
-                return value if isinstance(value, torch.Tensor) else None
-
-            def observe(counter: Callable[[torch.Tensor], Any], values: torch.Tensor) -> None:
-                identity = id(counter)
-                if identity in observed:
-                    return
-
-                observed.add(identity)
-                counter(values)
-
-            state = values_for(TensorKey.state)
-
-            counter = getattr(embedder, "counter", None)
-            if state is not None and callable(counter):
-                observe(counter=counter, values=state)
-
-            counters = getattr(embedder, "counters", None)
-            if counters is None:
-                continue
-
-            if state is not None and TensorKey.state.name in counters:
-                state_counter = counters[TensorKey.state.name]
-                if callable(state_counter):
-                    observe(counter=state_counter, values=state)
-
-            if state is None or TensorKey.content.name not in counters:
-                continue
-
-            content = values_for(TensorKey.content)
-            if content is None or content.shape != state.shape:
-                continue
-
-            values = content.masked_select(state.eq(Tokens.valued.value))
-            content_counter = counters[TensorKey.content.name]
-            if callable(content_counter):
-                observe(counter=content_counter, values=values)
-
-    @torch.no_grad()
     def on_train_epoch_end(
         self,
         trainer: Trainer,
@@ -188,4 +138,17 @@ class CounterUpdateCallback(Callback):
             counter.sync()
 
 
-__all__ = ["Counter", "CounterUpdateCallback"]
+def tally(values: torch.Tensor, size: int) -> torch.Tensor:
+    """Count valid integer classes into one fixed-width vector."""
+
+    if not isinstance(values, torch.Tensor):
+        raise TypeError(f"counter values must be a tensor, got {type(values).__name__}")
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError(f"counter size must be a positive integer, got {size!r}")
+
+    observed = values.reshape(-1).to(dtype=torch.int64)
+    observed = observed.masked_select(observed.ge(0) & observed.lt(size))
+    return torch.bincount(observed, minlength=size)
+
+
+__all__ = ["Counter", "CounterUpdateCallback", "tally"]

@@ -31,18 +31,15 @@ def _build_plugin() -> Plugin:
 
     class TensorField(TensorFieldBase):
         @classmethod
-        def new(cls, field, address, schema, strata):
+        def new(cls, input, target, present, trainable, inferred, address, schema, strata, context):
             return object()
-
-        def mask(self, p_mask: float):
-            return None
-
-        def target(self, p_prune: float):
-            return None
 
     class Embedder(EmbedderBase):
         def __init__(self, schema: object, address: object):
             super().__init__(schema=schema, address=address)
+
+        def forward(self, inputs):
+            return inputs
 
     class Decoder(DecoderBase):
         def __init__(self, schema: object, address: object):
@@ -330,6 +327,56 @@ def test_plugin_output_defaults_to_no_output_when_unregistered():
         TENSORFIELDS.pop(plugin.name, None)
 
 
+def test_plugin_observation_components_default_to_no_op():
+    plugin = Plugin(name=_plugin_name("defaultobserve"), types=(object,))
+    try:
+        assert (
+            plugin.observe(
+                field=object(),
+                address=Address("record/value"),
+                schema=object(),
+                state=None,
+                learn=False,
+            )
+            is None
+        )
+        assert (
+            plugin.learn(
+                module=object(),
+                observation=object(),
+                address=Address("record/value"),
+                strata=Strata.train,
+            )
+            is None
+        )
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
+@pytest.mark.parametrize("component", ["observe", "learn"])
+def test_plugin_observation_components_require_exact_signatures(component):
+    plugin = Plugin(name=_plugin_name(f"bad{component}"), types=(object,))
+
+    if component == "observe":
+
+        def observe(field, address):
+            return None
+
+        function = observe
+    else:
+
+        def learn(module, observation):
+            return None
+
+        function = learn
+
+    try:
+        with pytest.raises(TypeError, match=f"{component.title()} function must accept"):
+            plugin.register(function)
+    finally:
+        TENSORFIELDS.pop(plugin.name, None)
+
+
 def test_plugin_accepts_explicit_none_write():
     plugin = Plugin(name=_plugin_name("nonehooks"), types=(object,))
     try:
@@ -438,15 +485,9 @@ def test_plugin_rejects_legacy_tensorfield_new_signature():
         def new(cls, values, address, schema, strata):
             return object()
 
-        def mask(self, p_mask: float):
-            return None
-
-        def target(self, p_prune: float):
-            return None
-
     plugin = Plugin(name=_plugin_name("legacynew"), types=(object,))
     try:
-        with pytest.raises(TypeError, match="TensorField.new must accept 'field'"):
+        with pytest.raises(TypeError, match="TensorField.new must accept these parameters"):
             plugin.register(TensorField)
     finally:
         TENSORFIELDS.pop(plugin.name, None)

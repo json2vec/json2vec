@@ -10,7 +10,7 @@ from tensordict import TensorDict
 from torch.utils.data import IterableDataset
 
 import relflow as rf
-from relflow.data.arrow import Batch
+from relflow.data.arrow import Batch, Encoded
 from relflow.data.datasets import arrow
 from relflow.data.datasets.custom import adapt
 from relflow.structs.enums import Strata
@@ -35,8 +35,14 @@ class Records(IterableDataset):
 
 
 def collect(dataset: arrow.ArrowDataset, monkeypatch: pytest.MonkeyPatch) -> list[Batch]:
-    monkeypatch.setattr(arrow, "encode", lambda *, batch, **kwargs: TensorDict({}, batch_size=[len(batch)]))
-    monkeypatch.setattr(arrow, "mask", lambda batches, **kwargs: iter(batches))
+    monkeypatch.setattr(
+        arrow,
+        "encode",
+        lambda *, batch, **kwargs: Encoded(
+            tensors=TensorDict({}, batch_size=[len(batch)]),
+            source=batch,
+        ),
+    )
     return [item.source for item in dataset]
 
 

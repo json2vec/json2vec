@@ -1,0 +1,812 @@
+---
+eval: false
+---
+
+# Dynamic Mask Preprocessors
+
+**Example status — tested:** the core configuration matrix and representative
+Arrow/Awkward recipes on this page are covered by
+`tests/examples/test_masking_docs.py` and use the current public API.
+
+Use an `rf.Preprocessor` when mask selection depends on data logic that does not
+belong in RelFlow's structural query language: comparisons, permissions,
+windows, exact counts, nested predicates, correlated decisions, or
+stratum-specific routing.
+
+The division of responsibility is simple:
+
+```text
+source Arrow
+  -> preprocessor computes explicit Boolean selector fields
+  -> Mask.query reads those fields in node-owner geometry
+  -> optional Mask.rate samples eligible coordinates
+  -> skip/dropout/reconstruct determine routing and purpose
+```
+
+The preprocessor should make the decision legible in Arrow. `rf.Mask` should
+describe how RelFlow uses that decision.
+
+## The Contract in One Example
+
+This processor marks large amounts. The model persistently removes marked
+values from encoder input:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+import relflow as rf
+
+
+@rf.preprocess(
+    requires=("amount",),
+    produces=("mask_amount",),
+)
+def prepare(batch: rf.Batch) -> rf.Batch:
+    selected = pc.fill_null(
+        pc.greater(batch.data["amount"], 1_000.0),
+        False,
+    )
+    data = batch.data.append_column("mask_amount", selected)
+    return batch.replace(data)
+
+
+model = rf.Model(
+    d_model=16,
+    n_layers=1,
+    n_heads=4,
+    amount=rf.Number(
+        mask=rf.Mask(
+            query="mask_amount",
+            skip=True,
+            dropout=False,
+        ),
+    ),
+    fraud=rf.Boolean(mask=True),
+)
+```
+
+There are four important details:
+
+1. `mask_amount` is a top-level sibling of `amount`, because the leaf mask query
+   starts from the root record that owns both fields.
+2. Null comparisons are filled explicitly. A mask selector cannot be null.
+3. `batch.replace(data)` preserves RelFlow row identity for a same-row
+   transformation.
+4. `dropout=False` makes this persistent. Without it, the skip would run only
+   during training.
+
+The selector is unmodeled. It does not become a tensorfield merely because a
+mask reads it.
+
+## Attach the Processor Everywhere It Is Needed
+
+Defining a decorated function does not attach it to a model. Training data
+modules and direct model calls use different, explicit keywords:
+
+```python
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=validate,
+    test=test,
+    preprocessor=prepare,
+)
+
+train_batch = model.encode(
+    train,
+    preprocess=prepare,
+    strata="train",
+)
+
+predictions = model.predict(
+    requests,
+    preprocess=prepare,
+)
+```
+
+Serving attaches the same object to the deployment builder:
+
+```python
+deployment = (
+    rf.Deployment(checkpoint="artifacts/fraud-model.rf")
+    .preprocess(prepare)
+)
+```
+
+| Entry point | Keyword or method |
+| --- | --- |
+| `ArrowDataModule`, `PolarsDataModule`, `CustomDataModule`, `SyntheticDataModule` | `preprocessor=prepare` |
+| `model.encode(...)` | `preprocess=prepare` |
+| `model.predict(...)` | `preprocess=prepare` |
+| `rf.Deployment(...)` | `.preprocess(prepare)` |
+
+Use the same selector implementation across training, batch inference, and
+online inference whenever its source fields are available. This is the easiest
+way to avoid training-serving skew.
+
+A data module also accepts a mapping when splits intentionally use different
+processors:
+
+```python
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=validate,
+    test=test,
+    predict=requests,
+    preprocessor={
+        "train": prepare,
+        "validate": prepare,
+        "test": prepare,
+        "predict": prepare,
+    },
+)
+```
+
+The values may be different `rf.Preprocessor` objects or `None`. Omitted map
+keys default to no processor. That is convenient for a train-only dropout query,
+which is inactive elsewhere. A deterministic reconstruction or persistent
+ablation query still needs its selector in every active split.
+
+## Inspect Before Training
+
+Start with a tiny table and inspect the resolved route:
+
+```python
+source = pa.table(
+    {
+        "amount": [100.0, 2_000.0, None],
+        "fraud": [False, True, False],
+    }
+)
+
+encoded = model.encode(
+    source,
+    preprocess=prepare,
+    strata="train",
+)
+amount = encoded[rf.Address("record/amount")]
+
+assert amount.present[:, 0].tolist() == [True, False, True]
+assert amount.trainable[:, 0].tolist() == [False, False, False]
+```
+
+The null amount remains present as explicit null state because the processor
+chose `False` for it. The large amount is skipped and absent from encoder
+routing.
+
+During a reconstruction policy, inspect `trainable` in train/validation/test
+and `inferred` in prediction. Do not infer selection from decoded values;
+writers retain fixed output geometry and may populate unrequested positions.
+
+## Recipe: Train-Only Data-Dependent Dropout
+
+Remove the explicit `dropout=False` to make a derived selector regularization:
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(
+        query="mask_amount",
+        skip=True,
+    ),
+)
+```
+
+The preprocessor may still run on every split, but the query is evaluated only
+during training because `dropout` defaults to true. Direct validation or
+prediction input does not need the selector if the processor is not attached
+there.
+
+Use learned-mask routing instead by leaving `skip=False`:
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(query="mask_amount"),
+)
+```
+
+Both examples use the same eligibility logic. Only the selected encoder state
+changes.
+
+## Recipe: Bind User Configuration Once
+
+Additional keyword-only parameters are user configuration. Bind them with
+`.partial(...)` before attaching the processor:
+
+```python
+@rf.preprocess(
+    requires=("amount",),
+    produces=("mask_amount",),
+)
+def threshold(batch: rf.Batch, *, cutoff: float) -> rf.Batch:
+    selected = pc.fill_null(
+        pc.greater(batch.data["amount"], cutoff),
+        False,
+    )
+    data = batch.data.append_column("mask_amount", selected)
+    return batch.replace(data)
+
+
+production_threshold = threshold.partial(cutoff=1_000.0)
+
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    preprocessor=production_threshold,
+)
+```
+
+This makes the threshold immutable and visible at the attachment point.
+Unbound required parameters fail before the processor runs.
+
+## Recipe: Stratum-Aware Routing
+
+The pipeline can provide `strata` to a keyword-only parameter. This example
+creates a prediction-only persistent ablation without adding another option to
+`Mask`:
+
+```python
+@rf.preprocess(
+    requires=("deny_amount",),
+    produces=("mask_amount",),
+)
+def prediction_policy(
+    batch: rf.Batch,
+    *,
+    strata: rf.Strata,
+) -> rf.Batch:
+    if strata == rf.Strata.predict:
+        selected = pc.fill_null(batch.data["deny_amount"], False)
+    else:
+        selected = pa.repeat(
+            pa.scalar(False, type=pa.bool_()),
+            len(batch),
+        )
+
+    data = batch.data.append_column("mask_amount", selected)
+    return batch.replace(data)
+```
+
+Pair it with a policy that is active in every stratum:
+
+```python
+amount=rf.Number(
+    mask=rf.Mask(
+        query="mask_amount",
+        skip=True,
+        dropout=False,
+    ),
+)
+```
+
+The policy runs everywhere; the processor chooses no coordinates outside
+prediction. The output Arrow schema remains identical because `mask_amount` is
+always present and Boolean.
+
+Pipeline-provided processor parameters are `strata`, `schema`, and
+`encoding_context`. They cannot be bound with `.partial(...)`. Request only
+what the function uses.
+
+## Recipe: Conditional Reconstruction
+
+Use `reconstruct=True` when the selector marks values that should become
+targets:
+
+```python
+@rf.preprocess(
+    requires=("needs_estimate",),
+    produces=("predict_amount",),
+)
+def select_estimates(batch: rf.Batch) -> rf.Batch:
+    selected = pc.fill_null(batch.data["needs_estimate"], False)
+    data = batch.data.append_column("predict_amount", selected)
+    return batch.replace(data)
+
+
+model = rf.Model(
+    d_model=16,
+    n_layers=1,
+    n_heads=4,
+    context=rf.Category(size=128),
+    amount=rf.Number(
+        mask=rf.Mask(
+            query="predict_amount",
+            reconstruct=True,
+        ),
+    ),
+)
+```
+
+Selected amounts use learned-mask input and become targets. Add `skip=True` to
+remove them from encoder input while preserving the target:
+
+```python
+mask=rf.Mask(
+    query="predict_amount",
+    skip=True,
+    reconstruct=True,
+)
+```
+
+At prediction, a query-backed reconstruction currently requires the selector
+and the modeled `amount` column to establish the queried source structure. It
+hides supplied values selectively; it is not a source-less dynamic target. A
+directly bound unconditional `mask=True` target may be omitted entirely.
+
+## Recipe: Eligibility Plus Uniform Sampling
+
+Let preprocessing define *who is eligible* and `Mask.rate` define an
+epoch-varying random sample:
+
+```python
+@rf.preprocess(
+    requires=("country", "consented"),
+    produces=("eligible",),
+)
+def eligibility(batch: rf.Batch) -> rf.Batch:
+    selected = pc.and_kleene(
+        pc.equal(batch.data["country"], "US"),
+        batch.data["consented"],
+    )
+    selected = pc.fill_null(selected, False)
+    data = batch.data.append_column("eligible", selected)
+    return batch.replace(data)
+
+
+feature=rf.Number(
+    mask=rf.Mask(
+        query="eligible",
+        rate=0.25,
+        skip=True,
+    ),
+)
+```
+
+Approximately 25 percent of eligible coordinates are skipped each training
+epoch. Ineligible coordinates are never selected. The rate is not an exact
+quota.
+
+Prefer this split over generating random Booleans in a preprocessor:
+
+- the eligibility rule is inspectable and deterministic;
+- RelFlow's sample is stable across shuffling and model rebatching;
+- the data module's epoch key changes the training score stream;
+- skip-versus-learned-mask comparisons can reuse the same selection.
+
+If a fixed request-time decision is needed, emit the final Boolean selector and
+omit `rate`, because fractional policies do not run during prediction.
+
+## Nested Data: Use Awkward as a Computational View
+
+Arrow remains the carrier. Awkward makes nested Boolean construction concise:
+
+```text
+Arrow list<struct<...>>
+  -> ak.from_arrow
+  -> vectorized nested predicate/window/ranking
+  -> ak.with_field(..., "mask_event")
+  -> ak.to_arrow
+  -> explicit Arrow cast
+  -> batch.replace(...)
+```
+
+`requires` and `produces` still name top-level columns. Adding a selector inside
+`events` therefore declares `produces=("events",)`.
+
+### Recipe: atomic branch selection
+
+Define a stable output type. The explicit cast keeps empty and all-null
+partitions from inferring a different schema:
+
+```python
+import awkward as ak
+
+
+MASKED_EVENTS = pa.large_list(
+    pa.struct(
+        [
+            pa.field("kind", pa.large_string()),
+            pa.field("amount", pa.float64()),
+            pa.field("mask_event", pa.bool_(), nullable=False),
+        ]
+    )
+)
+
+
+@rf.preprocess(
+    requires=("events",),
+    produces=("events",),
+)
+def select_refunds(batch: rf.Batch) -> rf.Batch:
+    index = batch.data.schema.get_field_index("events")
+    source = batch.data["events"]
+    if source.null_count == len(source):
+        values = pa.nulls(len(source), type=MASKED_EVENTS)
+    else:
+        events = ak.from_arrow(source)
+        selected = ak.fill_none(events["amount"] < 0, False)
+        events = ak.with_field(events, selected, "mask_event")
+        values = ak.to_arrow(events, extensionarray=False)
+        values = pc.cast(values, MASKED_EVENTS)
+
+    data = batch.data.set_column(index, "events", values)
+    return batch.replace(data)
+```
+
+Read that selector from the branch:
+
+```python
+model = rf.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    events=rf.Branch(
+        length=128,
+        mask=rf.Mask(
+            query="mask_event",
+            skip=True,
+            dropout=False,
+        ),
+        kind=rf.Category(size=128),
+        amount=rf.Number,
+    ),
+)
+```
+
+One decision is resolved per retained event and broadcast to both children.
+Nested descendants inherit the same ancestor decision.
+
+### Recipe: mask only one leaf in each selected event
+
+Move the same query to the leaf when `kind` should remain visible:
+
+```python
+events=rf.Branch(
+    length=128,
+    kind=rf.Category(size=128),
+    amount=rf.Number(
+        mask=rf.Mask(
+            query="mask_event",
+            skip=True,
+            dropout=False,
+        ),
+    ),
+)
+```
+
+The leaf mask query still starts from each containing event record, so
+`mask_event` remains its Boolean sibling.
+
+### Recipe: last-N window
+
+Mark the last two values in every variable-length event history without a
+Python loop:
+
+```python
+@rf.preprocess(
+    requires=("events",),
+    produces=("events",),
+)
+def select_recent(batch: rf.Batch) -> rf.Batch:
+    index = batch.data.schema.get_field_index("events")
+    source = batch.data["events"]
+    if source.null_count == len(source):
+        values = pa.nulls(len(source), type=MASKED_EVENTS)
+    else:
+        events = ak.from_arrow(source)
+        position = ak.local_index(events, axis=1)
+        selected = position >= ak.num(events, axis=1) - 2
+        events = ak.with_field(events, selected, "mask_event")
+        values = ak.to_arrow(events, extensionarray=False)
+        values = pc.cast(values, MASKED_EVENTS)
+
+    data = batch.data.set_column(index, "events", values)
+    return batch.replace(data)
+```
+
+Pair this with `Branch(overflow="tail")` when the model should retain recent
+records. Branch queries and overflow are applied before a branch mask is
+resolved, so only retained child coordinates participate.
+
+### Recipe: exact-K by a nested score
+
+`Mask.rate` gives a probability, not exactly K selections. Compute exact ranks
+in Awkward:
+
+```python
+MASKED_EVENTS_WITH_RISK = pa.large_list(
+    pa.struct(
+        [
+            pa.field("kind", pa.large_string()),
+            pa.field("amount", pa.float64()),
+            pa.field("risk", pa.float64()),
+            pa.field("mask_event", pa.bool_(), nullable=False),
+        ]
+    )
+)
+
+
+@rf.preprocess(
+    requires=("events",),
+    produces=("events",),
+)
+def select_top_risk(batch: rf.Batch, *, count: int = 2) -> rf.Batch:
+    index = batch.data.schema.get_field_index("events")
+    source = batch.data["events"]
+    if source.null_count == len(source):
+        values = pa.nulls(len(source), type=MASKED_EVENTS_WITH_RISK)
+    else:
+        events = ak.from_arrow(source)
+        risk = ak.fill_none(events["risk"], float("-inf"))
+        order = ak.argsort(risk, axis=1, ascending=False, stable=True)
+        rank = ak.argsort(order, axis=1, ascending=True, stable=True)
+        selected = rank < count
+        events = ak.with_field(events, selected, "mask_event")
+        values = ak.to_arrow(events, extensionarray=False)
+        values = pc.cast(values, MASKED_EVENTS_WITH_RISK)
+
+    data = batch.data.set_column(index, "events", values)
+    return batch.replace(data)
+```
+
+This produces at most `count` true selectors in each non-empty history.
+
+## Correlating Decisions
+
+### Same selection and same effect
+
+Put one policy on the common branch:
+
+```python
+events=rf.Branch(
+    length=64,
+    mask=rf.Mask(query="mask_event", skip=True),
+    kind=rf.Category(size=128),
+    amount=rf.Number,
+)
+```
+
+This is the simplest and strongest atomicity guarantee.
+
+### Same selection, different effects
+
+Have multiple leaf policies read the same precomputed selector:
+
+```python
+events=rf.Branch(
+    length=64,
+    amount=rf.Number(
+        mask=rf.Mask(
+            query="mask_event",
+            skip=True,
+            dropout=False,
+        ),
+    ),
+    kind=rf.Category(
+        size=128,
+        mask=rf.Mask(
+            query="mask_event",
+            dropout=False,
+        ),
+    ),
+)
+```
+
+Selected `amount` values are structurally absent; selected `kind` values use a
+learned mask representation. Both use the same selector coordinates. A branch
+policy cannot express different effects for its descendants.
+
+### Independent decisions
+
+Produce separate Boolean fields such as `mask_amount` and `mask_kind`, then
+point each leaf at its own query. Equal `rate` values on separate leaf addresses
+are also independently salted. Do not duplicate leaf rate policies when the
+selection must be correlated.
+
+## Multiple Overlapping Policies
+
+One processor can produce several selectors, and one node can consume several
+policies:
+
+```python
+amount=rf.Number(
+    mask=(
+        rf.Mask(rate=0.10),
+        rf.Mask(
+            query="routing.ablate",
+            skip=True,
+            dropout=False,
+        ),
+        rf.Mask(
+            query="routing.predict_amount",
+            reconstruct=True,
+        ),
+    ),
+)
+```
+
+Think in unions. Any selected skip wins the encoder effect; any selected
+reconstruction wins target eligibility. An overlapping coordinate can
+therefore be absent from input and remain a reconstruction target. Policy order
+does not establish priority.
+
+## Root Decisions Versus Nested Decisions
+
+A root selector can broadcast one decision through the whole observation:
+
+```python
+model = rf.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    mask=rf.Mask(query="drop_record", skip=True),
+    profile=rf.Branch(
+        length=1,
+        age=rf.Number,
+        country=rf.Category(size=256),
+    ),
+    events=rf.Branch(
+        length=64,
+        amount=rf.Number,
+    ),
+)
+```
+
+Use a root mask when the entire observation shares one effect. If only `events`
+should share the root-level eligibility flag, broadcast it into each event
+record:
+
+```python
+@rf.preprocess(
+    requires=("events", "deny_events"),
+    produces=("events",),
+)
+def route_events(batch: rf.Batch) -> rf.Batch:
+    index = batch.data.schema.get_field_index("events")
+    source = batch.data["events"]
+    if source.null_count == len(source):
+        values = pa.nulls(len(source), type=MASKED_EVENTS)
+    else:
+        events = ak.from_arrow(source)
+        denied = ak.from_arrow(
+            pc.fill_null(batch.data["deny_events"], False)
+        )
+        selected = ak.broadcast_arrays(events["amount"], denied)[1]
+        events = ak.with_field(events, selected, "mask_event")
+        values = ak.to_arrow(events, extensionarray=False)
+        values = pc.cast(values, MASKED_EVENTS)
+
+    data = batch.data.set_column(index, "events", values)
+    return batch.replace(data)
+```
+
+Then put `Mask(query="mask_event", ...)` on the `events` branch. Every event in
+one denied observation receives the same decision, while fields such as
+`profile` remain visible.
+
+## Processor Scope
+
+The default `scope="partition"` processes each incoming Arrow unit before
+sampling, shuffling, and model rebatching. That unit is not necessarily a model
+batch.
+
+Use `scope="dataset"` only when a calculation genuinely needs the entire finite
+split, such as a global quantile:
+
+```python
+@rf.preprocess(
+    scope="dataset",
+    requires=("amount",),
+    produces=("mask_amount",),
+)
+def top_five_percent(batch: rf.Batch) -> rf.Batch:
+    cutoff = pc.quantile(batch.data["amount"], q=0.95)[0].as_py()
+    selected = pc.fill_null(
+        pc.greater_equal(batch.data["amount"], cutoff),
+        False,
+    )
+    data = batch.data.append_column("mask_amount", selected)
+    return batch.replace(data)
+```
+
+Dataset scope materializes the finite split before each iteration; it is not a
+persisted preprocessing cache. It is unsupported for restartable callable
+sources today. Prefer partition scope for request-time logic and use
+`Mask.rate` for epoch-varying randomness.
+
+## Preserve Schema and Identity
+
+### Schema rules
+
+- `requires` and `produces` contain unique top-level column names.
+- Every declared output must exist when the function returns.
+- Processed Arrow schemas are locked within a split across partitions and
+  epochs.
+- Use `pc.fill_null(..., False)` for nullable decisions.
+- Cast Awkward output to an explicit Arrow type, especially when a partition
+  may be empty or all-null.
+- Use `set_column` to replace a column and `append_column` only for a genuinely
+  new name.
+
+### Identity rules
+
+Use the `rf.Batch` method matching the row relationship:
+
+| Transformation | Method |
+| --- | --- |
+| Same rows, changed columns | `batch.replace(data)` |
+| Filter rows | `batch.filter(selector)` |
+| Select/reorder a subset | `batch.take(indices)` |
+| Declare one full permutation | `batch.order(indices)` |
+| One source row becomes many observations | `batch.expand(data, parents, ordinals)` or `batch.explode(...)` |
+| Many source rows become one observation | `batch.group(data, parents)` |
+
+Never return a transformed `pa.Table` by itself. A preprocessor returns
+`rf.Batch`, an iterable of `rf.Batch`, or `None`. Preserved identity is what
+makes `Mask.rate` stable across sampling, shuffling, and rebatching.
+
+Nested order is part of mask identity. If a preprocessor reorders events, their
+slot-based random mask decisions can change. Materialize the final selector
+from a stable event identifier before reordering when the decision itself must
+survive that operation.
+
+## Security and Leakage Checklist
+
+Dynamic masking is model routing, not source sanitization:
+
+- a selector derived from a hidden value can reveal information through its
+  masked/absent pattern;
+- `skip=True` does not prevent plugin validation or training-time vocabulary
+  and statistics observation;
+- reconstruction can tensorize selected targets even when their input is
+  skipped;
+- retained input columns may still contain the pristine value;
+- permissions should generally be computed from independent authorization
+  data, not from the protected value itself.
+
+If a value must never reach a plugin, replace it in preprocessing with an
+accepted safe value, or deactivate/remove that node from the modeled schema.
+Also ensure no retained output exposes the original source.
+
+## Troubleshooting Workflow
+
+When a dynamic mask behaves unexpectedly:
+
+1. Run the preprocessor on a tiny `rf.Batch` and inspect `batch.data.schema` and
+   selector values.
+2. Identify the mask owner: root, repeated branch, or leaf.
+3. Read `Mask.query` relative to that owner's record.
+4. Confirm one exact non-null Arrow Boolean exists per retained owner.
+5. Check whether `dropout` and `rate` make the policy active in the current
+   stratum.
+6. Encode one batch and inspect `state`, `present`, `trainable`, and `inferred`.
+7. For correlated fields, verify that the policy is on their common branch or
+   that they read one shared selector.
+8. For random comparisons, preserve `rf.Batch.identity`, `seed`, `epoch`, and
+   nested geometry.
+
+Typical failures:
+
+| Error or symptom | Resolution |
+| --- | --- |
+| Selector is absent | Attach the processor at this ingress or include the source field |
+| Selector contains nulls | Fill them explicitly according to domain meaning |
+| Selector type is integer | Cast to `pa.bool_()`; `0` and `1` are not implicit decisions |
+| Nested selector has the wrong length | Store one Boolean inside each owner struct, not a parallel top-level list |
+| Processor schema changes on an empty partition | Cast nested output to a declared Arrow type |
+| Production skip is ignored | Set `dropout=False` and remove any fractional `rate` |
+| Validation selection differs from test | Each stratum has its own deterministic salt |
+| Two sibling rate masks differ | Put the mask on their branch or share a preprocessed selector |
+
+## Related Documentation
+
+- [Masking, Skipping, and Reconstruction](../core-concepts/dynamic-masking.qmd)
+  is the complete configuration and runtime reference.
+- [Query Paths](../core-concepts/querypaths.qmd) defines the structural grammar
+  read by `Mask.query`.
+- [Binding Data](../core-concepts/binding-data.qmd) documents preprocessor
+  parameters and attachment.
+- [Working with Arrow](working-with-arrow.qmd) covers nested transformations,
+  lineage, and processor scope in more depth.
+- [Serving](serving.qmd) explains deployment microbatching and processor
+  constraints.

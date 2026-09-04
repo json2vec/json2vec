@@ -46,6 +46,29 @@ class RotaryMultiheadAttention(torch.nn.Module):
         value: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        active: torch.Tensor | None = None
+        if key_padding_mask is not None:
+            expected = (key.shape[0], key.shape[1])
+            if key_padding_mask.dtype != torch.bool or tuple(key_padding_mask.shape) != expected:
+                raise ValueError(
+                    f"attention key padding mask must have bool shape {expected}, "
+                    f"got {tuple(key_padding_mask.shape)} with dtype {key_padding_mask.dtype}"
+                )
+
+            active = ~key_padding_mask.all(dim=1)
+            if key.shape[1] == 0:
+                output = query.new_zeros(query.shape)
+                for parameter in self.parameters():
+                    output = output + parameter.sum() * 0.0
+                return output
+
+            # Give an empty row one safe placeholder key for SDPA, then erase its
+            # result below. This stays entirely on-device and avoids a host sync.
+            key = key.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
+            value = value.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[:, 0] &= active
+
         q = self.rotate(self.splitheads(self.q_proj(query), nhead=self.nhead))
         k = self.rotate(self.splitheads(self.k_proj(key), nhead=self.n_kv_heads))
         v = self.splitheads(self.v_proj(value), nhead=self.n_kv_heads)
@@ -53,14 +76,8 @@ class RotaryMultiheadAttention(torch.nn.Module):
         attn_mask: torch.Tensor | None = None
 
         if key_padding_mask is not None:
-            mask = key_padding_mask
-            all_masked = mask.all(dim=1)
-            if all_masked.any():
-                mask = mask.clone()
-                mask[all_masked, 0] = False
-
             # SDPA boolean masks use True for positions that may participate in attention.
-            attn_mask = ~mask[:, None, None, :]
+            attn_mask = ~key_padding_mask[:, None, None, :]
 
         context = F.scaled_dot_product_attention(
             query=q,
@@ -72,4 +89,7 @@ class RotaryMultiheadAttention(torch.nn.Module):
         )
         context = context.transpose(1, 2).reshape(query.shape[0], query.shape[1], self.d_model)
 
-        return self.out_proj(context)
+        output = self.out_proj(context)
+        if active is not None:
+            output = output.masked_fill(~active[:, None, None], 0.0)
+        return output

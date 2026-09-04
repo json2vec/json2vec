@@ -59,17 +59,19 @@ def test_rotary_attention_padding_mask_uses_sdpa_keep_mask(monkeypatch: pytest.M
     monkeypatch.setattr("relflow.architecture.attention.F.scaled_dot_product_attention", sdpa)
     attention = RotaryMultiheadAttention(d_model=16, nhead=4, dropout=0.0)
     inputs = torch.randn(2, 3, 16)
+    padding = torch.tensor(
+        [
+            [False, True, False],
+            [True, True, True],
+        ]
+    )
+    memory = inputs.masked_fill(padding.unsqueeze(-1), torch.nan)
 
-    attention(
+    output = attention(
         query=inputs,
-        key=inputs,
-        value=inputs,
-        key_padding_mask=torch.tensor(
-            [
-                [False, True, False],
-                [True, True, True],
-            ]
-        ),
+        key=memory,
+        value=memory,
+        key_padding_mask=padding,
     )
 
     assert torch.equal(
@@ -81,3 +83,27 @@ def test_rotary_attention_padding_mask_uses_sdpa_keep_mask(monkeypatch: pytest.M
             ]
         ),
     )
+    assert torch.equal(output[1], torch.zeros_like(output[1]))
+
+
+def test_rotary_attention_bypasses_an_all_empty_batch(monkeypatch: pytest.MonkeyPatch):
+    called = False
+
+    def sdpa(*args, **kwargs):
+        nonlocal called
+        called = True
+        return torch.zeros_like(kwargs["query"])
+
+    monkeypatch.setattr("relflow.architecture.attention.F.scaled_dot_product_attention", sdpa)
+    attention = RotaryMultiheadAttention(d_model=16, nhead=4, dropout=0.0)
+    inputs = torch.randn(2, 3, 16)
+
+    output = attention(
+        query=inputs,
+        key=inputs,
+        value=inputs,
+        key_padding_mask=torch.ones(2, 3, dtype=torch.bool),
+    )
+
+    assert called
+    assert torch.equal(output, torch.zeros_like(output))

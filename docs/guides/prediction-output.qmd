@@ -41,7 +41,7 @@ convert it to Python or squeeze dimensions based on batch size.
 
 ## Produce A Prediction
 
-Supervised target fields are normally omitted from prediction input:
+Fields configured with `mask=True` are normally omitted from prediction input:
 
 ```python
 import pyarrow as pa
@@ -140,15 +140,16 @@ record/fraud: struct<
 candidate while its state distribution favors `null` or `other`; a consumer
 that cares about missingness should inspect both.
 
-`inferred` is not confidence or correctness. It says whether that model
-coordinate was hidden when the prediction was produced. A supervised target is
-normally inferred; a visible embedded field is not.
+`inferred` is not confidence or correctness. It says whether prediction
+requested reconstruction at that model coordinate. An always-skipped
+supervised reconstruction is normally inferred; a visible embedded field is
+not.
 
 ## Which Addresses Appear?
 
 RelFlow does not echo every visible field. Public prediction output includes:
 
-- configured decoded targets whose plugin declares Arrow output;
+- configured deterministic reconstructions whose plugin declares Arrow output;
 - configured node embeddings;
 - both at the same address when a decoded field also has `embed=True`.
 

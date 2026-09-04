@@ -168,9 +168,9 @@ output.
 `encoder_pooling="pooler"` requires the selected Hugging Face model to expose
 `pooler_output`. The `"cls"` and `"mean"` modes require `last_hidden_state`.
 
-## Target Behavior
+## Reconstruction Behavior
 
-When `Text` is masked or used as a target, the decoder predicts:
+When `Text` is selected for reconstruction, the decoder predicts:
 
 - `state`: logits for `valued`, `null`, `padded`, `masked`, and reserved
   `other`.
@@ -179,10 +179,10 @@ When `Text` is masked or used as a target, the decoder predicts:
 The decoder does not generate text tokens. It reconstructs the frozen text
 embedding used as the target representation.
 
-For partial masking, the original frozen embedding is computed once and reused
-both as the reconstruction target and, after applying the current visibility
-mask, as input for values that remain visible. The frozen encoder is not run a
-second time for those visible values.
+RelFlow resolves visibility before tensorization. Visible strings run through
+the frozen encoder for input content; selected original strings run through it
+for target content. A skipped or learned-mask value never leaks through the
+input projection.
 
 State uses frequency-weighted cross entropy and reports state accuracy. Valued
 targets use the configured `l1` or `l2` content objective and report MAE and

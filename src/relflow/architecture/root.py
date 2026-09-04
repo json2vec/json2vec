@@ -40,7 +40,7 @@ from relflow.structs.experiment import (
     TreeFieldInput,
 )
 from relflow.structs.packages import Prediction
-from relflow.structs.tree import Address, Node, Rate, Renderable
+from relflow.structs.tree import Address, MaskInput, Node, Rate, Renderable
 from relflow.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
@@ -67,7 +67,7 @@ class Model(lit.LightningModule, Renderable):
 
         model = rf.Model(
             rf.Category("segment", size=32),
-            rf.Category("label", target=True, size=4),
+            rf.Category("label", mask=True, size=4),
             d_model=16,
             n_layers=1,
             n_heads=4,
@@ -93,6 +93,7 @@ class Model(lit.LightningModule, Renderable):
         attention: AttentionMode | str = AttentionMode.mha,
         n_linear: int = 1,
         dropout: Rate | None = None,
+        mask: MaskInput = False,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
         **field_kwargs: TreeFieldInput,
@@ -121,6 +122,8 @@ class Model(lit.LightningModule, Renderable):
                 generated root branch. Each block also contains a feed-forward
                 network.
             dropout: Optional dropout rate on the generated root branch.
+            mask: One mask policy or a list/tuple of policies applied to the
+                generated root and all active descendants.
             optimizer: Optimizer instance or factory used by Lightning training.
             scheduler: Optional scheduler config or factory.
 
@@ -141,6 +144,7 @@ class Model(lit.LightningModule, Renderable):
             attention=attention,
             n_linear=n_linear,
             dropout=dropout,
+            mask=mask,
             optimizer=optimizer,
             scheduler=scheduler,
             **field_kwargs,
@@ -163,6 +167,7 @@ class Model(lit.LightningModule, Renderable):
         attention: AttentionMode | str = AttentionMode.mha,
         n_linear: int = 1,
         dropout: Rate | None = None,
+        mask: MaskInput = False,
         optimizer: OptimizerConfig | None = None,
         scheduler: SchedulerConfig | None = None,
         **field_kwargs: Any,
@@ -180,7 +185,7 @@ class Model(lit.LightningModule, Renderable):
             field_args = ()
 
         if schema is not None:
-            if field_args or fields is not None or field_kwargs:
+            if field_args or fields is not None or field_kwargs or mask is not False:
                 raise TypeError("schema cannot be combined with tree fields")
             if d_model is not None or n_layers is not None or n_heads is not None:
                 raise TypeError("schema cannot be combined with d_model, n_layers, or n_heads")
@@ -204,6 +209,7 @@ class Model(lit.LightningModule, Renderable):
                 attention=attention,
                 n_linear=n_linear,
                 dropout=dropout,
+                mask=mask,
                 **field_kwargs,
             )
 
@@ -262,7 +268,7 @@ class Model(lit.LightningModule, Renderable):
             ("parameters", f"{parameters:,}"),
             ("branches", len(self.schema.branches)),
             ("fields", len(self.schema.active_requests)),
-            ("targets", len(self.schema.target)),
+            ("reconstruct", len(self.schema.reconstruct)),
             ("embeds", len(self.schema.embed)),
         ):
             heading.append(" ")
@@ -309,9 +315,6 @@ class Model(lit.LightningModule, Renderable):
         **values: Any,
     ) -> None:
         """Mutate selected schema nodes and rebuild compatible modules.
-
-        `target=True` is shorthand for `p_prune=1.0`; `target=False` clears
-        target behavior by setting `p_prune=0.0`.
 
         Args:
             *predicates: Predicates used to select nodes.
@@ -426,6 +429,13 @@ class Model(lit.LightningModule, Renderable):
 
         return callbacks
 
+    def on_fit_start(self) -> None:
+        if not self.schema.objectives:
+            raise RuntimeError(
+                "model has no reconstruction objectives; configure at least one active node "
+                "with mask=True or Mask(reconstruct=True) before fitting"
+            )
+
     def track(self, names: tuple[str, ...], /, value: torch.Tensor | TorchMetric) -> torch.Tensor | TorchMetric:
         def groupname(names: tuple[str, ...]) -> str:
             assert len(names) > 1
@@ -453,11 +463,12 @@ class Model(lit.LightningModule, Renderable):
 
     @property
     def interprocess_encoding_context(self) -> dict[Address, Any]:
-        return {
-            Address(str(address)): node.embedder.interprocess_encoding_context
-            for address, node in self.nodes.items()
-            if hasattr(node, "embedder") and hasattr(node.embedder, "interprocess_encoding_context")
-        }
+        contexts: dict[Address, Any] = {}
+        for address in self.schema.active_requests:
+            state = cast(Any, self.nodes[address]).embedder.context
+            if state is not None:
+                contexts[Address(str(address))] = state
+        return contexts
 
     @beartype
     def save(self, pathname: str | Path) -> str | Path:
@@ -528,7 +539,8 @@ class Model(lit.LightningModule, Renderable):
         batch: Batch | pa.Table | pa.RecordBatch,
         preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
-        mask: bool = True,
+        seed: int = 0,
+        epoch: int = 0,
     ) -> EncodedInput:
         """Return encoded tensorfield inputs for one Arrow input unit."""
         return ModelRuntime.encode(
@@ -536,7 +548,8 @@ class Model(lit.LightningModule, Renderable):
             batch=batch,
             preprocess=preprocess,
             strata=strata,
-            mask=mask,
+            seed=seed,
+            epoch=epoch,
         )
 
     @immutable("inference")
@@ -566,7 +579,12 @@ class Model(lit.LightningModule, Renderable):
         """Move encoded tensors while retaining Arrow data on CPU."""
 
         if isinstance(batch, Encoded):
-            return Encoded(tensors=batch.tensors.to(device), source=batch.source, retain=batch.retain)
+            return Encoded(
+                tensors=batch.tensors.to(device),
+                source=batch.source,
+                retain=batch.retain,
+                observations={address: value.to(device) for address, value in batch.observations.items()},
+            )
         return super().transfer_batch_to_device(batch, device, dataloader_idx)
 
     training_step = partialmethod(step, strata=Strata.train)

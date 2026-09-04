@@ -229,7 +229,7 @@ model = rf.Model(
         sku=rf.Category(query="product.sku", size=4096),
         quantity=rf.Number(query="qty"),
     ),
-    returned=rf.Category(query="outcome", target=True, size=2),
+    returned=rf.Category(query="outcome", mask=True, size=2),
 )
 ```
 
@@ -261,10 +261,10 @@ in-memory tables receive a full permutation. Replacement, multiple loader
 workers, and distributed scheduling currently fail explicitly instead of
 silently weakening the ordering contract.
 
-This repeatability applies to data sampling and order. Stochastic masking,
-pruning, branch masks, and unavailable simulation still draw from Torch's
-global random stream and are not identity- or chunk-invariant. Seed the model
-runtime separately when reproducing a complete training run.
+Uniform mask selection is also keyed by identity, schema address, normalized
+policy, stratum, and training epoch. It therefore remains stable across source
+chunks and model rebatching. Datatype-specific unavailable simulation retains
+its own plugin-defined random contract.
 
 ## 5. Migrate Prediction Consumers
 

@@ -7,6 +7,7 @@ from tensordict import TensorDict
 
 import relflow as rf
 from relflow.data.arrow import IDENTITY, Batch, Encoded, variants
+from relflow.structs.tree import Address
 
 
 def identities(size: int) -> pa.Array:
@@ -152,6 +153,23 @@ def test_encoded_keeps_tensors_and_arrow_source_separate():
     assert encoded.tensors is tensors
     assert encoded.source is source
     assert encoded.retain == ("value",)
+    assert encoded.observations == {}
+
+
+def test_encoded_copies_and_validates_pristine_observations():
+    source = Batch(data=pa.table({"value": [10]}), identity=identities(1))
+    tensors = TensorDict({}, batch_size=[])
+    observation = TensorDict({"counts": torch.ones(3, dtype=torch.int64)}, batch_size=[])
+    supplied = {Address("record/value"): observation}
+
+    encoded = Encoded(tensors=tensors, source=source, observations=supplied)
+    supplied.clear()
+
+    assert tuple(encoded.observations) == (Address("record/value"),)
+    assert encoded.observations["record/value"] is observation
+
+    with pytest.raises(TypeError, match="must be a TensorDict"):
+        Encoded(tensors=tensors, source=source, observations={Address("record/value"): object()})
 
 
 def test_encoded_is_internal_and_validates_retain():

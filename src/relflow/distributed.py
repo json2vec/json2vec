@@ -49,6 +49,13 @@ def all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def all_reduce_max(tensor: torch.Tensor) -> torch.Tensor:
+    if is_distributed():
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+
+    return tensor
+
+
 def all_gather_object(value: Any) -> list[Any]:
     if not is_distributed():
         return [value]

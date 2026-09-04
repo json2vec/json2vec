@@ -45,7 +45,7 @@ model = rf.Model(
         sku=rf.Category(size=2048),
         quantity=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -68,7 +68,8 @@ will need a different balance.
 | `batch_size` | Positive | The model's expected batch size and the default used by data modules and logging. Larger batches trade memory for throughput and a different optimization regime. |
 | `name` | Non-empty schema-safe string | Generated root name and the first component of every public address. |
 | `description` | Optional string | Human-readable schema metadata; it does not change computation. |
-| `embed` | Boolean | Adds the normalized root representation to prediction output. It does not create a target. |
+| `embed` | Boolean | Adds the normalized root representation to prediction output. It does not create a reconstruction objective. |
+| `mask` | `False`, a singleton shorthand, or a list/tuple of `rf.Mask` objects | Applies one decision atomically to every active descendant of the generated root. |
 | `optimizer` | Optimizer instance or factory | Required before `Trainer.fit(...)`. A factory is easier to reconstruct with a newly loaded or mutated model. |
 | `scheduler` | Scheduler config or factory | Optional Lightning optimizer scheduler configuration. |
 
@@ -78,6 +79,11 @@ head receives a rotary embedding. Check both conditions for the root, every
 nested Branch override, and every leaf using `pooling="query"`. A leaf using
 `pooling="mean"` constructs no query attention, although its configured
 `n_heads` must still pass the even-positive schema validation.
+
+The numeric neural-layer `dropout` option is independent from the Boolean
+`Mask.dropout` purpose. The former drops activations inside attention and
+feed-forward blocks; the latter decides whether one data mask policy is active
+only during training.
 
 ## Choose An Attention Mode
 
@@ -148,7 +154,7 @@ unexplained off-by-one slot to either type.
 
 Use this order so an architecture change is not confused with a data problem:
 
-1. Verify queries, states, split boundaries, and target omission with
+1. Verify queries, states, split boundaries, and reconstruction-field omission with
    `model.encode(...)`.
 2. Establish a simple baseline and one primary validation metric.
 3. Tune branch lengths and overflow policies; these determine what evidence is
@@ -186,7 +192,7 @@ with production-like branch lengths.
 | Signal | Check first | Likely next move |
 | --- | --- | --- |
 | Out of memory on the first batch | Batch size and nested branch shapes | Reduce batch size or branch lengths before shrinking every model dimension. |
-| Train and validation metrics are both flat | Queries, target/trainable masks, optimizer, and baseline | Fix the data contract first; then add width or depth only if the model is genuinely underfitting. |
+| Train and validation metrics are both flat | Queries, trainable reconstruction masks, optimizer, and baseline | Fix the data contract first; then add width or depth only if the model is genuinely underfitting. |
 | Train improves while validation degrades | Split integrity and train/validation gap | Add dropout, reduce capacity, or improve data—not a larger model. |
 | Runtime rises sharply after one field change | Branch length, Category/Set capacity, or Text `max_length` | Profile that field's activations and scoring work; undo unexplained headroom. |
 | Head/attention construction fails | Even head count, divisibility into `d_model`, and at least two dimensions per head | Choose an even positive head count for which `d_model % n_heads == 0` and `d_model // n_heads >= 2`; check root, Branch, and query-pooled leaf overrides. |

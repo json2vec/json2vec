@@ -245,7 +245,7 @@ deployment = rf.Deployment(
     checkpoint="artifacts/fraud-model.ckpt"
 ).update(
     rf.where("name") == "fraud",
-    target=False,
+    mask=False,
 )
 ```
 

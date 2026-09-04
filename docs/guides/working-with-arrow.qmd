@@ -116,7 +116,7 @@ model = rf.Model(
         sku=rf.Category(size=4096),
         quantity=rf.Number,
     ),
-    fraud=rf.Category(target=True, size=2),
+    fraud=rf.Category(mask=True, size=2),
 )
 
 data = rf.ArrowDataModule(

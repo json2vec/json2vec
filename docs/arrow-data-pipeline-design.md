@@ -8,15 +8,15 @@
   postprocessing, persistence, and deployment serialization
 - Related designs:
   [Awkward Array Preprocessing](awkward-preprocessing-design.md) and
-  [Unified Masking And Pruning](unified-mask-design-spec.md)
+  [Unified Mask](unified-mask-design-spec.md)
 
 This spec supersedes the persistent Awkward `RaggedField`, Python-row dataset,
 JMESPath, and plugin-boundary decisions in the Awkward design. That document
 remains the record of the first coalescing implementation and its loop audit.
 The `"<MASK>"` data-literal transport is removed: that string is ordinary
-content. Request-scoped `mask` / `masks` prediction arguments and an
-identity-bearing `Selection` remain part of the separate masking roadmap; they
-are not shipped by this Arrow implementation.
+content. The unified masking spec supersedes every mask-selection, skipping,
+external-selection, and reconstruction-objective proposal in this document.
+Those changes are not shipped by this Arrow implementation.
 
 ## Implementation Status
 
@@ -59,16 +59,17 @@ this legend when reading the detailed design below:
 - branch and leaf queries bind and cache by expression/type/address. Each active
   branch layout and overflow decision is materialized once and reused by its
   descendants;
-- the data-module seed controls sampling and row order. Torch masking, pruning,
-  branch masks, and unavailable simulation are not identity- or chunk-invariant;
+- the data-module seed controls sampling and row order. Legacy Torch masking,
+  pruning, branch masks, and unavailable simulation are not identity- or
+  chunk-invariant;
 - `pin_memory` is accepted for loader compatibility, but the encoded carrier
   does not currently expose recursive PyTorch pinning.
 
 **Roadmap:** coordinated source caches and indices, projection pushdown,
 replacement sampling, worker/rank scheduling, equal-step distributed plans,
-byte-bounded shuffling, and request-scoped prediction
-masks/selections. Any later section that describes one of these mechanisms is
-a target design, not a statement that it ships. The implementation plan,
+byte-bounded shuffling, and the separately specified unified masking design.
+Any later section that describes one of these mechanisms is a target design,
+not a statement that it ships. The implementation plan,
 required tests, benchmark plan, and acceptance criteria are forward-looking
 unless an item is explicitly present in the shipped list above.
 
@@ -209,7 +210,9 @@ source adapter.
 - Claiming zero-copy through padding or dense tensor construction. Ragged to
   dense conversion necessarily allocates.
 - Claiming zero-copy from GPU tensors to CPU Arrow buffers.
-- Moving training masks, pruning, attention, or GPU execution into Arrow.
+- Designing Mask selection, `skip`, `dropout`, `reconstruct`, or presence
+  semantics; the unified masking spec owns that work. Arrow remains the CPU
+  selection plane and Torch remains the model execution plane.
 - Guaranteeing identical order after the world size or source snapshot changes.
 - Maintaining permanent Arrow and Python dataset engines.
 - Reimplementing filesystem discovery, file-format inference, or scan planning
@@ -232,7 +235,7 @@ Each library has one role:
 | Structural query | Arrow | Preserves offsets, validity, and coordinates |
 | Ragged regularization | Arrow with NumPy offset/placement geometry | Produces `RaggedField` |
 | Datatype conversion | Plugin | Consumes whole Arrow leaf columns |
-| Model runtime | Torch | Dense content, state, targets, and masks |
+| Model runtime | Torch | Dense content, state, targets, and routing presence |
 | Prediction conversion | Plugin plus shared writer | Produces typed Arrow arrays |
 | Postprocessing | RelFlow `Batch` | Arrow table plus aligned identity |
 | Persistence | PyArrow | Writes Arrow directly to Parquet |
@@ -285,7 +288,8 @@ length. Arrow cannot record a positive row count in a zero-column table, so
 `data.num_rows` may be zero when `data.num_columns` is zero even though the
 batch is not empty. `Batch` operations handle that case from identity and
 validate length as soon as a column is added. This avoids a hidden sentinel
-column and still permits a target-only prediction with no source projection.
+column and still permits reconstruction-only prediction with no source
+projection.
 
 The same carrier crosses the prediction boundary. Before the model,
 `Batch.data` contains processed inputs. After `Model.write`, it contains the
@@ -716,8 +720,12 @@ source manifest
   → form model batches
   → coalesce node queries, branch geometry, and leaf state
   → run plugin codecs
-  → apply Torch mask and prune policies
+  → apply legacy Torch mask and prune policies
 ```
+
+That final ordering records the audit-baseline implementation. The unified
+masking spec replaces it with Arrow-side selection and split input/target
+projection before plugin conversion.
 
 Consequences:
 
@@ -766,7 +774,7 @@ model = rf.Model(
         sku=rf.Category(query="product.sku", size=2048),
         quantity=rf.Number(query="qty"),
     ),
-    returned=rf.Category(query="outcome", target=True, size=2),
+    returned=rf.Category(query="outcome", mask=True, size=2),
 )
 ```
 
@@ -917,11 +925,15 @@ Binding produces separate input and target projections for each stratum.
 
 - Train, validation, and test include target projections required by their
   active losses and metrics.
-- Predict excludes supervised targets from source binding and scan pushdown.
-  A target-only source field may therefore be absent without a query error.
-- An explicit prediction reconstruction request creates its masked model
-  coordinate from the stored model schema; it does not make an absent label a
-  required source input.
+- Predict excludes only queryless leaves with unconditional `reconstruct=True`
+  from source binding and scan pushdown. Such a reconstruction-only source
+  field may therefore be absent without a query error.
+- A query-backed reconstruction still requires its selector and modeled source
+  columns so the Arrow/plugin type can bind independently of one batch's flags.
+  A repeated ancestor also remains required to establish output cardinality.
+- A schema policy with unconditional `reconstruct=True` creates its requested
+  model coordinate from compiled geometry; it does not make an absent
+  prediction label a required source input.
 - A missing field in the active input plan remains a binding error.
 
 The shipped bound-plan cache is keyed by exact expression, Arrow type, and
@@ -1419,11 +1431,15 @@ membership. The current single-process guarantees are:
 - evaluation and prediction remain stable unless explicitly randomized;
 - sampling membership is derived from logical identity rather than row values.
 
-Torch model masking, pruning, branch masking, and datatype-specific unavailable
-simulation are separate. They currently use Torch's random stream, are not
-keyed by `Batch.identity`, and may change with model batching or source
+Legacy Torch model masking, pruning, branch masking, and datatype-specific
+unavailable simulation are separate. They currently use Torch's random stream,
+are not keyed by `Batch.identity`, and may change with model batching or source
 chunking. Seed Lightning/Torch for run-level repeatability, but do not infer a
 per-identity masking guarantee from the data-module seed.
+
+This paragraph describes the shipped audit baseline. The unified masking spec
+replaces it with identity-keyed selection and defines how seed, epoch, and
+stratum reach coalescing.
 
 Replacement draws, physical worker/rank ownership, stable distributed merge,
 topology-invariant scheduling, and persistent-worker epoch replay are roadmap
@@ -1589,7 +1605,7 @@ RelFlow warns when training is unshuffled or when the effective streaming
 window is too small. It does not inspect targets or promise that shuffling alone
 prevents every form of model collapse.
 
-## State And External Masks
+## State And Unified Masks
 
 Arrow validity and RelFlow state have distinct jobs:
 
@@ -1597,7 +1613,7 @@ Arrow validity and RelFlow state have distinct jobs:
 - query presence says whether the structural coordinate exists;
 - branch geometry adds capacity padding;
 - the plugin converts retained content;
-- Torch masking and pruning modify model visibility after tensorization.
+- the shipped baseline modifies model visibility after tensorization.
 
 The query executor derives Arrow presence alongside selected values and carries
 both into coalescing. It does not infer datatype-specific meaning.
@@ -1607,30 +1623,15 @@ consistently in typed numeric, binary, struct, and extension columns, especially
 when modeled fields are selected only after preprocessing. The string
 `"<MASK>"` is therefore ordinary string content.
 
-The remainder of this section is a **roadmap contract**, not a shipped API.
-Current `Model.predict(...)` has no public `mask` or `masks` argument and no
-public per-observation `Selection` carrier.
+The unified Mask contract now lives entirely in the masking spec. In brief,
+nodes declare one `mask` argument, normalized to an immutable policy tuple;
+dynamic selectors are ordinary Boolean Arrow fields that may be created by a
+preprocessor; branch selection is resolved once against its shared layout; and
+coalescing builds separate input and target projections. There is no parallel
+identity-bearing `Selection` carrier.
 
-In the target design, prediction masks address model nodes rather than source
-query paths. A scalar Boolean or `rf.Mask` applies uniformly. Per-observation
-selection uses an identity-bearing carrier:
-
-```python
-@dataclass(frozen=True, slots=True)
-class Selection:
-    identity: pa.Array | pa.ChunkedArray
-    values: pa.Array | pa.ChunkedArray
-```
-
-`values` is boolean or nested-list-of-boolean Arrow data. Its identity must
-equal the input `Batch.identity` row for row, and nested offsets must equal the
-queried branch geometry. A bare boolean array is rejected because alignment
-cannot be proven. This keeps request-specific masking typed and out of source
-data.
-
-Pruning is not an Arrow state. A pruned input is omitted from embedding
-execution. A reconstruction target may still be projected through a separate
-target plan.
+Skipping is not an Arrow state token. Arrow chooses and projects coordinates;
+Torch presence omits skipped coordinates from embedding, attention, and pooling.
 
 ## Coalescing And Plugins
 
@@ -1725,17 +1726,18 @@ from tensors.
 ### Output Plan
 
 Each prediction run compiles one output plan after checkpoint restoration,
-distributed vocabulary synchronization, any queued `Model.update(...)`, and
-resolution of explicit `mask` / `masks` arguments. It contains separate
-expected-forward and public-write address sets. The forward set validates
-decoder execution even for a plugin such as Text that deliberately exposes no
-decoded value; the write set contains only addresses that contribute a public
-Arrow field. The plan also contains:
+distributed vocabulary synchronization, and any queued `Model.update(...)`.
+Normalized schema `mask` tuples determine its reconstruction addresses; per-batch
+selector values never change its shape or fields. In the unified vocabulary,
+it contains separate `forward` and `writes` address plans. `forward` validates
+decoder or embedding execution even for a plugin such as Text that deliberately
+exposes no decoded value; `writes` contains only roles that contribute public
+Arrow data.
+The plan also contains:
 
-- decoded addresses that are persistent schema targets, including
-  `Prune(target=True)`, when their plugin declares output;
-- addresses added by an explicit prediction reconstruction mask when their
-  plugin declares output;
+- every address reached by a schema mask with `reconstruct=True` and no
+  remaining random rate, whether its selection is unconditional or
+  query-backed;
 - every active `embed=True` address;
 - the exact plugin and shared Arrow fields and compiled model axes for each
   address;
@@ -1746,13 +1748,13 @@ vocabulary, output configuration, or active addresses invalidates it and
 forces recompilation before another prediction run. Output types are never
 learned from prediction values.
 
-Every expected-forward address must be returned by the forward pass with its
+Every `forward` address must be returned by the forward pass with its
 compiled coordinate count. A missing address is an error with model and plugin
-context; it is not silently replaced by nulls. A per-observation mask still
+context; it is not silently replaced by nulls. A query-backed mask still
 returns the expected address for the whole batch, with unselected coordinates
 represented inside its typed output and `inferred` false. A forward value that
-is absent from the expected-forward set is an error. A valid forward value
-absent only from the public-write set is validated and then omitted without
+is absent from `forward` is an error. A valid forward value absent only from
+`writes` is validated and then omitted without
 calling a plugin writer.
 
 `written.data` has one row per processed observation and this canonical schema
@@ -2367,7 +2369,7 @@ phase is shared.
 7. Filters, functions, pipes, flattening, expressions, and recursive descent
    fail during query compilation.
 8. An absent supervised target is valid in predict but fails in a stratum whose
-   active target plan requires it.
+   active objective plan requires it.
 
 ### Preprocessing
 
@@ -2435,8 +2437,8 @@ phase is shared.
 4. Every writable built-in declares a stable `StructType` before prediction
    and returns that exact type with one value per decoded coordinate.
 5. Output-plan compilation follows checkpoint restore, vocabulary sync,
-   `Model.update`, explicit prediction masks, and `retain`; relevant mutations
-   invalidate and recompile it for the next run.
+   `Model.update`, normalized schema `mask` tuples, and `retain`; relevant
+   mutations invalidate and recompile it for the next run.
 6. A third-party plugin declares and writes an Arrow extension or nested type
    without a datatype case in the shared writer.
 7. Plugin type or coordinate-count mismatches, missing planned addresses, and
@@ -2483,8 +2485,7 @@ phase is shared.
 25. Default deployment JSON contains predictions but neither retained inputs
     nor identity; postprocessed deployment JSON contains exactly the
     postprocessor's row fields.
-26. Per-observation mask selection rejects mismatched identity or nested
-    offsets.
+26. Query-backed mask selection rejects selector shape or owner-geometry drift.
 27. `"<MASK>"` remains ordinary string content and the legacy literal symbols
     are absent from the public API.
 

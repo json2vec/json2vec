@@ -53,7 +53,7 @@ contract.
 
 ## Model
 
-Each measurement is a visible `Number`; `species` is always hidden and decoded
+Each measurement is a visible `Number`; `species` is always skipped and decoded
 as the supervised target. Capacity is exactly three because unavailable content
 is not an extra class.
 
@@ -75,7 +75,7 @@ model = rf.Model(
     petal_length=rf.Number,
     petal_width=rf.Number,
     species=rf.Category(
-        target=True,
+        mask=True,
         size=3,
         p_unavailable=0.0,
     ),
@@ -151,7 +151,7 @@ The measured run described below produced:
 | Model | Test accuracy |
 | --- | ---: |
 | Train-majority baseline | 33.3% |
-| RelFlow checkpoint | 93.3% |
+| RelFlow checkpoint | 90.0% |
 
 The state accuracy is not the task metric: every held-out target position is a
 valued label. `accuracy.content` measures which species was selected.
@@ -175,10 +175,11 @@ print(pc.struct_field(content, "probability"))
 print(pc.struct_field(species, "inferred"))
 ```
 
-The target is omitted from requests. RelFlow creates masked target positions,
-decodes them from the four measurements, and returns `inferred=true` for those
-positions. The saved artifact owns schema, weights, Category vocabulary, and
-Number normalization state.
+The target is omitted from requests. Because `mask=True` skips its encoder
+input, RelFlow creates source-less reconstruction positions, decodes them from
+the four measurements, and returns `inferred=true` for those positions. The
+saved artifact owns schema, weights, Category vocabulary, and Number
+normalization state.
 
 ## Reproduction Record
 

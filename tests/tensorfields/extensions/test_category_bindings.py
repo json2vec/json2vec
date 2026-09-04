@@ -8,7 +8,6 @@ import pytest
 
 import relflow as rf
 from relflow.structs.enums import TensorKey
-from relflow.tensorfields.shared.counter import CounterUpdateCallback
 from tests.arrow import table
 
 ADDRESS = rf.Address("record/category")
@@ -31,21 +30,13 @@ def learn(model: rf.Model, *values: str) -> None:
     model.encode(
         table([{"category": value} for value in values]),
         strata=rf.Strata.train,
-        mask=False,
     )
 
 
 def observe(model: rf.Model, *values: str | None) -> None:
-    inputs = model.encode(
+    model.encode(
         table([{"category": value} for value in values]),
         strata=rf.Strata.train,
-        mask=False,
-    )
-    CounterUpdateCallback().on_train_batch_start(
-        trainer=None,
-        pl_module=model,
-        batch=inputs,
-        batch_idx=0,
     )
 
 

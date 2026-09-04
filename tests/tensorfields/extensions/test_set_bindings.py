@@ -26,7 +26,6 @@ def learn(model: rf.Model, *values: list[str]) -> None:
     model.encode(
         table([{"tags": value} for value in values]),
         strata=rf.Strata.train,
-        mask=False,
     )
 
 

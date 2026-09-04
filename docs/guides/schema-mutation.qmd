@@ -32,7 +32,7 @@ model = rf.Model(
     n_heads=4,
     amount=rf.Number,
     channel=rf.Category(size=8),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -47,10 +47,10 @@ model
 #| output: true
 
 numbers = model.select(rf.where("type") == "number")
-target = model.select(rf.where("name") == "returned")
+reconstructed = model.select(rf.where("reconstruct"))
 
 print([str(node.address) for node in numbers])
-print([str(node.address) for node in target])
+print([str(node.address) for node in reconstructed])
 ```
 
 Prefer stable attributes such as `address`, `name`, and `type`. A callable is
@@ -75,7 +75,7 @@ then rebuilds the runtime graph:
 #| echo: true
 #| output: true
 
-model.update(rf.where("type") == "number", p_mask=0.10)
+model.update(rf.where("type") == "number", mask=0.10)
 model.update(rf.where("name") == "returned", weight=2.0, topk=[])
 ```
 
@@ -84,8 +84,10 @@ does not support the option, RelFlow raises instead of silently applying a
 partial change. Narrow the predicate or use `strict=False` only when partial
 application is intentional.
 
-`target=True` is normalized to `p_prune=1.0`; `target=False` sets
-`p_prune=0.0`.
+Every accepted shorthand is normalized to a tuple of `rf.Mask` policies.
+For example, `mask=0.10` becomes a uniform train-only learned mask, while
+`mask=True` becomes an always-skipped reconstruction target. Set `mask=False`
+to remove all policies from the selected node.
 
 ## Extend One Branch
 
@@ -185,7 +187,7 @@ Mutate between complete loops:
 
 trainer.fit(model=model, datamodule=datamodule)
 
-model.update(rf.where("name") == "amount", p_mask=0.0)
+model.update(rf.where("name") == "amount", mask=False)
 
 trainer.test(model=model, datamodule=datamodule)
 ```

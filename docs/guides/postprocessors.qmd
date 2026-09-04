@@ -22,7 +22,7 @@ mutable prediction dictionaries or runtime provider arguments.
 
 ## Complete Example
 
-Suppose `record/fraud` is a Category target and the caller needs a compact
+Suppose `record/fraud` is a reconstructed Category and the caller needs a compact
 request/label/score table:
 
 ```python

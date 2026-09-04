@@ -33,7 +33,6 @@ def test_direct_schema_binding_and_explicit_nested_query_can_share_a_batch():
             ]
         ),
         strata=Strata.predict,
-        mask=False,
     )
 
     direct = encoded[rf.Address("record/items/value")]
@@ -79,7 +78,6 @@ def test_query_backed_leaf_ignores_same_named_direct_source_values():
             ]
         ),
         strata=Strata.train,
-        mask=False,
     )
 
     assert encoded[rf.Address("record/label")].state.tolist() == [
@@ -105,7 +103,6 @@ def test_scalar_plugin_rejects_list_valued_query_with_field_context():
         model.encode(
             table([{"items": [{"values": [1.0, 2.0]}]}]),
             strata=Strata.predict,
-            mask=False,
         )
 
 
@@ -128,7 +125,6 @@ def test_set_owns_the_list_produced_by_a_traversal_query():
             ]
         ),
         strata=Strata.train,
-        mask=False,
     )[rf.Address("record/aliases")]
 
     assert encoded.state.tolist() == [
@@ -158,7 +154,6 @@ def test_vector_owns_the_list_produced_by_a_traversal_query():
             ]
         ),
         strata=Strata.predict,
-        mask=False,
     )[rf.Address("record/coordinates")]
 
     assert encoded.state.tolist() == [

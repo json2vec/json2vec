@@ -7,6 +7,7 @@ from relflow.structs.tree import Address
 
 class Parcel(TensorClass):
     payload: torch.Tensor
+    present: torch.Tensor
     origin: Address
     destination: Address | None
 

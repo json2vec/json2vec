@@ -22,12 +22,13 @@ from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
 
 if TYPE_CHECKING:
@@ -272,97 +273,70 @@ class Request(RequestBase):
 class TensorField(TensorFieldBase):
     state: torch.Tensor
     content: TensorDict[DatePart, torch.Tensor]
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        field: RaggedField,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
+        context: Context,
     ) -> TensorFieldBase:
         request: RequestBase = schema.requests[address]
-        try:
-            if pa.types.is_union(field.values.type):
-                values = parse(field.values, request.pattern)
-            else:
-                values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
-            if request.pattern is not None and not pa.types.is_timestamp(values.type):
-                values = pc.strptime(values, format=request.pattern, unit="s")
-            if isinstance(values, pa.ChunkedArray):
-                values = values.combine_chunks()
-            date_values = values.to_numpy(zero_copy_only=False).astype("datetime64[s]")
-        except (pa.ArrowException, TypeError, ValueError) as error:
-            raise ValueError(f"dateparts field at '{address}' contains invalid date values") from error
-        state = torch.from_numpy(field.dense)
 
-        dateparts: dict[DatePart, torch.Tensor] = {}
+        def encode(field: RaggedField) -> TensorDict[DatePart, torch.Tensor]:
+            try:
+                if not len(field.values):
+                    date_values = np.empty(0, dtype="datetime64[s]")
+                else:
+                    if pa.types.is_union(field.values.type):
+                        values = parse(field.values, request.pattern)
+                    else:
+                        values = (
+                            field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+                        )
+                    if request.pattern is not None and not pa.types.is_timestamp(values.type):
+                        values = pc.strptime(values, format=request.pattern, unit="s")
+                    if isinstance(values, pa.ChunkedArray):
+                        values = values.combine_chunks()
+                    date_values = values.to_numpy(zero_copy_only=False).astype("datetime64[s]")
+            except (pa.ArrowException, TypeError, ValueError) as error:
+                raise ValueError(f"dateparts field at '{address}' contains invalid date values") from error
 
-        for datepart in request.dateparts:
-            sin, cos = datepart(date_values)
-            embeddings = np.stack([sin, cos], axis=-1)
-            dateparts[datepart] = torch.from_numpy(field.place(embeddings, fill=0.0, value_shape=(2,))).to(
-                dtype=torch.float
-            )
+            dateparts: dict[DatePart, torch.Tensor] = {}
+            for datepart in request.dateparts:
+                sin, cos = datepart(date_values)
+                embeddings = np.stack([sin, cos], axis=-1)
+                dateparts[datepart] = torch.from_numpy(field.place(embeddings, fill=0.0, value_shape=(2,))).to(
+                    dtype=torch.float
+                )
+            return TensorDict(dateparts, batch_size=field.shape)
 
-        content: TensorDict[DatePart, torch.Tensor] = TensorDict(dateparts)
-
-        return cls(
-            content=content,
-            state=state,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=field.batch_size,
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state: torch.Tensor = self.state.masked_scatter(selected, mask_token)
-
-        content_mask = selected.unsqueeze(-1)
-        for datepart in self.content.keys():
-            self.content[datepart] = self.content[datepart].masked_fill(content_mask, 0.0)
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-
-        state: torch.Tensor = torch.full(shape, Tokens.masked)
-
-        dateparts: dict[DatePart, torch.Tensor] = {}
-        for datepart in schema.requests[address].dateparts:
-            dateparts[datepart] = torch.zeros((*shape, 2), dtype=torch.float)
+        state = torch.from_numpy(input.dense)
 
         return cls(
+            content=encode(input),
             state=state,
-            content=TensorDict(dateparts),
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: torch.from_numpy(target.dense),
+                    TensorKey.content: encode(target),
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -386,7 +360,7 @@ class Embedder(EmbedderBase):
             self.dateparts[datepart] = torch.nn.Linear(in_features=2, out_features=schema.d_model)
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N, *dims = inputs.state.shape
         D = math.prod(tuple([N, *dims]))
 
@@ -398,6 +372,7 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=embeddings.reshape(N, *dims, -1),
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,

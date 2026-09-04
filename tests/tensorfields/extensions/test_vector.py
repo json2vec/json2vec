@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import pytest
 import torch
 from tensordict import TensorDict
@@ -8,20 +6,23 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.structs.tree import Mask
 from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.vector import Decoder, Embedder, TensorField, loss, write
 from relflow.tensorfields.extensions.vector import output as output_type
 from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/embedding"
 
 
-def _structure_payload(*, n_dim: int = 3, objective: str = "l2") -> dict:
+def _structure_payload(*, n_dim: int = 3, objective: str = "l2", mask: bool | Mask = False) -> dict:
     field: dict = {
         "name": "embedding",
         "type": "vector",
         "n_dim": n_dim,
         "objective": objective,
+        "mask": mask,
     }
     return {
         "d_model": 16,
@@ -50,9 +51,15 @@ def _values() -> list:
 
 def _new_tensorfield(*, values: list, schema: Schema, strata: Strata) -> TensorField:
     batch = arrow_batch([{"items": [{"embedding": value} for value in root]} for (root,) in values])
-    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
-    field = replace(field, values=TENSORFIELDS["vector"].prepare(field.values, address=ADDRESS))
-    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["vector"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+    )
 
 
 def test_vector_request_is_available_in_structure():
@@ -94,11 +101,15 @@ def test_vector_embedder_and_decoder_shapes():
     )
 
     embedder = Embedder(schema=structure, address=ADDRESS)
-    parcel = embedder(field)
+    parcel = embedder.embed(field)
     assert parcel.payload.shape == (2, 1, 2, 16)
 
     decoder = Decoder(schema=structure, address=ADDRESS)
-    prediction = decoder([parcel])
+    prediction = decoder(
+        [parcel],
+        batch_size=field.state.shape[0],
+        device=parcel.payload.device,
+    )
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 3)
 
@@ -115,7 +126,7 @@ class _DummyModule:
 
 @pytest.mark.parametrize(("objective", "expected"), [("l1", 2.0), ("l2", 4.0)])
 def test_vector_loss_uses_selected_objective(objective: str, expected: float):
-    structure = Schema.model_validate(_structure_payload(objective=objective))
+    structure = Schema.model_validate(_structure_payload(objective=objective, mask=Mask(reconstruct=True)))
     schema = structure
 
     field = _new_tensorfield(
@@ -123,8 +134,6 @@ def test_vector_loss_uses_selected_objective(objective: str, expected: float):
         schema=schema,
         strata=Strata.train,
     )
-    field.mask(1.0)
-
     state_logits = torch.full((*field.state.shape, len(Tokens)), -50.0)
     state_logits.scatter_(-1, field.targets[TensorKey.state].unsqueeze(-1), 50.0)
     prediction_tensor = field.targets[TensorKey.content] + 2.0

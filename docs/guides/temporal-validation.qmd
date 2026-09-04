@@ -164,7 +164,7 @@ For each sampled observation, verify:
 1. no input event is newer than its `as_of`;
 2. the target window begins after `as_of`;
 3. branch truncation kept the intended side of the history;
-4. the target is hidden from model input;
+4. the reconstruction field is skipped from model input;
 5. validation-only categories are unavailable rather than added to vocabulary;
 6. the same raw request produces the same model-facing shape in serving.
 

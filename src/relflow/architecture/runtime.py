@@ -19,9 +19,9 @@ from relflow.architecture.node import NodeModule
 from relflow.data.arrow import Batch, Encoded, mappings
 from relflow.data.datasets.base import EncodedInput
 from relflow.data.iterables import encode as encode_batch
-from relflow.data.iterables import mask as apply_mask
 from relflow.data.processors import Postprocessor, Preprocessor
-from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
+from relflow.distributed import all_reduce_max
+from relflow.structs.enums import Component, Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
@@ -44,6 +44,22 @@ RESERVED = frozenset({TensorKey.state.name, TensorKey.inferred.name, TensorKey.e
 
 class Output(TypedDict):
     loss: NotRequired[torch.Tensor]
+
+
+def participation(
+    module: Model,
+    inputs: TensorDict[Address, TensorFieldBase],
+    strata: Strata,
+) -> set[Address]:
+    """Resolve objective addresses selected on at least one distributed rank."""
+
+    objectives = tuple(module.schema.objectives)
+    if strata == Strata.predict or not objectives:
+        return set()
+
+    local = torch.stack([inputs[address].trainable.any() for address in objectives]).to(dtype=torch.uint8)
+    selected = all_reduce_max(local).tolist()
+    return {address for address, active in zip(objectives, selected, strict=True) if active}
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +98,13 @@ def ingress(source: PredictionInput) -> Batch | pa.Table | pa.RecordBatch:
         )
     if not source:
         raise ValueError("an empty Python prediction sequence has no Arrow schema; pass a typed Arrow table")
+    if all(isinstance(value, Mapping) and not value for value in source):
+        from relflow.data.datasets.arrow import identity
+
+        return Batch(
+            data=pa.table({}),
+            identity=identity(len(source), namespace="direct:predict", offset=0),
+        )
     try:
         return pa.Table.from_pylist(mappings(source, context="Python prediction observations"))
     except (pa.ArrowException, TypeError, ValueError) as error:
@@ -147,7 +170,7 @@ def plan(module: Model, retain: Retain = (), *, refresh: bool = False) -> Output
     if not refresh and isinstance(cached, OutputPlan):
         return cached
 
-    expected = frozenset(Address(str(address)) for address in (*module.schema.target, *module.schema.embed))
+    expected = frozenset(Address(str(address)) for address in (*module.schema.decodes, *module.schema.embed))
     entries: list[OutputEntry] = []
     visited: set[Address] = set()
     for node in (module.schema.fields, *module.schema.fields.descendants):
@@ -346,21 +369,22 @@ class ModelRuntime:
         *,
         strata: Strata | str,
         dataloader_idx: int = 0,
+        participating: set[Address] | None = None,
     ) -> list[Prediction]:
+        strata = Strata.normalize(strata)
         sanitize(module, inputs, strata=strata, dataloader_idx=dataloader_idx)
 
         processed: dict[Address, list[Parcel]] = defaultdict(list)
         outgoing: dict[Address, Parcel] = {}
         predictions: list[Prediction] = []
 
+        participating = participation(module, inputs, strata) if participating is None else participating
+
         for address in module.schema.active_requests:
             tensorfield: TensorFieldBase = inputs[address]
-            if address in module.schema.target:
-                continue
-
             node_module = cast(NodeModule, module.nodes[address])
             embedder: EmbedderBase = node_module.embedder
-            embedded: Parcel = embedder(tensorfield)
+            embedded = embedder.embed(tensorfield)
             if embedded.destination is None:
                 raise ValueError(f"parcel from '{embedded.origin}' has no destination")
             processed[embedded.destination].append(embedded)
@@ -391,25 +415,33 @@ class ModelRuntime:
                         )
                     )
 
+        decodes = set(module.schema.decodes)
+        embeds = set(module.schema.embed)
         for address in module.schema.active_requests:
-            has_masked_input = inputs[address].state.eq(Tokens.masked.value).any()
-            if (
-                torch.any(inputs[address].trainable)
-                or (strata == Strata.predict and has_masked_input)
-                or address in module.schema.target
-                or address in module.schema.embed
-            ):
-                heritage: list[Address] = module.schema.requests[address].heritage
-                parcels = [outgoing[item] for item in heritage if item not in module.schema.target and item in outgoing]
+            tensorfield = inputs[address]
+            selected = (
+                (strata == Strata.predict and address in decodes)
+                or (strata != Strata.predict and address in participating)
+                or address in embeds
+            )
+            if not selected:
+                continue
 
-                node_module = cast(NodeModule, module.nodes[address])
-                decoder: DecoderBase = node_module.decoder
-                prediction = decoder(parcels, embed=address in module.schema.embed)
-                if Strata.normalize(strata) == Strata.predict:
-                    prediction.payload[TensorKey.inferred] = inputs[address].state.eq(Tokens.masked.value)
-                else:
-                    prediction.payload[TensorKey.inferred] = inputs[address].trainable.bool()
-                predictions.append(prediction)
+            heritage: list[Address] = module.schema.requests[address].heritage
+            parcels = [outgoing[item] for item in heritage if item in outgoing]
+
+            node_module = cast(NodeModule, module.nodes[address])
+            decoder: DecoderBase = node_module.decoder
+            prediction = decoder(
+                parcels,
+                batch_size=tensorfield.state.shape[0],
+                device=tensorfield.state.device,
+                embed=address in embeds,
+            )
+            prediction.payload[TensorKey.inferred] = (
+                tensorfield.inferred if strata == Strata.predict else tensorfield.trainable
+            )
+            predictions.append(prediction)
 
         return predictions
 
@@ -421,12 +453,21 @@ class ModelRuntime:
         dataloader_idx: int = 0,
         *,
         strata: Strata,
-    ) -> Output | Batch:
+    ) -> Output | Batch | None:
         inputs = batch.tensors if isinstance(batch, Encoded) else batch
+        if isinstance(batch, Encoded):
+            ModelRuntime.learn(module, batch.observations, strata=strata)
         if strata == Strata.predict and not isinstance(batch, Encoded):
             raise TypeError("prediction batches must retain their Arrow source")
         compiled = plan(module, batch.retain) if isinstance(batch, Encoded) and strata == Strata.predict else None
-        predictions = module.forward(inputs, strata=strata, dataloader_idx=dataloader_idx)
+        participating = participation(module, inputs, strata)
+        predictions = ModelRuntime.forward(
+            module,
+            inputs,
+            strata=strata,
+            dataloader_idx=dataloader_idx,
+            participating=participating,
+        )
 
         if strata == Strata.predict:
             assert isinstance(batch, Encoded)
@@ -438,9 +479,30 @@ class ModelRuntime:
                 compiled=compiled,
             )
 
+        if not participating:
+            logger.warning("no reconstruction objective was selected on any rank, skipping batch")
+            if strata == Strata.train:
+                return None
+            return Output(loss=torch.tensor(0.0, device=inputs.device))
+
         losses: list[torch.Tensor] = []
+        anchors: list[torch.Tensor] = []
         for prediction in predictions:
             if prediction.address not in module.schema.requests:
+                continue
+            if prediction.address not in module.schema.objectives:
+                continue
+            if strata == Strata.train and prediction.address in participating:
+                anchors.extend(
+                    value.sum() * 0.0
+                    for value in prediction.payload.values()
+                    if torch.is_tensor(value) and value.requires_grad
+                )
+            # Decoder participation is coordinated across ranks in forward.
+            # Plugin losses and scalar metrics remain local to ranks carrying
+            # selected targets; the zero-loss path below anchors every module
+            # into backward when only a peer has an objective.
+            if not inputs[prediction.address].trainable.any():
                 continue
             if set(prediction.payload.keys()) <= {TensorKey.embedding, TensorKey.inferred}:
                 continue
@@ -452,11 +514,18 @@ class ModelRuntime:
             loss = loss_fn(module=module, prediction=prediction, batch=inputs[address], strata=strata)
             losses.append(loss * torch.tensor(request.weight))
 
+        if strata == Strata.train:
+            if not anchors:
+                raise RuntimeError("a distributed reconstruction objective produced no gradient-bearing decoder output")
+            anchor = torch.stack(anchors).sum()
+        else:
+            anchor = torch.zeros((), device=inputs.device)
         if not losses:
-            logger.warning("no trainable fields in batch, returning zero loss")
-            return Output(loss=torch.tensor(0.0, device=inputs.device, requires_grad=True))
+            suffix = "anchored zero loss" if strata == Strata.train else "zero loss"
+            logger.warning(f"reconstruction targets are present only on peer ranks, returning {suffix}")
+            return Output(loss=anchor)
 
-        loss = module.track((Metric.loss, strata), value=torch.stack(losses).sum())
+        loss = module.track((Metric.loss, strata), value=torch.stack(losses).sum() + anchor)
         return Output(loss=cast(torch.Tensor, loss))
 
     @staticmethod
@@ -496,9 +565,10 @@ class ModelRuntime:
         *,
         preprocess: Preprocessor | None,
         strata: Strata,
-        mask: bool,
-    ) -> tuple[Batch, EncodedInput]:
-        """Normalize Arrow input, preprocess it, and encode model tensors."""
+        seed: int = 0,
+        epoch: int = 0,
+    ) -> Encoded:
+        """Normalize Arrow input, preprocess it, and encode one carrier."""
 
         from relflow.data.datasets.arrow import convert, merge, process
 
@@ -517,16 +587,54 @@ class ModelRuntime:
             if source is None:
                 raise ValueError(f"preprocessor '{processor.name}' returned no observations")
 
-        inputs = encode_batch(
+        return encode_batch(
             batch=source,
             schema=module.schema,
             strata=strata,
             interprocess_encoding_context=module.interprocess_encoding_context,
-            defer_target_masking=True,
+            seed=seed,
+            epoch=epoch,
         )
-        if mask:
-            inputs = next(apply_mask((inputs,), module.schema, strata=strata))
-        return source, inputs
+
+    @staticmethod
+    def learn(
+        module: Model,
+        observations: Mapping[Address, TensorDict],
+        *,
+        strata: Strata | str,
+    ) -> None:
+        """Apply every model-owned pristine observation exactly once."""
+
+        normalized = Strata.normalize(strata)
+        if normalized != Strata.train:
+            if observations:
+                raise ValueError(f"{normalized} input cannot carry learnable observations")
+            return
+
+        learners = {
+            address: TENSORFIELDS[request.type]
+            for address, request in module.schema.active_requests.items()
+            if Component.learn in TENSORFIELDS[request.type].components
+        }
+        missing = set(learners) - set(observations)
+        extra = set(observations) - set(learners)
+        if missing or extra:
+            details: list[str] = []
+            if missing:
+                details.append("missing " + ", ".join(map(str, sorted(missing, key=str))))
+            if extra:
+                details.append("unexpected " + ", ".join(map(str, sorted(extra, key=str))))
+            raise ValueError("training observations do not match registered learners: " + "; ".join(details))
+
+        for address in module.schema.active_requests:
+            if address not in learners:
+                continue
+            learners[address].learn(
+                module=module,
+                observation=observations[address].to(module.device),
+                address=address,
+                strata=normalized,
+            )
 
     @staticmethod
     def encode(
@@ -534,18 +642,22 @@ class ModelRuntime:
         batch: Batch | pa.Table | pa.RecordBatch,
         preprocess: Preprocessor | None = None,
         strata: Strata | str = Strata.predict,
-        mask: bool = True,
+        seed: int = 0,
+        epoch: int = 0,
     ) -> EncodedInput:
         """Encode one Arrow input unit to tensorfields."""
 
         normalized = Strata.normalize(strata)
-        return ModelRuntime.prepare(
+        encoded = ModelRuntime.prepare(
             module,
             batch,
             preprocess=preprocess,
             strata=normalized,
-            mask=mask,
-        )[1]
+            seed=seed,
+            epoch=epoch,
+        )
+        ModelRuntime.learn(module, encoded.observations, strata=normalized)
+        return cast(EncodedInput, encoded.tensors)
 
     @staticmethod
     def predict(
@@ -557,14 +669,14 @@ class ModelRuntime:
     ) -> pa.Table:
         """Predict one Arrow input unit and return an Arrow table."""
 
-        source, inputs = ModelRuntime.prepare(
+        encoded = ModelRuntime.prepare(
             module,
             ingress(batch),
             preprocess=preprocess,
             strata=Strata.predict,
-            mask=True,
         )
-        inputs = inputs.to(module.device)
+        source = encoded.source
+        inputs = encoded.tensors.to(module.device)
         compiled = plan(module, retain, refresh=True)
         raw: list[Prediction] = []
         if len(source):

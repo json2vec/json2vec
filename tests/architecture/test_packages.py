@@ -6,8 +6,10 @@ from relflow.structs.packages import Parcel, Prediction
 
 
 def test_parcel():
+    present = torch.tensor([[True, False, True], [False, True, True]])
     parcel = Parcel(
         payload=torch.randn(2, 3, 4),
+        present=present,
         origin="input",
         destination="output",
         batch_size=[2],
@@ -15,6 +17,7 @@ def test_parcel():
 
     assert isinstance(parcel.payload, torch.Tensor)
     assert parcel.payload.shape == (2, 3, 4)
+    assert torch.equal(parcel.present, present)
     assert parcel.origin == "input"
     assert parcel.destination == "output"
 
@@ -42,6 +45,7 @@ def test_prediction():
 def test_prediction_can_carry_embedding_payload():
     parcel = Parcel(
         payload=torch.randn(2, 3, 4),
+        present=torch.ones(2, 3, dtype=torch.bool),
         origin="source",
         destination="dest",
         batch_size=[2],

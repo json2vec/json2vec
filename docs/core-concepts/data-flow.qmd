@@ -17,8 +17,9 @@ source
   → sampling and shuffling
   → model-size rebatching
   → query + ragged coalescing
+  → mask selection + input/target projection
   → datatype codecs
-  → masking + model
+  → model
   → plugin Arrow writers
   → rf.Batch(prediction table, same identity)
   → postprocessing
@@ -116,10 +117,11 @@ Random decisions derive from the configured seed, stratum, epoch, operation,
 and stable identity. Sampling and shuffling have separate random streams, so
 changing one does not silently change the other.
 
-This guarantee covers dataset sampling and row order only. Stochastic
-`p_mask`, `p_prune`, branch masks, and datatype-specific unavailable simulation
-use the Torch random stream during tensor preparation. They are not currently
-keyed by Arrow identity and may change when batching changes.
+Uniform mask selection uses the same identity discipline with a separate
+domain. It is keyed by seed, stratum, training epoch, schema address, normalized
+policy, identity, and nested slot, so rebatching does not change the selected
+logical coordinates. Datatype-specific unavailable simulation keeps its own
+plugin-defined random contract.
 
 ## 5. Rebatch For Model Memory
 
@@ -157,17 +159,20 @@ The structural grammar handles fields, list traversal/index/slice, and literal
 map lookup. Data-dependent logic remains in preprocessing. See
 [Query Paths](querypaths.qmd).
 
-## 7. Coalesce Ragged Values Once
+## 7. Coalesce And Project Ragged Values Once
 
 The coalescing phase prepares every selected leaf for its datatype codec:
 
 1. build the singleton root layout;
 2. evaluate each active repeated-branch selector and overflow policy once;
 3. reuse each retained branch layout for all active descendants;
-4. project each leaf and retain its values and coordinate state in an Arrow-backed
-   `RaggedField`;
-5. validate its whole Arrow leaf type with the owning plugin, then invoke the
-   datatype codec once for the complete field batch.
+4. project each pristine leaf and retain its values and coordinate state in an
+   Arrow-backed `RaggedField`;
+5. resolve leaf and inherited branch masks against owner coordinates;
+6. validate and canonicalize the pristine Arrow values once with the owning
+   plugin;
+7. split the field into input and target projections, then invoke the datatype
+   codec once for the complete field batch.
 
 Branch and leaf plans bind independently and are cached by expression, Arrow
 type, and model address. Branch layouts carry retained records, shape, and
@@ -188,18 +193,25 @@ separate state channel for each modeled coordinate:
 | `valued` | a non-null source value exists, even if a vocabulary does not know its label |
 | `null` | the selected leaf is explicitly null |
 | `padded` | structure or configured capacity has no value |
-| `masked` | value is intentionally hidden from the encoder |
+| `masked` | input is represented by the learned mask rather than original content |
 | `other` | reserved extension state; current built-ins do not produce it from ordinary source data |
 
 Arrow null validity and RelFlow value state are related but not interchangeable.
 For example, an out-of-range list index is `padded`; a present leaf with a null
 slot is `null`.
 
-## 9. Mask, Encode, Decode, And Score
+## 9. Encode, Route, Decode, And Score
 
-The schema determines which fields are visible, hidden for reconstruction, or
-decoded as supervised targets. `target=True` is shorthand for a field that is
-pruned from encoder input and reconstructed with supervised loss.
+The schema's mask policies determine which coordinates remain visible, use a
+learned mask representation, disappear from encoder routing, or contribute a
+reconstruction objective. `mask=True` is shorthand for an always-skipped
+supervised reconstruction.
+
+Every `TensorField` carries `present`, `trainable`, and `inferred` alongside
+state and content. Embedders process only present coordinates and scatter their
+payloads back into fixed schema geometry. Branch attention and pooling ignore
+absent slots; decoders still have a defined zero-context path when an entire row
+is skipped.
 
 The model receives tensors only after all Arrow preprocessing and nested
 coalescing are complete. During prediction, the source `Batch` remains on CPU

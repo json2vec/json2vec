@@ -280,8 +280,8 @@ def test_root_and_branch_queries_feed_coalesce_from_arrow():
     )
 
     fields = coalesce(Batch(data=table, identity=identities(2)), model.schema, Strata.predict)
-    sku = fields[rf.Address("record/events/sku")]
-    risk = fields[rf.Address("record/events/risk")]
+    sku = fields[rf.Address("record/events/sku")].pristine
+    risk = fields[rf.Address("record/events/risk")].pristine
 
     assert model.schema.fields.query == "payload"
     assert model.schema.branches[rf.Address("record/events")].query == "events[-2:]"
@@ -306,7 +306,7 @@ def test_arrow_query_treats_mask_spelling_as_ordinary_content():
     )
     table = pa.table({"payload": pa.array([{"amount": "<MASK>"}, {"amount": None}])})
 
-    field = coalesce(Batch(data=table, identity=identities(2)), model.schema, Strata.predict)["record/amount"]
+    field = coalesce(Batch(data=table, identity=identities(2)), model.schema, Strata.predict)["record/amount"].pristine
 
     assert field.dense.tolist() == [[Tokens.valued.value], [Tokens.null.value]]
     assert field.values.to_pylist() == ["<MASK>"]

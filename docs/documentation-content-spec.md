@@ -116,13 +116,13 @@ before adding new conceptual material.
 | Hash semantics | The type uses batch-salted deterministic hashes rather than a learned vocabulary. | Describe equality across fields in one encoded batch, per-batch salt rotation during training, deterministic inference, quantized hash reconstruction, and the correspondence lost when sibling branches pool independently. |
 | DateParts precision | The page claims minute precision and omits seconds. The implementation stores second precision and supports `second_of_minute`. | Add the implemented part, remove the minute-only claim, and document per-part angular error in radians rather than generic content “accuracies.” |
 | Branch attention | The Branch page documents only `mha` and `none`; the public enum also includes `gqa` and `mqa`. | Document all supported modes and their intended tradeoffs, or classify unsupported values as non-public. |
-| State vocabulary | Core pages omit `other`, most output examples omit it, and the whitepaper invents a separate `pruned` state. There is no `pruned` token: pruning hides input with `masked` while retaining targets/trainability. | Make the Data Types overview authoritative for `valued`, `null`, `padded`, `masked`, and reserved `other`. Explain pruning as an operation, not a value state. |
+| State vocabulary | Core pages omit `other`, and most output examples omit it. There is no separate token for structural skipping. | Make the Data Types overview authoritative for `valued`, `null`, `padded`, `masked`, and reserved `other`. Explain that `masked` is a learned representation while `present` carries routing omission. |
 | Prediction payloads | Datatype examples are incomplete without saying so. They usually omit `state.other` and the public `inferred` mask. | Show one complete canonical payload, then label all smaller payloads as excerpts and link to it. Explain that `inferred` is true at positions masked in prediction input, while a visible leaf decoded for `embed=True` can carry `inferred=false`. |
 | Category capacity examples | Several tutorials allocate one more slot than the labels shown (`size=4` for three Iris labels and `size=3` for binary examples), reinforcing the false extra-bucket model. | Use exact capacity in introductory examples or explicitly label extra capacity as future-vocabulary headroom and explain its cost. |
 | Invalid top-k example | AI / Expert Quickstart mutates a `Category(size=2)` to `topk=[2]`, but `topk` must be less than `size`. | Use a legal value on a larger category or remove the mutation. Execute this example as a docs contract test. |
-| Dynamic masking | The prose says `p_mask` samples observed values, while leaf masking can select null and padded positions; branch masking excludes padding but may select null positions. | Make an explicit product decision: change the implementation to valued-only selection or document and test the exact position/state behavior. Use one term consistently. |
+| Dynamic masking | Selection, encoder effect, and learning purpose are easy to conflate. | Document the single `mask` argument, `Mask.query`/`rate` selection, `skip` routing, `dropout` activation, `reconstruct` objectives, and atomic branch inheritance in one canonical page. |
 | Device Tenure case study | The schema puts separate `Hash` fields under sibling branches, while the narrative claims the model can match that identity across those branches. The page later warns that this does not happen automatically. | Restructure the example around a shared repeated context/stacked field, or remove the cross-branch identity claim. Keep hypotheses distinct from demonstrated capability. |
-| Whitepaper category/state model | The whitepaper repeats the old unavailable bucket and separate `pruned` state. | Align its high-level architecture story with the canonical Data Types and Category pages; do not duplicate option-level details. |
+| Whitepaper category/state model | The whitepaper previously repeated an unavailable bucket and separate pruning state. | Keep its high-level architecture story aligned with the canonical Data Types and Category pages; do not duplicate option-level details. |
 
 Every correction should add or update a test when a small executable example can
 protect the documented contract.
@@ -202,8 +202,8 @@ The following material is required for the main reader journey:
   Expert Quickstart, and Field Stacking are not equally discoverable.
 - Datatype pages use similar but inconsistent templates, depth, payload examples,
   terminology, and next-step links.
-- Important concepts such as `target=True`, `p_mask`, `p_prune`, and `embed=True`
-  are fully re-explained on several pages, which makes drift likely.
+- Important concepts such as `mask`, `reconstruct`, `skip`, and `embed=True` are
+  fully re-explained on several pages, which makes drift likely.
 
 ### Proposed Learning Order
 
@@ -224,7 +224,8 @@ follows:
      preprocessor boundaries.
    - Advanced structural Query Paths recipes.
    - Learning roles and exported embeddings.
-   - Branch/window design and dynamic masking.
+   - Dynamic masking semantics, followed by task-oriented mask preprocessor
+     recipes.
 3. **Train And Evaluate**
    - Data Modules.
    - Training with Lightning.
@@ -265,7 +266,8 @@ a one-paragraph summary and link to it.
 | Choosing direct binding, an explicit query, or preprocessing | New short Binding Data page | Tutorials show one common case and link. |
 | Explicit structural queries and schema-shaped normalization | Advanced Query Paths reference | Datatype pages show only a relevant example. |
 | Universal state/content vocabulary | Data Types overview | Type pages explain only type-specific content behavior. |
-| `target`, masking, pruning, and `embed` roles | Learning Modes & Embeddings | Tutorials summarize in a compact table and link. |
+| Mask selection, skipping, reconstruction, dropout, and node inheritance | Dynamic Masking | Tutorials summarize in a compact table and link. |
+| Arrow/Awkward selector construction and processor wiring | Dynamic Mask Preprocessors | Masking concepts link to recipes rather than duplicating transformations. |
 | Public prediction envelope and `inferred` | Prediction/output-contract section | Type pages show their `content` member and link to the envelope. |
 | Type-specific encoding, loss, metrics, options, and output | Individual datatype page | Core pages compare types without duplicating contracts. |
 | Category vocabulary and unavailable semantics | Category | Set and whitepaper must not generalize Category behavior. |
@@ -435,7 +437,7 @@ and no concept has competing authoritative explanations.
 - A new user can train, inspect a validation result, save, load, and predict from
   one coherent example.
 - A reader can explain the difference between state, content, trainability,
-  pruning, and exported embeddings.
+  learned masking, structural skipping, reconstruction, and exported embeddings.
 - A reader can choose among Category, Set, Hash, Text, Number, Boolean,
   DateParts, and Vector from explicit decision boundaries.
 - A practitioner can choose interactive, batch, or online prediction and knows

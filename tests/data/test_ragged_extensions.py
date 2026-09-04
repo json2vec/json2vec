@@ -13,7 +13,7 @@ import pytest
 import relflow as rf
 import relflow.data.ragged as ragged_module
 from relflow.data.iterables import encode
-from relflow.data.ragged import RaggedField, coalesce
+from relflow.data.ragged import Projection, RaggedField, coalesce
 from relflow.structs.enums import Strata, Tokens
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import TENSORFIELDS, Plugin
@@ -89,7 +89,7 @@ def test_plugin_prepare_validates_and_preserves_one_whole_arrow_array():
 def test_multifamily_plugins_accept_all_null_arrow_columns(field):
     model = rf.Model(value=field, d_model=8, n_layers=1, n_heads=2)
 
-    encoded = model.encode(pa.table({"value": pa.nulls(2)}), mask=False)["record/value"]
+    encoded = model.encode(pa.table({"value": pa.nulls(2)}))["record/value"]
 
     assert encoded.state.tolist() == [
         [Tokens.null.value],
@@ -128,7 +128,7 @@ def test_builtin_plugin_type_contract_fails_before_codec_coercion():
 def test_mask_spelling_is_ordinary_typed_string_content():
     model = rf.Model(value=rf.Category(size=8, p_unavailable=0), d_model=8, n_layers=1, n_heads=2)
 
-    fields = model.encode(pa.table({"value": ["<MASK>"]}), mask=False)
+    fields = model.encode(pa.table({"value": ["<MASK>"]}))
 
     assert fields["record/value"].state.tolist() == [[Tokens.valued.value]]
 
@@ -161,7 +161,7 @@ def test_nested_dictionary_chunks_decode_without_combining_indices():
         n_heads=2,
     )
 
-    encoded = model.encode(source, strata=Strata.train, mask=False)["record/items/value"]
+    encoded = model.encode(source, strata=Strata.train)["record/items/value"]
 
     assert encoded.state.eq(Tokens.valued.value).all()
     assert set(rf.Category.vocabulary(model, "record/items/value")) == set(expected)
@@ -179,7 +179,7 @@ def test_dictionary_null_values_remain_null_after_decoding():
         n_heads=2,
     )
 
-    encoded = model.encode(pa.table({"value": values}), strata=Strata.train, mask=False)["record/value"]
+    encoded = model.encode(pa.table({"value": values}), strata=Strata.train)["record/value"]
 
     assert encoded.state.tolist() == [
         [Tokens.valued.value],
@@ -216,7 +216,7 @@ def test_extension_storage_uses_dictionary_value_validity():
         n_heads=2,
     )
 
-    encoded = model.encode(pa.table({"value": values}), strata=Strata.train, mask=False)["record/value"]
+    encoded = model.encode(pa.table({"value": values}), strata=Strata.train)["record/value"]
 
     assert encoded.state.tolist() == [
         [Tokens.valued.value],
@@ -242,7 +242,7 @@ def test_dateparts_encodes_heterogeneous_date_union():
         n_heads=2,
     )
 
-    encoded = model.encode(pa.table({"value": values}), strata=Strata.test, mask=False)["record/value"]
+    encoded = model.encode(pa.table({"value": values}), strata=Strata.test)["record/value"]
 
     assert encoded.state.tolist() == [
         [Tokens.valued.value],
@@ -267,7 +267,7 @@ model = rf.Model(
     n_layers=1,
     n_heads=2,
 )
-field = coalesce(convert(source, namespace="empty", offset=0), model.schema, Strata.predict)["record/value"]
+field = coalesce(convert(source, namespace="empty", offset=0), model.schema, Strata.predict)["record/value"].pristine
 assert field.shape == (0, 1)
 assert field.values.type == pa.float64()
 """
@@ -297,13 +297,13 @@ def test_typed_empty_branch_preserves_union_storage():
         n_heads=2,
     )
 
-    encoded = model.encode(source, strata=Strata.test, mask=False)["record/items/value"]
+    encoded = model.encode(source, strata=Strata.test)["record/items/value"]
 
     assert encoded.state.shape == (0, 1, 3)
     assert encoded.content.shape == (0, 1, 3)
 
 
-def test_coalesce_returns_arrow_backed_ragged_fields():
+def test_coalesce_returns_arrow_backed_projections():
     model = rf.Model(
         items=rf.Branch(length=3, value=rf.Number),
         d_model=8,
@@ -312,8 +312,10 @@ def test_coalesce_returns_arrow_backed_ragged_fields():
     )
     source = batch([{"items": [{"value": 1.0}, {"value": None}]}])
 
-    field = coalesce(source, schema=model.schema, strata=Strata.predict)["record/items/value"]
+    projection = coalesce(source, schema=model.schema, strata=Strata.predict)["record/items/value"]
+    field = projection.pristine
 
+    assert isinstance(projection, Projection)
     assert isinstance(field, RaggedField)
     assert isinstance(field.values, pa.Array)
     assert field.values.to_pylist() == [1.0]

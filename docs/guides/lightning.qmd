@@ -20,7 +20,7 @@ and [Evaluation And Metrics](evaluation.qmd) for interpreting the result.
 
 | Concern | Owner |
 | --- | --- |
-| Schema, addresses, queries, targets, embeddings | RelFlow model |
+| Schema, addresses, queries, mask policies, embeddings | RelFlow model |
 | Tensorization, value state, datatype losses and metrics | RelFlow model and data module |
 | Optimizer and scheduler factories | `rf.Model` configuration |
 | Epochs, devices, precision, callbacks, loggers, checkpoints | Lightning `Trainer` |
@@ -66,7 +66,7 @@ model = rf.Model(
     ),
     amount=rf.Number,
     merchant=rf.Category(size=3),
-    fraud=rf.Category(target=True, size=2),
+    fraud=rf.Category(mask=True, size=2),
 )
 
 datamodule = rf.ArrowDataModule(

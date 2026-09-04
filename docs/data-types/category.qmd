@@ -75,7 +75,7 @@ categorical content is unavailable.
 | `p_unavailable` | `0.01` | Probability of replacing each known valued label with unavailable content during training. Must be between `0` and `1`. |
 | `topk` | `[]` | Optional top-k accuracy values and prediction candidates. Values are deduplicated and sorted; each must be a positive integer other than `1` and less than `size`. |
 
-Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
+Shared options such as `mask`, `embed`, and `weight` are
 described in [Built-In Data Types](../core-concepts/data-types.qmd) and
 [Learning Modes & Embeddings](../core-concepts/embeddings.qmd).
 
@@ -83,7 +83,7 @@ described in [Built-In Data Types](../core-concepts/data-types.qmd) and
 #| echo: true
 #| output: true
 
-fraud = rf.Category("fraud", target=True, size=2)
+fraud = rf.Category("fraud", mask=True, size=2)
 
 fraud
 ```
@@ -138,8 +138,9 @@ training count. It excludes unused capacity, the unavailable sentinel, nulls,
 and padded positions. These are model-training exposures, not source-dataset
 frequencies: presenting the same observation in another epoch or through
 repeated sampling increments its count again. The counter's internal smoothing
-prior is removed from the public values. When a valued input is masked during
-training, its original target label still counts as an exposure.
+prior is removed from the public values. Counts come from the canonical pristine
+field, so a valued label still counts when a mask removes or replaces its
+encoder input.
 
 `Category.counts(...)` requires a model because counters are model state. In a
 distributed run, a snapshot taken during an epoch can still be rank-local;
@@ -221,8 +222,7 @@ to emit an unavailable class.
 
 ## Loss And Metrics
 
-When a `Category` is trainable because it is masked, pruned, or a supervised
-target, the decoder produces:
+When a `Category` is selected for reconstruction, the decoder produces:
 
 - five state logits for the shared state vocabulary; and
 - exactly `size` content logits for real categorical classes.

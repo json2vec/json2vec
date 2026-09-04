@@ -25,7 +25,7 @@ def test_leaf_rich_display_uses_schema_summary() -> None:
 
     assert "amount [number] active" in rendered
     assert "query=" not in rendered
-    assert "pooling=query weight=1 p_mask=0 p_prune=0 n_heads=4 n_linear=1" in rendered
+    assert "pooling=query weight=1 n_heads=4 n_linear=1" in rendered
     assert "jitter=0 n_bands=8 offset=4 objective=mae" in rendered
     assert "model_config" not in rendered
     assert "model_fields_set" not in rendered
@@ -44,11 +44,11 @@ def test_leaf_rich_display_shows_only_explicit_query() -> None:
 
 
 def test_leaf_display_flags() -> None:
-    target = render_text(rf.Category("returned", target=True, size=2)).splitlines()[0].split()
+    reconstruct = render_text(rf.Category("returned", mask=True, size=2)).splitlines()[0].split()
     embedded = render_text(rf.Number("amount", embed=True)).splitlines()[0].split()
     inactive = render_text(rf.Category("customer_id", active=False)).splitlines()[0].split()
 
-    assert "target" in target
+    assert "reconstruct" in reconstruct
     assert "embed" in embedded
     assert "inactive" in inactive
     assert "active" not in inactive
@@ -60,7 +60,7 @@ def test_names_and_type_labels_have_background_styles() -> None:
     branch_html = rf.Branch(rf.Number("amount"), name="items")._repr_html_()
     schema_html = rf.Schema.from_tree(
         rf.Number("amount"),
-        rf.Number("label", target=True),
+        rf.Number("label", mask=True),
         name="record",
         d_model=8,
         n_layers=1,
@@ -68,7 +68,7 @@ def test_names_and_type_labels_have_background_styles() -> None:
     )._repr_html_()
     model_html = rf.Model(
         rf.Number("amount"),
-        rf.Number("label", target=True),
+        rf.Number("label", mask=True),
         name="record",
         d_model=8,
         n_layers=1,
@@ -82,10 +82,9 @@ def test_names_and_type_labels_have_background_styles() -> None:
 
 
 def test_leaf_display_separates_common_and_specific_attributes() -> None:
-    number_lines = render_text(rf.Number("amount", p_mask=0.15, objective="huber")).splitlines()
+    number_lines = render_text(rf.Number("amount", mask=0.15, objective="huber")).splitlines()
     category_lines = render_text(rf.Category("sku", size=2048)).splitlines()
 
-    assert "p_mask=0.15" in number_lines[1]
     assert number_lines[1].startswith(" ")
     assert "objective=huber" not in number_lines[1]
     assert "objective=huber" in number_lines[2]
@@ -166,7 +165,7 @@ def test_nested_branch_rich_display_renders_nested_tree_prefixes() -> None:
                 length=360,
                 overflow="tail",
             ),
-            rf.Category("churned", target=True, size=2),
+            rf.Category("churned", mask=True, size=2),
             name="customer",
         )
     )
@@ -174,7 +173,7 @@ def test_nested_branch_rich_display_renders_nested_tree_prefixes() -> None:
     assert "|-- transactions [branch] length=360 overflow=tail" in rendered
     assert "|   |-- amount [number] active" in rendered
     assert "|   `-- merchant [category] active" in rendered
-    assert "`-- churned [category] active target" in rendered
+    assert "`-- churned [category] active reconstruct" in rendered
     assert "query=" not in rendered
 
 
@@ -202,7 +201,7 @@ def test_common_display_surfaces_are_backed_by_rich() -> None:
 def test_schema_rich_display_uses_root_schema_tree() -> None:
     schema = rf.Schema.from_tree(
         rf.Number("amount"),
-        rf.Category("label", target=True, size=2),
+        rf.Category("label", mask=True, size=2),
         name="record",
         d_model=8,
         n_layers=1,
@@ -213,20 +212,20 @@ def test_schema_rich_display_uses_root_schema_tree() -> None:
     rendered = render_text(schema)
 
     assert rendered == str(schema)
-    assert "schema [schema] d_model=8 branches=1 fields=2 targets=1 embeds=0" in rendered
+    assert "schema [schema] d_model=8 branches=1 fields=2 reconstruct=1 embeds=0" in rendered
     root_line = next(line for line in rendered.splitlines() if "`-- record [root]" in line)
     assert "length=" not in root_line
     assert "overflow=" not in root_line
     assert "embed=False" not in root_line
     assert "    |-- amount [number] active" in rendered
-    assert "    `-- label [category] active target" in rendered
+    assert "    `-- label [category] active reconstruct" in rendered
     assert "query=" not in rendered
 
 
 def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
     model = rf.Model(
         rf.Number("amount"),
-        rf.Category("label", target=True, size=2),
+        rf.Category("label", mask=True, size=2),
         name="record",
         d_model=8,
         n_layers=1,
@@ -239,20 +238,20 @@ def test_model_rich_display_uses_runtime_summary_and_schema_tree() -> None:
 
     assert rendered == str(model)
     assert "Model [model] batch_size=3 d_model=8 parameters=" in rendered
-    assert "branches=1 fields=2 targets=1 embeds=0" in rendered
+    assert "branches=1 fields=2 reconstruct=1 embeds=0" in rendered
     root_line = next(line for line in rendered.splitlines() if "`-- record [root]" in line)
     assert "length=" not in root_line
     assert "overflow=" not in root_line
     assert "embed=False" not in root_line
     assert "    |-- amount [number] active" in rendered
-    assert "    `-- label [category] active target" in rendered
+    assert "    `-- label [category] active reconstruct" in rendered
     assert "query=" not in rendered
 
 
 def test_model_select_pprint_uses_rich_node_display() -> None:
     model = rf.Model(
         rf.Number("amount"),
-        rf.Category("species", target=True, size=4),
+        rf.Category("species", mask=True, size=4),
         name="record",
         d_model=8,
         n_layers=1,
@@ -267,9 +266,9 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
 
     assert isinstance(selection, list)
     for output in (rendered, rich_rendered):
-        assert "species [category] active target" in output
+        assert "species [category] active reconstruct" in output
         assert "query=" not in output
-        assert " pooling=query weight=1 p_mask=0 p_prune=1 n_heads=4 n_linear=1" in output
+        assert " pooling=query weight=1 n_heads=4 n_linear=1" in output
         assert " size=4 p_unavailable=0.01 topk=[]" in output
         assert "Request(name=" not in output
         assert "Selection(" not in output
@@ -291,7 +290,9 @@ def test_tensorfield_rich_display_previews_state_tokens() -> None:
         strata=rf.Strata.train,
     )["record/letters/letter"]
 
-    field.hide(torch.tensor([[[False, True, False, False]]]))
+    selected = torch.tensor([[[False, True, False, False]]])
+    field.state[selected] = rf.Tokens.masked
+    field.trainable[selected] = True
     rendered = render_text(field)
 
     assert isinstance(field, Renderable)
@@ -328,7 +329,6 @@ def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
             ]
         ),
         strata=rf.Strata.train,
-        mask=False,
     )["record/words/letters/letter"]
 
     rendered = render_text(field)
@@ -338,7 +338,7 @@ def test_tensorfield_rich_display_separates_nested_array_state_tokens() -> None:
 
 
 def test_rich_display_does_not_replace_repr_or_mutate_serialization() -> None:
-    node = rf.Number("amount", p_mask=0.15)
+    node = rf.Number("amount", mask=0.15)
     dumped = node.model_dump(mode="python")
 
     assert "query=<inferred>" not in repr(node)

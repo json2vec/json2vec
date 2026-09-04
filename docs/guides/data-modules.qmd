@@ -40,7 +40,7 @@ model = rf.Model(
     batch_size=32,
     amount=rf.Number,
     merchant=rf.Category(size=1024),
-    fraud=rf.Category(target=True, size=2),
+    fraud=rf.Category(mask=True, size=2),
 )
 
 data = rf.ArrowDataModule(
@@ -90,7 +90,7 @@ schema rather than a tuning override.
 | --- | --- |
 | `preprocessor` | One Arrow `Batch` transform, or one per split |
 | `retain` | Processed top-level columns copied into prediction `inputs` |
-| `seed` | Root seed for sampling and shuffling |
+| `seed` | Root seed for sampling, shuffling, and uniform mask selection |
 | `shuffle` | Train defaults to `True`; other splits default to `False` |
 | `sample` | Independent inclusion probability in `(0, 1]` |
 | `epoch_size` | Maximum logical observations emitted per pass |
@@ -151,11 +151,12 @@ same source, seed, and epoch, they reproduce the same sequence. Training uses
 a new epoch in the key, so its order changes across epochs. Evaluation and
 prediction remain stable.
 
-That seed controls observation membership and ordering, not every stochastic
-model transform. `p_mask`, `p_prune`, branch masks, and `p_unavailable` use the
-Torch random stream and are not currently invariant to model-batch or source
-chunk boundaries. Seed Lightning/Torch separately for run-level repeatability,
-and do not treat the data-module seed as per-identity masking.
+The same seed also drives uniform mask selection. Selection is keyed by batch
+identity, schema address, policy, stratum, and training epoch, so changing a
+source chunk or model-batch boundary does not change which logical coordinates
+are selected. Training selections change by epoch; validation, test, and
+prediction selections remain stable. Datatype-specific transforms such as
+`p_unavailable` retain their own random contract.
 
 ::: {.callout-warning}
 Set `shuffle=False` for training only when order is part of the learning

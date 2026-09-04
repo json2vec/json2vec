@@ -1,7 +1,7 @@
 import pydantic
 import pytest
 
-from relflow.structs.tree import Address, Leaf, Node
+from relflow.structs.tree import Address, Leaf, Mask, Node
 
 
 class AddressPayload(pydantic.BaseModel):
@@ -76,19 +76,62 @@ def test_leaf_defaults_to_not_embedded():
     assert leaf.embed is False
 
 
-def test_leaf_mask_and_prune_rates_default_to_zero():
+def test_leaf_mask_defaults_to_an_empty_tuple():
     leaf = Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4})
 
-    assert leaf.p_mask == 0.0
-    assert leaf.p_prune == 0.0
+    assert Leaf.model_fields["mask"].default is False
+    assert leaf.mask == ()
 
 
-def test_leaf_mask_and_prune_rates_cannot_be_null():
-    with pytest.raises(ValueError):
-        Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "p_mask": None})
+@pytest.mark.parametrize("value", [False, [], ()])
+def test_leaf_empty_mask_forms_normalize(value):
+    assert Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "mask": value}).mask == ()
 
-    with pytest.raises(ValueError):
-        Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "p_prune": None})
+
+def test_leaf_mask_singletons_normalize():
+    assert Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "mask": 0.25}).mask == (
+        Mask(rate=0.25),
+    )
+    assert Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "mask": True}).mask == (
+        Mask(skip=True, dropout=False, reconstruct=True),
+    )
+
+
+def test_leaf_mask_collection_is_copied_normalized_and_deduplicated():
+    values = [Mask(rate=0.0), Mask(rate=1.0), Mask(), Mask(query="selected")]
+    leaf = Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "mask": values})
+
+    values.clear()
+
+    assert leaf.mask == (Mask(), Mask(query="selected"))
+
+
+def test_leaf_mask_rejects_none_and_non_mask_collection_entries():
+    with pytest.raises(TypeError, match="mask cannot be None"):
+        Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "mask": None})
+
+    with pytest.raises(TypeError, match="entries must be Mask"):
+        Leaf.model_validate({"name": "leaf", "type": "number", "n_heads": 4, "mask": [True]})
+
+
+def test_mask_normalizes_dropout_and_rejects_invalid_combinations():
+    assert Mask().dropout is True
+    assert Mask(reconstruct=True).dropout is False
+
+    with pytest.raises(ValueError, match="dropout=True"):
+        Mask(dropout=True, reconstruct=True)
+
+    assert Mask(skip=True, rate=0.5) == Mask(skip=True, rate=0.5, dropout=True)
+
+
+def test_mask_is_frozen_and_rejects_unknown_fields():
+    policy = Mask()
+
+    with pytest.raises(pydantic.ValidationError, match="Instance is frozen"):
+        policy.skip = True
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        Mask.model_validate({"unknown": True})
 
 
 def test_node_rejects_extra_fields():
@@ -96,45 +139,10 @@ def test_node_rejects_extra_fields():
         Node.model_validate({"name": "ok_name", "type": "node", "n_heads": 4, "p_prune": 0.0})
 
 
-def test_leaf_target_true_sets_prune_rate():
-    node = Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, "target": True})
-
-    assert node.target is True
-    assert node.p_prune == 1.0
-    assert not node.model_extra or "target" not in node.model_extra
-
-
-def test_leaf_target_false_is_input_only_noop():
-    node = Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, "target": False})
-
-    assert node.target is False
-    assert node.p_prune == 0.0
-    assert not node.model_extra or "target" not in node.model_extra
-
-
-def test_leaf_target_property_updates_prune_rate():
-    node = Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, "p_prune": 0.25})
-
-    node.target = True
-    assert node.p_prune == 1.0
-
-    node.target = False
-    assert node.p_prune == 0.0
-
-
-def test_leaf_target_rejects_conflicting_prune_rate():
-    with pytest.raises(ValueError, match="target=True is shorthand for p_prune=1.0"):
-        Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, "target": True, "p_prune": 0.5})
-
-
-def test_leaf_target_false_rejects_conflicting_prune_rate():
-    with pytest.raises(ValueError, match="target=False is shorthand for p_prune=0.0"):
-        Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, "target": False, "p_prune": 0.5})
-
-
-def test_leaf_target_requires_boolean():
-    with pytest.raises(ValueError, match="target must be a boolean"):
-        Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, "target": "yes"})
+@pytest.mark.parametrize("name", ["masks", "p_mask", "p_prune", "target"])
+def test_leaf_rejects_removed_mask_fields_even_with_extra_allow(name):
+    with pytest.raises(ValueError, match="removed node field"):
+        Leaf.model_validate({"name": "label", "type": "number", "n_heads": 4, name: False})
 
 
 def test_node_description_trims_and_accepts_optional_metadata():

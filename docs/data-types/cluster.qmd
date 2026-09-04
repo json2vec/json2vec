@@ -23,16 +23,16 @@ model = rf.Model(
     merchant_id=rf.Cluster(
         capacity=100_000,
         bounds=64,
-        p_mask=0.15,
+        mask=rf.Mask(rate=0.15, reconstruct=True),
         embed=True,
     ),
-    fraud=rf.Category(target=True, size=2),
+    fraud=rf.Category(mask=True, size=2),
 )
 ```
 
 Here `capacity` bounds the learned label vocabulary and `bounds=64` fixes the
-latent cluster width at 64. `p_mask=0.15` creates reconstruction examples from
-which the cluster head can learn.
+latent cluster width at 64. The reconstructing mask creates sampled objectives
+from which the cluster head can learn.
 
 Choose a different datatype when the intended signal differs:
 
@@ -83,14 +83,14 @@ committed columns; epoch callbacks may revive inactive columns or merge highly
 similar active columns. Treat the range as a learned-capacity mechanism, not a
 guarantee that every column will receive equal semantic use.
 
-Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
+Shared options such as `mask`, `embed`, and `weight` are
 documented in [Built-In Data Types](../core-concepts/data-types.qmd).
 
 ::: {.callout-important}
-A `Cluster` used only as a visible input with `p_mask=0` and `p_prune=0` does not
-create a reconstruction loss for its cluster head, so adaptive cluster
-selection cannot learn. Configure `p_mask`, `p_prune`, or `target=True` when
-that head should train.
+A `Cluster` used only as a visible input does not create a reconstruction loss
+for its cluster head, so adaptive cluster selection cannot learn. Configure a
+mask with `reconstruct=True`, or use `mask=True` for an always-skipped target,
+when that head should train.
 :::
 
 `p_unavailable` uses Torch randomness during training. The data-module seed
@@ -170,7 +170,7 @@ state; saving or rebuilding while an override is open is rejected.
 
 ## Loss And Metrics
 
-For masked, pruned, or target positions, `Cluster` learns the shared state
+For positions selected for reconstruction, `Cluster` learns the shared state
 classification objective and label reconstruction through latent cluster
 probabilities. Content accuracy includes only valued targets whose labels are
 known. Training also records cluster balance and activity diagnostics,

@@ -15,12 +15,15 @@ def test_common_resources_are_available_from_package_root():
     assert relflow.Schema.__name__ == "Schema"
     assert relflow.Address("root", "label") == "root/label"
     assert relflow.Branch.__name__ == "Branch"
+    assert relflow.Mask.model_fields["rate"].default is None
     assert relflow.where("type").name == "type"
     assert relflow.preprocess.__name__ == "preprocess"
     assert relflow.postprocess.__name__ == "postprocess"
     assert relflow.Preprocessor.__name__ == "Preprocessor"
     assert relflow.PreprocessorProvider.strata == "strata"
     assert relflow.Batch.__name__ == "Batch"
+    assert relflow.Context().state is None
+    assert relflow.Context().salt == 0
     assert not hasattr(relflow, "Observation")
     assert not hasattr(relflow, "observe")
     assert relflow.OptimizerConfig is not None

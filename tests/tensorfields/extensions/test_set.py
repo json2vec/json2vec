@@ -1,4 +1,3 @@
-from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
@@ -8,11 +7,13 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
-from relflow.tensorfields.base import TENSORFIELDS
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS, Context
 from relflow.tensorfields.extensions.set import Decoder, Embedder, TensorField, loss, write
 from relflow.tensorfields.extensions.set import output as output_type
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
 from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/tags"
 
@@ -21,11 +22,13 @@ def _structure_payload(
     *,
     p_unavailable: float | None = None,
     threshold: float | None = None,
+    mask: bool | Mask = False,
 ) -> dict:
     field: dict = {
         "name": "tags",
         "type": "set",
         "size": 8,
+        "mask": mask,
     }
     if p_unavailable is not None:
         field["p_unavailable"] = p_unavailable
@@ -59,17 +62,18 @@ def _new_tensorfield(
     values: list,
     schema: Schema,
     strata: Strata,
-    interprocess_encoding_context,
+    state,
 ) -> TensorField:
     batch = arrow_batch([{"items": [{"tags": value} for value in root]} for (root,) in values])
-    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
-    field = replace(field, values=TENSORFIELDS["set"].prepare(field.values, address=ADDRESS))
-    return TensorField.new(
-        field=field,
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["set"],
         address=ADDRESS,
         schema=schema,
         strata=strata,
-        interprocess_encoding_context=interprocess_encoding_context,
+        context=Context(state=state),
     )
 
 
@@ -95,7 +99,7 @@ def test_set_tensorfield_encodes_multi_hot_content():
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -123,7 +127,7 @@ def test_set_nested_mask_string_is_an_ordinary_label():
         values=[[[["<MASK>", "ALPHA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert state.vocab == ["<MASK>", "ALPHA"]
@@ -139,7 +143,7 @@ def test_set_tensorfield_reserves_real_vocabulary_in_batch():
         values=[[[["ALPHA", "BETA"], ["ALPHA"]]], [[["BETA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=vocabulary.state,
+        state=vocabulary.state,
     )
 
     assert vocabulary.snapshot() == ["ALPHA", "BETA"]
@@ -153,14 +157,14 @@ def test_set_tensorfield_zeros_oov_content_without_changing_state():
         values=[[[["ALPHA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     field = _new_tensorfield(
         values=[[[["OMEGA"]]]],
         schema=structure,
         strata=Strata.validate,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert field.state[0, 0, 0] == Tokens.valued.value
@@ -175,7 +179,7 @@ def test_set_tensorfield_simulated_unavailable_zeros_content():
         values=[[[["ALPHA", "BETA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert field.content.shape[-1] == structure.requests[ADDRESS].size
@@ -293,16 +297,14 @@ def test_set_empty_vocabulary_keeps_declared_schema():
 
 
 def test_set_loss_does_not_mutate_counter():
-    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0, mask=Mask(reconstruct=True)))
     state = _state()
     field = _new_tensorfield(
         values=[[[["ALPHA", "BETA"], []]], [[["BETA"]]]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _DummyModule(schema=structure, embedder=embedder, decoder=decoder)

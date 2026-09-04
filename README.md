@@ -27,8 +27,7 @@ A `relflow` schema is both a data contract and an architecture blueprint.
   and `Vector` become datatype-specific tensorfields.
 - `Branch` nodes define shared contexts for child fields, with optional local
   attention and pooling before the representation flows upward.
-- Targets, masks, pruning, and embeddings are configured on the same schema
-  tree.
+- Mask policies and embeddings are configured on the same schema tree.
 - Prediction output uses schema addresses as fields inside a typed Arrow
   struct, so decoded values and embeddings remain attached to the part of the
   record that produced them.
@@ -56,7 +55,7 @@ model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 ```
 
@@ -73,9 +72,9 @@ This model reads records shaped like:
 }
 ```
 
-The `line_items` branch has its own repeated context, `returned` is withheld
-from input and decoded as a supervised target, and `embed=True` asks prediction
-to emit embeddings at configured addresses.
+The `line_items` branch has its own repeated context, `returned` is skipped by
+the encoder and decoded as a supervised reconstruction, and `embed=True` asks
+prediction to emit embeddings at configured addresses.
 
 ## Train With Lightning
 
@@ -106,7 +105,7 @@ model = rf.Model(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
     sepal_length=rf.Number,
     petal_length=rf.Number,
-    species=rf.Category(target=True, size=3, topk=[2]),
+    species=rf.Category(mask=True, size=3, topk=[2]),
 )
 
 datamodule = rf.ArrowDataModule(
@@ -200,29 +199,35 @@ and [Postprocessors](https://relflow.github.io/relflow/guides/postprocessors.htm
 ## Learning Modes
 
 `relflow` does not maintain separate supervised and self-supervised code
-paths. Supervised learning is the special case where a target field is hidden
-from the input 100% of the time and decoded from the remaining context.
+paths. Supervised learning is the special case where a field is skipped by the
+encoder 100% of the time and decoded from the remaining context.
 
 | Setting | What the model sees | What prediction can emit |
 | --- | --- | --- |
 | plain input | value is visible | no decoded output unless otherwise configured |
-| `target=True` | value is hidden | decoded supervised output |
-| `p_mask` | sampled configured leaf positions are hidden in train, validation, and test | decoded reconstruction |
-| `p_prune` | whole leaf instances are hidden in train, validation, and test | decoded reconstruction |
+| `mask=True` | value is skipped by the encoder | decoded supervised reconstruction |
+| `mask=x` | sampled positions use a learned mask during training | context regularization only |
+| `mask=rf.Mask(rate=x, reconstruct=True)` | sampled positions use a learned mask | reconstruction loss in train/validation/test; a remaining rate is inactive in ordinary prediction |
+| `mask=rf.Mask(rate=x, skip=True, reconstruct=True)` | sampled positions are omitted from encoder work | the same reconstruction objective without input embedding; a remaining rate is inactive in ordinary prediction |
 | `embed=True` | does not hide the value | embedding at that address |
 
-`target=True` is exact shorthand for `p_prune=1.0`. The current `p_mask`
-implementation samples configured positions, including null and padded
-positions, at rates lower than `1.0`; see
+`mask=True` is shorthand for
+`rf.Mask(skip=True, dropout=False, reconstruct=True)`. A mask can select
+positions uniformly with `rate`, from a Boolean Arrow field with `query`, or
+with both. See
 [Dynamic Masking](https://relflow.github.io/relflow/core-concepts/dynamic-masking.html)
-for exact selection behavior. Use `embed=True` when you want a representation
-returned from prediction.
+for selection, branch atomicity, and the distinction between learned masking
+and structural skipping. The
+[preprocessor recipes](https://relflow.github.io/relflow/guides/dynamic-mask-preprocessors.html)
+show data-dependent Arrow and Awkward selectors from source through deployment.
+Use `embed=True` when you want a representation returned from prediction.
 
 ## Data Modules
 
 Data modules load Arrow records, apply optional batch preprocessing, sample and
-shuffle logical observations, tensorize values from the model schema, apply
-configured masking and target pruning, and hand encoded batches to Lightning.
+shuffle logical observations, resolve mask policies against Arrow values,
+tensorize the selected input and target projections, and hand encoded batches
+to Lightning.
 One preparation phase produces all selected ragged fields before datatype
 codecs run. Same-named fields use direct projection; any node may opt into a small,
 Arrow-native structural `query=...` path.
@@ -251,11 +256,11 @@ for split configuration, sampling, shuffling, buffering, and preprocessors.
 - **Hierarchical context encoding:** child records interact locally before
   their representation flows upward.
 - **Typed datatype architecture:** each built-in field owns validation,
-  tensorization, missing-state handling, masking, decoding, loss, metrics, and
+  tensorization, missing-state handling, decoding, loss, metrics, and
   output writing. The external registration surface is experimental and
   same-process only in the current release.
-- **Unified training roles:** `target=True`, `p_prune`, and `p_mask` all use the
-  same reconstruction path.
+- **Unified mask policies:** one `mask` argument controls selection, encoder
+  omission, train-only dropout, and reconstruction.
 - **Embedding trees:** embeddings can come from the root, branches, or selected
   leaves.
 - **Schema evolution:** fields can be added, removed, updated, reset, or

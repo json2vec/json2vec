@@ -74,7 +74,7 @@ same exact Python type. Normalize mixed label types in a preprocessor.
 | `p_unavailable` | `0.01` | Independent probability of dropping each known positive label from training content. Must be between `0` and `1`. |
 | `threshold` | `None` | Optional prediction-output filter from `0` through `1`. When set, only populated labels at or above the threshold are returned. |
 
-Shared options such as `target`, `p_mask`, `p_prune`, `embed`, and `weight` are
+Shared options such as `mask`, `embed`, and `weight` are
 described in [Built-In Data Types](../core-concepts/data-types.qmd).
 
 ## Vocabulary And Content
@@ -145,7 +145,7 @@ otherwise depend on traversal order, batching, and worker timing.
 
 ## Loss And Metrics
 
-When a `Set` is masked, pruned, or used as a target, its decoder produces:
+When a `Set` is selected for reconstruction, its decoder produces:
 
 - five logits for the shared state vocabulary; and
 - `size` independent content logits.

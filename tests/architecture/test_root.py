@@ -9,6 +9,7 @@ import torch
 
 import relflow as rf
 from relflow.architecture.root import Model, MutationLockCallback, RollbackCheckpoint, RuntimePlacementCallback
+from relflow.architecture.runtime import ModelRuntime
 from relflow.data.iterables import encode
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata, TensorKey, Tokens
@@ -118,7 +119,7 @@ def prediction_schema() -> Schema:
                     "name": "label",
                     "type": "category",
                     "embed": False,
-                    "p_prune": 1.0,
+                    "mask": True,
                     "p_unavailable": 0.0,
                     "size": 16,
                     "topk": [2],
@@ -143,7 +144,7 @@ def primed() -> Model:
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
-    model(inputs, strata=Strata.train)
+    model(inputs.tensors, strata=Strata.train)
     return model
 
 
@@ -362,6 +363,18 @@ def test_configure_callbacks_deduplicates_shared_extension_callbacks() -> None:
     assert callback_types.index(CounterUpdateCallback) < callback_types.index(VocabularySyncCallback)
 
 
+def test_fit_start_rejects_a_model_without_reconstruction_objectives() -> None:
+    model = rf.Model(
+        value=rf.Number,
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+    )
+
+    with pytest.raises(RuntimeError, match="no reconstruction objectives"):
+        model.on_fit_start()
+
+
 def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> None:
     model = Model(schema=configuration(), batch_size=2)
     model._trainer = type(  # noqa: SLF001
@@ -469,70 +482,34 @@ def test_training_counters_observe_all_encoded_fields() -> None:
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
 
-    CounterUpdateCallback().on_train_batch_start(trainer=None, pl_module=model, batch=inputs, batch_idx=0)
+    ModelRuntime.learn(model, inputs.observations, strata=Strata.train)
 
-    address = Address("root", "color")
-    field = inputs[address]
-    embedder = model.nodes[address].embedder
+    for address in (Address("root", "color"), Address("root", "label")):
+        embedder = model.nodes[address].embedder
+        observation = inputs.observations[address]
 
-    expected_state_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    expected_state_counts += torch.bincount(field.state.reshape(-1), minlength=len(Tokens))
-    assert torch.equal(embedder.counters[TensorKey.state.name].counts.cpu(), expected_state_counts)
-
-    valued = field.state.eq(Tokens.valued.value)
-    expected_content_counts = torch.ones(
-        schema.requests[address].size,
-        dtype=torch.int64,
-    )
-    expected_content_counts += torch.bincount(
-        field.content.masked_select(valued).reshape(-1),
-        minlength=schema.requests[address].size,
-    )
-    assert torch.equal(embedder.counters[TensorKey.content.name].counts.cpu(), expected_content_counts)
-
-    target_address = Address("root", "label")
-    target_field = inputs[target_address]
-    target_embedder = model.nodes[target_address].embedder
-
-    expected_target_counts = torch.ones(len(Tokens), dtype=torch.int64)
-    expected_target_counts += torch.bincount(
-        target_field.targets[TensorKey.state].reshape(-1),
-        minlength=len(Tokens),
-    )
-    assert torch.equal(target_embedder.counters[TensorKey.state.name].counts.cpu(), expected_target_counts)
-
-    target_valued = target_field.targets[TensorKey.state].eq(Tokens.valued.value)
-    expected_target_content_counts = torch.ones(
-        schema.requests[target_address].size,
-        dtype=torch.int64,
-    )
-    expected_target_content_counts += torch.bincount(
-        target_field.targets[TensorKey.content].masked_select(target_valued).reshape(-1),
-        minlength=schema.requests[target_address].size,
-    )
-    assert torch.equal(
-        target_embedder.counters[TensorKey.content.name].counts.cpu(),
-        expected_target_content_counts,
-    )
+        expected_state = torch.ones(len(Tokens), dtype=torch.int64) + observation[TensorKey.state]
+        expected_content = torch.ones(schema.requests[address].size, dtype=torch.int64) + observation[TensorKey.content]
+        assert torch.equal(embedder.counters[TensorKey.state.name].counts.cpu(), expected_state)
+        assert torch.equal(embedder.counters[TensorKey.content.name].counts.cpu(), expected_content)
 
 
-def test_training_counters_call_content_counter_for_empty_updates() -> None:
+def test_training_counters_learn_fixed_width_empty_observations() -> None:
     class SpyCounter(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.calls: list[torch.Tensor] = []
 
-        def forward(self, values: torch.Tensor) -> torch.Tensor:
+        def learn(self, values: torch.Tensor) -> None:
             self.calls.append(values.detach().cpu())
-            return values
 
     schema = prediction_schema()
     model = Model(schema=schema, batch_size=2)
     inputs = encode(
         batch=arrow_batch(
             [
-                {"color": "red", "label": "warm"},
-                {"color": "blue", "label": "cool"},
+                {"color": None, "label": "warm"},
+                {"color": None, "label": "cool"},
             ]
         ),
         schema=schema,
@@ -541,15 +518,14 @@ def test_training_counters_call_content_counter_for_empty_updates() -> None:
     )
 
     address = Address("root", "color")
-    field = inputs[address]
-    field.state.fill_(Tokens.null.value)
     spy = SpyCounter()
     model.nodes[address].embedder.counters[TensorKey.content.name] = spy
 
-    CounterUpdateCallback().on_train_batch_start(trainer=None, pl_module=model, batch=inputs, batch_idx=0)
+    ModelRuntime.learn(model, inputs.observations, strata=Strata.train)
 
     assert len(spy.calls) == 1
-    assert spy.calls[0].numel() == 0
+    assert tuple(spy.calls[0].shape) == (schema.requests[address].size,)
+    assert not spy.calls[0].any()
 
 
 def test_track_marks_metric_sync_handled_without_collective(monkeypatch) -> None:
@@ -614,7 +590,7 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
                         "type": "category",
                         "active": False,
                         "embed": True,
-                        "p_prune": 1.0,
+                        "mask": True,
                         "size": 16,
                     },
                 ],
@@ -634,12 +610,13 @@ def test_inactive_leaf_nodes_are_ignored_by_encoding_and_forward() -> None:
         strata=Strata.train,
         interprocess_encoding_context=model.interprocess_encoding_context,
     )
+    inputs = inputs.tensors
     predictions = model(inputs, strata=Strata.train)
 
     assert Address("root", "ignored") not in inputs.keys()
     assert Address("root", "ignored") in model.nodes
     assert Address("root", "ignored") not in model.schema.active_requests
-    assert Address("root", "ignored") not in model.schema.target
+    assert Address("root", "ignored") not in model.schema.reconstruct
     assert Address("root", "ignored") not in model.schema.embed
     assert all(prediction.address != Address("root", "ignored") for prediction in predictions)
 
@@ -678,7 +655,8 @@ def test_encode_returns_tensorfield_inputs_for_raw_batch() -> None:
         color.state,
         torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
     )
-    assert torch.equal(label.state, torch.full((2, 1), Tokens.masked.value))
+    assert torch.equal(label.state, torch.full((2, 1), Tokens.padded.value))
+    assert not label.present.any()
 
 
 def test_encode_branch_tail_overflow_keeps_last_values() -> None:
@@ -803,33 +781,9 @@ def test_encode_accepts_strata_for_testing_training_inputs() -> None:
         inputs[Address("root", "label")].targets[TensorKey.state],
         torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
     )
-    assert torch.equal(
-        inputs[Address("root", "label")].state,
-        torch.full((2, 1), Tokens.masked.value),
-    )
-
-
-def test_encode_mask_false_skips_training_target_masking() -> None:
-    model = primed()
-
-    inputs = model.encode(
-        table(
-            [
-                {"color": "red", "label": "warm"},
-                {"color": "blue", "label": "cool"},
-            ]
-        ),
-        strata=Strata.train,
-        mask=False,
-    )
     label = inputs[Address("root", "label")]
-
-    assert list(label.targets.keys()) == []
-    assert not label.trainable.any()
-    assert torch.equal(
-        label.state,
-        torch.tensor([[Tokens.valued.value], [Tokens.valued.value]], dtype=torch.int64),
-    )
+    assert torch.equal(label.state, torch.full((2, 1), Tokens.padded.value))
+    assert not label.present.any()
 
 
 def test_predict_encodes_batch_and_returns_embedding_outputs() -> None:
@@ -845,7 +799,7 @@ def test_predict_encodes_batch_and_returns_embedding_outputs() -> None:
 
 def test_leaf_embed_uses_decoder_pooled_embedding() -> None:
     class ConstantPool(torch.nn.Module):
-        def forward(self, memory: torch.Tensor) -> torch.Tensor:
+        def forward(self, memory: torch.Tensor, *, present: torch.Tensor) -> torch.Tensor:
             return torch.ones(memory.shape[0], 1, memory.shape[-1], device=memory.device)
 
     schema = Schema.model_validate(

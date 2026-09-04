@@ -27,17 +27,28 @@ representation or learning objective itself must change.
 
 ## Component Lifecycle
 
-One plugin registers seven named components:
+One plugin can register nine named components. Three form the input path; the
+others are required only when the field's configured role needs them:
 
-| Component | Responsibility |
-| --- | --- |
-| `Request` | Pydantic schema options and bound-tree validation. |
-| `TensorField` | Encode one eagerly prepared `RaggedField` into content; implement empty prediction input, hiding, masking, and targeting. |
-| `Embedder` | Convert visible state/content into a `d_model` parcel sent to the parent branch. |
-| `Decoder` | Pool heritage context and produce raw state/content predictions. |
-| `loss` | Compare decoded tensors with cached targets and log address-qualified metrics. |
-| `output` | Declare the stable plugin-owned Arrow coordinate type before any prediction batch. |
-| `write` | Convert raw prediction tensors to one flat `pa.StructArray` of exactly that type. |
+| Component | Required when | Responsibility |
+| --- | --- | --- |
+| `Request` | Always | Define Pydantic schema options and bound-tree validation. |
+| `TensorField` | Always | Tensorize separate input and target `RaggedField` projections and retain shared routing bits. |
+| `Embedder` | Always | Convert compact present state/content into a `d_model` parcel sent to the parent branch. |
+| `Decoder` | A reconstructing mask reaches the leaf, or the leaf has `embed=True` | Pool heritage context and produce raw predictions or a contextual leaf embedding. |
+| `loss` | A reconstructing mask reaches the leaf | Compare decoded tensors with cached targets and log address-qualified metrics. |
+| `output` | Optional | Declare plugin-owned decoded Arrow content; the default declares none. |
+| `write` | Optional | Convert decoded tensors to the declared flat Arrow content; the default writes none. |
+| `observe` | Optional, paired with `learn` when it returns a summary | Summarize pristine canonical training exposure without mutating model modules in a worker. |
+| `learn` | Optional, paired with a stateful `observe` | Apply one carried observation to model-side plugin state. |
+
+The bound schema validates effective capabilities centrally. An input-only leaf
+does not need a `Decoder` or `loss`. A leaf with `embed=True` needs a `Decoder`
+but no loss. Any reconstructing policy on the leaf or one of its ancestor
+branches requires both `Decoder` and `loss`; this is checked for every affected
+descendant after construction, loading, and schema mutation. `output` and
+`write` remain optional even for a reconstructable plugin, although a plugin
+that exposes decoded content should implement them together.
 
 Callbacks are optional and are registered separately with `plugin.callback(...)`.
 
@@ -46,10 +57,13 @@ The runtime path is:
 ```text
 Arrow batches → direct binding or explicit structural query
 → eager atomic coalescing of every RaggedField
+→ mask selection against the pristine field
 → Plugin(types=..., arrow=...) terminal validation
-→ TensorField.new / TensorField.empty
-→ masking and target caching
-→ Embedder.forward → Parcel
+→ optional observe of the pristine canonical field
+→ split input and target RaggedFields
+→ TensorField.new(input, target, present, trainable, inferred, ...)
+→ TensorField.take → TensorInput
+→ Embedder.forward → presence-bearing Parcel
 → parent branch encoders
 → Decoder.forward / Decoder.decode → Prediction
 → loss during train, validate, or test
@@ -153,8 +167,9 @@ strings; the data layer reserves no string sentinel.
 ## Define The Request
 
 The following blocks are contract excerpts, not a complete datatype. A working
-implementation must supply every method described below and should use a
-built-in tensorfield as its tested starting point.
+implementation supplies the three input-path components plus the components
+required by its configured roles. Use the closest built-in tensorfield as a
+tested starting point.
 
 ```python
 from typing import Annotated, Literal
@@ -169,21 +184,69 @@ class Request(rf.RequestBase):
 ```
 
 `RequestBase` provides common options such as `name`, `query`, `nullable`,
-`active`, `embed`, `weight`, `p_mask`, `p_prune`, pooling, heads, linear depth,
-and dropout. With `query=None`, a request reads its own name from its parent
+`active`, `embed`, `weight`, `mask`, pooling, heads, linear depth, and neural
+dropout. With `query=None`, a request reads its own name from its parent
 selection. An explicit node-relative structural query is evaluated inside the
-same coalescing call; direct and queried values converge before paired
-value/state regularization.
+same coalescing call; direct and queried values converge before fixed-geometry
+projection.
 Custom tensorfields therefore receive the same `field` contract in either case
 and do not implement querying.
 Add only datatype-specific options and validate combinations in Pydantic
 validators or `post_bind_validate()` when the check requires the bound tree
 shape.
 
+## Observe Pristine Training Exposure
+
+Masking changes encoder input, not the data a plugin is allowed to learn its
+conversion state from. When a datatype needs vocabulary proposals, sufficient
+statistics, or another pristine-data observation, register the optional
+`observe` and `learn` pair:
+
+```python
+from tensordict import TensorDict
+
+
+@signed_scalar.register
+def observe(
+    field: rf.RaggedField,
+    *,
+    address: rf.Address,
+    schema: rf.Schema,
+    state,
+    learn: bool,
+) -> TensorDict | None:
+    # Inspect the complete canonical field before input/target splitting.
+    # Return a fixed-schema, batch-transferable summary when learn is true.
+    ...
+
+
+@signed_scalar.register
+def learn(
+    module: rf.Model,
+    observation: TensorDict,
+    *,
+    address: rf.Address,
+    strata: rf.Strata,
+) -> None:
+    # Reduce the summary and update model-side resources once.
+    ...
+```
+
+`Plugin.prepare(...)` only validates and canonicalizes Arrow representation; it
+does not learn. `observe` sees that canonical pristine `RaggedField` before the
+shared engine filters either projection. In a data-loader worker it may update
+only the explicit address-specific interprocess `state`, never an authoritative
+model module. A returned observation must have a fixed tensor schema and a
+registered `learn` consumer. The runtime transfers it with the encoded batch and
+calls `learn` on the model side when the training batch is consumed. The plugin
+owns any distributed reduction required by its resources. With `learn=False`,
+`observe` returns `None` and neither hook may mutate state. Stateless plugins
+omit both hooks.
+
 ## Define State And Content
 
-Use a tensorclass with the four runtime fields. State shape is the leading
-schema shape; content may add datatype-specific trailing dimensions.
+Use a tensorclass with the six shared runtime fields. State shape is the
+leading schema shape; content may add datatype-specific trailing dimensions.
 
 ```python
 import numpy as np
@@ -198,64 +261,64 @@ from tensordict import TensorDict, tensorclass
 class TensorField(rf.TensorFieldBase):
     state: torch.Tensor
     content: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict
 
     @classmethod
     def new(
         cls,
-        field: rf.RaggedField,
+        input: rf.RaggedField,
+        target: rf.RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address,
         schema,
         strata,
-        interprocess_encoding_context=None,
+        context: rf.Context,
     ):
-        # field.values is the Arrow array of retained, valued leaf values.
-        # Cast it columnarly, then scatter it into dense model geometry.
-        encoded = pc.cast(field.values, pa.float32(), safe=True)
-        if isinstance(encoded, pa.ChunkedArray):
-            encoded = encoded.combine_chunks()
-        encoded = encoded.to_numpy(zero_copy_only=False)
-        content = torch.from_numpy(field.place(encoded, fill=0.0))
-        state = torch.from_numpy(field.dense)
+        def encode(field: rf.RaggedField) -> torch.Tensor:
+            # Cast retained valued rows columnarly, then scatter them into the
+            # projection's fixed model geometry.
+            encoded = pc.cast(field.values, pa.float32(), safe=True)
+            if isinstance(encoded, pa.ChunkedArray):
+                encoded = encoded.combine_chunks()
+            values = encoded.to_numpy(zero_copy_only=False)
+            return torch.from_numpy(field.place(values, fill=0.0))
 
-        # Use interprocess_encoding_context for field-owned mutable state such
-        # as a vocabulary; stateless tensorfields can omit this parameter.
+        # Stateful plugins read their own resource from context.state. Any
+        # plugin may use context.salt for batch-local deterministic encoding.
         return cls(
-            content=content,
-            state=state,
-            trainable=torch.zeros_like(state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=field.batch_size,
+            content=encode(input),
+            state=torch.from_numpy(input.dense),
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    rf.TensorKey.state: torch.from_numpy(target.dense),
+                    rf.TensorKey.content: encode(target),
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
-
-    @classmethod
-    def empty(cls, batch_size, address, schema):
-        # Return masked state, safe zero content, false trainable, empty targets.
-        ...
-
-    def hide(self, selected, *, cache_targets=True, trainable=True):
-        # Cache original state/content once, write masked state and safe content,
-        # then update the trainable mask.
-        ...
-
-    def mask(self, p_mask=0.0, **kwargs):
-        ...
-
-    def target(self, p_prune=1.0):
-        ...
 ```
 
 Use the shared `Tokens` values exactly. Do not invent a public state for a
-condition that belongs to content. The built-ins use safe zero content for
-non-valued positions and keep original targets in a `TensorDict` before hiding.
+condition that belongs to content. The input and target projections already
+encode learned masking, structural omission, and reconstruction selection;
+plugins must not implement a second mask path.
 
-The internal coalescer owns schema traversal, missing/null/padded state, and
-branch overflow. It prepares every encoded field successfully before any
-`TensorField.new(...)` runs. The resulting `RaggedField` is entirely
-Arrow-backed: `values` contains retained valued inputs, `state` is flat `int8`,
-`placement` is flat `int64`, and `shape` is the dense model geometry. Use
-`field.dense` for the final `rf.Tokens` state as a shaped NumPy array.
+The internal coalescer owns schema traversal, missing/null/padded state, branch
+overflow, mask selection, and input/target splitting. It validates and
+canonicalizes each pristine value array before either projection reaches
+`TensorField.new(...)`. Each `RaggedField` is entirely Arrow-backed: `values`
+contains retained valued rows, `state` is flat `int8`, `placement` is flat
+`int64`, and `shape` is the dense model geometry. Use `field.dense` for the
+final `rf.Tokens` state as a shaped NumPy array.
 
 The plugin declaration owns Arrow terminal compatibility; the tensorfield owns
 semantic validation and encoding. `field.place(...)` requires one encoded row
@@ -264,10 +327,9 @@ is the plugin boundary—Awkward may be a convenient temporary view inside an
 upstream preprocessor, but it is not stored in `RaggedField` or passed to a
 datatype codec.
 
-Test `new(...)` with scalar, nested, null, padded, overflow, and missing target
-input. If strings are accepted, prove that control-like text remains ordinary
-content. Test `empty(...)` separately because it controls requests that omit a
-target.
+Test `new(...)` with scalar, nested, null, padded, overflow, learned-mask,
+skipped, reconstructed, and source-less prediction projections. If strings are
+accepted, prove that control-like text remains ordinary content.
 
 ## Embed Visible Input
 
@@ -286,24 +348,37 @@ class Embedder(rf.EmbedderBase):
         self.destination = schema.requests[address].parent.address
         self.projection = torch.nn.Linear(1, schema.d_model)
 
-    def forward(self, inputs: TensorField) -> Parcel:
+    def forward(self, inputs: rf.TensorInput) -> Parcel:
         # Add/project state and valued content; zero content must not leak into
         # non-valued states as if it were a real value.
         payload = ...
         return Parcel(
             payload=payload,
+            present=torch.ones(
+                inputs.state.shape[0],
+                dtype=torch.bool,
+                device=inputs.state.device,
+            ),
             origin=self.origin,
             destination=self.destination,
             batch_size=inputs.batch_size[0],
         )
 ```
 
+`EmbedderBase.embed(...)` gathers the field's `present` coordinates and calls
+the plugin's `forward(...)` with only that compact `TensorInput`. It validates
+the returned one-dimensional presence vector, scatters payloads back into fixed
+schema geometry, and carries full geometry presence in the outgoing parcel.
+The plugin's forward method never receives targets, trainable bits, or inferred
+bits.
+
 Any vocabulary, normalizer, or tokenizer state needed across processes should be
-owned by the embedder and exposed through an `interprocess_encoding_context`
-property. The encoding runtime injects that field-owned state into
-`TensorField.new(...)` only when its signature contains the exact parameter name
-`interprocess_encoding_context`; omit the parameter for a stateless tensorfield.
-Register a synchronization callback when distributed updates require one.
+owned by the embedder. Override its standard `context` property to return that
+state; the base property returns `None`. Every `TensorField.new(...)` receives
+one `rf.Context`: `context.state` is the value exposed by its embedder and
+`context.salt` is shared by every field in an encoded batch. This is one uniform
+constructor contract, including for stateless tensorfields. Register a
+synchronization callback when distributed updates require one.
 
 ## Decode Heritage
 
@@ -427,9 +502,10 @@ A custom datatype test suite should cover:
 
 1. request validation and schema inspection within the creating process;
 2. scalar and every supported schema nesting shape;
-3. null, padded, masked, unavailable/malformed, and overflow behavior;
-4. `p_mask`, `p_prune`, `target=True`, and missing prediction input;
-5. embedder shape, non-valued zero-content invariant, and device movement;
+3. null, padded, learned-mask, skipped, unavailable/malformed, and overflow behavior;
+4. uniform, query-driven, branch-atomic, reconstruction, and source-less prediction masks;
+5. compact `TensorInput`, presence-bearing parcel shape, scatter behavior,
+   non-valued zero-content invariant, and device movement;
 6. decoder shape for query and mean pooling if both are supported;
 7. finite loss with no valued content and correct metric selection;
 8. stable declared Arrow output, flat writer count/type, shared envelope, and

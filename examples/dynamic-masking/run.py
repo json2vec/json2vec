@@ -1,55 +1,83 @@
 from __future__ import annotations
 
-import random
-import string
-
+import awkward as ak
+import pyarrow as pa
+import pyarrow.compute as pc
 from rich import print
 
 import relflow as rf
-from relflow.structs.enums import Strata
 
-ALPHABET = string.ascii_uppercase
-ADDRESS = "record/words/letters/letter"
+EVENTS = pa.large_list(
+    pa.struct(
+        [
+            pa.field("kind", pa.large_string()),
+            pa.field("amount", pa.float64()),
+        ]
+    )
+)
+MASKED_EVENTS = pa.large_list(
+    pa.struct(
+        [
+            pa.field("kind", pa.large_string()),
+            pa.field("amount", pa.float64()),
+            pa.field("mask_event", pa.bool_(), nullable=False),
+        ]
+    )
+)
 
 
-def consecutive_letters(rng: random.Random, *, min_count: int = 3, max_count: int = 8) -> list[dict[str, str]]:
-    length = rng.randint(min_count, max_count)
-    start = rng.randint(0, len(ALPHABET) - length)
-    return [{"letter": value} for value in ALPHABET[start : start + length]]
+@rf.preprocess(requires=("events",), produces=("events",))
+def refunds(batch: rf.Batch) -> rf.Batch:
+    column = batch.data.schema.get_field_index("events")
+    source = batch.data["events"]
+    if source.null_count == len(source):
+        values = pa.nulls(len(source), type=MASKED_EVENTS)
+    else:
+        events = ak.from_arrow(source)
+        selected = ak.fill_none(events["amount"] < 0, False)
+        events = ak.with_field(events, selected, "mask_event")
+        values = pc.cast(ak.to_arrow(events, extensionarray=False), MASKED_EVENTS)
+    return batch.replace(batch.data.set_column(column, "events", values))
 
 
-def words(rng: random.Random, *, min_count: int = 2, max_count: int = 4) -> list[dict[str, list[dict[str, str]]]]:
-    length = rng.randint(min_count, max_count)
-    return [{"letters": consecutive_letters(rng)} for _ in range(length)]
-
-
-def records(n: int, *, seed: int = 7) -> list[dict[str, list[dict[str, list[dict[str, str]]]]]]:
-    rng = random.Random(seed)
-    return [{"words": words(rng)} for _ in range(n)]
+def records() -> pa.Table:
+    return pa.Table.from_pylist(
+        [
+            {
+                "events": [
+                    {"kind": "purchase", "amount": 25.0},
+                    {"kind": "refund", "amount": -10.0},
+                    {"kind": "purchase", "amount": 8.0},
+                ]
+            }
+        ],
+        schema=pa.schema([pa.field("events", EVENTS)]),
+    )
 
 
 if __name__ == "__main__":
-    model = rf.Model.from_tree(
+    model = rf.Model(
         d_model=16,
         n_layers=1,
         n_heads=4,
-        words=rf.Branch(
+        events=rf.Branch(
             length=3,
-            letters=rf.Branch(
-                length=8,
-                mask=rf.Mask(count=2, window=2),
-                letter=rf.Category(size=len(ALPHABET), p_unavailable=0.0),
+            mask=rf.Mask(
+                query="mask_event",
+                skip=True,
+                dropout=False,
             ),
+            kind=rf.Category(size=16),
+            amount=rf.Number,
         ),
     )
 
-    data = records(5)
-    print(data[0])
+    encoded = model.encode(
+        records(),
+        preprocess=refunds,
+        strata="predict",
+    )
 
-    inputs = model.encode(data, strata=Strata.train, mask=False)
-    print(f"encoded field: {ADDRESS}")
-    print(inputs[ADDRESS])
-
-    masked = model.encode(data, strata=Strata.train, mask=True)
-    print(f"masked field: {ADDRESS}")
-    print(masked[ADDRESS])
+    print("One branch decision is shared by kind and amount:")
+    print(encoded[rf.Address("record/events/kind")])
+    print(encoded[rf.Address("record/events/amount")])

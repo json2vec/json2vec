@@ -97,7 +97,10 @@ model = rf.Model(
         length=160,
         overflow="tail",
         embed=True,
-        device_id=rf.Hash(p_mask=0.15, embed=True),
+        device_id=rf.Hash(
+            mask=rf.Mask(rate=0.15, reconstruct=True),
+            embed=True,
+        ),
         source=rf.Category(size=2),
         event_type=rf.Category(size=128),
         days_since_event=rf.Number,
@@ -105,7 +108,7 @@ model = rf.Model(
         amount=rf.Number,
         merchant_category=rf.Category(size=1024),
     ),
-    account_takeover=rf.Category(target=True, size=2),
+    account_takeover=rf.Category(mask=True, size=2),
 )
 
 model
@@ -121,11 +124,10 @@ extractor for these simple inferred paths preserves the explicit `None`
 placeholders, so login-only and transaction-only fields stay on the same event
 coordinates.
 
-`p_mask=0.15` hides some individual device occurrences during train and
-validation. The decoder learns quantized hash reconstruction when another
-occurrence remains visible. Using `target=True` on the entire Hash leaf
-would hide every identity occurrence and remove the relationship the model
-needs.
+The reconstructing mask hides some individual device occurrences during
+training. The decoder learns quantized hash reconstruction when another
+occurrence remains visible. Using `mask=True` on the entire Hash leaf would
+skip every identity occurrence and remove the relationship the model needs.
 
 `days_since_event` supplies recency. Root and event embeddings are requested for
 diagnostics; they are not explanations by themselves.

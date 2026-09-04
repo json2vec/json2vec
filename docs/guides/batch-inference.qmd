@@ -238,7 +238,7 @@ this by declaring their Arrow type before the first prediction batch.
 
 ## Operational Checklist
 
-- Omit supervised targets from prediction source data.
+- Omit unconditional `mask=True` reconstruction fields from prediction source data.
 - Use the same preprocessor and bound fitted state as training.
 - Keep `shuffle=False` unless randomized output order is intentional.
 - Set `retain` on the data module for every source field needed downstream.

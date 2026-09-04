@@ -41,7 +41,7 @@ model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -49,8 +49,9 @@ model
 
 This model reads an order as a structured object. The line items interact in
 their own repeated context before that context is pooled into the order. The
-`returned` value is hidden and learned as a supervised target. The root address
-is `order`, so its target prediction is written at `order/returned`.
+`returned` value is skipped by the encoder and learned as a supervised
+reconstruction. The root address is `order`, so its prediction is written at
+`order/returned`.
 
 ## Why Preserve The Record Shape?
 
@@ -77,8 +78,8 @@ of the approach.
   `DateParts`, `Text`, and `Vector` own value encoding, loss, metrics, and
   prediction output.
 - `Branch` nodes preserve repeated contexts and pool them into their parent.
-- `target=True`, masking, and pruning decide which values are hidden and
-  learned from context.
+- One `mask` policy controls learned masking, structural skipping, and
+  reconstruction from context.
 - `embed=True` selects root, branch, or leaf representations to export during
   prediction.
 - Field names and optional node-relative queries bind Arrow values to stable

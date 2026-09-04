@@ -1,4 +1,3 @@
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,6 +11,7 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.structs.tree import Mask
 from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.extensions.boolean import (
     BooleanCounter,
@@ -25,11 +25,12 @@ from relflow.tensorfields.extensions.boolean import (
     output as output_type,
 )
 from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/groups/items/enabled"
 
 
-def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
+def _schema(*, threshold: float | list[float] = 0.5, mask: bool | Mask = False) -> Schema:
     return Schema.model_validate(
         {
             "d_model": 8,
@@ -51,6 +52,7 @@ def _schema(*, threshold: float | list[float] = 0.5) -> Schema:
                                         "name": "enabled",
                                         "type": "boolean",
                                         "threshold": threshold,
+                                        "mask": mask,
                                     }
                                 ],
                             }
@@ -69,9 +71,15 @@ def _tensorfield(groups: list[list[list[Any]]], *, schema: Schema, strata: Strat
             for observation in groups
         ]
     )
-    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
-    field = replace(field, values=TENSORFIELDS["boolean"].prepare(field.values, address=ADDRESS))
-    return TensorField.new(field=field, address=ADDRESS, schema=schema, strata=strata)
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["boolean"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+    )
 
 
 def test_boolean_tensorfield_encodes_nested_values_without_vocabulary():
@@ -125,7 +133,7 @@ def test_boolean_embedder_maps_false_zero_and_true_to_initialized_rows():
         strata=Strata.train,
     )
 
-    content_only = embedder(field).payload - embedder.state(field.state)
+    content_only = embedder.embed(field).payload - embedder.state(field.state)
 
     assert torch.allclose(content_only[0, 0, 0, 0], torch.full((schema.d_model,), -1.0))
     assert torch.allclose(content_only[0, 0, 0, 1], torch.full((schema.d_model,), 1.0))
@@ -144,13 +152,12 @@ class _TrackingModule:
 
 
 def test_boolean_loss_tracks_binary_torchmetrics():
-    schema = _schema(threshold=[0.25, 0.75])
+    schema = _schema(threshold=[0.25, 0.75], mask=True)
     field = _tensorfield(
         groups=[[[False, True]], [[True, False]]],
         schema=schema,
         strata=Strata.train,
     )
-    field.target(1.0)
     module = _TrackingModule(schema, Embedder(schema, ADDRESS), Decoder(schema, ADDRESS))
     state_logits = torch.zeros(*field.state.shape, len(Tokens))
     content_logits = torch.zeros(*field.content.shape, 1)
@@ -252,13 +259,12 @@ def test_boolean_thresholds_configure_unique_metrics_and_one_auc():
 
 
 def test_boolean_metrics_ignore_null_and_padded_targets():
-    schema = _schema()
+    schema = _schema(mask=True)
     field = _tensorfield(
         groups=[[[False, True, None]]],
         schema=schema,
         strata=Strata.train,
     )
-    field.target(1.0)
     decoder = Decoder(schema, ADDRESS)
     module = _TrackingModule(schema, Embedder(schema, ADDRESS), decoder)
     content_logits = torch.full((*field.content.shape, 1), 20.0)
@@ -288,13 +294,12 @@ def test_boolean_metrics_ignore_null_and_padded_targets():
 
 
 def test_boolean_non_valued_batch_only_trains_state_and_does_not_update_content_metrics():
-    schema = _schema(threshold=[0.25, 0.75])
+    schema = _schema(threshold=[0.25, 0.75], mask=True)
     field = _tensorfield(
         groups=[[[None]]],
         schema=schema,
         strata=Strata.train,
     )
-    field.target(1.0)
     decoder = Decoder(schema, ADDRESS)
     module = _TrackingModule(schema, Embedder(schema, ADDRESS), decoder)
     prediction = Prediction(

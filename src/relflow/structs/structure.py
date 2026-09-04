@@ -1,66 +1,17 @@
 """Structured schema nodes that group tensorfield requests."""
 
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias, Union
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal, Self, TypeAlias
 
 import pydantic
 from rich.text import Text
 
 from relflow.structs.enums import AttentionMode, Overflow
-from relflow.structs.tree import Address, Leaf, Node, Rate
+from relflow.structs.tree import Leaf, Mask, Node
 from relflow.tensorfields import extensions as _extensions  # noqa: F401
 from relflow.tensorfields.base import TENSORFIELDS
 
-if TYPE_CHECKING:
-    RequestTypes: TypeAlias = Any
-else:
-    RequestTypes: TypeAlias = Annotated[
-        Union[tuple([tensorfield.Request for tensorfield in TENSORFIELDS.values()])],
-        pydantic.Field(discriminator="type"),
-    ]
-
-
-Dropout: TypeAlias = Rate
-
-
-class Mask(pydantic.BaseModel):
-    """Structured masking policy attached to a `Branch`."""
-
-    model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
-
-    name: str | None = None
-    rate: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] | None = None
-    count: Annotated[int, pydantic.Field(ge=0)] | None = None
-    window: Annotated[int, pydantic.Field(gt=0)] | None = None
-    branch: bool = False
-    start: bool = False
-    offset: Annotated[int, pydantic.Field(ge=0)] = 0
-    exclude: tuple[Address, ...] = pydantic.Field(default_factory=tuple)
-
-    @pydantic.model_validator(mode="after")
-    def check_rate_or_count(self):
-        if (self.rate is None) == (self.count is None):
-            raise ValueError("Mask requires exactly one of rate or count")
-
-        return self
-
-    @pydantic.field_validator("exclude", mode="before")
-    @classmethod
-    def normalize_exclude(cls, value: Any) -> tuple[Address, ...]:
-        if value is None:
-            return ()
-
-        if isinstance(value, str):
-            return (Address(value),)
-
-        if isinstance(value, (list, tuple)):
-            normalized: list[Address] = []
-            for item in value:
-                if not isinstance(item, str):
-                    raise TypeError(f"Mask.exclude entries must be Address strings; got {type(item).__name__}")
-                normalized.append(Address(item))
-            return tuple(normalized)
-
-        raise TypeError(f"Mask.exclude must be an Address, a tuple of Addresses, or None; got {type(value).__name__}")
+RequestTypes: TypeAlias = Leaf
 
 
 class Branch(Node):
@@ -68,6 +19,8 @@ class Branch(Node):
 
     Positional children are treated as fields inside the branch.
     """
+
+    model_config = pydantic.ConfigDict(extra="forbid", validate_default=True)
 
     name: str | None = None
     type: Annotated[Literal["branch"], pydantic.Field(default="branch")] = "branch"
@@ -77,10 +30,19 @@ class Branch(Node):
     overflow: Overflow = Overflow.head
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
     n_layers: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
-    masks: list[Mask] = pydantic.Field(default_factory=list)
-    fields: list[Self | RequestTypes | pydantic.InstanceOf[Leaf]] = pydantic.Field(default_factory=list)
+    mask: tuple[Mask, ...] = pydantic.Field(default=False)
+    fields: list[Self | pydantic.SerializeAsAny[pydantic.InstanceOf[Leaf]]] = pydantic.Field(default_factory=list)
 
     def __init__(self, *children: Self | RequestTypes | Leaf, **data):
+        removed = sorted({"p_mask", "p_prune", "target"} & data.keys())
+        if "masks" in data:
+            value = data["masks"]
+            modeled = isinstance(value, (type(self), Leaf)) or (isinstance(value, type) and issubclass(value, Leaf))
+            if not modeled:
+                removed.append("masks")
+        if removed:
+            raise ValueError(f"removed node field(s): {removed}; use mask")
+
         if "max_length" in data:
             raise ValueError("max_length was removed; use length")
 
@@ -88,7 +50,7 @@ class Branch(Node):
             super().__init__(**data)
             return
 
-        config_names = set(type(self).model_fields) | {"mask"}
+        config_names = set(type(self).model_fields)
         keyword_children = {key: data.pop(key) for key in tuple(data) if key not in config_names}
 
         if children:
@@ -104,25 +66,36 @@ class Branch(Node):
 
         super().__init__(**data)
 
-    @pydantic.model_validator(mode="before")
+    @pydantic.field_validator("mask", mode="before")
     @classmethod
-    def normalize_mask_shorthand(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
+    def normalize_mask(cls, value: Any) -> tuple[Mask, ...]:
+        return Mask.normalize(value)
 
-        values = dict(data)
-        if "max_length" in values:
-            raise ValueError("max_length was removed; use length")
+    @pydantic.field_validator("fields", mode="before")
+    @classmethod
+    def materialize(cls, value: Any) -> Any:
+        """Resolve serialized leaf requests against the live plugin registry."""
 
-        mask = values.pop("mask", None)
-        if mask is None:
-            return values
+        if not isinstance(value, (list, tuple)):
+            return value
 
-        if "masks" in values:
-            raise ValueError("pass either mask or masks, not both")
+        fields: list[Any] = []
+        for field in value:
+            if not isinstance(field, Mapping):
+                fields.append(field)
+                continue
 
-        values["masks"] = [mask]
-        return values
+            payload = dict(field)
+            field_type = payload.get("type")
+            if field_type == "branch":
+                fields.append(cls.model_validate(payload))
+                continue
+            if not isinstance(field_type, str) or field_type not in TENSORFIELDS:
+                raise ValueError(f"unknown tensor field type: {field_type}")
+
+            fields.append(TENSORFIELDS[field_type].Request.model_validate(payload))
+
+        return fields
 
     @pydantic.model_validator(mode="after")
     def check_query(self):
@@ -147,12 +120,8 @@ class Branch(Node):
         return self
 
     def post_bind_validate(self):
-        if len(self.masks) == 0:
+        if len(self.mask) == 0:
             return None
-
-        is_root = getattr(getattr(self, "parent", None), "type", None) == "schema"
-        if is_root:
-            raise ValueError("Mask on the generated root branch is not supported")
 
         active_leaves = [
             descendant
@@ -160,25 +129,7 @@ class Branch(Node):
             if isinstance(descendant, Leaf) and getattr(descendant, "active", True)
         ]
         if not active_leaves:
-            raise ValueError(f"branch '{self.address}' has masks but no active descendant leaves")
-
-        prefix = f"{self.address}/"
-        active_addresses = {str(leaf.address) for leaf in active_leaves}
-        names = [mask.name for mask in self.masks if mask.name is not None]
-        duplicates = sorted({name for name in names if names.count(name) > 1})
-        if duplicates:
-            raise ValueError(f"branch '{self.address}' has duplicate mask name(s): {duplicates}")
-
-        for mask in self.masks:
-            if mask.offset >= self.length:
-                raise ValueError(f"branch '{self.address}' mask offset must be less than length={self.length}")
-
-            excluded = {
-                address if address.startswith(prefix) else f"{prefix}{address}" for address in map(str, mask.exclude)
-            }
-            if active_addresses <= excluded:
-                label = f" '{mask.name}'" if mask.name is not None else ""
-                raise ValueError(f"branch '{self.address}' mask{label} excludes every active descendant leaf")
+            raise ValueError(f"branch '{self.address}' has a mask but no active descendant leaves")
 
         return None
 
@@ -207,10 +158,10 @@ class Branch(Node):
             heading.append(" ")
             heading.append(f"{name}=", style="dim")
             heading.append(str(value), style="cyan")
-        if self.masks:
+        if self.mask:
             heading.append(" ")
-            heading.append("masks=", style="dim")
-            heading.append(str(len(self.masks)), style="cyan")
+            heading.append("mask=", style="dim")
+            heading.append(str(len(self.mask)), style="cyan")
 
         yield heading
 

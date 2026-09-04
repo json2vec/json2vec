@@ -10,7 +10,8 @@ contracts; individual datatype references own their complete behavior.
 Data types are the structural and typed nodes in a `relflow` schema. `Branch`
 names a shared context for child fields, usually a repeated collection such as
 transactions or sessions. Tensorfields are typed leaves that read values,
-encode state and content, hide selected positions, and decode targets.
+encode state and content, apply selected mask policies, and decode
+reconstruction objectives.
 
 Use constructor names from the package root in Python. Serialized schemas use
 the lower-case `type` value.
@@ -20,7 +21,7 @@ content contract:
 
 ```text
 direct Arrow field selection OR explicit structural query
-  -> canonical ragged field -> validate -> tensorize state/content
+  -> canonical ragged field -> resolve masks -> validate -> tensorize projections
   -> embed visible input
   -> optionally decode selected targets
   -> write a public payload
@@ -94,13 +95,13 @@ value. They are deliberately separate.
 | `valued` | A source value exists. This does not guarantee that vocabulary-backed content is known. |
 | `null` | The source value is explicitly `None`. |
 | `padded` | A fixed branch shape contains a slot with no source item. |
-| `masked` | The input at this position is intentionally hidden. |
+| `masked` | The input remains present as a learned mask representation. |
 | `other` | Reserved for extension-specific state. Current built-in tensorizers do not produce it from ordinary source data. |
 
-There is no `pruned` state token. Pruning is an operation: a selected field is
-hidden with input state `masked`, its original state and content are cached as
-targets, and its trainable mask marks the positions that contribute to loss.
-`target=True` is the always-pruned configuration.
+There is no separate skipped state token. A learned mask uses input state
+`masked`; a structurally skipped coordinate is absent from routing and uses
+`present` to distinguish that omission from original padding. A reconstructing
+policy separately marks the original state and content as a decoder target.
 
 Likewise, unavailable is not a universal state. It is a type-specific content
 condition:
@@ -144,7 +145,7 @@ children instead of reading one leaf value.
 | Option | Default | Notes |
 | --- | --- | --- |
 | `name` | `None`; inferred when bound | Public schema name and default processed-observation key. The normal `Model(..., amount=rf.Number)` or `Branch(..., amount=rf.Number)` keyword binding supplies `amount`; an unbound leaf must acquire a name before schema compilation. |
-| `query` | `None` | Optional node-relative structural source path. `None` selects the node's own schema name from its parent. Explicit and direct values converge during coalescing before paired value/state regularization. See [Query Paths](querypaths.qmd). |
+| `query` | `None` | Optional node-relative structural source path. `None` selects the node's own schema name from its parent. Explicit and direct values converge during coalescing before fixed-geometry projection. See [Query Paths](querypaths.qmd). |
 | `description` | `None` | Optional schema metadata. |
 | `active` | `True` | Inactive fields remain in the schema but are ignored by encoding, loss, and prediction. |
 | `nullable` | `True` | Allows explicit `None` input. `False` raises whenever the encoded leaf contains state `null`. |
@@ -153,20 +154,30 @@ children instead of reading one leaf value.
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `target` | `False` | Exact shorthand for `p_prune=1.0`; withholds the leaf from input and trains it as a supervised reconstruction target. |
-| `p_mask` | `0.0` | Bernoulli rate for independently selecting leaf positions during non-predict masking. Must be less than `1.0`. |
-| `p_prune` | `0.0` | Probability of selecting an observation and hiding the whole leaf instance for that observation. |
+| `mask` | `False` | One mask shorthand or a list/tuple of `rf.Mask` objects. The stored value is always a canonical tuple. |
 | `weight` | `1.0` | Positive multiplier applied to this field's total loss. |
 
-The current `p_mask` implementation samples every configured position, including
-null and padded positions, rather than valued positions only. `p_prune` samples
-once per observation and expands that choice across all positions of the leaf.
-Their cached original states allow state loss to learn what was hidden; each
-datatype decides which selected targets contribute to content loss. See
-[Dynamic Masking](dynamic-masking.qmd) for the exact behavior and branch masks.
+`mask=False` means no policy. `mask=0.15` is a uniform train-only learned mask;
+`mask=True` is an always-skipped supervised reconstruction target. Use an
+explicit policy when the shorthand is not precise enough:
 
-`target=True` and `p_prune=1.0` are the supported always-hidden APIs.
-`p_mask=1.0` is invalid because `p_mask` is constrained to rates below `1.0`.
+```python
+field = rf.Number(
+    mask=rf.Mask(
+        query="eligible",
+        rate=0.15,
+        skip=True,
+        reconstruct=True,
+    )
+)
+```
+
+`query` supplies Boolean eligibility, `rate` samples eligible coordinates,
+`skip` omits selected inputs from tensorization and routing, `dropout` makes a
+policy train-only, and `reconstruct` creates decoder targets. `dropout` defaults
+to the opposite of `reconstruct`; setting both true is invalid. Branch-owned
+policies make one atomic decision for the full descendant subtree. See
+[Dynamic Masking](dynamic-masking.qmd) for the complete contract.
 
 ### Decoder And Output Options
 
@@ -208,9 +219,9 @@ structure and transport boundaries are documented in
 - `content` is owned by the datatype. It may be a number, Boolean payload,
   label/candidate payload, Set probability mapping, or vector.
 - `inferred` is a Boolean mask, not a confidence score. During prediction it is
-  true exactly where the encoded input state was `masked`.
+  true exactly where prediction requested a reconstruction.
 
-An always-hidden `target=True` field therefore has `inferred=true` at its hidden
+An always-skipped `mask=True` field therefore has `inferred=true` at its requested
 positions. A visible leaf decoded
 because it has `embed=True` may still produce state and content with
 `inferred=false`. Consumers should use `inferred` to distinguish requested
@@ -229,8 +240,8 @@ datatype's internal input embedding. See
 
 - Open the selected datatype page for its accepted input, encoding, loss,
   metrics, options, output, and limits.
-- Use [Learning Modes & Embeddings](embeddings.qmd) to choose `target`, masking,
-  pruning, and exported embeddings.
+- Use [Learning Modes & Embeddings](embeddings.qmd) to choose reconstruction,
+  masking, structural skipping, and exported embeddings.
 - Use [Dynamic Masking](dynamic-masking.qmd) for exact leaf and repeated-branch
   selection behavior.
 - Use [Binding Data](binding-data.qmd) to choose direct projection, an explicit

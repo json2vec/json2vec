@@ -44,10 +44,18 @@ class RotaryTransformerEncoderLayer(torch.nn.Module):
             torch.nn.Dropout(p=dropout),
         )
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+    def forward(self, inputs: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
+        if present.dtype != torch.bool or tuple(present.shape) != tuple(inputs.shape[:2]):
+            raise ValueError(
+                f"encoder presence must have bool shape {tuple(inputs.shape[:2])}, "
+                f"got {tuple(present.shape)} with dtype {present.dtype}"
+            )
+
+        inputs = inputs.masked_fill(~present.unsqueeze(-1), 0.0)
         normed = self.attention_norm(inputs)
-        inputs = inputs + self.attention(normed, normed, normed)
-        return inputs + self.ffn(self.ffn_norm(inputs))
+        inputs = inputs + self.attention(normed, normed, normed, key_padding_mask=~present)
+        inputs = inputs + self.ffn(self.ffn_norm(inputs))
+        return inputs.masked_fill(~present.unsqueeze(-1), 0.0)
 
 
 class BranchEncoder(torch.nn.Module):
@@ -84,21 +92,47 @@ class BranchEncoder(torch.nn.Module):
         )
 
     def forward(self, parcels: list[Parcel]) -> Parcel:
-        payloads: list[torch.Tensor] = []
+        if not parcels:
+            raise ValueError(f"branch encoder '{self.origin}' requires at least one child parcel")
+
+        payloads = [parcel.payload for parcel in parcels]
+        presence = [parcel.present for parcel in parcels]
         for parcel in parcels:
-            payloads.append(parcel.payload)
+            if parcel.present.dtype != torch.bool or tuple(parcel.present.shape) != tuple(parcel.payload.shape[:-1]):
+                raise ValueError(
+                    f"parcel from '{parcel.origin}' presence must have bool shape "
+                    f"{tuple(parcel.payload.shape[:-1])}, got {tuple(parcel.present.shape)} "
+                    f"with dtype {parcel.present.dtype}"
+                )
 
         concatenated: torch.Tensor = torch.cat(payloads, dim=-2)
+        present = torch.cat(presence, dim=-1)
         N, *dims, L, C = concatenated.shape
         encoded: torch.Tensor = concatenated.reshape(-1, L, C)
+        present = present.reshape(-1, L)
+        active = present.any(dim=1)
+        indices = active.nonzero(as_tuple=False).reshape(-1)
 
-        for layer in self.encoder:
-            encoded = layer(encoded)
+        pooled = encoded.new_zeros((encoded.shape[0], 1, C))
+        if indices.numel():
+            selected = encoded.index_select(0, indices)
+            selected_present = present.index_select(0, indices)
 
-        pooled: torch.Tensor = self.pool(encoded).reshape(N, *dims[:-1], -1, C)
+            for layer in self.encoder:
+                selected = layer(selected, present=selected_present)
+
+            selected = self.pool(selected, present=selected_present)
+            pooled = pooled.index_copy(0, indices, selected)
+        else:
+            for parameter in self.parameters():
+                pooled = pooled + parameter.sum() * 0.0
+
+        pooled = pooled.reshape(N, *dims, C)
+        present = active.reshape(N, *dims)
 
         return Parcel(
             payload=pooled,
+            present=present,
             origin=self.origin,
             destination=self.destination,
             batch_size=N,

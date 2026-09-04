@@ -6,11 +6,13 @@ from relflow.tensorfields import base as base
 from relflow.tensorfields import extensions as extensions
 from relflow.tensorfields.base import (
     TENSORFIELDS,
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
+    TensorInput,
 )
 from relflow.tensorfields.output import (
     array,
@@ -27,11 +29,13 @@ from relflow.tensorfields.output import (
 
 __all__ = [
     "TENSORFIELDS",
+    "Context",
     "DecoderBase",
     "EmbedderBase",
     "Plugin",
     "RequestBase",
     "TensorFieldBase",
+    "TensorInput",
     "array",
     "base",
     "embedding",

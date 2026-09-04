@@ -4,7 +4,7 @@ from __future__ import annotations
 import enum
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
 import pydantic
@@ -17,14 +17,15 @@ from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
@@ -36,7 +37,6 @@ text.callback(CounterUpdateCallback)
 
 INPUT_IDS = "input_ids"
 ATTENTION_MASK = "attention_mask"
-TEXT_TENSOR_KEYS = (INPUT_IDS, ATTENTION_MASK)
 DEFAULT_TEXT_MODEL = "google/bert_uncased_L-2_H-128_A-2"
 
 
@@ -136,108 +136,92 @@ class Request(RequestBase):
 
 
 @text.register
+def observe(
+    field: RaggedField,
+    *,
+    address: Address,
+    schema: Schema,
+    state: object | None,
+    learn: bool,
+) -> TensorDict | None:
+    """Count pristine text states without tokenizing hidden content."""
+
+    if not learn:
+        return None
+    return TensorDict(
+        {TensorKey.state: tally(torch.from_numpy(field.dense.copy()), len(Tokens))},
+        batch_size=[],
+    )
+
+
+@text.register
 @tensorclass
 class TensorField(TensorFieldBase):
     content: TensorDict[str, torch.Tensor]
     state: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        field: RaggedField,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
+        context: Context,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
-        values = field.values.to_pylist()
 
-        if values:
-            tokenizer = CachedModel.get_tokenizer(request.model)
-            encoded = tokenizer(
-                values,
-                padding="max_length",
-                truncation=True,
-                max_length=request.max_length,
-                return_tensors="pt",
+        def encode(field: RaggedField) -> TensorDict[str, torch.Tensor]:
+            values = field.values.to_pylist()
+            if values:
+                tokenizer = CachedModel.get_tokenizer(request.model)
+                encoded = tokenizer(
+                    values,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=request.max_length,
+                    return_tensors="pt",
+                )
+                encoded_ids = encoded[INPUT_IDS].to(dtype=torch.int64).numpy()
+                encoded_mask = encoded[ATTENTION_MASK].to(dtype=torch.int64).numpy()
+            else:
+                encoded_ids = np.empty((0, request.max_length), dtype=np.int64)
+                encoded_mask = np.empty((0, request.max_length), dtype=np.int64)
+
+            return TensorDict(
+                {
+                    INPUT_IDS: torch.from_numpy(field.place(encoded_ids, fill=0, value_shape=(request.max_length,))),
+                    ATTENTION_MASK: torch.from_numpy(
+                        field.place(encoded_mask, fill=0, value_shape=(request.max_length,))
+                    ),
+                },
+                batch_size=field.shape,
             )
-            encoded_ids = encoded[INPUT_IDS].to(dtype=torch.int64).numpy()
-            encoded_mask = encoded[ATTENTION_MASK].to(dtype=torch.int64).numpy()
-        else:
-            encoded_ids = np.empty((0, request.max_length), dtype=np.int64)
-            encoded_mask = np.empty((0, request.max_length), dtype=np.int64)
 
-        token_ids = torch.from_numpy(field.place(encoded_ids, fill=0, value_shape=(request.max_length,)))
-        attention_mask = torch.from_numpy(field.place(encoded_mask, fill=0, value_shape=(request.max_length,)))
-        state_tensor = torch.from_numpy(field.dense)
+        state_tensor = torch.from_numpy(input.dense)
 
         return cls(
             state=state_tensor,
-            content=TensorDict(
+            content=encode(input),
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
                 {
-                    INPUT_IDS: token_ids,
-                    ATTENTION_MASK: attention_mask,
+                    TensorKey.state: torch.from_numpy(target.dense),
+                    TensorKey.content: encode(target),
                 },
-                batch_size=field.shape,
+                batch_size=input.shape,
             ),
-            trainable=torch.zeros(field.shape, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=field.batch_size,
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        if cache_targets:
-            if TensorKey.state not in self.targets.keys():
-                self.targets[TensorKey.state] = self.state.clone()
-            if TensorKey.content not in self.targets.keys():
-                self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_scatter(selected, mask_token)
-        expanded = selected.unsqueeze(-1).expand_as(self.content[INPUT_IDS])
-        for key in TEXT_TENSOR_KEYS:
-            self.content[key] = self.content[key].masked_scatter(
-                expanded,
-                torch.zeros_like(input=self.content[key]),
-            )
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        request: Request = schema.requests[address]
-        leading_shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-        token_shape: tuple[int, ...] = (*leading_shape, request.max_length)
-        state = torch.full(leading_shape, Tokens.masked, dtype=torch.int64)
-
-        return cls(
-            state=state,
-            content=TensorDict(
-                {
-                    INPUT_IDS: torch.zeros(token_shape, dtype=torch.int64),
-                    ATTENTION_MASK: torch.zeros(token_shape, dtype=torch.int64),
-                },
-                batch_size=leading_shape,
-            ),
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            batch_size=input.batch_size,
         )
 
 
@@ -360,37 +344,40 @@ class Embedder(EmbedderBase):
         return embeddings.reshape(N, *dims, self.hidden_size)
 
     @beartype
-    def target_embeddings(self, inputs: TensorField) -> torch.Tensor:
-        if TensorKey.embedding not in inputs.targets.keys():
-            # Targets hold the original tokenized text; masked inputs have these tensors zeroed.
-            inputs.targets[TensorKey.embedding] = self.encode(
-                content=inputs.targets[TensorKey.content],
-                state=inputs.targets[TensorKey.state],
-            )
-
-        return inputs.targets[TensorKey.embedding]
-
-    @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N, *dims = inputs.state.shape
         D = math.prod((N, *dims))
 
         state = inputs.state.reshape(D)
         valued = state.eq(Tokens.valued.value).unsqueeze(-1)
-        if TensorKey.content in inputs.targets.keys() and TensorKey.state in inputs.targets.keys():
-            encoded = self.target_embeddings(cast(TensorField, inputs))
-        else:
-            encoded = self.encode(content=inputs.content, state=inputs.state)
+        encoded = self.encode(content=inputs.content, state=inputs.state)
         encoded = encoded.reshape(D, self.hidden_size)
         projected = self.linear(encoded) * valued
         embeddings = self.embeddings(state)
 
         return Parcel(
             payload=(embeddings + projected).reshape(N, *dims, -1),
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
         )
+
+
+@text.register
+def learn(
+    module: Model,
+    observation: TensorDict,
+    *,
+    address: Address,
+    strata: Strata,
+) -> None:
+    """Apply pristine text-state counts to the model resource."""
+
+    if strata != Strata.train:
+        raise ValueError(f"text learner at '{address}' requires train strata, got {strata}")
+    embedder: Embedder = module.nodes[address].embedder
+    embedder.counter.learn(observation[TensorKey.state])
 
 
 @text.register
@@ -458,7 +445,12 @@ def loss(
         return loss
 
     inputs = prediction.payload[TensorKey.content].reshape(-1, embedder.hidden_size)
-    targets = embedder.target_embeddings(batch).reshape(-1, embedder.hidden_size)
+    if TensorKey.embedding not in batch.targets.keys():
+        batch.targets[TensorKey.embedding] = embedder.encode(
+            content=batch.targets[TensorKey.content],
+            state=batch.targets[TensorKey.state],
+        )
+    targets = batch.targets[TensorKey.embedding].reshape(-1, embedder.hidden_size)
     diff = inputs.subtract(targets)
 
     loss += module.track(

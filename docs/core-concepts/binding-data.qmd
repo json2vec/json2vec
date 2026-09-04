@@ -62,7 +62,7 @@ model = rf.Model(
         sku=rf.Category(query="product.sku", size=4096),
         quantity=rf.Number(query="qty"),
     ),
-    returned=rf.Category(query="outcome", target=True, size=2),
+    returned=rf.Category(query="outcome", mask=True, size=2),
 )
 ```
 
@@ -339,7 +339,9 @@ result = model.predict(requests, preprocess=prepare)
 
 The singular names are intentional: install one coordinated processor that can
 transform sibling columns together. Compose ordinary Arrow functions inside it
-when preparation has several phases.
+when preparation has several phases. For Boolean selectors consumed by
+`Mask.query`, including nested Awkward examples and exact-count decisions, see
+[Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd).
 
 ## Retention Is Output, Not Binding
 

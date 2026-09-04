@@ -25,7 +25,7 @@ model = rf.Model(
     n_heads=4,
     amount=rf.Number,
     merchant=rf.Category(size=4096),
-    label=rf.Category(target=True, size=2),
+    label=rf.Category(mask=True, size=2),
 )
 ```
 
@@ -41,7 +41,7 @@ model = rf.Model(
         sku=rf.Category(size=2048),
         quantity=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 ```
 
@@ -72,7 +72,12 @@ model = rf.Model(
 - `Branch(name="transactions")` reads the same-named child collection, and its
   leaves read keys such as `amount` from each child mapping.
 - `Branch(overflow="head")` is the default. Use `overflow="tail"` for recency-ordered histories and `overflow="error"` for strict schemas. The generated root branch uses internal `Overflow.error`.
-- `target=True` is shorthand for `p_prune=1.0`; the field is hidden from input and decoded as a supervised target.
+- `mask=True` is shorthand for
+  `Mask(skip=True, dropout=False, reconstruct=True)`: the field is never
+  embedded and is decoded as a supervised reconstruction target.
+- Every node has one canonical `mask` tuple. A float is uniform train-only
+  masking; `Mask(query=...)` selects with an Arrow Boolean field; `skip=True`
+  prevents tensorization and embedding; `reconstruct=True` adds an objective.
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
 - `Hash` represents large identifiers with batch-salted hashes, preserving equality across fields in one encoded batch without learning a persistent vocabulary.
 - `DateParts` is for calendar parts. If elapsed time or recency matters, derive a `Number`.
@@ -215,6 +220,8 @@ make render
 - `docs/ai-quickstart.qmd`
 - `docs/core-concepts/querypaths.qmd`
 - `docs/core-concepts/data-types.qmd`
+- `docs/core-concepts/dynamic-masking.qmd`
+- `docs/guides/dynamic-mask-preprocessors.qmd`
 
 When adding docs, prefer runnable inline Python snippets and current public
 imports. Keep Quarto pages self-contained; do not depend on external standalone

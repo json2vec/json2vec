@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 from tensordict import TensorDict
+
+from relflow.structs.tree import Address
 
 IDENTITY = pa.struct(
     [
@@ -233,9 +235,9 @@ class Batch:
         if self.identity.null_count:
             raise ValueError("Batch identity cannot contain null rows")
 
-        for field in IDENTITY:
-            if pc.struct_field(self.identity, field.name).null_count:
-                raise ValueError(f"Batch identity field {field.name!r} cannot contain nulls")
+        for identity_field in IDENTITY:
+            if pc.struct_field(self.identity, identity_field.name).null_count:
+                raise ValueError(f"Batch identity field {identity_field.name!r} cannot contain nulls")
 
         if self.data.num_columns and self.data.num_rows != len(self.identity):
             raise ValueError(f"Batch data has {self.data.num_rows} rows but identity has {len(self.identity)} rows")
@@ -447,17 +449,30 @@ class Batch:
 
 @dataclass(frozen=True, slots=True)
 class Encoded:
-    """Internal tensor payload paired with its untouched Arrow source batch."""
+    """Tensor payload, pristine observations, and its untouched Arrow source."""
 
     tensors: TensorDict
     source: Batch
     retain: tuple[str, ...] | Literal["*"] = ()
+    observations: Mapping[Address, TensorDict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.tensors, TensorDict):
             raise TypeError(f"Encoded tensors must be a TensorDict, got {type(self.tensors).__name__}")
         if not isinstance(self.source, Batch):
             raise TypeError(f"Encoded source must be an rf.Batch, got {type(self.source).__name__}")
+        if not isinstance(self.observations, Mapping):
+            raise TypeError(f"Encoded observations must be a mapping, got {type(self.observations).__name__}")
+        normalized: dict[Address, TensorDict] = {}
+        for address, observation in self.observations.items():
+            if not isinstance(address, str) or not address:
+                raise TypeError("Encoded observation addresses must be non-empty strings")
+            if not isinstance(observation, TensorDict):
+                raise TypeError(
+                    f"Encoded observation at '{address}' must be a TensorDict, got {type(observation).__name__}"
+                )
+            normalized[Address(address)] = observation
+        object.__setattr__(self, "observations", normalized)
         if self.retain != "*" and (
             not isinstance(self.retain, tuple)
             or any(not isinstance(name, str) or not name for name in self.retain)

@@ -26,7 +26,7 @@ import relflow as rf
 transactions = rf.Branch(
     name="transactions",
     length=16,
-    account_id=rf.Hash(p_mask=0.15, n_hashes=4),
+    account_id=rf.Hash(mask=rf.Mask(rate=0.15, reconstruct=True), n_hashes=4),
     amount=rf.Number,
 )
 

@@ -1,33 +1,23 @@
-"""Arrow batch encoding and tensor masking stages."""
+"""Arrow batch encoding into policy-resolved tensorfields."""
 
 from __future__ import annotations
 
-import inspect
 import random
-from collections.abc import Iterable, Iterator
 from dataclasses import replace
-from functools import cache
-from typing import Any, Callable, cast
+from typing import Any, Literal, cast
 
-from beartype import beartype
+import numpy as np
+import pyarrow as pa
+import torch
 from tensordict import TensorDict
 
-from relflow.data.arrow import Batch
+from relflow.data.arrow import Batch, Encoded
 from relflow.data.datasets.base import EncodedInput, InterprocessEncodingContext
-from relflow.data.ragged import coalesce
-from relflow.structs.enums import Strata
+from relflow.data.ragged import RaggedField, boolean, coalesce
+from relflow.structs.enums import Component, Strata, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
-from relflow.tensorfields.base import TENSORFIELDS, TensorFieldBase
-
-
-@cache
-def signature(function: Callable[..., Any]) -> tuple[frozenset[str], bool]:
-    """Cache the stable keyword contract of one tensorfield method."""
-
-    parameters = inspect.signature(function).parameters
-    variadic = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
-    return frozenset(parameters), variadic
+from relflow.tensorfields.base import TENSORFIELDS, Context, TensorFieldBase
 
 
 def encode(
@@ -35,142 +25,103 @@ def encode(
     schema: Schema,
     strata: Strata,
     interprocess_encoding_context: InterprocessEncodingContext,
-    defer_target_masking: bool = False,
-) -> EncodedInput:
+    seed: int = 0,
+    epoch: int = 0,
+    retain: tuple[str, ...] | Literal["*"] = (),
+) -> Encoded:
     out: dict[Address, TensorFieldBase] = {}
-    target_addresses = set(schema.target)
+    observations: dict[Address, TensorDict] = {}
 
-    hash_salt = random.getrandbits(64) if strata in {Strata.train, Strata.validate} else 0
+    salt = random.getrandbits(64) if strata in {Strata.train, Strata.validate} else 0
 
-    ragged_fields = coalesce(batch, schema=schema, strata=strata)
+    projections = coalesce(batch, schema=schema, strata=strata, seed=seed, epoch=epoch)
 
     for address, request in schema.active_requests.items():
         plugin = TENSORFIELDS[request.type]
-        TensorField = cast(type[TensorFieldBase], getattr(plugin, "TensorField"))
+        TensorField = plugin.TensorField
+        projection = projections.pop(address)
+        pristine = projection.pristine
+        nulls = pristine.state.to_numpy(zero_copy_only=False) == Tokens.null.value
+        if not request.nullable and nulls.any():
+            raise ValueError(
+                f"request '{address}' has nullable=False but input contains {int(nulls.sum())} null value(s)"
+            )
 
-        if (strata == Strata.predict) & (address in target_addresses):
-            out[address] = TensorField.empty(
-                batch_size=len(batch),
+        values = pa.nulls(0) if projection.vacant else plugin.prepare(pristine.values, address=address)
+        canonical = replace(pristine, values=values)
+        observation = None
+        if not projection.vacant:
+            observation = plugin.observe(
+                field=canonical,
                 address=address,
                 schema=schema,
+                state=interprocess_encoding_context.get(address),
+                learn=strata == Strata.train,
             )
-            continue
 
-        field = ragged_fields.pop(address)
-        values = plugin.prepare(field.values, address=address)
-        if values is not field.values:
-            field = replace(field, values=values)
-        kwargs: dict[str, Any] = dict(
-            field=field,
+        learner = plugin.components.get(Component.learn)
+        if observation is not None and not isinstance(observation, TensorDict):
+            raise TypeError(
+                f"plugin '{plugin.name}' observer at '{address}' must return a TensorDict or None, "
+                f"got {type(observation).__name__}"
+            )
+        if observation is not None and learner is None:
+            raise RuntimeError(
+                f"plugin '{plugin.name}' observer at '{address}' returned an observation without a learner"
+            )
+        if strata == Strata.train and learner is not None and observation is None:
+            raise RuntimeError(f"plugin '{plugin.name}' learner at '{address}' requires a training observation")
+        if strata != Strata.train and observation is not None:
+            raise RuntimeError(
+                f"plugin '{plugin.name}' observer at '{address}' returned an observation with learn=False"
+            )
+        if observation is not None:
+            observations[address] = observation
+
+        input_field, target_field = projection.split(values)
+        out[address] = TensorField.new(
+            input=input_field,
+            target=target_field,
+            present=torch.from_numpy(boolean(projection.present).copy()).reshape(input_field.shape),
+            trainable=torch.from_numpy(boolean(projection.trainable).copy()).reshape(input_field.shape),
+            inferred=torch.from_numpy(boolean(projection.inferred).copy()).reshape(input_field.shape),
             address=address,
             schema=schema,
             strata=strata,
+            context=Context(
+                state=interprocess_encoding_context.get(address),
+                salt=salt,
+            ),
         )
-        parameters, _ = signature(TensorField.new)
-        if "interprocess_encoding_context" in parameters:
-            kwargs["interprocess_encoding_context"] = interprocess_encoding_context.get(address)
-
-        if "salt" in parameters:
-            kwargs["salt"] = hash_salt
-
-        out[address] = TensorField.new(**kwargs)
-        out[address].check_nullable(address=address, schema=schema)
-
-        if not defer_target_masking and strata != Strata.predict and address in target_addresses:
-            out[address].mask(p_prune=1.0)
 
     inputs = cast(EncodedInput, TensorDict(source=cast(Any, out)))
-
-    return inputs
-
-
-def policy(
-    field: TensorFieldBase,
-    *,
-    p_mask: float,
-    p_prune: float,
-    branch_masks: tuple[Any, ...],
-    address: Address,
-    schema: Schema,
-) -> None:
-    parameters, supports_policy_kwargs = signature(type(field).mask)
-    supports_policy_kwargs |= any(name in parameters for name in ("p_prune", "branch_masks", "schema"))
-
-    if supports_policy_kwargs:
-        field.mask(
-            p_mask=p_mask,
-            p_prune=p_prune,
-            branch_masks=branch_masks,
-            address=address,
-            schema=schema,
-        )
-        return
-
-    if branch_masks:
-        raise TypeError(f"tensorfield at '{address}' must accept mask(..., branch_masks=...) to use Branch masks")
-
-    if p_mask > 0.0:
-        field.mask(p_mask=p_mask)
-
-    if p_prune > 0.0:
-        field.target(p_prune=p_prune)
-
-
-@beartype
-def mask(
-    pipe: Iterable[EncodedInput],
-    schema: Schema,
-    strata: Strata = Strata.train,
-) -> Iterator[EncodedInput]:
-    for item in pipe:
-        if strata == Strata.predict:
-            yield item
-            continue
-
-        for address, request in schema.active_requests.items():
-            p_mask = float(request.p_mask or 0.0)
-            p_prune = float(request.p_prune or 0.0)
-            branch_masks = schema.branch_masks_for(address)
-            if p_mask <= 0.0 and p_prune <= 0.0 and not branch_masks:
-                continue
-
-            policy(
-                item[address],
-                p_mask=p_mask,
-                p_prune=p_prune,
-                branch_masks=branch_masks,
-                address=address,
-                schema=schema,
-            )
-
-        yield item
-
-
-@beartype
-def target(
-    pipe: Iterable[EncodedInput],
-    schema: Schema,
-) -> Iterator[EncodedInput]:
-    for item in pipe:
-        for address, request in schema.active_requests.items():
-            p_prune = float(request.p_prune or 0.0)
-            if p_prune <= 0.0:
-                continue
-
-            item[address].target(p_prune=p_prune)
-
-        yield item
+    return Encoded(tensors=inputs, source=batch, retain=retain, observations=observations)
 
 
 def mock(schema: Schema, batch_size: int) -> EncodedInput:
     out: dict[Address, TensorFieldBase] = {}
 
     for address, request in schema.active_requests.items():
-        TensorField = cast(type[TensorFieldBase], getattr(TENSORFIELDS[request.type], "TensorField"))
-        out[address] = TensorField.empty(
-            batch_size=batch_size,
+        TensorField = TENSORFIELDS[request.type].TensorField
+        shape = (batch_size, *schema.shapes[address])
+        state = pa.array(np.full(np.prod(shape), Tokens.padded.value, dtype=np.int8))
+        field = RaggedField(
+            values=pa.nulls(0),
+            state=state,
+            placement=pa.array([], type=pa.int64()),
+            shape=shape,
+        )
+        routing = torch.zeros(shape, dtype=torch.bool)
+        out[address] = TensorField.new(
+            input=field,
+            target=field,
+            present=routing,
+            trainable=routing,
+            inferred=routing,
             address=address,
             schema=schema,
+            strata=Strata.predict,
+            context=Context(),
         )
 
     return cast(EncodedInput, TensorDict(source=cast(Any, out), batch_size=batch_size))

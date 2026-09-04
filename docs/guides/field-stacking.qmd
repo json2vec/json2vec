@@ -241,7 +241,6 @@ source = pa.table(
 encoded = model.encode(
     source,
     preprocess=stack_locations,
-    mask=False,
 )
 ```
 

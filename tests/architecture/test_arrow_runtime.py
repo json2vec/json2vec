@@ -4,6 +4,7 @@ import pytest
 
 import relflow as rf
 from relflow.architecture.runtime import ModelRuntime
+from relflow.data.arrow import Encoded
 from relflow.structs.enums import Component, Strata, TensorKey
 from relflow.structs.packages import Prediction
 from relflow.structs.tree import Address
@@ -16,11 +17,11 @@ def model(*, nested: bool = False, embed: bool = False) -> rf.Model:
             "items": rf.Branch(
                 length=3,
                 value=rf.Number,
-                label=rf.Boolean(target=True),
+                label=rf.Boolean(mask=True),
             )
         }
         if nested
-        else {"value": rf.Number, "label": rf.Boolean(target=True)}
+        else {"value": rf.Number, "label": rf.Boolean(mask=True)}
     )
     return rf.Model(
         d_model=8,
@@ -63,11 +64,51 @@ def test_lightning_predict_step_uses_the_datamodule_retain_plan():
     assert result.data["inputs"].to_pylist() == [{"request_id": "a"}]
 
 
+def test_training_dataloader_carries_pristine_observations_into_step():
+    configured = model()
+    data = rf.ArrowDataModule(
+        model=configured,
+        train=pa.table({"value": [1.0, 100.0], "label": [False, True]}),
+        shuffle=False,
+        num_workers=0,
+        persistent_workers=False,
+        pin_memory=False,
+    )
+
+    batch = next(iter(data.train_dataloader()))
+    assert isinstance(batch, Encoded)
+    assert rf.Number.normalization(configured, "record/value")["count"] == 0
+
+    result = configured.training_step(batch, 0)
+    statistics = rf.Number.normalization(configured, "record/value")
+
+    assert result is not None
+    assert statistics["count"] == 2
+    assert statistics["mean"] == pytest.approx(50.5)
+    assert statistics["variance"] == pytest.approx(2450.25)
+
+
 def test_predict_adapts_a_small_python_record_sequence_once():
     result = model().predict([{"value": 1.0}, {"value": 2.0}])
 
     assert isinstance(result, pa.Table)
     assert len(result) == 2
+
+
+def test_predict_preserves_empty_mapping_rows_for_source_less_reconstruction():
+    configured = rf.Model(
+        label=rf.Boolean(mask=True),
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+    )
+
+    result = configured.predict([{}, {}])
+
+    assert len(result) == 2
+    predictions = result["predictions"].combine_chunks()
+    label = predictions.field("record/label")
+    assert label.field(TensorKey.inferred.name).to_pylist() == [True, True]
 
 
 def test_python_prediction_ingress_preserves_keys_introduced_after_the_first_row():
@@ -156,10 +197,10 @@ def test_empty_retain_uses_typed_null_without_changing_row_count():
     assert len(result) == 3
 
 
-def test_target_without_public_plugin_output_keeps_a_typed_null_prediction_column():
+def test_reconstruction_without_public_plugin_output_keeps_a_typed_null_prediction_column():
     configured = rf.Model(
         value=rf.Number,
-        identifier=rf.Hash(target=True),
+        identifier=rf.Hash(mask=True),
         d_model=8,
         n_layers=1,
         n_heads=2,
@@ -244,14 +285,13 @@ def test_output_plan_declares_once_and_passes_that_type_to_writer(monkeypatch: p
 
 def test_write_rejects_an_ordinary_unplanned_forward_address():
     configured = model()
-    source, inputs = ModelRuntime.prepare(
+    encoded = ModelRuntime.prepare(
         configured,
         pa.table({"value": [1.0]}),
         preprocess=None,
         strata=Strata.predict,
-        mask=True,
     )
-    predictions = configured(inputs, strata=Strata.predict)
+    predictions = configured(encoded.tensors, strata=Strata.predict)
     target = predictions[0]
     extra = Prediction(
         address=Address("record/value"),
@@ -260,21 +300,20 @@ def test_write_rejects_an_ordinary_unplanned_forward_address():
     )
 
     with pytest.raises(ValueError, match="unplanned prediction address.*record/value"):
-        configured.write([*predictions, extra], source=source)
+        configured.write([*predictions, extra], source=encoded.source)
 
 
 def test_output_plan_rejects_runtime_embedding_width_drift():
     configured = model(embed=True)
-    source, inputs = ModelRuntime.prepare(
+    encoded = ModelRuntime.prepare(
         configured,
         pa.table({"value": [1.0]}),
         preprocess=None,
         strata=Strata.predict,
-        mask=True,
     )
-    predictions = configured(inputs, strata=Strata.predict)
+    predictions = configured(encoded.tensors, strata=Strata.predict)
     root = next(prediction for prediction in predictions if prediction.address == Address("record"))
     root.payload[TensorKey.embedding] = root.payload[TensorKey.embedding][..., :-1]
 
     with pytest.raises(ValueError, match="must end with model width 8"):
-        configured.write(predictions, source=source)
+        configured.write(predictions, source=encoded.source)

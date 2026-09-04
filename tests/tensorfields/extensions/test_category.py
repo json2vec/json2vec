@@ -1,4 +1,3 @@
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,7 +8,8 @@ from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
-from relflow.tensorfields.base import TENSORFIELDS
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS, Context
 from relflow.tensorfields.extensions.category import (
     Decoder,
     Embedder,
@@ -22,15 +22,22 @@ from relflow.tensorfields.extensions.category import (
 )
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState
 from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/category"
 
 
-def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | None = None) -> dict:
+def _structure_payload(
+    *,
+    topk: list[int] | None = None,
+    p_unavailable: float | None = None,
+    mask: bool | Mask = False,
+) -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
         "size": 8,
+        "mask": mask,
     }
     if topk is not None:
         field["topk"] = topk
@@ -64,17 +71,18 @@ def _tensorfield(
     *,
     schema: Schema,
     strata: Strata,
-    interprocess_encoding_context: VocabularyState,
+    state: VocabularyState,
 ) -> TensorField:
     batch = arrow_batch([{"items": [{"category": value} for value in row]} for row in rows])
-    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
-    field = replace(field, values=TENSORFIELDS["category"].prepare(field.values, address=ADDRESS))
-    return TensorField.new(
-        field=field,
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["category"],
         address=ADDRESS,
         schema=schema,
         strata=strata,
-        interprocess_encoding_context=interprocess_encoding_context,
+        context=Context(state=state),
     )
 
 
@@ -135,7 +143,7 @@ def test_category_tensorfield_separates_state_and_content():
         rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -169,14 +177,14 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
         rows=[["ALPHA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     field = _tensorfield(
         rows=[["OMEGA"]],
         schema=schema,
         strata=Strata.validate,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -198,7 +206,7 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
         rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -243,12 +251,14 @@ def test_category_embedder_zeroes_unavailable_and_non_valued_content_contributio
             dtype=torch.int64,
         ),
         content=torch.tensor([[0, unavailable, 0, 0, 0, 0]], dtype=torch.int64),
+        present=torch.ones((1, 6), dtype=torch.bool),
         trainable=torch.zeros((1, 6), dtype=torch.bool),
+        inferred=torch.zeros((1, 6), dtype=torch.bool),
         targets=TensorDict({}),
         batch_size=1,
     )
 
-    output = embedder(field).payload
+    output = embedder.embed(field).payload
     expected = embedder.embeddings[TensorKey.state.name](field.state)
     expected[:, 0] += embedder.embeddings[TensorKey.content.name](field.content[:, 0])
 
@@ -368,7 +378,7 @@ class _TrackingModule:
 
 
 def test_category_loss_does_not_mutate_counters():
-    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0, mask=Mask(reconstruct=True)))
     schema = structure
     state = _state()
 
@@ -376,10 +386,8 @@ def test_category_loss_does_not_mutate_counters():
         rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
@@ -411,23 +419,21 @@ def test_category_loss_does_not_mutate_counters():
 
 
 def test_category_loss_uses_uniform_target_for_unavailable_content():
-    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0, mask=True))
     state = _state(size=structure.requests[ADDRESS].size)
 
     _tensorfield(
         rows=[["ALPHA"]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
     field = _tensorfield(
         rows=[["OMEGA"]],
         schema=structure,
         strata=Strata.validate,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field.target(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)

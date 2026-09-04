@@ -17,15 +17,16 @@ from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
 from relflow.tensorfields.output import array, labels, struct, variable
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState, VocabularySyncCallback
 
 if TYPE_CHECKING:
@@ -165,32 +166,78 @@ class Request(RequestBase):
 
 
 @category.register
+def observe(
+    field: RaggedField,
+    *,
+    address: Address,
+    schema: Schema,
+    state: object | None,
+    learn: bool,
+) -> TensorDict | None:
+    """Reserve and count the complete pristine categorical exposure."""
+
+    if not learn:
+        return None
+    if not isinstance(state, VocabularyState):
+        raise RuntimeError(f"category field at '{address}' requires a vocabulary encoding context")
+
+    indices = state.indices(field.values, learn=True)
+    return TensorDict(
+        {
+            TensorKey.state: tally(torch.from_numpy(field.dense.copy()), len(Tokens)),
+            TensorKey.content: tally(torch.from_numpy(indices.copy()), schema.requests[address].size),
+        },
+        batch_size=[],
+    )
+
+
+@category.register
 @tensorclass
 class TensorField(TensorFieldBase):
     state: torch.Tensor
     content: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        field: RaggedField,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
-        interprocess_encoding_context: VocabularyState,
+        context: Context,
     ) -> TensorFieldBase:
-        learn = strata == Strata.train
-        tokens = interprocess_encoding_context.indices(field.values, learn=learn)
+        state = context.state
+        if state is not None and not isinstance(state, VocabularyState):
+            raise TypeError(
+                f"category field at '{address}' requires VocabularyState context, got {type(state).__name__}"
+            )
 
-        if len(interprocess_encoding_context) > (size := schema.requests[address].size):
+        def encode(field: RaggedField) -> torch.Tensor:
+            if not len(field.values):
+                return torch.zeros(field.shape, dtype=torch.int64)
+            if state is None:
+                raise RuntimeError(f"category field at '{address}' requires a vocabulary encoding context")
+            tokens = state.indices(field.values, learn=False)
+            return torch.from_numpy(field.place(tokens, fill=0))
+
+        content = encode(input)
+        target_content = encode(target)
+
+        if state is not None and len(state) > (size := schema.requests[address].size):
             logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
                 "vocabulary exceeds size={}", size
             )
 
-        state_tensor = torch.from_numpy(field.dense)
-        content = torch.from_numpy(field.place(tokens, fill=0))
+        state_tensor = torch.from_numpy(input.dense)
+        target_state = torch.from_numpy(target.dense)
         if strata == Strata.train:
             p_unavailable: float = schema.requests[address].p_unavailable
             unavailable_index: int = schema.requests[address].size
@@ -200,62 +247,28 @@ class TensorField(TensorFieldBase):
                 # train split is exactly where the vocabulary is built. We simulate a small
                 # amount of OOV behavior so the content objective does not reward any real
                 # class for valued inputs whose categorical content is unavailable.
-                is_known = state_tensor.eq(Tokens.valued.value) & content.ne(unavailable_index)
-                if is_known.any():
-                    simulated = (
-                        torch.rand_like(input=state_tensor, dtype=torch.float).lt(other=p_unavailable) & is_known
-                    )
-                    if simulated.any():
-                        content = content.masked_fill(simulated, unavailable_index)
+                def regularize(values: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+                    known = state.eq(Tokens.valued.value) & values.ne(unavailable_index)
+                    selected = torch.rand_like(state, dtype=torch.float).lt(p_unavailable) & known
+                    return values.masked_fill(selected, unavailable_index)
+
+                content = regularize(content, state_tensor)
+                target_content = regularize(target_content, target_state)
 
         return cls(
             state=state_tensor,
             content=content,
-            trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=field.batch_size,
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_scatter(selected, mask_token)
-        self.content = self.content.masked_fill(selected, 0)
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-
-        state = torch.full(shape, Tokens.masked)
-        content = torch.zeros(shape, dtype=torch.int64)
-
-        return cls(
-            state=state,
-            content=content,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: target_state,
+                    TensorKey.content: target_content,
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -291,7 +304,7 @@ class Embedder(EmbedderBase):
         )
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N: int
         dims: list[int]
 
@@ -313,14 +326,32 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=embeddings,
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
         )
 
     @property
-    def interprocess_encoding_context(self) -> VocabularyState:
+    def context(self) -> VocabularyState:
         return self.vocab.state
+
+
+@category.register
+def learn(
+    module: Model,
+    observation: TensorDict,
+    *,
+    address: Address,
+    strata: Strata,
+) -> None:
+    """Apply pristine categorical counts to model-owned resources."""
+
+    if strata != Strata.train:
+        raise ValueError(f"category learner at '{address}' requires train strata, got {strata}")
+    embedder: Embedder = module.nodes[address].embedder
+    embedder.counters[TensorKey.state.name].learn(observation[TensorKey.state])
+    embedder.counters[TensorKey.content.name].learn(observation[TensorKey.content])
 
 
 @category.register

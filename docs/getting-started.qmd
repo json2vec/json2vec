@@ -10,7 +10,7 @@ table construction through prediction.
 
 This runnable walkthrough takes one small model through the complete first-use
 lifecycle: install, define a schema, train, inspect validation metrics, save,
-load, and predict with the target omitted.
+load, and predict with the reconstructed field omitted.
 
 The example is deliberately too small to establish model quality. Its job is to
 verify that every part of the workflow is connected correctly.
@@ -114,7 +114,7 @@ model = rf.Model(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
     sepal_length=rf.Number,
     petal_length=rf.Number,
-    species=rf.Category(target=True, size=3, topk=[2]),
+    species=rf.Category(mask=True, size=3, topk=[2]),
 )
 
 model
@@ -125,7 +125,7 @@ The schema expresses four decisions:
 - `sepal_length` and `petal_length` are visible numeric inputs;
 - `species` is a bounded category with capacity for exactly the three labels in
   this example;
-- `target=True` hides `species` from the encoder and trains its decoder from the
+- `mask=True` skips `species` in the encoder and trains its decoder from the
   remaining context;
 - root-level `embed=True` asks prediction to return one `d_model` vector for
   each record.
@@ -134,7 +134,7 @@ The schema expresses four decisions:
 Category capacity is not required for an unavailable class; use extra capacity
 only when the vocabulary is expected to grow.
 
-The generated root is named `record`, so the target address is
+The generated root is named `record`, so the reconstruction address is
 `record/species`. See [Model Tree](core-concepts/model-tree.qmd) for how to read
 the displayed schema.
 
@@ -210,8 +210,9 @@ with TemporaryDirectory() as directory:
     predictions = restored.predict(requests)
 ```
 
-Notice that `requests` omit `species`. Target omission is the normal prediction
-contract: the target slot is masked, then decoded from the visible inputs. A
+Notice that `requests` omit `species`. Omission is the normal prediction
+contract for `mask=True`: the slot is absent from encoder routing, then decoded
+from the visible inputs. A
 Lightning training checkpoint may additionally contain optimizer, scheduler,
 and loop state; `Model.save(...)` is the compact RelFlow artifact for restoring
 the schema and model state. [Model Lifecycle](guides/model-lifecycle.qmd)
@@ -246,10 +247,11 @@ For each request:
 - `content.value` is the selected vocabulary label;
 - `content.probability` is that label's model probability;
 - `content.topk` contains the two requested ranked candidates;
-- `inferred` is `true` because `species` was masked and decoded;
+- `inferred` is `true` because `species` was requested for deterministic
+  reconstruction;
 - `record.embedding` is the exported 16-dimensional root representation.
 
-The target payload also contains a probability distribution over value states.
+The reconstructed payload also contains a probability distribution over value states.
 Category probabilities rank the learned vocabulary; they are not automatically
 calibrated probabilities and are not an out-of-distribution detector. See
 [Prediction Output](guides/prediction-output.qmd) for the complete shared
@@ -276,7 +278,7 @@ nested_model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 nested_model

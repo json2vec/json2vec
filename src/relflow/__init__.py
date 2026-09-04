@@ -46,7 +46,16 @@ from relflow.structs.experiment import (
 )
 from relflow.structs.structure import Branch, Mask
 from relflow.structs.tree import Address, Leaf
-from relflow.tensorfields import TENSORFIELDS, DecoderBase, EmbedderBase, Plugin, RequestBase, TensorFieldBase
+from relflow.tensorfields import (
+    TENSORFIELDS,
+    Context,
+    DecoderBase,
+    EmbedderBase,
+    Plugin,
+    RequestBase,
+    TensorFieldBase,
+    TensorInput,
+)
 from relflow.tensorfields.extensions.boolean import Request as Boolean
 from relflow.tensorfields.extensions.category import Request as Category
 from relflow.tensorfields.extensions.cluster import Request as Cluster
@@ -112,6 +121,7 @@ __all__ = [
     "Cluster",
     "Category",
     "Component",
+    "Context",
     "CustomDataModule",
     "DateParts",
     "DecoderBase",
@@ -148,6 +158,7 @@ __all__ = [
     "Strata",
     "TENSORFIELDS",
     "TensorFieldBase",
+    "TensorInput",
     "TensorKey",
     "Text",
     "Tokens",

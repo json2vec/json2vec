@@ -15,12 +15,13 @@ architecture.
 
 ## First Five Checks
 
-1. Print the model and confirm names, addresses, lengths, targets, and active
+1. Print the model and confirm names, addresses, lengths, reconstruction roles, and active
    fields.
 2. Run `model.encode(one_row_table)` and inspect state/content shapes.
 3. Print the post-preprocessor `pa.Schema`; read every query relative to its
    parent model node.
-4. Verify that training contains targets and prediction requests omit them.
+4. Verify that fitting data contains reconstruction values and prediction
+   requests omit unconditional reconstructed fields.
 5. Reproduce on CPU with one observation and no data-loader workers.
 
 ```{python .marimo}
@@ -43,7 +44,7 @@ records = pa.Table.from_pylist(
 )
 
 print(records.schema)
-print(model.encode(records, mask=False))
+print(model.encode(records))
 ```
 
 The snippet is a diagnostic excerpt; use the model from the page where the
@@ -63,8 +64,8 @@ problem occurred.
 | Arrow/Awkward conversion rejects a value | A modeled value contains an opaque object or an unstable physical type | Normalize it at ingress or in the preprocessor and return one exact Arrow schema. |
 | Plugin rejects an Arrow union | The leaf contains terminals from more than one incompatible `Plugin(types=...)` family; built-in examples include Category, Cluster, Hash, and Set labels | Normalize the column to one deliberate Arrow type in a preprocessor; custom plugins should declare separate entries for incompatible types and a union for types that may promote. |
 | Set rejects an iterable container | A Set leaf received a `set`, `range`, generator, mapping, or another unsupported iterable | Emit a list, tuple, or NumPy array; scalar `str`, `bytes`, and non-iterable values are already treated as singleton labels. |
-| Loss is zero / “no trainable fields” | No target, mask, or prune selection is active for the batch | Add a supervised target or reconstruction policy; inspect `trainable` and target state in encoded input. |
-| Prediction has no decoded value | Visible input fields are not decoded by default | Configure `target`, masking, or the supported prediction role. `embed=True` requests an embedding and may also invoke decoding, but it is not a target. |
+| Loss is zero / “no trainable fields” | No reconstructing mask selection is active for the batch | Add `mask=True` or an explicit policy with `reconstruct=True`; inspect `trainable` and target state in encoded input. |
+| Prediction has no decoded value | Visible inputs and stochastic-only objectives are not decoded by default | Configure a deterministic reconstructing mask. `embed=True` requests an embedding and may also invoke decoding, but it does not create an objective. |
 | Prediction address is missing | Root/branch name differs, field is inactive, or its plugin declares no public decoded content | Print the model and inspect fields inside the Arrow `predictions` struct. |
 | `topk` validation fails | `1` is redundant or requested `k >= size` | Remove `1`; choose `1 < k < size`. Runtime candidates are capped by the populated vocabulary. |
 | Category vocabulary warning | Training observed more distinct labels than `size` | Confirm cardinality and split roles; increase deliberate capacity or choose another representation. |
@@ -87,11 +88,11 @@ Each leaf keeps value state separate from content. The shared states are:
 - `valued`: a value was present; datatype content may still be unavailable;
 - `null`: an explicit null;
 - `padded`: an unused fixed-shape position;
-- `masked`: content hidden for inference or training;
+- `masked`: a selected input represented by the learned mask token;
 - `other`: reserved for datatype-specific extensions.
 
-Pruning is an operation that changes visible input to `masked` while caching
-targets. It is not a separate `pruned` state. See
+A structurally skipped input is omitted from model routing through `present`;
+it does not acquire another state token. See
 [Data Types And Value State](../core-concepts/data-types.qmd) before debugging a
 content value in isolation.
 

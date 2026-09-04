@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 import pytest
 import torch
 
@@ -7,7 +5,8 @@ import relflow as rf
 from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
-from relflow.tensorfields.base import TENSORFIELDS
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS, Context
 from relflow.tensorfields.extensions.hashable import (
     Decoder,
     Embedder,
@@ -15,6 +14,7 @@ from relflow.tensorfields.extensions.hashable import (
 )
 from tests.arrow import batch as arrow_batch
 from tests.arrow import table
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/identifier"
 
@@ -26,6 +26,7 @@ def _structure_payload(
     n_bands: int = 4,
     offset: int = 2,
     n_buckets: int = 4,
+    mask: bool | Mask = False,
 ) -> dict:
     field: dict = {
         "name": "identifier",
@@ -34,6 +35,7 @@ def _structure_payload(
         "n_bands": n_bands,
         "offset": offset,
         "n_buckets": n_buckets,
+        "mask": mask,
     }
     return {
         "d_model": 16,
@@ -61,14 +63,15 @@ def _new_tensorfield(
     salt: int = 0,
 ) -> TensorField:
     batch = arrow_batch([{"items": [{"identifier": value} for value in root]} for (root,) in values])
-    field = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
-    field = replace(field, values=TENSORFIELDS["hash"].prepare(field.values, address=ADDRESS))
-    return TensorField.new(
-        field=field,
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["hash"],
         address=ADDRESS,
         schema=schema,
         strata=strata,
-        salt=salt,
+        context=Context(salt=salt),
     )
 
 
@@ -208,8 +211,8 @@ def test_hashable_rejects_arrow_struct_values():
         _new_tensorfield(values=values, schema=schema, strata=Strata.train)
 
 
-def test_hashable_mask_caches_targets_before_zeroing():
-    schema = Schema.model_validate(_structure_payload(n_hashes=4))
+def test_hashable_reconstruction_projects_targets_before_zeroing_input():
+    schema = Schema.model_validate(_structure_payload(n_hashes=4, mask=Mask(reconstruct=True)))
     values = [
         [["a", "b"]],
         [["c", "d"]],
@@ -220,13 +223,14 @@ def test_hashable_mask_caches_targets_before_zeroing():
         schema=schema,
         strata=Strata.train,
     )
-    original_state = field.state.clone()
-    original_content = field.content.clone()
+    visible = _new_tensorfield(
+        values=values,
+        schema=Schema.model_validate(_structure_payload(n_hashes=4)),
+        strata=Strata.train,
+    )
 
-    field.mask(1.0)
-
-    assert torch.equal(field.targets[TensorKey.state], original_state)
-    assert torch.equal(field.targets[TensorKey.content], original_content)
+    assert torch.equal(field.targets[TensorKey.state], visible.state)
+    assert torch.equal(field.targets[TensorKey.content], visible.content)
     assert torch.all(field.state == Tokens.masked.value)
     assert torch.all(field.content == 0.0)
 
@@ -375,7 +379,6 @@ def test_hashable_embedder_forward_produces_finite_projections():
             ]
         ),
         strata=Strata.train,
-        mask=False,
     )
 
     predictions = model(inputs, strata=Strata.train)
@@ -390,7 +393,12 @@ def test_hashable_training_loss_covers_state_and_content_heads():
     n_buckets = 4
     model = rf.Model(
         rf.Branch(
-            rf.Hash("id", n_hashes=n_hashes, n_buckets=n_buckets),
+            rf.Hash(
+                "id",
+                n_hashes=n_hashes,
+                n_buckets=n_buckets,
+                mask=rf.Mask(reconstruct=True),
+            ),
             name="items",
             length=3,
         ),
@@ -408,10 +416,7 @@ def test_hashable_training_loss_covers_state_and_content_heads():
             ]
         ),
         strata=Strata.train,
-        mask=False,
     )
-    field = inputs[address]
-    field.hide(torch.ones_like(field.state, dtype=torch.bool))
 
     predictions = model(inputs, strata=Strata.train)
     prediction = next(p for p in predictions if p.address == address)
@@ -424,7 +429,7 @@ def test_hashable_training_loss_covers_state_and_content_heads():
 
 
 def test_hashable_content_target_matches_deterministic_recomputation():
-    schema = Schema.model_validate(_structure_payload(n_hashes=5, length=2))
+    schema = Schema.model_validate(_structure_payload(n_hashes=5, length=2, mask=Mask(reconstruct=True)))
     values = [[["alice", "bob"]], [["carol", "dave"]]]
 
     field = _new_tensorfield(
@@ -433,12 +438,9 @@ def test_hashable_content_target_matches_deterministic_recomputation():
         strata=Strata.train,
     )
 
-    # Cache targets then re-derive from a fresh TensorField and compare.
-    field.mask(1.0)
-
     fresh = _new_tensorfield(
         values=values,
-        schema=schema,
+        schema=Schema.model_validate(_structure_payload(n_hashes=5, length=2)),
         strata=Strata.train,
     )
 
@@ -464,7 +466,7 @@ def test_hashable_embedder_uses_raw_sinusoidal_content_and_state_embeddings():
         strata=Strata.test,
     )
 
-    output = embedder(field).payload
+    output = embedder.embed(field).payload
     normalized = field.content.reshape(-1, 3).to(embedder.weights.dtype).div(1 << 63)
     weighted = normalized.unsqueeze(-1).mul(embedder.weights)
     expected = torch.stack([torch.sin(weighted), torch.cos(weighted)], dim=-1)
@@ -494,7 +496,7 @@ def _hashable_model(**kwargs) -> "rf.Model":
 
 
 def test_hashable_fields_keep_state_embeddings_and_decoders_local():
-    model = _hashable_model()
+    model = _hashable_model(mask=True)
     items = model.nodes["record/items/id"]
     owner = model.nodes["record/owner"]
 
@@ -513,11 +515,10 @@ def test_hashable_gives_same_input_value_identical_raw_embeddings_across_fields(
             ]
         ),
         strata=Strata.train,
-        mask=False,
     )
 
-    items_projection = model.nodes["record/items/id"].embedder(inputs["record/items/id"]).payload
-    owner_projection = model.nodes["record/owner"].embedder(inputs["record/owner"]).payload
+    items_projection = model.nodes["record/items/id"].embedder.embed(inputs["record/items/id"]).payload
+    owner_projection = model.nodes["record/owner"].embedder.embed(inputs["record/owner"]).payload
 
     assert torch.allclose(items_projection[0, 0, 0], owner_projection[0, 0])
     assert torch.allclose(items_projection[1, 0, 0], owner_projection[1, 0])
@@ -555,9 +556,9 @@ def test_equal_values_stay_matched_within_each_rotating_batch(monkeypatch: pytes
 
     projections_by_batch: list[tuple[torch.Tensor, torch.Tensor]] = []
     for _ in range(3):
-        inputs = model.encode(records, strata=Strata.train, mask=False)
-        items_projection = model.nodes["record/items/id"].embedder(inputs["record/items/id"]).payload
-        owner_projection = model.nodes["record/owner"].embedder(inputs["record/owner"]).payload
+        inputs = model.encode(records, strata=Strata.train)
+        items_projection = model.nodes["record/items/id"].embedder.embed(inputs["record/items/id"]).payload
+        owner_projection = model.nodes["record/owner"].embedder.embed(inputs["record/owner"]).payload
         projections_by_batch.append((items_projection[0, 0, 0].detach(), owner_projection[0, 0].detach()))
 
     for items_alice, owner_alice in projections_by_batch:
@@ -579,8 +580,8 @@ def test_inference_uses_stable_unsalted_hashes(strata: Strata, monkeypatch: pyte
 
     monkeypatch.setattr(iterables.random, "getrandbits", unexpected_random_salt)
 
-    first = model.encode(records, strata=strata, mask=False)
-    second = model.encode(records, strata=strata, mask=False)
+    first = model.encode(records, strata=strata)
+    second = model.encode(records, strata=strata)
 
     assert torch.equal(first["record/items/id"].content, second["record/items/id"].content)
     assert torch.equal(first["record/owner"].content, second["record/owner"].content)

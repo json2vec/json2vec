@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -24,15 +24,16 @@ from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
 from relflow.tensorfields.output import array, struct
-from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback
+from relflow.tensorfields.shared.counter import Counter, CounterUpdateCallback, tally
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
@@ -100,63 +101,76 @@ class BooleanCounter(Counter):
 
 
 @boolean.register
+def observe(
+    field: RaggedField,
+    *,
+    address: Address,
+    schema: Schema,
+    state: object | None,
+    learn: bool,
+) -> TensorDict | None:
+    """Count complete pristine Boolean state and content."""
+
+    if not learn:
+        return None
+    values = pc.cast(field.values, pa.int64(), safe=True)
+    if isinstance(values, pa.ChunkedArray):
+        values = values.combine_chunks()
+    content = torch.from_numpy(values.to_numpy(zero_copy_only=False).copy())
+    return TensorDict(
+        {
+            TensorKey.state: tally(torch.from_numpy(field.dense.copy()), len(Tokens)),
+            TensorKey.content: tally(content, 2),
+        },
+        batch_size=[],
+    )
+
+
+@boolean.register
 @tensorclass
 class TensorField(TensorFieldBase):
     content: torch.Tensor
     state: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        field: RaggedField,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
+        context: Context,
     ) -> TensorFieldBase:
-        encoded = pc.if_else(field.values, pa.scalar(1.0, pa.float32()), pa.scalar(-1.0, pa.float32()))
-        if isinstance(encoded, pa.ChunkedArray):
-            encoded = encoded.combine_chunks()
-        encoded = encoded.to_numpy(zero_copy_only=False)
-        content = torch.from_numpy(field.place(encoded, fill=0.0))
-        state = torch.from_numpy(field.dense)
+        def encode(field: RaggedField) -> torch.Tensor:
+            encoded = pc.if_else(field.values, pa.scalar(1.0, pa.float32()), pa.scalar(-1.0, pa.float32()))
+            if isinstance(encoded, pa.ChunkedArray):
+                encoded = encoded.combine_chunks()
+            return torch.from_numpy(field.place(encoded.to_numpy(zero_copy_only=False), fill=0.0))
+
+        state = torch.from_numpy(input.dense)
+        target_state = torch.from_numpy(target.dense)
         return cls(
-            content=content,
+            content=encode(input),
             state=state,
-            trainable=torch.zeros_like(state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=field.batch_size,
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_fill(selected, Tokens.masked.value)
-        self.content = self.content.masked_fill(selected, 0.0)
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(cls, batch_size: int, address: Address, schema: Schema):
-        shape = (batch_size, *schema.shapes[address])
-        state = torch.full(shape, Tokens.masked.value, dtype=torch.int64)
-        return cls(
-            content=torch.zeros(shape, dtype=torch.float32),
-            state=state,
-            trainable=torch.zeros_like(state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: target_state,
+                    TensorKey.content: encode(target),
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -180,16 +194,34 @@ class Embedder(EmbedderBase):
         self.content: torch.Tensor
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         content = self.content[inputs.content.to(dtype=torch.int64).add(1)]
         embeddings = self.state(inputs.state) + content
 
         return Parcel(
             payload=embeddings,
+            present=torch.ones(inputs.state.shape[0], dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=inputs.batch_size[0],
         )
+
+
+@boolean.register
+def learn(
+    module: Model,
+    observation: TensorDict,
+    *,
+    address: Address,
+    strata: Strata,
+) -> None:
+    """Apply pristine Boolean counts to model-owned resources."""
+
+    if strata != Strata.train:
+        raise ValueError(f"boolean learner at '{address}' requires train strata, got {strata}")
+    embedder: Embedder = module.nodes[address].embedder
+    embedder.counters[TensorKey.state.name].learn(observation[TensorKey.state])
+    embedder.counters[TensorKey.content.name].learn(observation[TensorKey.content])
 
 
 @boolean.register

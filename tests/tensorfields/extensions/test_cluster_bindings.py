@@ -26,7 +26,7 @@ def build() -> rf.Model:
         merchant_id=rf.Cluster(
             capacity=CAPACITY,
             n_clusters=(2, N_CLUSTERS),
-            p_mask=0.1,
+            mask=rf.Mask(rate=0.1, reconstruct=True),
             p_unavailable=0.0,
         ),
     )
@@ -42,7 +42,6 @@ def learn(model: rf.Model, *tokens: str) -> None:
     model.encode(
         table([{"merchant_id": token} for token in tokens]),
         strata=rf.Strata.train,
-        mask=False,
     )
 
 

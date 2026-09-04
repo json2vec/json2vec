@@ -29,6 +29,8 @@ website:
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
+          - href: guides/dynamic-mask-preprocessors.qmd
+            text: Mask Preprocessor Recipes
       - text: Train & Evaluate
         menu:
           - href: guides/data-modules.qmd
@@ -111,6 +113,8 @@ website:
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
+          - href: guides/dynamic-mask-preprocessors.qmd
+            text: Mask Preprocessor Recipes
       - section: Data Types
         contents:
           - href: data-types/branch.qmd

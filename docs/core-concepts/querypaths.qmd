@@ -44,7 +44,7 @@ model = rf.Model(
         sku=rf.Category(query="product.sku", size=4096),
         quantity=rf.Number(query="qty"),
     ),
-    returned=rf.Category(query="outcome", target=True, size=2),
+    returned=rf.Category(query="outcome", mask=True, size=2),
 )
 ```
 
@@ -235,21 +235,35 @@ model = rf.Model(
 The predicate moves complete event structs, so `timestamp` and `device` remain
 aligned.
 
-## Prediction And Target Binding
+## Prediction And Reconstruction Binding
 
-Train, validation, and test plans include target columns needed for losses and
-metrics. A prediction plan excludes persistent supervised targets from source
-requirements, so ordinary prediction input can omit fields declared with
-`target=True`.
-
-This remains true when the target has an explicit query:
+Train, validation, and test plans require source values used by reconstruction
+losses and metrics. Prediction can omit a directly bound, unconditional,
+deterministic target:
 
 ```python
-fraud=rf.Category(query="labels.fraud", target=True, size=2)
+fraud=rf.Category(mask=True, size=2)
 ```
 
-Training data needs `labels.fraud`; ordinary prediction data does not. Missing
-active input fields still fail binding rather than turning into silent nulls.
+The root layout supplies one output coordinate per observation. A directly
+bound repeated target can also be absent, but its containing branches must
+remain because their lists define output cardinality.
+
+An explicitly queried target cannot currently omit its queried source structure
+wholesale:
+
+```python
+fraud=rf.Category(query="labels.fraud", mask=True, size=2)
+```
+
+Training needs `labels.fraud`, and prediction must preserve `labels` and the
+queried field's Arrow schema. Prefer a directly bound target when source-less
+prediction is required. Query-backed mask selection also needs its Boolean
+selector in every stratum where the policy is active.
+
+Missing active input fields still fail binding rather than becoming silent
+nulls. See [Masking, Skipping, and Reconstruction](dynamic-masking.qmd#prediction-and-source-omission)
+for the complete matrix.
 
 ## Errors Are Early And Contextual
 
