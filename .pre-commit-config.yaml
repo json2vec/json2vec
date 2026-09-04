@@ -26,8 +26,8 @@ repos:
         verbose: true
 
       - id: docs
-        name: Render Docs
-        entry: make render
+        name: Render Docs (isolated)
+        entry: make check-docs
         language: system
         pass_filenames: false
         always_run: true

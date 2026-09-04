@@ -26,9 +26,10 @@ source .venv/bin/activate
 python -m pip install "relflow @ git+https://github.com/relflow/relflow.git"
 ```
 
-That command follows the repository's current default branch. Pin a tag or
-commit after `@` for a reproducible environment, and retain the matching source
-checkout because the published site is not yet versioned.
+That command follows the repository's current default branch. The documentation
+navbar links to the published `main` and staging branch builds. Because those
+builds move with their branches, pin a tag or commit after `@` and retain the
+matching source checkout when exact reproducibility matters.
 
 Verify the installed distribution and import:
 

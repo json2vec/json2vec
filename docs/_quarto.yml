@@ -76,6 +76,12 @@ website:
           - href: case-studies/device-tenure.qmd
             text: Device Tenure
     right:
+      - text: Versions
+        menu:
+          - text: main
+            href: https://relflow.github.io/relflow/
+          - text: stage/0.2.0-rc.1
+            href: https://relflow.github.io/relflow/branches/stage/0.2.0-rc.1/
       - icon: github
         href: https://github.com/relflow/relflow
         aria-label: GitHub

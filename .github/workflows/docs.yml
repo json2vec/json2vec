@@ -1,28 +1,28 @@
-name: Build docs
+name: Build and deploy docs
 
 on:
   push:
     branches:
       - main
+      - stage/0.2.0-rc.1
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: github-pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'github-pages' }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    name: Render Quarto site
+  validate:
+    name: Render proposed docs
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out docs
+      - name: Check out proposed docs
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -41,27 +41,98 @@ jobs:
       - name: Render docs
         run: make render
 
-      - name: Configure GitHub Pages
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/configure-pages@v5
+  render:
+    name: Render ${{ matrix.name }} docs
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+      (github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/stage/0.2.0-rc.1'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep these entries aligned with the Versions menu in docs/_quarto.yml.
+          - name: main
+            ref: main
+            artifact: docs-main
+          - name: stage/0.2.0-rc.1
+            ref: stage/0.2.0-rc.1
+            artifact: docs-stage-0-2-0-rc-1
+
+    steps:
+      - name: Check out ${{ matrix.name }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync docs dependencies
+        run: uv sync --extra docs
+
+      - name: Render docs
+        run: make render
+
+      - name: Upload rendered docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: docs/site
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    name: Assemble Pages site
+    needs: render
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download main docs
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-main
+          path: site
+
+      - name: Download staging docs
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-stage-0-2-0-rc-1
+          path: site/branches/stage/0.2.0-rc.1
 
       - name: Upload Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/site
+          path: site
 
   deploy:
     name: Deploy to GitHub Pages
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: assemble
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
 
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4

@@ -1,0 +1,47 @@
+<svg host="65bd71144e" xmlns="http://www.w3.org/2000/svg" style="background: transparent; background-color: transparent; color-scheme: light dark;" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="260px" height="260px" viewBox="-0.5 -0.5 260 260" content="&lt;mxfile&gt;&lt;diagram id=&quot;tnBM1N_dV4-RGLIWvB9N&quot; name=&quot;Page-1&quot;&gt;7VhNj5swEP01SN1DI8BLPo4hze4eWmmlPfTsgANWDEbGSUh/fW2w+Y5CtQlVlOUQwRt7nHlvxh4wwCrKXhlMwl/UR8SwTT8zwA/DtsGzKX4lcCqAuQUKIGDYLyCrAj7wH6RANS/YYx+ljYGcUsJx0gQ9GsfI4w0MMkaPzWFbSpqrJjBQK5oV8OFBgjrDfmOfhyoKpzb6DeEg1CtbprJsoLcLGN3Har2YxqiwRFC7UUPTEPr02ICgDxOOD2hFCWUqBLjnVFrB2gArRikv7qJshYjkXPNZuHg5Yy0DYijmQyYAJdgBkr0iRf1tftIs5XEiOcEygHsMMUcfCfSk9SjSQmAhj4gyp5zRXRGZQHJegLvFhGiISD6/+5DtvhlieXe2NF3DXon7xdoFC/NJjqcx1+OFYZtfAofMU0lkzcVjN1gV/wExjrIapIJ/RTRCnJ3EEGV1nGKGSmBrpp6PVTrYUyVbWEuFEoRKv6B0XbEtbhTh/eQ/X+ZeRoJFwv6EG0TeaYo5prEwbSjnNBIc6AFLwas0cNoWJISJdBZlgazhyQam2JsIJnOxIOPLOMhXMycieOCi2K+QSlFdHyKf2iI3FTXzq1DUNEXNWE/XkcrWxae0svXuU9OqLNC6ViX4Ga1mX1p9QitgjqnV4l612hKcvPVupCPpNmuV2HxM2Szrsm6SRXnwV2dL5+y5VfYjXzcTZziskeT0cKQxhgiUp3+zm+nhTa3wTrH4J+dLa96iPqV75iE1q370X3LktByJJA4Q7zjKZSzDHqbsgN1TzBBtH7rcYcA0KXrBLc5kV/KvLcdLft2geOaXi8fuayWuUToDtrz7J9ha/D+GtY/HYhjMRmR4QDv8tf1bsytt/21H9mJ6q+3fdh6idqbt3Wk6Xu1MH4HhTnva8wZ4M4YfooVpM9z33nYrhsGQ9v/uGe6csGPmsP0QDE9H62HEY/WptjgYq+/kYP0X&lt;/diagram&gt;&lt;/mxfile&gt;">
+    <defs/>
+    <g>
+        <g>
+            <rect x="0" y="0" width="260" height="260" rx="46.8" ry="46.8" fill="#3b7a0b" stroke="none" pointer-events="all" style="fill: light-dark(rgb(59, 122, 11), rgb(158, 179, 144));"/>
+        </g>
+        <g>
+            <path d="M 145 115 C 145 96.2 155.55 78.99 172.3 70.45 C 189.05 61.91 209.18 63.5 224.39 74.55" fill="none" stroke="#000000" stroke-width="20" stroke-miterlimit="10" pointer-events="all" style="stroke: light-dark(rgb(0, 0, 0), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <path d="M 145 175 C 145 156.2 155.55 138.99 172.3 130.45 C 189.05 121.91 209.18 123.5 224.39 134.55" fill="none" stroke="#000000" stroke-width="20" stroke-miterlimit="10" pointer-events="all" style="stroke: light-dark(rgb(0, 0, 0), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <path d="M 15 155 C 15 136.2 25.55 118.99 42.3 110.45 C 59.05 101.91 79.18 103.5 94.39 114.55" fill="none" stroke="#000000" stroke-width="20" stroke-miterlimit="10" transform="translate(65,0)scale(-1,1)translate(-65,0)" pointer-events="all" style="stroke: light-dark(rgb(0, 0, 0), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <path d="M 145 205 L 145 175" fill="none" stroke="#000000" stroke-width="20" stroke-miterlimit="10" pointer-events="stroke" style="stroke: light-dark(rgb(0, 0, 0), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="35" cy="115" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="145" cy="115" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="145" cy="205" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <path d="M 115 205 L 115 121" fill="none" stroke="#000000" stroke-width="20" stroke-miterlimit="10" pointer-events="stroke" style="stroke: light-dark(rgb(0, 0, 0), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="115" cy="121" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="225" cy="75" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="225" cy="135" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="145" cy="175" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+        <g>
+            <ellipse cx="115" cy="205" rx="10" ry="10" fill="#ffffff" stroke="none" pointer-events="all" style="fill: light-dark(rgb(255, 255, 255), rgb(0, 33, 17));"/>
+        </g>
+    </g>
+</svg>

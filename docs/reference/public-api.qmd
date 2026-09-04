@@ -201,11 +201,12 @@ The second block is an inspection excerpt using a model built elsewhere.
 
 ## Compatibility
 
-The published site currently tracks the repository's `main` branch; versioned
-documentation snapshots are not retained. The documented Git installation also
-tracks that branch unless a revision is pinned. For reproducible work, install
-an explicit tag or commit and record that source revision, the distribution
-version, processor code, and dependency environment with every artifact:
+The published site keeps `main` at its stable root URL and exposes selected
+staging builds through the Versions menu. These builds move with their branches;
+they are not immutable snapshots. The documented Git installation also tracks
+`main` unless a revision is pinned. For reproducible work, install an explicit
+tag or commit and record that source revision, the distribution version,
+processor code, and dependency environment with every artifact:
 
 ```bash
 python -m pip install \

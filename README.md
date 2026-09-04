@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="RelFlow logo" src="https://raw.githubusercontent.com/relflow/relflow/main/docs/branding/logo.drawio.svg" width="144" />
+</p>
+
 <h1 align="center"><code>relflow</code></h1>
 
 <p align="center">
@@ -285,9 +289,9 @@ is directly from the GitHub repository:
 python -m pip install "relflow @ git+https://github.com/relflow/relflow.git"
 ```
 
-This follows the repository's default branch. Pin a tag or commit in the Git
-URL for reproducible environments; the published documentation currently
-tracks `main` and does not retain versioned snapshots.
+This follows the repository's default branch. The documentation Versions menu
+links to the published `main` and staging builds. Those builds move with their
+branches, so pin a tag or commit in the Git URL for reproducible environments.
 
 Install optional functionality from the same source:
 
