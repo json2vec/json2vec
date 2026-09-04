@@ -35,6 +35,7 @@ body = rf.Text(
     "body",
     max_length=128,
     encoder_pooling="mean",
+    jitter=rf.Jitter(add=0.05),
 )
 
 body
@@ -164,9 +165,33 @@ output.
 | `encoder_batch_size` | `32` | Maximum number of length-grouped, flattened text values per Hugging Face forward pass. |
 | `encoder_pooling` | `"cls"` | Pooling mode: `"cls"`, `"mean"`, or `"pooler"`. |
 | `objective` | `"l2"` | Hidden-embedding reconstruction objective: `"l1"` or `"l2"`. |
+| `jitter` | `rf.Jitter()` | Training-only affine noise applied to the frozen encoder's pooled continuous embedding. |
 
 `encoder_pooling="pooler"` requires the selected Hugging Face model to expose
 `pooler_output`. The `"cls"` and `"mean"` modes require `last_hidden_state`.
+
+## Jitter
+
+`Text` applies configured jitter to the pooled, continuous Hugging Face
+embedding immediately before RelFlow's trainable projection. It never perturbs
+source strings, token IDs, attention masks, or the frozen encoder itself.
+
+```python
+message = rf.Text(
+    jitter=rf.Jitter(add=0.05, multiply=0.02),
+)
+```
+
+Jitter runs only during training and only on finite coordinates belonging to
+valued text. Evaluation and prediction are deterministic. Reconstruction
+targets are separately encoded from pristine text, so jitter limits the input
+signal without corrupting the target embedding.
+
+Text has neither a continuous source value nor a separate learned normalization
+boundary: its first continuous representation is the frozen encoder embedding.
+Both values of `jitter.normalize` therefore use this same boundary. The option
+changes placement only for consumers, such as `Number`, that have distinct raw
+and normalized representations.
 
 ## Reconstruction Behavior
 

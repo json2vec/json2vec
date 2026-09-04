@@ -112,7 +112,7 @@ arrive.
 
 ## The Canonical Payload
 
-A decoded leaf combines shared fields with its plugin-owned output:
+A decoded leaf combines shared fields with its extension-owned output:
 
 ```text
 record/fraud: struct<
@@ -132,7 +132,7 @@ record/fraud: struct<
 | Field | Meaning |
 | --- | --- |
 | `state` | Softmax probabilities for RelFlow's five value states |
-| plugin fields such as `content` or `cluster` | Datatype-specific prediction |
+| extension fields such as `content` or `cluster` | Datatype-specific prediction |
 | `inferred` | `true` where prediction input was masked |
 | `embedding` | L2-normalized representation requested with `embed=True` |
 
@@ -149,7 +149,7 @@ not.
 
 RelFlow does not echo every visible field. Public prediction output includes:
 
-- configured deterministic reconstructions whose plugin declares Arrow output;
+- configured deterministic reconstructions whose extension declares Arrow output;
 - configured node embeddings;
 - both at the same address when a decoded field also has `embed=True`.
 
@@ -164,9 +164,9 @@ than an empty struct, which Parquet cannot persist. Likewise, `retain=()` makes
 
 ## Datatype-Specific Fields
 
-Plugins own their exact Arrow fragment:
+Extensions own their exact Arrow fragment:
 
-| Datatype | Plugin-owned fields |
+| Datatype | Extension-owned fields |
 | --- | --- |
 | `Boolean` | `content: struct<probability: float32>` |
 | `Number` | `content: float64` |

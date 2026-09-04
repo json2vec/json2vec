@@ -23,7 +23,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Plugin = Plugin(name="hash", types=(bool, int, float, str, bytes))
+hashable: Extension = Extension(name="hash", types=(bool, int, float, str, bytes))
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
@@ -302,13 +302,3 @@ def loss(
     )
 
     return loss
-
-
-@hashable.register
-def output(module: Model, address: Address) -> None:
-    return None
-
-
-@hashable.register
-def write(module: Model, prediction: Prediction, datatype: None) -> None:
-    return None

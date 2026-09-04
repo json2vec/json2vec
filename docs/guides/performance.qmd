@@ -142,7 +142,7 @@ preprocessing, explicit queries, tensorization, or I/O.
 RelFlow eagerly coalesces every encoded address for a processed Arrow batch
 before any datatype codec runs. Fields do not each recursively walk Python
 records. The shared path owns missing versus null, branch overflow, padding,
-final `Tokens` state, and dense placement. Each plugin
+final `Tokens` state, and dense placement. Each extension
 enforces its declared Arrow terminal compatibility families; the ragged core
 does not name concrete leaf types. Datatype codecs still perform inherently
 field-specific work such as vocabulary updates, date parsing, hashing, or

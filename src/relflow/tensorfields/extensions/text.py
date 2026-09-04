@@ -13,6 +13,7 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
+from relflow.helpers import Jitter
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -20,7 +21,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-text: Plugin = Plugin(name="text", types=(str,))
+text: Extension = Extension(name="text", types=(str,))
 text.callback(CounterUpdateCallback)
 
 INPUT_IDS = "input_ids"
@@ -133,6 +134,7 @@ class Request(RequestBase):
     encoder_batch_size: Annotated[int, pydantic.Field(gt=0, default=32)] = 32
     encoder_pooling: Pooling = Pooling.cls
     objective: Objective = Objective.l2
+    jitter: Jitter = pydantic.Field(default_factory=Jitter)
 
 
 @text.register
@@ -238,6 +240,7 @@ class Embedder(EmbedderBase):
         self.__dict__["_cached_model"] = cached_model
         self.hidden_size: int = cached_model.hidden_size
         self.request = request
+        self.jitter: Jitter = request.jitter
         self.padding_side: str = getattr(CachedModel.get_tokenizer(request.model), "padding_side", "right")
 
         self.embeddings = torch.nn.Embedding(
@@ -352,6 +355,9 @@ class Embedder(EmbedderBase):
         valued = state.eq(Tokens.valued.value).unsqueeze(-1)
         encoded = self.encode(content=inputs.content, state=inputs.state)
         encoded = encoded.reshape(D, self.hidden_size)
+        if self.training:
+            eligible = valued & torch.isfinite(encoded)
+            encoded = self.jitter.apply(encoded, eligible)
         projected = self.linear(encoded) * valued
         embeddings = self.embeddings(state)
 
@@ -469,13 +475,3 @@ def loss(
     )
 
     return loss
-
-
-@text.register
-def output(module: Model, address: Address) -> None:
-    return None
-
-
-@text.register
-def write(module: Model, prediction: Prediction, datatype: None) -> None:
-    return None

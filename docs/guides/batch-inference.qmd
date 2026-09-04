@@ -233,7 +233,7 @@ Schema drift commonly comes from a postprocessor that:
 - changes integer or string width between batches;
 - derives dynamic struct fields from observed labels.
 
-Make the output schema independent of batch values. Built-in plugin writers do
+Make the output schema independent of batch values. Built-in extension writers do
 this by declaring their Arrow type before the first prediction batch.
 
 ## Operational Checklist

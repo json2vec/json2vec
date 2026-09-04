@@ -10,7 +10,7 @@ from relflow.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
 )
 
 if TYPE_CHECKING:
@@ -23,14 +23,14 @@ class NodeModule(torch.nn.Module):
 
         if address in schema.requests:
             request: Node = schema.requests[address]
-            plugin: Plugin = TENSORFIELDS[request.type]
-            self.embedder: EmbedderBase = plugin.Embedder(schema=schema, address=address)
+            extension: Extension = TENSORFIELDS[request.type]
+            self.embedder: EmbedderBase = extension.Embedder(schema=schema, address=address)
             if address in schema.objectives or address in schema.embed:
-                self.decoder: DecoderBase = plugin.Decoder(schema=schema, address=address)
+                self.decoder: DecoderBase = extension.Decoder(schema=schema, address=address)
             if address in schema.objectives:
-                loss = plugin.loss
+                loss = extension.loss
                 if not callable(loss):
-                    raise TypeError(f"plugin '{plugin.name}' loss must be callable for objective '{address}'")
+                    raise TypeError(f"extension '{extension.name}' loss must be callable for objective '{address}'")
 
         elif address in schema.branches:
             self.encoder: BranchEncoder = BranchEncoder(schema=schema, address=address)

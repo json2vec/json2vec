@@ -29,6 +29,8 @@ website:
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
+          - href: core-concepts/jitter.qmd
+            text: Jitter & Input Noise
           - href: guides/dynamic-mask-preprocessors.qmd
             text: Mask Preprocessor Recipes
       - text: Train & Evaluate
@@ -113,6 +115,8 @@ website:
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
+          - href: core-concepts/jitter.qmd
+            text: Jitter & Input Noise
           - href: guides/dynamic-mask-preprocessors.qmd
             text: Mask Preprocessor Recipes
       - section: Data Types

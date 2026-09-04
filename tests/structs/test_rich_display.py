@@ -26,7 +26,7 @@ def test_leaf_rich_display_uses_schema_summary() -> None:
     assert "amount [number] active" in rendered
     assert "query=" not in rendered
     assert "pooling=query weight=1 n_heads=4 n_linear=1" in rendered
-    assert "jitter=0 n_bands=8 offset=4 objective=mae" in rendered
+    assert "jitter=Jitter(add=0.0, multiply=0.0, normalize=True) n_bands=8 offset=4 objective=mae" in rendered
     assert "model_config" not in rendered
     assert "model_fields_set" not in rendered
 

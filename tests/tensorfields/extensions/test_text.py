@@ -7,6 +7,7 @@ import torch
 from tensordict import TensorDict
 
 from relflow.data.ragged import coalesce
+from relflow.helpers import Jitter
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -21,7 +22,6 @@ from relflow.tensorfields.extensions.text import (
     Embedder,
     TensorField,
     loss,
-    write,
 )
 from tests.arrow import batch as arrow_batch
 from tests.tensorfields.helpers import tensorize
@@ -35,6 +35,7 @@ def _structure_payload(
     encoder_pooling: str = "cls",
     encoder_batch_size: int = 2,
     mask: bool | Mask = False,
+    jitter: Jitter | dict[str, object] | None = None,
 ) -> dict:
     field: dict = {
         "name": "body",
@@ -46,6 +47,8 @@ def _structure_payload(
         "objective": objective,
         "mask": mask,
     }
+    if jitter is not None:
+        field["jitter"] = jitter
     return {
         "d_model": 16,
         "fields": {
@@ -205,6 +208,19 @@ def test_text_request_strips_model():
     assert request.model == "bert-base-uncased"
 
 
+def test_text_request_hydrates_jitter_from_mapping():
+    structure = Schema.model_validate(_structure_payload(jitter={"add": 0.2, "multiply": 0.1}))
+
+    assert structure.requests[ADDRESS].jitter == Jitter(add=0.2, multiply=0.1)
+
+
+@pytest.mark.parametrize("normalize", [True, False])
+def test_text_accepts_jitter_normalization_modes(normalize: bool):
+    structure = Schema.model_validate(_structure_payload(jitter=Jitter(add=0.2, normalize=normalize)))
+
+    assert structure.requests[ADDRESS].jitter == Jitter(add=0.2, normalize=normalize)
+
+
 def test_text_raises_when_transformers_is_missing(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(CachedModel, "_models", {})
     monkeypatch.delitem(sys.modules, "transformers", raising=False)
@@ -327,6 +343,53 @@ def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):
     )
     assert prediction.payload[TensorKey.state].shape == (2, 2, len(Tokens))
     assert prediction.payload[TensorKey.content].shape == (2, 2, 4)
+
+
+@pytest.mark.parametrize("normalize", [True, False])
+def test_text_jitters_only_training_valued_finite_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
+    normalize: bool,
+):
+    _patch_hf(monkeypatch)
+
+    payload = _structure_payload(jitter=Jitter(add=0.5, normalize=normalize))
+    payload["d_model"] = 4
+    structure = Schema.model_validate(payload)
+    field = _new_tensorfield(
+        values=[[["alpha", None]], [["gamma", "delta"]]],
+        schema=structure,
+        strata=Strata.train,
+    )
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    embedder.linear = torch.nn.Identity()
+    with torch.no_grad():
+        embedder.embeddings.weight.zero_()
+
+    encoded = torch.arange(field.state.numel() * embedder.hidden_size, dtype=torch.float32).reshape(
+        *field.state.shape, embedder.hidden_size
+    )
+    encoded[0, 0, 0, 2] = torch.nan
+    monkeypatch.setattr(embedder, "encode", lambda content, state: encoded.clone())
+
+    draws = iter((torch.ones(11), torch.zeros(11)))
+    monkeypatch.setattr(torch, "rand_like", lambda values: next(draws).to(values))
+
+    embedder.train()
+    training = embedder.embed(field).payload
+    expected = encoded.clone()
+    valued = field.state.eq(Tokens.valued.value).unsqueeze(-1).expand_as(expected)
+    expected[valued & torch.isfinite(expected)] += 0.5
+    expected[~valued] = 0.0
+
+    assert torch.equal(torch.isnan(training), torch.isnan(expected))
+    assert torch.allclose(torch.nan_to_num(training), torch.nan_to_num(expected))
+
+    embedder.eval()
+    evaluation = embedder.embed(field).payload
+    pristine = encoded.clone()
+    pristine[~valued] = 0.0
+    assert torch.equal(torch.isnan(evaluation), torch.isnan(pristine))
+    assert torch.allclose(torch.nan_to_num(evaluation), torch.nan_to_num(pristine))
 
 
 def test_text_forward_never_reads_reconstruction_targets(
@@ -537,6 +600,49 @@ class _DummyModule:
         return value
 
 
+def test_text_loss_encodes_pristine_targets_without_jitter(monkeypatch: pytest.MonkeyPatch):
+    _patch_hf(monkeypatch)
+
+    structure = Schema.model_validate(
+        _structure_payload(
+            jitter=Jitter(add=0.5),
+            mask=Mask(reconstruct=True),
+        )
+    )
+    field = _new_tensorfield(values=_values(), schema=structure, strata=Strata.train)
+    embedder = Embedder(schema=structure, address=ADDRESS)
+    pristine = torch.arange(field.state.numel() * embedder.hidden_size, dtype=torch.float32).reshape(
+        *field.state.shape,
+        embedder.hidden_size,
+    )
+
+    monkeypatch.setattr(embedder, "encode", lambda content, state: pristine.clone())
+
+    def reject(self: Jitter, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        pytest.fail("Text reconstruction targets must bypass Jitter.apply")
+
+    monkeypatch.setattr(Jitter, "apply", reject)
+
+    state_logits = torch.full((*field.targets[TensorKey.state].shape, len(Tokens)), -50.0)
+    state_logits[..., Tokens.valued.value] = 50.0
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: state_logits,
+                TensorKey.content: torch.zeros_like(pristine),
+            },
+            batch_size=[field.state.shape[0]],
+        ),
+    )
+    module = _DummyModule(structure, embedder, Decoder(schema=structure, address=ADDRESS))
+
+    output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
+
+    assert torch.isfinite(output)
+    assert torch.equal(field.targets[TensorKey.embedding], pristine)
+
+
 @pytest.mark.parametrize(("objective", "expected"), [("l1", 2.0), ("l2", 4.0)])
 def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch, objective: str, expected: float):
     _patch_hf(monkeypatch)
@@ -571,22 +677,3 @@ def test_text_loss_reconstructs_frozen_embedding(monkeypatch: pytest.MonkeyPatch
     module = _DummyModule(structure, embedder, decoder)
     output = loss(module=module, prediction=prediction, batch=field, strata=Strata.train)
     assert torch.isclose(output, torch.tensor(expected, dtype=output.dtype), atol=1e-3)
-
-
-def test_text_write_returns_no_payload(monkeypatch: pytest.MonkeyPatch):
-    _patch_hf(monkeypatch)
-
-    structure = Schema.model_validate(_structure_payload())
-    prediction = Prediction(
-        address=ADDRESS,
-        payload=TensorDict(
-            {
-                TensorKey.state: torch.zeros(2, 2, len(Tokens)),
-                TensorKey.content: torch.zeros(2, 2, 4),
-            },
-            batch_size=[2],
-        ),
-    )
-
-    output = write(module=_DummyModule(structure, None, None), prediction=prediction, datatype=None)
-    assert output is None

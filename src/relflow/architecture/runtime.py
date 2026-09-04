@@ -28,7 +28,7 @@ from relflow.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
 )
@@ -71,7 +71,7 @@ class OutputEntry:
     decoded: pa.StructType | None
     writer: Callable[..., pa.StructArray | None] | None
     embed: bool
-    plugin: str | None
+    extension: str | None
     coordinate: pa.StructType | None
     output: pa.DataType | None
 
@@ -181,20 +181,20 @@ def plan(module: Model, retain: Retain = (), *, refresh: bool = False) -> Output
         visited.add(address)
         decoded: pa.StructType | None = None
         writer: Callable[..., pa.StructArray | None] | None = None
-        plugin_name: str | None = None
+        extension_name: str | None = None
         if address in module.schema.requests:
-            plugin = TENSORFIELDS[module.schema.requests[address].type]
-            plugin_name = plugin.name
-            declared = plugin.output(module=module, address=address)
+            extension = TENSORFIELDS[module.schema.requests[address].type]
+            extension_name = extension.name
+            declared = extension.output(module=module, address=address)
             if declared is not None and not isinstance(declared, pa.StructType):
-                raise TypeError(f"plugin output for {address!s} must return a pyarrow StructType or None")
+                raise TypeError(f"extension output for {address!s} must return a pyarrow StructType or None")
             if declared is not None:
                 conflicts = RESERVED.intersection(field.name for field in declared)
                 if conflicts:
                     names = ", ".join(sorted(conflicts))
-                    raise ValueError(f"plugin output for {address!s} uses reserved field(s): {names}")
+                    raise ValueError(f"extension output for {address!s} uses reserved field(s): {names}")
                 decoded = declared
-                writer = plugin.write
+                writer = extension.write
 
         coordinate_fields: list[pa.Field] = []
         if decoded is not None:
@@ -223,7 +223,7 @@ def plan(module: Model, retain: Retain = (), *, refresh: bool = False) -> Output
                 decoded=decoded,
                 writer=writer,
                 embed=address in module.schema.embed,
-                plugin=plugin_name,
+                extension=extension_name,
                 coordinate=coordinate_type,
                 output=output_type,
             )
@@ -262,12 +262,12 @@ def coordinate(module: Model, entry: OutputEntry, prediction: Prediction, rows: 
 
         if entry.decoded is not None:
             if entry.writer is None:
-                raise RuntimeError(f"compiled output for {address!s} has no plugin writer")
+                raise RuntimeError(f"compiled output for {address!s} has no extension writer")
             written = entry.writer(module=module, prediction=prediction, datatype=entry.decoded)
             if not isinstance(written, pa.StructArray):
-                raise TypeError(f"plugin write for {address!s} must return a pyarrow StructArray")
+                raise TypeError(f"extension write for {address!s} must return a pyarrow StructArray")
             if written.type != entry.decoded:
-                raise TypeError(f"plugin write for {address!s} returned {written.type}; expected {entry.decoded}")
+                raise TypeError(f"extension write for {address!s} returned {written.type}; expected {entry.decoded}")
 
             state_values = state(state_tensor)
             fields.append(pa.field(TensorKey.state.name, state_values.type, nullable=False))
@@ -499,7 +499,7 @@ class ModelRuntime:
                     if torch.is_tensor(value) and value.requires_grad
                 )
             # Decoder participation is coordinated across ranks in forward.
-            # Plugin losses and scalar metrics remain local to ranks carrying
+            # Extension losses and scalar metrics remain local to ranks carrying
             # selected targets; the zero-loss path below anchors every module
             # into backward when only a peer has an objective.
             if not inputs[prediction.address].trainable.any():
@@ -509,8 +509,8 @@ class ModelRuntime:
 
             address = Address(str(prediction.address))
             request: RequestBase = module.schema.requests[address]
-            plugin: Plugin = TENSORFIELDS[request.type]
-            loss_fn = cast(Callable[..., torch.Tensor], plugin.loss)
+            extension: Extension = TENSORFIELDS[request.type]
+            loss_fn = cast(Callable[..., torch.Tensor], extension.loss)
             loss = loss_fn(module=module, prediction=prediction, batch=inputs[address], strata=strata)
             losses.append(loss * torch.tensor(request.weight))
 

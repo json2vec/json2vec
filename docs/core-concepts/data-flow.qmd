@@ -20,7 +20,7 @@ source
   → mask selection + input/target projection
   → datatype codecs
   → model
-  → plugin Arrow writers
+  → extension Arrow writers
   → rf.Batch(prediction table, same identity)
   → postprocessing
   → Parquet or explicit JSON conversion
@@ -121,7 +121,7 @@ Uniform mask selection uses the same identity discipline with a separate
 domain. It is keyed by seed, stratum, training epoch, schema address, normalized
 policy, identity, and nested slot, so rebatching does not change the selected
 logical coordinates. Datatype-specific unavailable simulation keeps its own
-plugin-defined random contract.
+extension-defined random contract.
 
 ## 5. Rebatch For Model Memory
 
@@ -170,7 +170,7 @@ The coalescing phase prepares every selected leaf for its datatype codec:
    Arrow-backed `RaggedField`;
 5. resolve leaf and inherited branch masks against owner coordinates;
 6. validate and canonicalize the pristine Arrow values once with the owning
-   plugin;
+   extension;
 7. split the field into input and target projections, then invoke the datatype
    codec once for the complete field batch.
 
@@ -179,13 +179,13 @@ type, and model address. Branch layouts carry retained records, shape, and
 dense placement; a sibling leaf does not repeat its ancestors' structural work.
 
 `RaggedField` is a structural carrier, not a catalogue of allowed datatypes.
-Each tensorfield plugin registers the raw atom compatibility families it
-accepts. This keeps shared nesting code extensible: adding a plugin does not
+Each tensorfield extension registers the raw atom compatibility families it
+accepts. This keeps shared nesting code extensible: adding an extension does not
 require editing a central hardcoded type table.
 
 ## 8. Encode Value And State
 
-Datatype plugins convert their Arrow values to tensor content. RelFlow tracks a
+Datatype extensions convert their Arrow values to tensor content. RelFlow tracks a
 separate state channel for each modeled coordinate:
 
 | State | Meaning |
@@ -219,7 +219,7 @@ while Lightning transfers tensors to the accelerator.
 
 ## 10. Write Typed Arrow Output
 
-Every plugin declares its stable Arrow output type and writes one flat Arrow
+Every extension declares its stable Arrow output type and writes one flat Arrow
 struct per model coordinate. The shared runtime adds state probabilities,
 `inferred`, embeddings, and configured repeated-axis wrappers.
 
@@ -285,8 +285,8 @@ chooses to expose them.
 | Preprocessor | yes, with lineage methods | `rf.Batch` |
 | Sampling/shuffling | yes | `rf.Batch` |
 | Query/coalescing | no | Arrow arrays with NumPy offset/placement geometry |
-| Plugin encoding | no | tensors internally |
-| Plugin writing | no | Arrow arrays |
+| Extension encoding | no | tensors internally |
+| Extension writing | no | Arrow arrays |
 | Postprocessor | no | `rf.Batch` |
 | Writer | no | Parquet |
 | JSON transport | no | terminal Python objects |

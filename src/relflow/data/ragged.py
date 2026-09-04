@@ -388,7 +388,7 @@ def descend(layout: Layout, branch: Branch, address: Address) -> Layout:
 
 
 def vacancy(layout: Layout) -> RaggedField:
-    """Represent a source-less leaf without inventing a plugin datatype."""
+    """Represent a source-less leaf without inventing an extension datatype."""
 
     return RaggedField(
         values=pa.nulls(0),
@@ -399,7 +399,7 @@ def vacancy(layout: Layout) -> RaggedField:
 
 
 def pristine(layout: Layout, request: Any) -> RaggedField:
-    """Project one untouched leaf while preserving plugin-owned Arrow values."""
+    """Project one untouched leaf while preserving extension-owned Arrow values."""
 
     expression = request.query or member(request.name)
     selected = query(layout.records, expression, address=str(request.address))

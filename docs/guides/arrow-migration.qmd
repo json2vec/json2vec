@@ -264,7 +264,7 @@ silently weakening the ordering contract.
 Uniform mask selection is also keyed by identity, schema address, normalized
 policy, stratum, and training epoch. It therefore remains stable across source
 chunks and model rebatching. Datatype-specific unavailable simulation retains
-its own plugin-defined random contract.
+its own extension-defined random contract.
 
 ## 5. Migrate Prediction Consumers
 

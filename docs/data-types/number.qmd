@@ -33,7 +33,7 @@ import relflow as rf
 
 amount = rf.Number(
     "amount",
-    jitter=0.02,
+    jitter=rf.Jitter(add=0.02),
     objective="huber",
     mask=rf.Mask(rate=0.10, reconstruct=True),
 )
@@ -55,6 +55,169 @@ the field inside a `Branch`.
 
 Numeric content is normalized online by the embedder before Fourier features are
 computed, so models do not require pre-normalized inputs.
+
+## Jitter
+
+`rf.Jitter` is a shared helper for continuous tensor representations. It owns a
+frozen Pydantic configuration and exposes the vectorized Torch operation as
+`jitter.apply(inputs, mask)`. A consuming tensorfield owns the surrounding
+policy: when jitter is active, which coordinates are eligible, and where the
+operation sits relative to that field's normalization.
+
+`Number` uses jitter during training on finite, valued inputs and places it
+before or after its online normalizer as described below. `Vector`, `DateParts`,
+and `Text` use the same helper at their own continuous representation
+boundaries. See [Jitter And Input Noise](../core-concepts/jitter.qmd) for their
+shared lifecycle and a field-by-field comparison.
+
+For `Number`, jitter is useful when exact measurements should not be treated as
+exact, when small input changes should not move the representation sharply, or
+when noisy visible context should regularize a reconstruction objective. Its
+explicit fields replace an ambiguous scalar noise setting; create a new
+configuration rather than mutating one in place.
+
+Pass the model explicitly: `jitter=rf.Jitter(...)`. Scalar values such as
+`jitter=0.05` are invalid in this breaking API because they do not say whether
+the magnitude is additive, multiplicative, raw, or normalized.
+
+Configure additive noise, multiplicative noise, or both:
+
+```python
+amount = rf.Number(
+    jitter=rf.Jitter(
+        add=0.05,
+        multiply=0.10,
+        normalize=True,
+    )
+)
+```
+
+When both components are enabled, RelFlow draws four independent values
+$U_1, U_2, U_3, U_4 \sim \operatorname{Uniform}(0, 1)$ for an input value $v$
+and applies:
+
+$$
+J(v) = v\left[1 + m(U_1-U_2)\right] + a(U_3-U_4)
+$$
+
+where $m$ is `multiply` and $a$ is `add`. Each difference of uniforms has a
+triangular distribution on $[-1, 1]`: zero is most likely, the extremes are
+least likely, and the expected perturbation is zero. Additive and
+multiplicative noise use independent draws. Each enabled component draws its
+own pair; a disabled component draws nothing.
+
+This gives the controls concrete bounds:
+
+- `add=a` contributes a value in $[-a, a]$.
+- `multiply=m` scales the value by a factor in $[1-m, 1+m]$.
+- `add=0` or `multiply=0` disables that component.
+- `multiply > 1` permits a negative factor and can therefore reverse a value's
+  sign.
+
+Both magnitudes must be non-negative. `Jitter.apply` does not clip values to an
+application domain, so choose bounds that respect constraints such as
+non-negative prices or percentages. Number's later Fourier-safety clamp only
+protects numerical computation; it is not domain validation.
+
+### Jitter order
+
+`normalize` controls where the affine perturbation is placed relative to the
+Number normalizer. Let $N$ denote normalization with the field's learned mean
+and variance:
+
+| Configuration | Training-time input to the Fourier features | Meaning of `add` |
+| --- | --- | --- |
+| `normalize=True` | $J(N(x))$ | Normalized units, independent of the raw feature scale |
+| `normalize=False` | $N(J(x))$ | Raw source units |
+
+The default is `normalize=True`. It is the scale-independent choice when the
+source distribution or units are unknown. For example:
+
+```python
+temperature = rf.Number(
+    jitter=rf.Jitter(add=0.05),
+)
+```
+
+The maximum additive displacement is `0.05` normalized units regardless of
+whether the source happens to be measured in Celsius, millikelvin, or another
+scale.
+
+Use `normalize=False` when the source units carry the intended noise model. A
+sensor accurate to half a degree can be represented directly:
+
+```python
+temperature = rf.Number(
+    jitter=rf.Jitter(add=0.5, normalize=False),
+)
+```
+
+Multiplication before normalization is useful when uncertainty is relative to
+the raw magnitude. Here the triangular scaling factor lies between `0.90` and
+`1.10`, with factors near `1.0` most likely:
+
+```python
+revenue = rf.Number(
+    jitter=rf.Jitter(multiply=0.10, normalize=False),
+)
+```
+
+Additive and multiplicative components compose in one affine transform. For
+example, a measurement can have both proportional error and fixed instrument
+error:
+
+```python
+weight = rf.Number(
+    jitter=rf.Jitter(
+        multiply=0.02,
+        add=0.1,
+        normalize=False,
+    )
+)
+```
+
+With `normalize=True`, multiplication acts on the centered, normalized value.
+It has little effect near the learned mean, where the normalized value is near
+zero. This is sometimes useful, but additive normalized jitter is the simpler
+default when the input distribution is unknown.
+
+### Choosing a configuration
+
+| Situation | Starting configuration | Reason |
+| --- | --- | --- |
+| Distribution and units are unknown | `rf.Jitter(add=0.05)` | A scale-independent perturbation with an explicit normalized bound |
+| Error is a percentage of a positive raw value | `rf.Jitter(multiply=0.05, normalize=False)` | Applies a triangular factor between `0.95` and `1.05` before normalization |
+| Error has a known tolerance in source units | `rf.Jitter(add=tolerance, normalize=False)` | Expresses the perturbation in the same units as the source |
+| Error has proportional and fixed components | `rf.Jitter(multiply=relative, add=absolute, normalize=False)` | Models both components with independent noise |
+| Exact values should be preserved | Omit `jitter` or use `rf.Jitter()` | Both magnitudes are zero |
+
+These are starting points, not universal calibration values. Compare validation
+metrics and domain-specific errors at several magnitudes. Too much jitter can
+erase distinctions the model needs, while a very small amount may have no
+measurable regularizing effect.
+
+### Lifecycle and state
+
+For `Number`, jitter is active only while the model is in training mode.
+Evaluation and prediction use the unperturbed value. It is applied only to
+finite, valued coordinates; null, padded, masked, and non-finite coordinates do
+not receive noise. These lifecycle and eligibility rules belong to `Number`,
+not to the shared helper; another tensorfield may define the appropriate rules
+for its own representation.
+
+The normalizer always learns from the pristine finite training values, even
+when `normalize=False` places jitter before normalization in the model path.
+Reconstruction targets are pristine as well. A coordinate hidden for
+reconstruction has masked input state and is not jittered; still-visible Number
+context can be jittered without changing the statistics used to scale it or
+the values a decoder is asked to reconstruct.
+
+Noise comes from the active Torch random-number generator. Seeding Torch can
+make runs repeatable when the device, batch layout, execution order, and
+distributed topology are held fixed. Jitter is not keyed to `Batch` row
+identity, however, so changing batching, devices, or rank count can assign
+different draws to the same observation. Do not rely on exact jitter samples as
+a persisted data transformation.
 
 Date-derived numbers are appropriate when elapsed time is the signal. For
 example, compute `days_since_transaction` in preprocessing when risk depends on
@@ -80,13 +243,21 @@ Common number fields include:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `jitter` | `0.0` | Adds training-time triangular noise after normalization. The noise is the difference of two independent uniforms, scaled to the interval `[-jitter, jitter]`, with its peak at zero. Must be `>= 0.0`. |
+| `jitter` | `rf.Jitter()` | Training-only affine triangular noise. Configure `add`, `multiply`, and whether noise is applied after or before normalization. |
 | `n_bands` | `8` | Advanced: negative exponent bound for log-spaced Fourier frequencies. Must be positive. |
 | `offset` | `4` | Advanced: positive exponent bound for log-spaced Fourier frequencies. Must be positive. |
 | `alpha` | `None` | Optional exponential update rate for the online normalizer. Must be strictly between `0` and `1`; `None` uses cumulative statistics. |
 | `objective` | `"mae"` | Content reconstruction objective: `"mae"`, `"mse"`, or `"huber"`. |
 
 The total number of Fourier frequencies is `n_bands + offset + 1`.
+
+`rf.Jitter` has three fields:
+
+| Field | Default | Contract |
+| --- | --- | --- |
+| `add` | `0.0` | Maximum absolute additive perturbation; must be `>= 0.0`. |
+| `multiply` | `0.0` | Maximum multiplicative-factor deviation from `1.0`; must be `>= 0.0`. |
+| `normalize` | `True` | Apply jitter after normalization when true, or to raw values before normalization when false. |
 
 ## Shared Preprocessing State
 
@@ -96,6 +267,9 @@ field updates those statistics before mask projection and model computation.
 Masking therefore changes what the encoder sees without biasing the normalizer.
 During validation, test, and prediction, the learned normalization values are
 reused without updating them.
+
+Jitter does not change this contract. Statistics are collected from pristine
+values and never from their noisy training-time copies.
 
 With `alpha=None`, updates are cumulative over observed training values. With an
 `alpha` value, the normalizer uses exponential moving updates. The normalization

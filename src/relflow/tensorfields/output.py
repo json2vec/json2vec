@@ -1,7 +1,7 @@
-"""Arrow builders shared by tensorfield output plugins and the model runtime.
+"""Arrow builders shared by tensorfield output extensions and the model runtime.
 
-Plugins return flat coordinate arrays. The runtime later wraps model axes with
-``shape`` and combines plugin fragments with ``state``, ``inferred``, and
+Extensions return flat coordinate arrays. The runtime later wraps model axes with
+``shape`` and combines extension fragments with ``state``, ``inferred``, and
 ``embedding``. None of these helpers materialize prediction rows as Python
 objects.
 """

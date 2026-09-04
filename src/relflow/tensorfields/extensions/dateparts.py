@@ -18,6 +18,7 @@ from tensordict import TensorDict, tensorclass
 
 from relflow.data.arrow import variants
 from relflow.data.ragged import RaggedField
+from relflow.helpers import Jitter
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -25,7 +26,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -167,7 +168,7 @@ def _(arr: np.ndarray) -> np.ndarray:
     return (np.sin(radians), np.cos(radians))
 
 
-dateparts: Plugin = Plugin(name="dateparts", types=(str | date | datetime,))
+dateparts: Extension = Extension(name="dateparts", types=(str | date | datetime,))
 
 
 def parse(
@@ -213,6 +214,7 @@ class Request(RequestBase):
     type: Literal["dateparts"] = "dateparts"
     dateparts: list[DatePart]
     pattern: Annotated[str | None, pydantic.Field(default=None)] = None
+    jitter: Jitter = pydantic.Field(default_factory=Jitter)
 
     @pydantic.field_validator("dateparts", mode="before", check_fields=False)
     @classmethod
@@ -348,6 +350,7 @@ class Embedder(EmbedderBase):
         request = schema.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
+        self.jitter: Jitter = request.jitter
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
@@ -364,11 +367,17 @@ class Embedder(EmbedderBase):
         N, *dims = inputs.state.shape
         D = math.prod(tuple([N, *dims]))
 
-        embeddings: torch.Tensor = self.embeddings(inputs.state.reshape(D))
+        state = inputs.state.reshape(D)
+        valued = state.eq(Tokens.valued).unsqueeze(-1)
+        embeddings: torch.Tensor = self.embeddings(state)
 
         for datepart in self.dateparts:
             projection: torch.nn.Linear = self.dateparts[datepart]
-            embeddings = embeddings + projection(inputs.content[datepart].reshape(D, 2))
+            content = inputs.content[datepart].reshape(D, 2)
+            if self.training:
+                eligible = valued & torch.isfinite(content)
+                content = self.jitter.apply(content, eligible)
+            embeddings = embeddings + projection(content)
 
         return Parcel(
             payload=embeddings.reshape(N, *dims, -1),
@@ -463,13 +472,3 @@ def loss(
     loss += torch.stack(losses).mean()
 
     return loss
-
-
-@dateparts.register
-def output(module: Model, address: Address) -> None:
-    return None
-
-
-@dateparts.register
-def write(module: Model, prediction: Prediction, datatype: None) -> None:
-    return None

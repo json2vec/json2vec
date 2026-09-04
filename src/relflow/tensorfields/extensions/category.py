@@ -20,7 +20,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
-category: Plugin = Plugin(name="category", types=(bool, int, float, str, bytes))
+category: Extension = Extension(name="category", types=(bool, int, float, str, bytes))
 
 category.callback(VocabularySyncCallback, CounterUpdateCallback)
 

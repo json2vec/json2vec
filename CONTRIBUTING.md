@@ -98,44 +98,44 @@ particular datatype.
 
 - Shared data code may understand Arrow containers, validity, offsets, shape,
   branch overflow, and lineage.
-- A tensorfield plugin owns accepted Arrow families, semantic validation,
+- A tensorfield extension owns accepted Arrow families, semantic validation,
   tensorization, embedding, decoding, loss, output schema, writing, callbacks,
   and datatype-specific runtime resources.
 - Reach tensorfield behavior through `TENSORFIELDS` and registered components.
   Do not import a concrete extension or branch on names such as `"category"`
   or `"number"` in shared architecture or data code.
 - Do not inspect a callable for a magic parameter to infer a datatype
-  capability. Add a small explicit plugin contract when orchestration must
+  capability. Add a small explicit extension contract when orchestration must
   provide optional lifecycle state.
 - Registration must remain late-extensible. Validation and serialization must
-  not freeze a snapshot of whichever plugins happened to be imported first.
+  not freeze a snapshot of whichever extensions happened to be imported first.
 - Adding a third-party datatype should not require editing shared data or
   architecture modules.
 
 Optional dependencies belong in the extension path that needs them and should
 fail with a clear installation message. Do not make core imports depend on an
-optional plugin dependency.
+optional extension dependency.
 
 ## Tensorfield Contract
 
-Define a tensorfield extension with `rf.Plugin`:
+Define a tensorfield extension with `rf.Extension`:
 
 ```python
 import relflow as rf
 
-plugin = rf.Plugin(
+extension = rf.Extension(
     name="example",
     types=(int | float,),
 )
 ```
 
-Plugin names use lowercase letters, numbers, and underscores. `Request`,
+Extension names use lowercase letters, numbers, and underscores. `Request`,
 `TensorField`, `Embedder`, and `Decoder` subclass their corresponding RelFlow
 base classes.
 
 `types` declares compatible canonical Arrow atom families. A custom Python
 atom supplies its physical Arrow matcher with
-`Plugin(..., arrow={Type: matcher})`. Keep these datatype contracts out of
+`Extension(..., arrow={Type: matcher})`. Keep these datatype contracts out of
 `Request`, `RaggedField`, and the shared query/coalescing engine.
 
 Register the components owned by the extension:
@@ -148,14 +148,14 @@ Register the components owned by the extension:
 - `loss(module, prediction, batch, strata)`: the training objective and
   datatype metrics.
 - `output(module, address)`: the stable Arrow prediction coordinate type, or
-  `None` when the plugin has no decoded output.
+  `None` when the extension has no decoded output.
 - `write(module, prediction, datatype)`: a `pa.StructArray` matching the
   declared output type, or `None`.
 
-Register Lightning callback factories with `plugin.callback(...)`. Put
+Register Lightning callback factories with `extension.callback(...)`. Put
 utilities shared by several extensions under `relflow.tensorfields.shared`,
 but keep extension-specific vocabulary, counters, synchronization, cache
-flushing, and other lifecycle behavior behind plugin-owned objects.
+flushing, and other lifecycle behavior behind extension-owned objects.
 
 ## Preprocessors And Postprocessors
 
@@ -166,7 +166,7 @@ required and produced columns when the processor contract depends on them.
 
 Partition preprocessors must be safe on each source partition independently.
 Use dataset scope only when the operation truly needs the materialized split.
-Datatype encoding and model semantics still belong in tensorfield plugins.
+Datatype encoding and model semantics still belong in tensorfield extensions.
 
 Postprocessors accept and return one `rf.Batch`. They may reshape prediction
 columns for an application or warehouse, but must preserve row count and exact
@@ -217,7 +217,7 @@ not private implementation choreography.
 
 Use the existing locations:
 
-- `tests/tensorfields/` for plugin and tensorfield contracts.
+- `tests/tensorfields/` for extension and tensorfield contracts.
 - `tests/architecture/` for graph construction, runtime contracts, and
   callback aggregation.
 - `tests/data/` for Arrow identity, queries, coalescing, datasets, sampling,
@@ -227,7 +227,7 @@ Use the existing locations:
 - `tests/inference/` for prediction writing and serving.
 - `tests/structs/` for schema and validation behavior.
 
-For an extension-boundary change, include a minimal third-party plugin test.
+For an extension-boundary change, include a minimal third-party extension test.
 Prove that it can register, validate data, encode, and round-trip its schema
 without adding its name or attributes to shared modules. Architectural tests
 should guard against concrete extension imports and built-in-name dispatch,

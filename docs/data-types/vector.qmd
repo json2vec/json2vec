@@ -34,6 +34,7 @@ embedding = rf.Vector(
     "embedding",
     n_dim=4,
     objective="l2",
+    jitter=rf.Jitter(add=0.02),
 )
 
 embedding
@@ -68,11 +69,41 @@ Common vector fields include:
 - Sensor windows or compact numerical descriptors.
 - External representation vectors that should be joined with structured fields.
 
+## Jitter
+
+`Vector` can apply `rf.Jitter` to its supplied coordinates during training:
+
+```python
+embedding = rf.Vector(
+    n_dim=384,
+    jitter=rf.Jitter(
+        add=0.02,
+        multiply=0.05,
+    ),
+)
+```
+
+The affine noise is applied immediately before the input projection. Only
+finite coordinates in valued vectors are eligible. Null, padded, and masked
+states are unchanged. Evaluation and prediction are deterministic, and both
+the stored tensorfield content and reconstruction targets retain the pristine
+input vector.
+
+The built-in `Vector` intentionally has one continuous boundary and no
+normalizer: input coordinates may be embeddings, sensor samples, or unrelated
+dense features, and RelFlow cannot infer the correct scaling rule. Jitter is
+therefore applied at that same boundary for either `normalize` value, and `add`
+is measured in the supplied coordinate units. The flag changes placement only
+for tensorfields with distinct raw and normalized representations, currently
+`Number`. Normalize in an `rf.Preprocessor` or upstream system first when
+scale-independent noise is desired.
+
 ## Configuration
 
 | Option | Default | Notes |
 | --- | --- | --- |
 | `n_dim` | required | Vector width. Must be positive. |
+| `jitter` | `rf.Jitter()` | Training-only affine triangular noise in supplied coordinate units. |
 | `objective` | `"l2"` | Content reconstruction objective: `"l1"` or `"l2"`. |
 
 Increasing `n_dim` grows the input projection, decoder output, activation

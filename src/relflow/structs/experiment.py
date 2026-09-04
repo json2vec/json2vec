@@ -361,7 +361,7 @@ class Schema(Node):
         self.validate_capabilities()
 
     def validate_capabilities(self) -> None:
-        """Validate effective leaf roles against registered plugin components."""
+        """Validate effective leaf roles against registered extension components."""
 
         from relflow.tensorfields.base import TENSORFIELDS
 
@@ -377,8 +377,8 @@ class Schema(Node):
             elif request.embed:
                 required.append(Component.Decoder)
 
-            plugin = TENSORFIELDS[request.type]
-            missing = [component.value for component in required if component not in plugin.components]
+            extension = TENSORFIELDS[request.type]
+            missing = [component.value for component in required if component not in extension.components]
             if not missing:
                 continue
 
@@ -386,11 +386,11 @@ class Schema(Node):
             if owners:
                 sources = ", ".join(repr(str(owner)) for owner in owners)
                 raise ValueError(
-                    f"reconstruction mask at {sources} reaches leaf '{address}', but plugin "
-                    f"'{plugin.name}' is missing required component(s): {names}; register both Decoder and loss"
+                    f"reconstruction mask at {sources} reaches leaf '{address}', but extension "
+                    f"'{extension.name}' is missing required component(s): {names}; register both Decoder and loss"
                 )
             raise ValueError(
-                f"embedded leaf '{address}' uses plugin '{plugin.name}', which is missing required "
+                f"embedded leaf '{address}' uses extension '{extension.name}', which is missing required "
                 f"component: {names}; register a Decoder or set embed=False"
             )
 

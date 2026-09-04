@@ -34,6 +34,7 @@ created_at = rf.DateParts(
     "created_at",
     dateparts=["day of week", "HourOfDay", "second_of_minute"],
     pattern="%Y-%m-%dT%H:%M:%S",
+    jitter=rf.Jitter(add=0.02, multiply=0.05),
 )
 
 created_at
@@ -70,6 +71,7 @@ does not impose an application timezone policy or convert local times for you.
 | --- | --- | --- |
 | `dateparts` | required | Non-empty list of unique date parts to extract. Friendly casing and separators are normalized. |
 | `pattern` | `None` | Optional valid `datetime.strptime` pattern for source strings. |
+| `jitter` | `rf.Jitter()` | Training-only affine noise applied to each cyclical coordinate before projection. |
 
 Available date parts are:
 
@@ -101,6 +103,40 @@ embedding are added to create the internal field representation. Requesting
 more parts therefore adds both computation and parameters, and it can expose
 redundant calendar signals. Select parts justified by the task rather than
 including every period automatically.
+
+## Jitter
+
+`DateParts` can regularize its continuous calendar representation with the
+shared `rf.Jitter` helper. Jitter is applied independently to the sine and
+cosine coordinates after calendar extraction and immediately before each
+part's trainable projection:
+
+```{python .marimo}
+#| echo: true
+
+noisy_calendar = rf.DateParts(
+    "created_at",
+    dateparts=["day_of_week", "hour_of_day"],
+    jitter=rf.Jitter(add=0.02, multiply=0.05),
+)
+```
+
+The magnitudes therefore describe unit-circle coordinate units, not seconds,
+days, or timestamp units. Jitter does not shift the source datetime, and it does
+not renormalize a perturbed pair back onto the unit circle. Start with small
+values and validate the effect on the task.
+
+Noise is active only in training mode and only on finite coordinates whose
+field state is `valued`. State embeddings, null or masked coordinates, and
+reconstruction targets remain pristine. Validation, testing, and prediction
+are deterministic with respect to jitter.
+
+`DateParts` has one continuous model-input boundary: its inherently normalized
+cyclical pairs. Consequently, both `normalize=True` and `normalize=False` are
+accepted but place jitter at that same boundary. The option changes placement
+only for a consumer such as `Number` that has distinct raw and normalized
+continuous representations. Derive a `Number` during preprocessing when noise
+must instead be expressed in elapsed-time source units.
 
 ## Loss And Metrics
 

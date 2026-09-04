@@ -87,7 +87,7 @@ def test_query_backed_leaf_ignores_same_named_direct_source_values():
     assert rf.Category.vocabulary(model, "record/label") == ("A", "B")
 
 
-def test_scalar_plugin_rejects_list_valued_query_with_field_context():
+def test_scalar_extension_rejects_list_valued_query_with_field_context():
     model = build(
         rf.Branch(
             rf.Number("value", query="values[*]"),

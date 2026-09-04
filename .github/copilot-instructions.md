@@ -11,5 +11,5 @@ not invent a public `Struct(...)` API.
 
 Keep code direct: use short semantic names, inline one-use forwarding helpers,
 never prefix functions or classes with `_`, preserve Arrow as the canonical CPU
-representation, and keep datatype behavior inside its plugin. Keep examples
+representation, and keep datatype behavior inside its extension. Keep examples
 runnable and update tests and docs with public behavior.

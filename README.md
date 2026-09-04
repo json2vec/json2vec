@@ -398,7 +398,7 @@ uv run pytest tests/examples/test_e2e_examples.py
 - `src/relflow/inference`: serving and prediction callbacks
 - `src/relflow/logging`: runtime logging callbacks
 - `src/relflow/structs`: pydantic config models, enums, and tree nodes
-- `src/relflow/tensorfields`: tensorfield plugin system and built-in fields
+- `src/relflow/tensorfields`: tensorfield extension system and built-in fields
 - `tests/`: package test suite
 - `docs/`: Quarto project, pages, guides, stylesheets, and sample data
 

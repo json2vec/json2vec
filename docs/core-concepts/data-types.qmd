@@ -61,7 +61,7 @@ families, preventing an Arrow union from silently changing label identity.
 Normalize source columns in a preprocessor. For `Set`, a string or binary
 scalar is one label rather than a sequence of characters or bytes.
 
-These rules are owned by each datatype plugin through `Plugin(types=...)`; the
+These rules are owned by each datatype extension through `Extension(types=...)`; the
 ragged engine does not contain a list of built-in leaf names. Tuple entries are
 separate compatibility families, so `types=(str, bytes)` accepts a string or
 binary Arrow leaf but rejects an Arrow union containing both. A union is one
@@ -69,7 +69,7 @@ compatible family, so `types=(int | float,)` permits numeric promotion within a
 field. PyArrow may canonicalize mixed Python inputs before this boundary; use
 an explicit Arrow schema when original Python-type provenance matters.
 
-The public declaration uses Python types, but `Plugin.prepare(...)` validates
+The public declaration uses Python types, but `Extension.prepare(...)` validates
 each whole Arrow leaf against their Arrow equivalents before a datatype codec
 runs. It traverses Arrow list, fixed-size-list, dictionary, extension, and union
 types to find terminal types. It then safely decodes dictionary wrappers,
@@ -77,12 +77,12 @@ including dictionaries nested in list containers. A logical extension type is
 preserved when a declared matcher accepts it directly; otherwise its storage
 type crosses the codec boundary. Compatible union children are promoted to a
 common Arrow type when Arrow defines a safe promotion. A heterogeneous union
-without a common representation remains plugin-owned.
+without a common representation remains extension-owned.
 
-`None` is a core null state rather than a plugin atom type. String values have
+`None` is a core null state rather than an extension atom type. String values have
 no reserved sentinel and remain ordinary content. Container shape and datatype
 meaning remain the tensorfield's responsibility. Custom Python atoms add
-plugin-owned physical predicates with `Plugin(..., arrow={Type: matcher})`; see
+extension-owned physical predicates with `Extension(..., arrow={Type: matcher})`; see
 [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd).
 
 ## Value State And Content {#value-state}

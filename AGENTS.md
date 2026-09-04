@@ -81,9 +81,16 @@ model = rf.Model(
 - `embed=True` emits an embedding in prediction output. It does not make the field a supervised target.
 - `Hash` represents large identifiers with batch-salted hashes, preserving equality across fields in one encoded batch without learning a persistent vocabulary.
 - `DateParts` is for calendar parts. If elapsed time or recency matters, derive a `Number`.
-- Tensorfield plugins declare canonical Arrow atom compatibility families with
-  `Plugin(types=...)`; custom Python atoms add plugin-owned physical matchers
-  with `Plugin(..., arrow={Type: matcher})`. Keep datatype contracts out of
+- `rf.Jitter(add=..., multiply=..., normalize=...)` is a shared frozen
+  configuration whose `apply(inputs, mask)` method owns the vectorized affine
+  tensor operation. Consumers own training activation, eligible coordinates,
+  and normalization placement. `Number`, `Vector`, `DateParts`, and `Text`
+  consume it. `Number` uses `normalize` to choose between raw and standardized
+  values. The other built-ins have one continuous representation and apply
+  jitter there without creating another normalizer.
+- Tensorfield extensions declare canonical Arrow atom compatibility families with
+  `Extension(types=...)`; custom Python atoms add extension-owned physical matchers
+  with `Extension(..., arrow={Type: matcher})`. Keep datatype contracts out of
   `Request` and the shared ragged engine.
 - Preprocessors accept and return identity-bearing `rf.Batch` objects before
   query/coalescing. Use them for source renaming, Arrow compute, windowing,
@@ -176,7 +183,7 @@ thousands of values is a signal to use Arrow, Awkward, NumPy, or Torch.
 - Shared data code may understand Arrow containers, validity, offsets, shape,
   and lineage. It must not know a built-in tensorfield name, configuration
   attribute, or value interpretation.
-- A tensorfield plugin owns its accepted Arrow families, semantic validation,
+- A tensorfield extension owns its accepted Arrow families, semantic validation,
   tensorization, embedding, decoding, loss, output schema, writing, callbacks,
   and datatype-specific runtime resources.
 - Reach optional behavior through a registered component or an explicit

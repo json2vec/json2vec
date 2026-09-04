@@ -27,7 +27,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-boolean: Plugin = Plugin(name="boolean", types=(bool,))
+boolean: Extension = Extension(name="boolean", types=(bool,))
 boolean.callback(CounterUpdateCallback)
 BOOLEAN_VALUES = (-1.0, 0.0, 1.0)
 Threshold = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]

@@ -25,7 +25,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from relflow.data.datasets.base import InterprocessEncodingContext
     from relflow.structs.experiment import Schema
 
-cluster: Plugin = Plugin(name="cluster", types=(bool, int, float, str, bytes))
+cluster: Extension = Extension(name="cluster", types=(bool, int, float, str, bytes))
 
 cluster.callback(VocabularySyncCallback, CounterUpdateCallback)
 

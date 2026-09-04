@@ -44,6 +44,7 @@ def test_quarto_docs_snapshot_contains_expected_pages() -> None:
         "docs/core-concepts/data-types.qmd",
         "docs/core-concepts/embeddings.qmd",
         "docs/core-concepts/dynamic-masking.qmd",
+        "docs/core-concepts/jitter.qmd",
         "docs/data-types/boolean.qmd",
         "docs/data-types/branch.qmd",
         "docs/data-types/category.qmd",
@@ -129,9 +130,7 @@ def test_documented_contracts_match_public_enums_and_requests() -> None:
     data_types = (docs / "core-concepts/data-types.qmd").read_text()
     branch = (docs / "data-types/branch.qmd").read_text()
     dateparts = (docs / "data-types/dateparts.qmd").read_text()
-    published = "\n".join(
-        path.read_text() for path in docs.rglob("*.qmd") if path.name != "documentation-content-spec.md"
-    )
+    published = "\n".join(path.read_text() for path in docs.rglob("*.qmd"))
 
     assert {token.name for token in rf.Tokens} == {"valued", "null", "padded", "masked", "other"}
     assert all(f"`{token.name}`" in data_types for token in rf.Tokens)

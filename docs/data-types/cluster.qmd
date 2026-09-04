@@ -196,7 +196,7 @@ struct<
 >
 ```
 
-The shared runtime owns `state` and `inferred`; the plugin owns `content` and
+The shared runtime owns `state` and `inferred`; the extension owns `content` and
 `cluster`. Label probabilities are normalized over the vocabulary populated at
 write time, excluding unused capacity. If the vocabulary is empty, the content
 label is null and its probability is zero. Non-string source labels are exposed

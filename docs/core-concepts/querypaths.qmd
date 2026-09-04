@@ -280,7 +280,7 @@ Use this debugging order:
 2. identify the parent model node and the Arrow value it selects;
 3. read the child query relative to that value—not from the source root;
 4. verify that a `Branch` returns a list of structs and a leaf returns a type
-   accepted by its plugin;
+   accepted by its extension;
 5. move data-dependent logic into a preprocessor.
 
 ## Migration Examples

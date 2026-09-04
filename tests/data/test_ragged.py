@@ -380,7 +380,7 @@ def test_predict_reconstruction_values_are_prepared_when_present():
     model = build(rf.Number("value"), rf.Hash("label", mask=True))
     source = table([{"value": 1.0, "label": {"not": "hashable"}}])
 
-    with pytest.raises(TypeError, match="plugin 'hash'.*does not accept Arrow type struct"):
+    with pytest.raises(TypeError, match="extension 'hash'.*does not accept Arrow type struct"):
         model.encode(source, strata=Strata.predict)
 
 

@@ -14,6 +14,7 @@ from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
+from relflow.helpers import Jitter
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -21,7 +22,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-vector: Plugin = Plugin(name="vector", types=(int | float,))
+vector: Extension = Extension(name="vector", types=(int | float,))
 
 
 class Objective(enum.StrEnum):
@@ -53,6 +54,7 @@ class Request(RequestBase):
 
     type: Literal["vector"] = "vector"
     n_dim: Annotated[int, pydantic.Field(gt=0)]
+    jitter: Jitter = pydantic.Field(default_factory=Jitter)
     objective: Objective = Objective.l2
 
 
@@ -132,6 +134,7 @@ class Embedder(EmbedderBase):
         request: Request = schema.requests[address]
         self.origin: Address = address
         self.destination: Address = request.parent.address
+        self.jitter: Jitter = request.jitter
 
         self.embeddings = torch.nn.Embedding(
             num_embeddings=len(Tokens),
@@ -149,6 +152,10 @@ class Embedder(EmbedderBase):
 
         state = inputs.state.reshape(D)
         content = inputs.content.reshape(D, -1)
+
+        if self.training:
+            eligible = state.eq(Tokens.valued).unsqueeze(-1) & torch.isfinite(content)
+            content = self.jitter.apply(content, eligible)
 
         projected = self.linear(content)
         embeddings = self.embeddings(state)

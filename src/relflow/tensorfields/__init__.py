@@ -1,4 +1,4 @@
-"""Tensorfield plugin extension API and built-in extension imports."""
+"""Tensorfield extension API and built-in implementations."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -32,7 +32,7 @@ __all__ = [
     "Context",
     "DecoderBase",
     "EmbedderBase",
-    "Plugin",
+    "Extension",
     "RequestBase",
     "TensorFieldBase",
     "TensorInput",

@@ -12,7 +12,6 @@ requires-python = ">=3.12"
 dependencies = [
     "awkward>=2.13.0",
     "beartype>=0.21.0",
-    "pluggy>=1.6.0",
     "rich>=14.0.0",
     "pydantic>=2.11.7",
     "loguru>=0.7.3",
@@ -84,7 +83,7 @@ line-length = 120
 lint.extend-select = ["I"]
 
 [tool.ty.rules]
-# Keep ty as a green baseline while the dynamic plugin/Torch/Lightning surfaces
+# Keep ty as a green baseline while the dynamic extension/Torch/Lightning surfaces
 # are covered by runtime tests and can be tightened incrementally.
 unresolved-attribute = "ignore"
 invalid-type-form = "ignore"

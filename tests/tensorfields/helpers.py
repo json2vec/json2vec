@@ -1,4 +1,4 @@
-"""Shared tensorfield construction for focused plugin tests."""
+"""Shared tensorfield construction for focused extension tests."""
 
 from dataclasses import replace
 
@@ -8,13 +8,13 @@ from relflow.data.ragged import Projection, boolean
 from relflow.structs.enums import Strata
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
-from relflow.tensorfields.base import Context, Plugin, TensorFieldBase
+from relflow.tensorfields.base import Context, Extension, TensorFieldBase
 
 
 def tensorize(
     tensorfield: type[TensorFieldBase],
     projection: Projection,
-    plugin: Plugin,
+    extension: Extension,
     *,
     address: Address | str,
     schema: Schema,
@@ -24,8 +24,8 @@ def tensorize(
     """Prepare once, split by policy, and construct one tensorfield."""
 
     address = Address(address)
-    values = plugin.prepare(projection.pristine.values, address=address)
-    plugin.observe(
+    values = extension.prepare(projection.pristine.values, address=address)
+    extension.observe(
         field=replace(projection.pristine, values=values),
         address=address,
         schema=schema,

@@ -2,7 +2,7 @@ import pyarrow as pa
 import pytest
 import torch
 
-from relflow.structs.enums import Tokens
+from relflow.structs.enums import Component, Tokens
 from relflow.tensorfields.base import TENSORFIELDS
 from relflow.tensorfields.output import (
     STATE,
@@ -129,8 +129,10 @@ def test_vocabulary_labels_are_large_strings_cached_by_revision():
 
 
 @pytest.mark.parametrize("name", ["dateparts", "hash", "text"])
-def test_embedding_only_plugins_declare_no_decoded_output(name: str):
-    plugin = TENSORFIELDS[name]
+def test_embedding_only_extensions_declare_no_decoded_output(name: str):
+    extension = TENSORFIELDS[name]
 
-    assert plugin.output(module=object(), address=object()) is None
-    assert plugin.write(module=object(), prediction=object(), datatype=None) is None
+    assert Component.output not in extension.components
+    assert Component.write not in extension.components
+    assert extension.output(module=object(), address=object()) is None
+    assert extension.write(module=object(), prediction=object(), datatype=None) is None

@@ -12,10 +12,10 @@ model schema. Use the least powerful mechanism that expresses the change:
 | Same names and nesting | direct binding |
 | A different structural path | node `query=...` |
 | Derivation, filtering, sorting, joining, or coordinated nested work | `@rf.preprocess` |
-| A genuinely new atomic value family | tensorfield plugin |
+| A genuinely new atomic value family | tensorfield extension |
 
 That order keeps ordinary schemas declarative without forcing complex source
-preparation into datatype plugins.
+preparation into datatype extensions.
 
 ## Direct Binding
 
@@ -363,12 +363,12 @@ result = model.predict(
 Use `retain="*"` only when returning every processed source column is truly the
 desired application contract.
 
-## What Belongs In A Plugin?
+## What Belongs In An Extension?
 
 Preprocessors own representation changes between source Arrow and modeled
-fields. A tensorfield plugin is appropriate only when the atomic value family
+fields. A tensorfield extension is appropriate only when the atomic value family
 needs its own request, codec, embedding, decoder, loss, metrics, or Arrow
-output. Plugin raw-type compatibility is registered by the plugin; shared
+output. Extension raw-type compatibility is registered by the extension; shared
 request and ragged code must not hardcode datatype-specific Python classes.
 
 ## Binding Checklist
@@ -382,7 +382,7 @@ request and ragged code must not hardcode datatype-specific Python classes.
 - Fit state before iteration and bind it with `.partial(...)`.
 - Reuse the same processor at training and inference boundaries.
 - Retain only output columns that a consumer actually needs.
-- Build a plugin only for a new datatype contract, not ordinary source cleanup.
+- Build an extension only for a new datatype contract, not ordinary source cleanup.
 
 Continue with [Working With Arrow](../guides/working-with-arrow.qmd) for Arrow
 recipes and [Data Flow](data-flow.qmd) for where binding sits in the complete

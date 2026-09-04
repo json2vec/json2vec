@@ -16,6 +16,7 @@ from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
 from relflow.distributed import all_reduce_sum
+from relflow.helpers import Jitter
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -23,7 +24,7 @@ from relflow.tensorfields.base import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -36,15 +37,10 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-number: Plugin = Plugin(name="number", types=(int | float,))
+number: Extension = Extension(name="number", types=(int | float,))
 number.callback(CounterUpdateCallback)
 
 FOURIER_SAFE_MAX_ANGLE = float(1e4)
-
-
-def jitter(inputs: torch.Tensor, jitter_amount: torch.Tensor) -> torch.Tensor:
-    noise = torch.rand_like(inputs).sub(torch.rand_like(inputs)).mul(jitter_amount)
-    return inputs.add(noise)
 
 
 class Objective(enum.StrEnum):
@@ -67,7 +63,7 @@ class Request(RequestBase):
     """Numeric scalar tensorfield request."""
 
     type: Literal["number"] = "number"
-    jitter: Annotated[float, pydantic.Field(ge=0.0, default=0.0)] = 0.0
+    jitter: Jitter = pydantic.Field(default_factory=Jitter)
     n_bands: Annotated[int, pydantic.Field(gt=0, default=8)] = 8
     offset: Annotated[int, pydantic.Field(gt=0, default=4)] = 4
     alpha: Annotated[float | None, pydantic.Field(gt=0.0, lt=1.0, default=None)] = None
@@ -312,10 +308,9 @@ class Embedder(EmbedderBase):
         weights = torch.logspace(start=-n_bands, end=offset, steps=n_bands + offset + 1, base=2)
         self.linear = torch.nn.Linear(2 * len(weights), schema.d_model)
         self.register_buffer("weights", weights.mul(math.pi).unsqueeze(dim=0))
-        self.register_buffer("jitter", torch.tensor(request.jitter))
         self.register_buffer("max_fourier_input", torch.tensor(FOURIER_SAFE_MAX_ANGLE) / self.weights.abs().max())
 
-        self.jitter: torch.Tensor
+        self.jitter: Jitter = request.jitter
         self.weights: torch.Tensor
         self.max_fourier_input: torch.Tensor
 
@@ -361,11 +356,15 @@ class Embedder(EmbedderBase):
 
         state = inputs.state.reshape(D)
         content = inputs.content.reshape(D)
+        eligible = state.eq(Tokens.valued) & torch.isfinite(content)
+
+        if self.training and not self.jitter.normalize:
+            content = self.jitter.apply(content, eligible)
 
         content = self.normalizer(inputs=content, mask=state.eq(Tokens.valued), update=False)
 
-        if self.training:
-            content = jitter(content, jitter_amount=self.jitter)
+        if self.training and self.jitter.normalize:
+            content = self.jitter.apply(content, eligible)
 
         content = self.clamp(content=content, state=state)
 

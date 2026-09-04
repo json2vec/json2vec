@@ -6,14 +6,14 @@ eval: false
 # Experimental Custom Tensorfields
 
 **Example status — excerpt:** the component blocks are intentionally
-incomplete and cannot be combined into a supported artifact-compatible plugin.
+incomplete and cannot be combined into a supported artifact-compatible extension.
 
 RelFlow exposes its tensorfield registry for datatypes that need a source
 contract, tensor representation, input embedding, decoder, loss, or public
 writer beyond the built-ins.
 
 ::: {.callout-warning title="Experimental and not artifact-compatible"}
-This is an advanced, runtime-coupled extension surface, not a stable plugin SDK.
+This is an advanced, runtime-coupled extension surface, not a stable extension SDK.
 The current schema validator fixes its request union when RelFlow is imported,
 so a dynamically registered request cannot round-trip through
 `Model.save(...)` / `Model.load(...)`. Use custom tensorfields only for
@@ -27,7 +27,7 @@ representation or learning objective itself must change.
 
 ## Component Lifecycle
 
-One plugin can register nine named components. Three form the input path; the
+One extension can register nine named components. Three form the input path; the
 others are required only when the field's configured role needs them:
 
 | Component | Required when | Responsibility |
@@ -37,20 +37,20 @@ others are required only when the field's configured role needs them:
 | `Embedder` | Always | Convert compact present state/content into a `d_model` parcel sent to the parent branch. |
 | `Decoder` | A reconstructing mask reaches the leaf, or the leaf has `embed=True` | Pool heritage context and produce raw predictions or a contextual leaf embedding. |
 | `loss` | A reconstructing mask reaches the leaf | Compare decoded tensors with cached targets and log address-qualified metrics. |
-| `output` | Optional | Declare plugin-owned decoded Arrow content; the default declares none. |
+| `output` | Optional | Declare extension-owned decoded Arrow content; the default declares none. |
 | `write` | Optional | Convert decoded tensors to the declared flat Arrow content; the default writes none. |
 | `observe` | Optional, paired with `learn` when it returns a summary | Summarize pristine canonical training exposure without mutating model modules in a worker. |
-| `learn` | Optional, paired with a stateful `observe` | Apply one carried observation to model-side plugin state. |
+| `learn` | Optional, paired with a stateful `observe` | Apply one carried observation to model-side extension state. |
 
 The bound schema validates effective capabilities centrally. An input-only leaf
 does not need a `Decoder` or `loss`. A leaf with `embed=True` needs a `Decoder`
 but no loss. Any reconstructing policy on the leaf or one of its ancestor
 branches requires both `Decoder` and `loss`; this is checked for every affected
 descendant after construction, loading, and schema mutation. `output` and
-`write` remain optional even for a reconstructable plugin, although a plugin
+`write` remain optional even for a reconstructable extension, although an extension
 that exposes decoded content should implement them together.
 
-Callbacks are optional and are registered separately with `plugin.callback(...)`.
+Callbacks are optional and are registered separately with `extension.callback(...)`.
 
 The runtime path is:
 
@@ -58,7 +58,7 @@ The runtime path is:
 Arrow batches → direct binding or explicit structural query
 → eager atomic coalescing of every RaggedField
 → mask selection against the pristine field
-→ Plugin(types=..., arrow=...) terminal validation
+→ Extension(types=..., arrow=...) terminal validation
 → optional observe of the pristine canonical field
 → split input and target RaggedFields
 → TensorField.new(input, target, present, trainable, inferred, ...)
@@ -70,9 +70,9 @@ Arrow batches → direct binding or explicit structural query
 → output-plan compilation → write during prediction
 ```
 
-## Create And Import The Plugin
+## Create And Import The Extension
 
-Plugin names contain lowercase letters, numbers, and underscores. Creating a
+Extension names contain lowercase letters, numbers, and underscores. Creating a
 duplicate name replaces the registry entry with a warning.
 
 ```{python .marimo}
@@ -81,7 +81,7 @@ duplicate name replaces the registry entry with a warning.
 
 import relflow as rf
 
-signed_scalar = rf.Plugin(name="signed_scalar", types=(int | float,))
+signed_scalar = rf.Extension(name="signed_scalar", types=(int | float,))
 ```
 
 Registration is an import-time side effect. Import the implementation before
@@ -92,19 +92,19 @@ types valid; durable checkpoint, batch, and serving workflows are unsupported.
 ### Declare Raw Atom Compatibility
 
 `types` is a required tuple naming the canonical Arrow terminal families that
-the plugin accepts. The declaration uses familiar Python equivalents, but
-`Plugin.prepare(...)` validates the whole Arrow leaf type—not the Python
+the extension accepts. The declaration uses familiar Python equivalents, but
+`Extension.prepare(...)` validates the whole Arrow leaf type—not the Python
 objects that may have existed before Arrow conversion—before
 `TensorField.new(...)` runs. Each tuple entry is a separate, incompatible
-family. A PEP 604 union groups terminal types that may safely share one plugin
+family. A PEP 604 union groups terminal types that may safely share one extension
 input:
 
 ```python
 # A string+binary Arrow union is rejected because it spans two families.
-identity = rf.Plugin(name="identity", types=(str, bytes))
+identity = rf.Extension(name="identity", types=(str, bytes))
 
 # int and float are one compatible numeric family and may mix.
-numeric = rf.Plugin(name="numeric", types=(int | float,))
+numeric = rf.Extension(name="numeric", types=(int | float,))
 ```
 
 RelFlow maps those families to Arrow terminal types: for example, `str` accepts
@@ -120,11 +120,11 @@ Arrow struct or map terminals.
 
 Arrow conversion is allowed to canonicalize Python input before this check.
 For example, PyArrow may infer `binary` for a bounded Python chunk containing
-both `str` and `bytes`; the plugin then sees one binary family and accepts it.
+both `str` and `bytes`; the extension then sees one binary family and accepts it.
 If original Python-type provenance matters, provide an explicit Arrow schema
 or normalize the values deliberately before they enter the Arrow pipeline.
 
-Custom Python atoms require a plugin-owned physical matcher. The matcher sees
+Custom Python atoms require an extension-owned physical matcher. The matcher sees
 the logical Arrow extension type first; if it does not accept an extension,
 RelFlow also checks its storage terminals:
 
@@ -133,7 +133,7 @@ from decimal import Decimal
 
 import pyarrow as pa
 
-decimal = rf.Plugin(
+decimal = rf.Extension(
     name="decimal",
     types=(Decimal,),
     arrow={Decimal: pa.types.is_decimal},
@@ -142,22 +142,22 @@ decimal = rf.Plugin(
 
 Every `arrow` key must occur in `types`, and every matcher must accept a
 `pa.DataType` and return a boolean. Built-in Python equivalents already have
-standard matchers and may be overridden when a plugin needs a narrower
+standard matchers and may be overridden when an extension needs a narrower
 physical contract. A declared custom type without a matcher fails immediately
-when the plugin is created instead of becoming an unusable registry entry.
+when the extension is created instead of becoming an unusable registry entry.
 
 The declaration is an atom contract, not a semantic shape schema. For example,
-a Vector plugin may accept the numeric family while its `TensorField.new(...)`
+a Vector extension may accept the numeric family while its `TensorField.new(...)`
 still enforces Arrow list rank, fixed width, and numeric conversion after
 branch overflow.
 
-Before `TensorField.new(...)`, `Plugin.prepare(...)` validates the whole leaf
+Before `TensorField.new(...)`, `Extension.prepare(...)` validates the whole leaf
 and canonicalizes representation wrappers with Arrow operations. Dictionary
 arrays are decoded recursively through list containers. A logical extension
-type is preserved when one of the plugin's matchers accepts that extension
+type is preserved when one of the extension's matchers accepts that extension
 directly; otherwise its storage type is prepared. Compatible union children
 are promoted when Arrow defines one safe common type. If no common type exists,
-the union reaches the datatype codec unchanged and that plugin must implement
+the union reaches the datatype codec unchanged and that extension must implement
 its semantic conversion explicitly.
 
 `None` is handled as a shared null state and does not need an entry in `types`.
@@ -197,7 +197,7 @@ shape.
 
 ## Observe Pristine Training Exposure
 
-Masking changes encoder input, not the data a plugin is allowed to learn its
+Masking changes encoder input, not the data an extension is allowed to learn its
 conversion state from. When a datatype needs vocabulary proposals, sufficient
 statistics, or another pristine-data observation, register the optional
 `observe` and `learn` pair:
@@ -232,15 +232,15 @@ def learn(
     ...
 ```
 
-`Plugin.prepare(...)` only validates and canonicalizes Arrow representation; it
+`Extension.prepare(...)` only validates and canonicalizes Arrow representation; it
 does not learn. `observe` sees that canonical pristine `RaggedField` before the
 shared engine filters either projection. In a data-loader worker it may update
 only the explicit address-specific interprocess `state`, never an authoritative
 model module. A returned observation must have a fixed tensor schema and a
 registered `learn` consumer. The runtime transfers it with the encoded batch and
-calls `learn` on the model side when the training batch is consumed. The plugin
+calls `learn` on the model side when the training batch is consumed. The extension
 owns any distributed reduction required by its resources. With `learn=False`,
-`observe` returns `None` and neither hook may mutate state. Stateless plugins
+`observe` returns `None` and neither hook may mutate state. Stateless extensions
 omit both hooks.
 
 ## Define State And Content
@@ -288,8 +288,8 @@ class TensorField(rf.TensorFieldBase):
             values = encoded.to_numpy(zero_copy_only=False)
             return torch.from_numpy(field.place(values, fill=0.0))
 
-        # Stateful plugins read their own resource from context.state. Any
-        # plugin may use context.salt for batch-local deterministic encoding.
+        # Stateful extensions read their own resource from context.state. Any
+        # extension may use context.salt for batch-local deterministic encoding.
         return cls(
             content=encode(input),
             state=torch.from_numpy(input.dense),
@@ -310,7 +310,7 @@ class TensorField(rf.TensorFieldBase):
 Use the shared `Tokens` values exactly. Do not invent a public state for a
 condition that belongs to content. The input and target projections already
 encode learned masking, structural omission, and reconstruction selection;
-plugins must not implement a second mask path.
+extensions must not implement a second mask path.
 
 The internal coalescer owns schema traversal, missing/null/padded state, branch
 overflow, mask selection, and input/target splitting. It validates and
@@ -320,10 +320,10 @@ contains retained valued rows, `state` is flat `int8`, `placement` is flat
 `int64`, and `shape` is the dense model geometry. Use `field.dense` for the
 final `rf.Tokens` state as a shaped NumPy array.
 
-The plugin declaration owns Arrow terminal compatibility; the tensorfield owns
+The extension declaration owns Arrow terminal compatibility; the tensorfield owns
 semantic validation and encoding. `field.place(...)` requires one encoded row
 per retained value and preserves datatype-specific trailing dimensions. This
-is the plugin boundary—Awkward may be a convenient temporary view inside an
+is the extension boundary—Awkward may be a convenient temporary view inside an
 upstream preprocessor, but it is not stored in `RaggedField` or passed to a
 datatype codec.
 
@@ -366,10 +366,10 @@ class Embedder(rf.EmbedderBase):
 ```
 
 `EmbedderBase.embed(...)` gathers the field's `present` coordinates and calls
-the plugin's `forward(...)` with only that compact `TensorInput`. It validates
+the extension's `forward(...)` with only that compact `TensorInput`. It validates
 the returned one-dimensional presence vector, scatters payloads back into fixed
 schema geometry, and carries full geometry presence in the outgoing parcel.
-The plugin's forward method never receives targets, trainable bits, or inferred
+The extension's forward method never receives targets, trainable bits, or inferred
 bits.
 
 Any vocabulary, normalizer, or tokenizer state needed across processes should be
@@ -434,7 +434,7 @@ def loss(
 
 @signed_scalar.register
 def output(module: Any, address: rf.Address) -> pa.StructType:
-    # This is the stable plugin-owned type for one flat model coordinate.
+    # This is the stable extension-owned type for one flat model coordinate.
     return pa.struct(
         [pa.field(rf.TensorKey.content.name, pa.float32(), nullable=False)]
     )
@@ -454,7 +454,7 @@ Call `module.track((address, strata, metric, component), value=...)` so logs use
 the same address/stage convention as built-ins. Compute content loss only where
 the cached target state makes that content meaningful.
 
-`output` must depend only on stable model, request, and plugin state; it cannot
+`output` must depend only on stable model, request, and extension state; it cannot
 infer a type from the first prediction values. RelFlow calls it once while
 compiling the output plan, then supplies that exact `datatype` to every
 `write` call. Use the supplied type—do not call `output` again or infer a new
@@ -467,7 +467,7 @@ values. The shared runtime validates the coordinate count and wraps compiled
 repeated axes afterward.
 
 The runtime reserves `state`, `inferred`, and `embedding`: it adds those shared
-fields and normalizes embeddings. A plugin fragment cannot declare them.
+fields and normalizes embeddings. An extension fragment cannot declare them.
 
 If the datatype intentionally has no decoded public output, omit both hooks or
 register `None` explicitly:
@@ -494,7 +494,7 @@ signed_scalar.callback(SignedScalarStateCallback)
 ```
 
 Callbacks may participate in distributed work. Every rank must register the
-same callback factories in the same imported plugin version.
+same callback factories in the same imported extension version.
 
 ## Test The Full Contract
 
@@ -530,12 +530,12 @@ structured content.
   batch workers, or serving for a schema containing a dynamically registered
   request in the current release.
 - Keep experimental training and prediction in the process that imported and
-  constructed the plugin.
+  constructed the extension.
 - Pin and test the RelFlow version because `Parcel`, `Prediction`, and some
   distributed state contracts are not all top-level SDK objects.
 - Avoid process-global files, sockets, or tokenizers created at import time;
   data-loader workers and service workers import modules independently.
-- Document whether the plugin can train and predict on CPU, CUDA, MPS, and DDP.
+- Document whether the extension can train and predict on CPU, CUDA, MPS, and DDP.
 
 ## Where Next
 

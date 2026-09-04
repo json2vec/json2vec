@@ -127,15 +127,15 @@ def test_fully_skipped_source_is_prepared_and_observed(monkeypatch):
         )
     )
     source = arrow_batch([{"value": "A"}, {"value": "B"}])
-    plugin = TENSORFIELDS["category"]
-    prepare = plugin.prepare
+    extension = TENSORFIELDS["category"]
+    prepare = extension.prepare
     seen = []
 
     def spy(values, *, address):
         seen.append(values.to_pylist())
         return prepare(values, address=address)
 
-    monkeypatch.setattr(plugin, "prepare", spy)
+    monkeypatch.setattr(extension, "prepare", spy)
     encoded = encode(
         source,
         configured.schema,
@@ -162,9 +162,9 @@ def test_number_learns_pristine_moments_once_before_forward():
         Strata.train,
         configured.interprocess_encoding_context,
     )
-    plugin = TENSORFIELDS["number"]
+    extension = TENSORFIELDS["number"]
 
-    plugin.learn(
+    extension.learn(
         module=configured,
         observation=encoded.observations["record/value"],
         address="record/value",

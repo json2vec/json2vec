@@ -74,7 +74,7 @@ class Branch(Node):
     @pydantic.field_validator("fields", mode="before")
     @classmethod
     def materialize(cls, value: Any) -> Any:
-        """Resolve serialized leaf requests against the live plugin registry."""
+        """Resolve serialized leaf requests against the live extension registry."""
 
         if not isinstance(value, (list, tuple)):
             return value

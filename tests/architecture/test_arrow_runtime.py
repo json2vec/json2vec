@@ -197,7 +197,7 @@ def test_empty_retain_uses_typed_null_without_changing_row_count():
     assert len(result) == 3
 
 
-def test_reconstruction_without_public_plugin_output_keeps_a_typed_null_prediction_column():
+def test_reconstruction_without_public_extension_output_keeps_a_typed_null_prediction_column():
     configured = rf.Model(
         value=rf.Number,
         identifier=rf.Hash(mask=True),
@@ -258,9 +258,9 @@ def test_predict_rejects_missing_or_duplicate_retain_columns():
 
 
 def test_output_plan_declares_once_and_passes_that_type_to_writer(monkeypatch: pytest.MonkeyPatch):
-    plugin = TENSORFIELDS["boolean"]
-    declare = plugin.output
-    render = plugin.write
+    extension = TENSORFIELDS["boolean"]
+    declare = extension.output
+    render = extension.write
     calls = {"output": 0, "write": 0}
     declarations: dict[Address, pa.StructType] = {}
 
@@ -275,8 +275,8 @@ def test_output_plan_declares_once_and_passes_that_type_to_writer(monkeypatch: p
         assert datatype is declarations[prediction.address]
         return render(module=module, prediction=prediction, datatype=datatype)
 
-    monkeypatch.setitem(plugin.components, Component.output, output)
-    monkeypatch.setitem(plugin.components, Component.write, write)
+    monkeypatch.setitem(extension.components, Component.output, output)
+    monkeypatch.setitem(extension.components, Component.write, write)
 
     model().predict(pa.table({"value": [1.0]}))
 

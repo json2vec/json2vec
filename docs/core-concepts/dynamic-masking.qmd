@@ -178,7 +178,7 @@ Validation and test sampling use stable but separately salted decisions.
 Changing the training epoch changes the score stream, although a small finite
 selection can coincide by chance. Prediction never samples a remaining
 fractional rate. A public prediction field exists only when the tensorfield
-plugin supplies its Arrow output/write components.
+extension supplies its Arrow output/write components.
 
 ## Learned Mask Versus Skip
 
@@ -203,7 +203,7 @@ or when expensive input embedding should be avoided for selected values.
 
 `skip=True` is an encoder-routing boundary, not secure deletion:
 
-- plugin type validation and `prepare` still see pristine Arrow values;
+- extension type validation and `prepare` still see pristine Arrow values;
 - training vocabulary/statistics observers still learn from pristine values;
 - a reconstructing skip still tensorizes its target representation;
 - `retain="*"` can still copy source columns into prediction output;
@@ -212,7 +212,7 @@ or when expensive input embedding should be avoided for selected values.
 
 For Text, structural skip avoids tokenizing and frozen-encoding the input. A
 Text reconstruction target may still need target-side encoding for its loss.
-Use a preprocessor to redact source data before plugin processing when secrecy
+Use a preprocessor to redact source data before extension processing when secrecy
 or data minimization is the requirement.
 
 Skipping preserves fixed schema geometry. Tensorfields carry Boolean presence,
@@ -322,10 +322,10 @@ policy owner, not a decoded datatype; objectives and outputs still belong to
 its descendant leaves. `active=False` descendants are excluded.
 
 Schema construction validates the expansion up front. Every affected active
-leaf plugin must provide both a decoder and a loss component. If one cannot be
+leaf extension must provide both a decoder and a loss component. If one cannot be
 reconstructed, model construction fails with the policy owner and leaf address
 instead of discovering the mismatch during training. Public prediction output
-also depends on whether that leaf plugin provides Arrow output/write
+also depends on whether that leaf extension provides Arrow output/write
 components.
 
 The same rule applies to a reconstructing mask on the generated root: it
@@ -615,7 +615,7 @@ The rich state preview uses:
 | `N` | Explicit null |
 | `P` | Padding, structural absence, or skipped input |
 | `M` | Learned mask representation |
-| `O` | Plugin-defined other state |
+| `O` | Extension-defined other state |
 
 There is no `Model.encode(mask=False)` runtime bypass. Mask behavior is part of
 the schema and selected by stratum. For a temporary persistent experiment, use
@@ -631,7 +631,7 @@ the schema and selected by stratum. For a temporary persistent experiment, use
 | “structurally absent” or null-selector error | Missing path, missing parent struct, or null decision | Make the decision explicit, often with `fill_null(..., False)` |
 | Sibling fields choose different random coordinates | Policies live on separate leaf addresses | Put one mask on their common branch or share a preprocessed selector |
 | A child remains hidden after `mask=False` | An ancestor policy selected it | Ancestor effects cannot be undone; move or narrow the ancestor policy |
-| Vocabulary/statistics include skipped values | Plugins observe pristine training data | This is intentional; redact in preprocessing if necessary |
+| Vocabulary/statistics include skipped values | Extensions observe pristine training data | This is intentional; redact in preprocessing if necessary |
 | Query-backed target cannot be omitted in prediction | Source-less vacancy is only available to directly bound unconditional targets | Keep the queried structure or bind the target directly |
 | Changing model batch size changes a manual test | Raw tables were submitted in separate calls | Preserve `rf.Batch.identity` across slices |
 
@@ -644,5 +644,3 @@ the schema and selected by stratum. For a temporary persistent experiment, use
   lineage, Arrow kernels, and Awkward round trips.
 - [Learning Modes & Embeddings](embeddings.qmd) explains decoder and output
   roles.
-- [Unified Mask Design Spec](../unified-mask-design-spec.md) records the lower-
-  level execution and extension contracts.

@@ -37,8 +37,8 @@ def encode(
     projections = coalesce(batch, schema=schema, strata=strata, seed=seed, epoch=epoch)
 
     for address, request in schema.active_requests.items():
-        plugin = TENSORFIELDS[request.type]
-        TensorField = plugin.TensorField
+        extension = TENSORFIELDS[request.type]
+        TensorField = extension.TensorField
         projection = projections.pop(address)
         pristine = projection.pristine
         nulls = pristine.state.to_numpy(zero_copy_only=False) == Tokens.null.value
@@ -47,11 +47,11 @@ def encode(
                 f"request '{address}' has nullable=False but input contains {int(nulls.sum())} null value(s)"
             )
 
-        values = pa.nulls(0) if projection.vacant else plugin.prepare(pristine.values, address=address)
+        values = pa.nulls(0) if projection.vacant else extension.prepare(pristine.values, address=address)
         canonical = replace(pristine, values=values)
         observation = None
         if not projection.vacant:
-            observation = plugin.observe(
+            observation = extension.observe(
                 field=canonical,
                 address=address,
                 schema=schema,
@@ -59,21 +59,21 @@ def encode(
                 learn=strata == Strata.train,
             )
 
-        learner = plugin.components.get(Component.learn)
+        learner = extension.components.get(Component.learn)
         if observation is not None and not isinstance(observation, TensorDict):
             raise TypeError(
-                f"plugin '{plugin.name}' observer at '{address}' must return a TensorDict or None, "
+                f"extension '{extension.name}' observer at '{address}' must return a TensorDict or None, "
                 f"got {type(observation).__name__}"
             )
         if observation is not None and learner is None:
             raise RuntimeError(
-                f"plugin '{plugin.name}' observer at '{address}' returned an observation without a learner"
+                f"extension '{extension.name}' observer at '{address}' returned an observation without a learner"
             )
         if strata == Strata.train and learner is not None and observation is None:
-            raise RuntimeError(f"plugin '{plugin.name}' learner at '{address}' requires a training observation")
+            raise RuntimeError(f"extension '{extension.name}' learner at '{address}' requires a training observation")
         if strata != Strata.train and observation is not None:
             raise RuntimeError(
-                f"plugin '{plugin.name}' observer at '{address}' returned an observation with learn=False"
+                f"extension '{extension.name}' observer at '{address}' returned an observation with learn=False"
             )
         if observation is not None:
             observations[address] = observation

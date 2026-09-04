@@ -16,14 +16,14 @@ from relflow.tensorfields.base import (
     TENSORFIELDS,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
 )
 
 
-def extension(
+def build_extension(
     *,
     decoder: bool = True,
     loss: bool = True,
@@ -32,17 +32,17 @@ def extension(
     state: object | None = None,
     contexts: list[rf.Context] | None = None,
 ):
-    """Register one late-bound plugin with nested, trailing-axis tensor content."""
+    """Register one late-bound extension with nested, trailing-axis tensor content."""
 
     name = f"extension_{uuid.uuid4().hex}"
-    plugin = Plugin(name=name, types=(str, bytes))
+    extension = Extension(name=name, types=(str, bytes))
 
-    @plugin.register
+    @extension.register
     class Request(RequestBase):
         type: Literal[name] = name
         family: Literal["text", "bytes"] = "text"
 
-    @plugin.register
+    @extension.register
     @tensorclass
     class TensorField(TensorFieldBase):
         content: TensorDict
@@ -99,7 +99,7 @@ def extension(
                 batch_size=input.batch_size,
             )
 
-    @plugin.register
+    @extension.register
     class Embedder(EmbedderBase):
         def __init__(self, schema: rf.Schema, address: Address):
             super().__init__(schema=schema, address=address)
@@ -130,7 +130,7 @@ def extension(
 
     if decoder:
 
-        @plugin.register
+        @extension.register
         class Decoder(DecoderBase):
             def __init__(self, schema: rf.Schema, address: Address):
                 if explode:
@@ -146,17 +146,17 @@ def extension(
 
     if loss:
 
-        @plugin.register
+        @extension.register
         def loss(module: object, prediction: Prediction, batch: object, strata: Strata) -> torch.Tensor:
             return prediction.payload[TensorKey.state].sum() * 0.0
 
-    return plugin, Request
+    return extension, Request
 
 
-def test_third_party_plugin_receives_one_explicit_context_contract():
+def test_third_party_extension_receives_one_explicit_context_contract():
     marker = object()
     contexts: list[rf.Context] = []
-    plugin, Request = extension(decoder=False, loss=False, state=marker, contexts=contexts)
+    extension, Request = build_extension(decoder=False, loss=False, state=marker, contexts=contexts)
     try:
         model = rf.Model(value=Request(), d_model=8, n_layers=1, n_heads=2)
 
@@ -166,12 +166,12 @@ def test_third_party_plugin_receives_one_explicit_context_contract():
         assert len(contexts) == 2  # mocked graph input, then the real batch
         assert contexts[-1] == rf.Context(state=marker, salt=0)
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 @pytest.mark.parametrize("branch", [False, True])
 def test_reconstruction_validates_custom_leaf_and_branch_capabilities(branch):
-    plugin, Request = extension(decoder=False, loss=False)
+    extension, Request = build_extension(decoder=False, loss=False)
     try:
         field = Request(name="value")
         fields = (
@@ -180,51 +180,51 @@ def test_reconstruction_validates_custom_leaf_and_branch_capabilities(branch):
             else {"value": field.model_copy(update={"mask": True})}
         )
 
-        with pytest.raises(ValueError, match=rf"plugin '{plugin.name}'.*Decoder, loss"):
+        with pytest.raises(ValueError, match=rf"extension '{extension.name}'.*Decoder, loss"):
             rf.Model(d_model=8, n_layers=1, n_heads=2, **fields)
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_reconstruction_requires_decoder_and_loss_as_one_capability():
-    plugin, Request = extension(decoder=True, loss=False)
+    extension, Request = build_extension(decoder=True, loss=False)
     try:
-        with pytest.raises(ValueError, match=rf"plugin '{plugin.name}'.*required component\(s\): loss"):
+        with pytest.raises(ValueError, match=rf"extension '{extension.name}'.*required component\(s\): loss"):
             rf.Model(value=Request(mask=True), d_model=8, n_layers=1, n_heads=2)
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_leaf_embedding_requires_a_decoder_but_branch_embedding_does_not():
-    plugin, Request = extension(decoder=False, loss=False)
+    extension, Request = build_extension(decoder=False, loss=False)
     try:
-        with pytest.raises(ValueError, match=rf"embedded leaf 'record/value'.*plugin '{plugin.name}'.*Decoder"):
+        with pytest.raises(ValueError, match=rf"embedded leaf 'record/value'.*extension '{extension.name}'.*Decoder"):
             rf.Model(value=Request(embed=True), d_model=8, n_layers=1, n_heads=2)
 
         model = rf.Model(value=Request(), d_model=8, n_layers=1, n_heads=2, embed=True)
         assert "record" in model.schema.embed
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_failed_capability_mutation_restores_schema_and_runtime_graph():
-    plugin, Request = extension(decoder=False, loss=False)
+    extension, Request = build_extension(decoder=False, loss=False)
     try:
         model = rf.Model(value=Request(), d_model=8, n_layers=1, n_heads=2)
         nodes = model.nodes
 
-        with pytest.raises(ValueError, match=rf"plugin '{plugin.name}'.*Decoder, loss"):
+        with pytest.raises(ValueError, match=rf"extension '{extension.name}'.*Decoder, loss"):
             model.update(rf.where("name") == "value", mask=True)
 
         assert model.schema.requests["record/value"].mask == ()
         assert model.schema.objectives == []
         assert model.nodes is nodes
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_failed_runtime_rebuild_restores_schema_and_runtime_graph():
-    plugin, Request = extension(explode=True)
+    extension, Request = build_extension(explode=True)
     try:
         model = rf.Model(value=Request(), d_model=8, n_layers=1, n_heads=2)
         nodes = model.nodes
@@ -236,11 +236,11 @@ def test_failed_runtime_rebuild_restores_schema_and_runtime_graph():
         assert model.schema.objectives == []
         assert model.nodes is nodes
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
-def test_late_plugin_schema_round_trip_uses_the_live_registry():
-    plugin, Request = extension(decoder=False, loss=False)
+def test_late_extension_schema_round_trip_uses_the_live_registry():
+    extension, Request = build_extension(decoder=False, loss=False)
     try:
         schema = rf.Schema.from_tree(
             rf.Branch(Request(name="value", family="bytes"), name="items", length=2),
@@ -257,11 +257,11 @@ def test_late_plugin_schema_round_trip_uses_the_live_registry():
         assert isinstance(restored_json.requests["record/items/value"], Request)
         assert restored_json.requests["record/items/value"].family == "bytes"
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_custom_tensordict_trailing_axes_gather_embed_and_scatter():
-    plugin, Request = extension(decoder=False, loss=False)
+    extension, Request = build_extension(decoder=False, loss=False)
     try:
         model = rf.Model(
             value=Request(mask=rf.Mask(query="skip", skip=True, dropout=False)),
@@ -288,11 +288,11 @@ def test_custom_tensordict_trailing_axes_gather_embed_and_scatter():
         assert root.payload[TensorKey.embedding].shape == (3, 8)
         assert torch.equal(root.payload[TensorKey.embedding][1], torch.zeros(8))
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
-def test_compact_plugin_presence_is_scattered_without_routing_its_payload(monkeypatch):
-    plugin, Request = extension(decoder=False, loss=False)
+def test_compact_extension_presence_is_scattered_without_routing_its_payload(monkeypatch):
+    extension, Request = build_extension(decoder=False, loss=False)
     try:
         model = rf.Model(value=Request(), d_model=8, n_layers=1, n_heads=2)
         field = model.encode(pa.table({"value": ["a", "bb"]}), strata=Strata.train)["record/value"]
@@ -316,11 +316,11 @@ def test_compact_plugin_presence_is_scattered_without_routing_its_payload(monkey
         assert parcel.present.tolist() == [[True], [False]]
         assert torch.equal(parcel.payload[1], torch.zeros(1, 8))
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
-def test_source_less_multifamily_plugin_uses_the_generic_vacancy():
-    plugin, Request = extension()
+def test_source_less_multifamily_extension_uses_the_generic_vacancy():
+    extension, Request = build_extension()
     try:
         model = rf.Model(label=Request(mask=True, family="bytes"), d_model=8, n_layers=1, n_heads=2)
 
@@ -329,11 +329,11 @@ def test_source_less_multifamily_plugin_uses_the_generic_vacancy():
         assert len(predictions) == 2
         assert predictions["predictions"].type == pa.null()
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_all_skipped_custom_embedder_accepts_zero_sized_parameters():
-    plugin, Request = extension(decoder=False, loss=False, empty=True)
+    extension, Request = build_extension(decoder=False, loss=False, empty=True)
     try:
         model = rf.Model(
             value=Request(mask=rf.Mask(skip=True, dropout=False)),
@@ -350,4 +350,4 @@ def test_all_skipped_custom_embedder_accepts_zero_sized_parameters():
         assert embedder.empty.grad is not None
         assert embedder.empty.grad.numel() == 0
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)

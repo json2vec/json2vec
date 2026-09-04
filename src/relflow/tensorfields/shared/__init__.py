@@ -43,7 +43,7 @@ Rules for adding helpers here:
    If a helper needs distributed synchronization, implement it in a callback
    owned by the helper module. The callback may inspect concrete helper types
    because it is part of that helper's implementation. Data modules and the root
-   model should only attach callbacks through the tensorfield plugin registry.
+   model should only attach callbacks through the tensorfield extension registry.
 
 7. Avoid generic registries for one-off behavior.
    Add a shared abstraction only when multiple tensorfields can use it or when

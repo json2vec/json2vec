@@ -1,6 +1,7 @@
 from typing import get_type_hints
 
 import relflow
+import relflow.tensorfields as tensorfields
 
 
 def test_common_resources_are_available_from_package_root():
@@ -15,7 +16,16 @@ def test_common_resources_are_available_from_package_root():
     assert relflow.Schema.__name__ == "Schema"
     assert relflow.Address("root", "label") == "root/label"
     assert relflow.Branch.__name__ == "Branch"
+    assert relflow.Extension.__name__ == "Extension"
+    assert tensorfields.Extension is relflow.Extension
+    assert not hasattr(relflow, "Plugin")
+    assert not hasattr(tensorfields, "Plugin")
     assert relflow.Mask.model_fields["rate"].default is None
+    assert relflow.Jitter.model_fields["add"].default == 0.0
+    assert relflow.Jitter.model_fields["multiply"].default == 0.0
+    assert relflow.Jitter.model_fields["normalize"].default is True
+    for tensorfield in (relflow.Number, relflow.Vector, relflow.DateParts, relflow.Text):
+        assert isinstance(tensorfield.model_fields["jitter"].default_factory(), relflow.Jitter)
     assert relflow.where("type").name == "type"
     assert relflow.preprocess.__name__ == "preprocess"
     assert relflow.postprocess.__name__ == "postprocess"

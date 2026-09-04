@@ -26,6 +26,7 @@ from relflow.data.processors import (
     preprocess,
 )
 from relflow.data.ragged import RaggedField
+from relflow.helpers import Jitter
 from relflow.inference.callback import Writer
 from relflow.structs.enums import (
     AttentionMode,
@@ -51,7 +52,7 @@ from relflow.tensorfields import (
     Context,
     DecoderBase,
     EmbedderBase,
-    Plugin,
+    Extension,
     RequestBase,
     TensorFieldBase,
     TensorInput,
@@ -131,6 +132,7 @@ __all__ = [
     "Schema",
     "Input",
     "JSONBackend",
+    "Jitter",
     "Leaf",
     "Metric",
     "Mask",
@@ -142,7 +144,7 @@ __all__ = [
     "Number",
     "OptimizerConfig",
     "Overflow",
-    "Plugin",
+    "Extension",
     "PolarsDataModule",
     "Postprocessor",
     "Preprocessor",

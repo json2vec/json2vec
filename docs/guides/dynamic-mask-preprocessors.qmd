@@ -756,7 +756,7 @@ Dynamic masking is model routing, not source sanitization:
 
 - a selector derived from a hidden value can reveal information through its
   masked/absent pattern;
-- `skip=True` does not prevent plugin validation or training-time vocabulary
+- `skip=True` does not prevent extension validation or training-time vocabulary
   and statistics observation;
 - reconstruction can tensorize selected targets even when their input is
   skipped;
@@ -764,7 +764,7 @@ Dynamic masking is model routing, not source sanitization:
 - permissions should generally be computed from independent authorization
   data, not from the protected value itself.
 
-If a value must never reach a plugin, replace it in preprocessing with an
+If a value must never reach an extension, replace it in preprocessing with an
 accepted safe value, or deactivate/remove that node from the modeled schema.
 Also ensure no retained output exposes the original source.
 

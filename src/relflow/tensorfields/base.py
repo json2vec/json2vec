@@ -1,4 +1,4 @@
-"""Tensorfield plugin base classes and registry."""
+"""Tensorfield extension base classes and registry."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from types import MappingProxyType, UnionType
 from typing import TYPE_CHECKING, Any, Callable, TypeAlias, TypeVar, cast, get_args, overload
 
 import numpy as np
-import pluggy
 import pyarrow as pa
 import pyarrow.compute as pc
 import torch
@@ -27,16 +26,11 @@ from relflow.data.arrow import variants
 from relflow.structs.enums import Component, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address, Leaf, Renderable
-from relflow.tensorfields.spec import PluginSpec
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.data.ragged import RaggedField
     from relflow.structs.experiment import Schema
-
-pm: pluggy.PluginManager = pluggy.PluginManager(project_name="tensorfields")
-
-pm.add_hookspecs(module_or_class=PluginSpec)
 
 RequestBase: TypeAlias = Leaf
 CallbackFactory: TypeAlias = type[Callback] | Callable[[], Callback]
@@ -430,18 +424,18 @@ class TensorFieldBase(Renderable):
         return values.to(dtype=torch.int64)
 
 
-TENSORFIELDS: dict[str, "Plugin"] = {}
+TENSORFIELDS: dict[str, "Extension"] = {}
 
 
-class Plugin:
+class Extension:
     """Registry object for a tensorfield implementation.
 
     Register request, tensorfield, embedder, decoder, loss, output, and write
-    components with `@plugin.register`. ``types`` names the Python equivalents
+    components with `@extension.register`. ``types`` names the Python equivalents
     of accepted canonical Arrow terminal families. Separate tuple entries are
     incompatible; types joined in one PEP 604 union may share one Arrow column.
     ``arrow`` supplies a physical-type matcher for custom Python atoms or
-    overrides a standard matcher. Creating a plugin with an existing name
+    overrides a standard matcher. Creating an extension with an existing name
     replaces the registry entry and emits a warning.
     """
 
@@ -453,54 +447,54 @@ class Plugin:
         arrow: Mapping[type[Any], ArrowMatcher] | None = None,
     ):
         if not isinstance(name, str):
-            raise TypeError("Plugin name must be a string")
+            raise TypeError("Extension name must be a string")
 
         # should start with a letter and contain only lowercase letters, numbers, and underscores
         if not re.match(r"^[a-z0-9_]+$", name):
-            raise ValueError("Plugin name must consist of lowercase letters, numbers, and underscores only")
+            raise ValueError("Extension name must consist of lowercase letters, numbers, and underscores only")
 
         if not isinstance(types, tuple):
-            raise TypeError("Plugin types must be a tuple of types or PEP 604 unions")
+            raise TypeError("Extension types must be a tuple of types or PEP 604 unions")
         if not types:
-            raise ValueError("Plugin types must contain at least one value type family")
+            raise ValueError("Extension types must contain at least one value type family")
 
         families: list[tuple[type[Any], ...]] = []
         type_to_family: dict[type[Any], int] = {}
         for family_index, family in enumerate(types):
             members = get_args(family) if isinstance(family, UnionType) else (family,)
             if not members or any(member is Any or not isinstance(member, type) for member in members):
-                raise TypeError("Plugin types must contain only concrete types or PEP 604 unions of concrete types")
+                raise TypeError("Extension types must contain only concrete types or PEP 604 unions of concrete types")
             if type(None) in members:
-                raise TypeError("Plugin types must not include NoneType; null is represented by field state")
+                raise TypeError("Extension types must not include NoneType; null is represented by field state")
             if any(issubclass(member, (list, tuple, np.ndarray, np.generic, Iterator)) for member in members):
                 raise TypeError(
-                    "Plugin types declare canonical terminal Python atoms; "
+                    "Extension types declare canonical terminal Python atoms; "
                     "sequences, iterators, ndarrays, and NumPy scalar classes are prepared structurally"
                 )
 
             for member in members:
                 if member in type_to_family:
                     raise ValueError(
-                        f"Plugin value type {member.__name__} appears in more than one compatibility family"
+                        f"Extension value type {member.__name__} appears in more than one compatibility family"
                     )
                 type_to_family[member] = family_index
             families.append(cast(tuple[type[Any], ...], tuple(members)))
 
         if arrow is not None and not isinstance(arrow, Mapping):
-            raise TypeError("Plugin arrow must be a mapping from declared value types to Arrow matchers")
+            raise TypeError("Extension arrow must be a mapping from declared value types to Arrow matchers")
         declared = {} if arrow is None else dict(arrow)
         unknown = [member for member in declared if member not in type_to_family]
         if unknown:
             names = ", ".join(getattr(member, "__name__", repr(member)) for member in unknown)
-            raise ValueError(f"Plugin arrow matcher type(s) are absent from types: {names}")
+            raise ValueError(f"Extension arrow matcher type(s) are absent from types: {names}")
         invalid = [member for member, matcher in declared.items() if not callable(matcher)]
         if invalid:
             names = ", ".join(member.__name__ for member in invalid)
-            raise TypeError(f"Plugin Arrow matcher(s) must be callable: {names}")
+            raise TypeError(f"Extension Arrow matcher(s) must be callable: {names}")
         missing = [member for member in type_to_family if member not in MATCHERS and member not in declared]
         if missing:
             names = ", ".join(member.__name__ for member in missing)
-            raise TypeError(f"Plugin custom value type(s) require arrow matchers: {names}")
+            raise TypeError(f"Extension custom value type(s) require arrow matchers: {names}")
 
         self.name: str = name
         self.value_types: tuple[ValueTypeFamily, ...] = types
@@ -514,7 +508,7 @@ class Plugin:
 
         if name in TENSORFIELDS:
             warnings.warn(
-                f"Plugin '{name}' already registered; overriding existing tensorfield plugin",
+                f"Extension '{name}' already registered; overriding existing tensorfield extension",
                 UserWarning,
                 stacklevel=2,
             )
@@ -567,7 +561,7 @@ class Plugin:
         return len(families) <= 1
 
     def canonical(self, datatype: pa.DataType) -> pa.DataType:
-        """Resolve Arrow encodings that wrap a plugin's declared atom types."""
+        """Resolve Arrow encodings that wrap an extension's declared atom types."""
 
         if pa.types.is_dictionary(datatype):
             return self.canonical(datatype.value_type)
@@ -666,16 +660,16 @@ class Plugin:
         *,
         address: Address,
     ) -> pa.Array | pa.ChunkedArray:
-        """Validate one whole Arrow leaf column at the plugin boundary."""
+        """Validate one whole Arrow leaf column at the extension boundary."""
 
         if not isinstance(values, (pa.Array, pa.ChunkedArray)):
             raise TypeError(
-                f"plugin '{self.name}' at address '{address}' requires an Arrow array, got {type(values).__name__}"
+                f"extension '{self.name}' at address '{address}' requires an Arrow array, got {type(values).__name__}"
             )
         if not self.accepts(values.type):
             expected = ", ".join(" | ".join(member.__name__ for member in members) for members in self.families)
             raise TypeError(
-                f"plugin '{self.name}' at address '{address}' does not accept Arrow type {values.type}; "
+                f"extension '{self.name}' at address '{address}' does not accept Arrow type {values.type}; "
                 f"expected terminal atoms compatible with {expected}; normalize it in a preprocessor"
             )
         datatype = self.canonical(values.type)
@@ -683,7 +677,7 @@ class Plugin:
             return self.normalize(values, datatype)
         except pa.ArrowException as error:
             raise TypeError(
-                f"plugin '{self.name}' at address '{address}' cannot safely normalize Arrow type "
+                f"extension '{self.name}' at address '{address}' cannot safely normalize Arrow type "
                 f"{values.type} to {datatype}; normalize it in a preprocessor"
             ) from error
 
@@ -698,7 +692,7 @@ class Plugin:
         obj: RegisterT | None,
         component: Component | str | None = None,
     ) -> RegisterT | None:
-        """Register one tensorfield component with this plugin."""
+        """Register one tensorfield component with this extension."""
         if obj is None:
             if component is None:
                 raise TypeError("component must be provided when registering None")
@@ -708,7 +702,7 @@ class Plugin:
                 raise TypeError("only output and write may be registered as None")
 
             if key in self.components:
-                raise ValueError(f"Component '{key}' already registered in plugin '{self.name}'")
+                raise ValueError(f"Component '{key}' already registered in extension '{self.name}'")
 
             self.components[key] = None
             return None
@@ -723,7 +717,7 @@ class Plugin:
             raise ValueError(f"Component '{name}' is not a valid Component enum value") from None
 
         if key in self.components:
-            raise ValueError(f"Component '{key}' already registered in plugin '{self.name}'")
+            raise ValueError(f"Component '{key}' already registered in extension '{self.name}'")
 
         match key:
             case Component.Request:
@@ -851,7 +845,7 @@ class Plugin:
         for callback_factory in registered:
             callback = callback_factory()
             if not isinstance(callback, Callback):
-                raise TypeError(f"Plugin callback factory for '{self.name}' must produce a Lightning Callback")
+                raise TypeError(f"Extension callback factory for '{self.name}' must produce a Lightning Callback")
 
         self.callback_factories.extend(registered)
         return factory if len(registered) == 1 else registered
@@ -880,7 +874,7 @@ class Plugin:
         if component == Component.learn:
             return default_learn
 
-        raise AttributeError(f"Plugin '{self.name}' has no component '{component}'")
+        raise AttributeError(f"Extension '{self.name}' has no component '{component}'")
 
     @property
     def Request(self) -> type[RequestBase]:

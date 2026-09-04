@@ -93,7 +93,7 @@ However, these implementations are often rigid, proprietary, or inaccessible to 
 1. *Dynamic model architecture*: Model architecture is usually hard-coded or limited to a strict subset of possible topographies, which limits reuse across domains. See @sec:schema[Dynamic Model Architecture Instantiation]
 2. *Hierarchical context encoding*: Most systems cannot naturally represent multiple nested contexts, such as monthly statements, transactions, login sessions, and clickstream events. See @sec:nested-contexts[Hierarchical Context Encoding].
 3. *Transfer learning*: Business foundation models are hard to reuse if their schemas cannot evolve as teams add or remove features and targets. See @sec:mutability[Transfer Learning with Schema Evolution].
-4. *Typed datatype support*: Real business data needs specialized support for categories, numbers, text, entities, embeddings, and dates. The current external custom-datatype registry remains experimental and is not artifact-compatible. See @sec:datatypes[Datatype Plugin Architecture].
+4. *Typed datatype support*: Real business data needs specialized support for categories, numbers, text, entities, embeddings, and dates. The current external custom-datatype registry remains experimental and is not artifact-compatible. See @sec:datatypes[Datatype Extension Architecture].
 5. *Explainability*: Business models often operate on sensitive decisions, so developers need ways to inspect model behavior beyond a single opaque prediction. See @sec:explainability[Explainability].
 6. *Integrated querying and transformation*: Source data arrives in inconsistent shapes and formats, so developers need flexible querying and transformation without maintaining a separate feature pipeline. See @sec:integration[Integrated Querying, Wrangling, and Logging].
 
@@ -719,11 +719,11 @@ Without schema evolution, the organization would need to resort to one or both o
 By using transfer learning with schema evolution, teams can adapt foundation models with new fields for their individual use cases.
 
 
-== Datatype Plugin Architecture <sec:datatypes>
+== Datatype Extension Architecture <sec:datatypes>
 
-Schemas define the shape of the model, but datatype plugins define how each data field behaves. The built-in datatypes use this architecture internally. Although registry and base objects are importable, dynamically registered external request types do not currently round-trip through saved schema validation; treat custom tensorfields as an experimental, same-process extension surface rather than a stable artifact-compatible plugin SDK.
+Schemas define the shape of the model, but datatype extensions define how each data field behaves. The built-in datatypes use this architecture internally. Although registry and base objects are importable, dynamically registered external request types do not currently round-trip through saved schema validation; treat custom tensorfields as an experimental, same-process extension surface rather than a stable artifact-compatible extension SDK.
 
-Each plugin also declares its accepted raw atom compatibility families with `Plugin(types=(...))`. Separate tuple entries are incompatible—for example, `(str, bytes)` accepts either identity type but rejects a field that mixes them—while a union entry such as `(int | float,)` permits compatible numeric promotion. RelFlow applies this declaration recursively to list, tuple, and NumPy-array leaf atoms; the tensorfield remains responsible for semantic container shape and encoding.
+Each extension also declares its accepted raw atom compatibility families with `Extension(types=(...))`. Separate tuple entries are incompatible—for example, `(str, bytes)` accepts either identity type but rejects a field that mixes them—while a union entry such as `(int | float,)` permits compatible numeric promotion. RelFlow applies this declaration recursively to list, tuple, and NumPy-array leaf atoms; the tensorfield remains responsible for semantic container shape and encoding.
 
 A field's `type` is not only a validation hint. It selects a small bundle of components that know how to:
 - Validate and canonicalize declared Arrow atom families
@@ -735,12 +735,12 @@ A field's `type` is not only a validation hint. It selects a small bundle of com
 - Serialize predictions for inference and evaluation
 
 This is the key abstraction that allows `relflow` to model categories, numbers, timestamps, text, embeddings, and entities with the same high-level training loop.
-The context encoder does not need to know whether a field started as a string category, a floating-point value, a timestamp, or a pretrained text embedding. By the time the value enters the architecture, the plugin has converted it into a parcel of vectors. By the time the model produces a prediction, the plugin owns how to score and write that prediction.
+The context encoder does not need to know whether a field started as a string category, a floating-point value, a timestamp, or a pretrained text embedding. By the time the value enters the architecture, the extension has converted it into a parcel of vectors. By the time the model produces a prediction, the extension owns how to score and write that prediction.
 
-Conceptually, a datatype plugin for `foo` looks like this:
+Conceptually, a datatype extension for `foo` looks like this:
 
 ```python
-foo: Plugin = Plugin(name="foo", types=(str, bytes))
+foo: Extension = Extension(name="foo", types=(str, bytes))
 
 @foo.register
 class Request(RequestBase):
@@ -770,9 +770,9 @@ def write(module, prediction):
     # optional when the datatype has no public decoded payload
 ```
 
-The important point is that the architecture receives a uniform interface while the datatype plugin remains free to be specialized.
+The important point is that the architecture receives a uniform interface while the datatype extension remains free to be specialized.
 
-A `number` plugin can use continuous regression losses, a `category` plugin can use cross-entropy over a bounded vocabulary, a `dateparts` plugin can decompose timestamps into calendar components, a `text` plugin can call a pretrained Hugging Face encoder, and a `vector` plugin can learn against distances from dense embeddings.
+A `number` extension can use continuous regression losses, a `category` extension can use cross-entropy over a bounded vocabulary, a `dateparts` extension can decompose timestamps into calendar components, a `text` extension can call a pretrained Hugging Face encoder, and a `vector` extension can learn against distances from dense embeddings.
 
 This design keeps built-in datatypes specialized without forcing every value
 into the same crude representation. A future stable extension SDK can expose
@@ -989,7 +989,7 @@ This is important operationally. In many production ML systems, training data is
 Every node may opt into a structural `query`. Without one, RelFlow directly
 projects the same-named value relative to its parent schema node. An explicit
 query navigates Arrow structs, lists, and maps before the result rejoins
-canonical ragged preparation and the datatype plugin converts it into tensors.
+canonical ragged preparation and the datatype extension converts it into tensors.
 
 #sidenote[
   Queries are node-relative and structural. They support field selection, list
@@ -1082,7 +1082,7 @@ The same preprocessor path is used during training, batch prediction, and real-t
 
 Logging is integrated at three levels.
 
-First, the model logs field-level metrics through the same datatype plugins that compute losses. Categorical fields can log accuracy, numerical fields can log error metrics, and every metric is grouped by address and stage. This makes it possible to identify where the model is struggling: not only that validation loss increased, but that `customer/transaction/amount` or `customer/login_sessions/device` became unstable.
+First, the model logs field-level metrics through the same datatype extensions that compute losses. Categorical fields can log accuracy, numerical fields can log error metrics, and every metric is grouped by address and stage. This makes it possible to identify where the model is struggling: not only that validation loss increased, but that `customer/transaction/amount` or `customer/login_sessions/device` became unstable.
 
 Second, the training pipeline logs lifecycle and throughput information. Throughput is tracked in observations per second, which is useful when tuning batch size, dataloader workers, sharding strategy, or remote execution resources.
 
@@ -1228,22 +1228,22 @@ A team could pretrain encoders over user behavior, item metadata, inventory cons
 === Media Datatypes
 
 `relflow` does not currently support image, audio, or video datatypes.
-This is not because they are conceptually incompatible with the framework. A media datatype could follow the same plugin contract as any other datatype: load content, convert it into tensors or embeddings, decode outputs where appropriate, and contribute losses or predictions.
+This is not because they are conceptually incompatible with the framework. A media datatype could follow the same extension contract as any other datatype: load content, convert it into tensors or embeddings, decode outputs where appropriate, and contribute losses or predictions.
 
 The difficulty is operational.
 Media fields require more deliberate handling of file paths, object stores, streaming reads, caching, decoding libraries, batching, variable shapes, and potentially large intermediate tensors. Images, audio clips, and videos also often rely on pretrained encoders whose compute profile is very different from a categorical or numerical field.
 
-The likely path is to support media through datatype plugins that can wrap existing encoders.
-For example, an image plugin might convert a file reference into a vision-transformer embedding, while an audio plugin might convert an object-store URI into a fixed-width acoustic representation. The core architecture should only see the resulting embedding parcel; the media plugin should own the messy loading and preprocessing details.
+The likely path is to support media through datatype extensions that can wrap existing encoders.
+For example, an image extension might convert a file reference into a vision-transformer embedding, while an audio extension might convert an object-store URI into a fixed-width acoustic representation. The core architecture should only see the resulting embedding parcel; the media extension should own the messy loading and preprocessing details.
 
 === Data Source and Reader Plugins
 
-The data pipeline also needs a broader plugin system.
+The data pipeline also needs a broader extension system.
 At the moment, support is centered around a small set of source locations and file formats. That is enough for early development, but not enough for production environments where data may come from local files, S3, databases, message queues, lakehouse tables, or internal services.
 
-There are two related plugin boundaries to add:
-- *Source plugins*, which know how to enumerate and open data from a location.
-- *Reader plugins*, which know how to parse a particular format into raw `json`-like observations.
+There are two related extension boundaries to add:
+- *Source extensions*, which know how to enumerate and open data from a location.
+- *Reader extensions*, which know how to parse a particular format into raw `json`-like observations.
 
 This separation matters because source and format are independent.
 A parquet file might live locally, in S3, or behind an internal data platform. A streaming record might arrive from a queue but still decode into the same observation shape used during batch training.

@@ -16,12 +16,12 @@ from relflow.data.iterables import encode
 from relflow.data.ragged import Projection, RaggedField, coalesce
 from relflow.structs.enums import Strata, Tokens
 from relflow.structs.tree import Address
-from relflow.tensorfields.base import TENSORFIELDS, Plugin
+from relflow.tensorfields.base import TENSORFIELDS, Extension
 from relflow.tensorfields.extensions.number import number
 from tests.arrow import batch
 
 
-def plugin_name() -> str:
+def extension_name() -> str:
     return f"ragged_{uuid.uuid4().hex[:8]}"
 
 
@@ -38,12 +38,12 @@ def plugin_name() -> str:
         ((object,), pa.map_(pa.string(), pa.int64())),
     ],
 )
-def test_plugin_accepts_registered_arrow_terminal_families(family, datatype):
-    plugin = Plugin(plugin_name(), types=family)
+def test_extension_accepts_registered_arrow_terminal_families(family, datatype):
+    extension = Extension(extension_name(), types=family)
     try:
-        assert plugin.accepts(datatype)
+        assert extension.accepts(datatype)
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 @pytest.mark.parametrize(
@@ -56,25 +56,25 @@ def test_plugin_accepts_registered_arrow_terminal_families(family, datatype):
         ((dict,), pa.list_(pa.string())),
     ],
 )
-def test_plugin_rejects_unregistered_arrow_terminal_families(family, datatype):
-    plugin = Plugin(plugin_name(), types=family)
+def test_extension_rejects_unregistered_arrow_terminal_families(family, datatype):
+    extension = Extension(extension_name(), types=family)
     try:
-        assert not plugin.accepts(datatype)
+        assert not extension.accepts(datatype)
         with pytest.raises(TypeError, match="does not accept Arrow type.*normalize it in a preprocessor"):
-            plugin.prepare(pa.array([], type=datatype), address=Address("record/value"))
+            extension.prepare(pa.array([], type=datatype), address=Address("record/value"))
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
-def test_plugin_prepare_validates_and_preserves_one_whole_arrow_array():
-    plugin = Plugin(plugin_name(), types=(int | float,))
+def test_extension_prepare_validates_and_preserves_one_whole_arrow_array():
+    extension = Extension(extension_name(), types=(int | float,))
     values = pa.array([[1, 2], [3]], type=pa.large_list(pa.int64()))
     try:
-        prepared = plugin.prepare(values, address=Address("record/value"))
+        prepared = extension.prepare(values, address=Address("record/value"))
 
         assert prepared is values
     finally:
-        TENSORFIELDS.pop(plugin.name, None)
+        TENSORFIELDS.pop(extension.name, None)
 
 
 @pytest.mark.parametrize(
@@ -86,7 +86,7 @@ def test_plugin_prepare_validates_and_preserves_one_whole_arrow_array():
         rf.Cluster(capacity=8, n_clusters=2, p_unavailable=0.0),
     ],
 )
-def test_multifamily_plugins_accept_all_null_arrow_columns(field):
+def test_multifamily_extensions_accept_all_null_arrow_columns(field):
     model = rf.Model(value=field, d_model=8, n_layers=1, n_heads=2)
 
     encoded = model.encode(pa.table({"value": pa.nulls(2)}))["record/value"]
@@ -97,7 +97,7 @@ def test_multifamily_plugins_accept_all_null_arrow_columns(field):
     ]
 
 
-def test_encode_calls_plugin_prepare_once_with_the_whole_leaf_column(monkeypatch: pytest.MonkeyPatch):
+def test_encode_calls_extension_prepare_once_with_the_whole_leaf_column(monkeypatch: pytest.MonkeyPatch):
     model = rf.Model(value=rf.Number, d_model=8, n_layers=1, n_heads=2)
     calls: list[pa.DataType] = []
     original = number.prepare
@@ -118,10 +118,10 @@ def test_encode_calls_plugin_prepare_once_with_the_whole_leaf_column(monkeypatch
     assert calls == [pa.int64()]
 
 
-def test_builtin_plugin_type_contract_fails_before_codec_coercion():
+def test_builtin_extension_type_contract_fails_before_codec_coercion():
     model = rf.Model(value=rf.Number, d_model=8, n_layers=1, n_heads=2)
 
-    with pytest.raises(TypeError, match="plugin 'number'.*does not accept Arrow type string"):
+    with pytest.raises(TypeError, match="extension 'number'.*does not accept Arrow type string"):
         model.encode(pa.table({"value": ["1.5"]}))
 
 

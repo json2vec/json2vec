@@ -41,7 +41,7 @@ from relflow.structs.experiment import (
 )
 from relflow.structs.packages import Prediction
 from relflow.structs.tree import Address, MaskInput, Node, Rate, Renderable
-from relflow.tensorfields.base import TENSORFIELDS, Plugin, TensorFieldBase
+from relflow.tensorfields.base import TENSORFIELDS, Extension, TensorFieldBase
 
 OptimizerConfig = torch.optim.Optimizer | Callable[["Model"], torch.optim.Optimizer]
 SchedulerConfig = Any | Callable[["Model", torch.optim.Optimizer], Any]
@@ -407,8 +407,8 @@ class Model(lit.LightningModule, Renderable):
             callbacks.append(ThroughputLogger())
 
         for request in self.schema.active_requests.values():
-            plugin: Plugin = TENSORFIELDS[request.type]
-            for factory in plugin.callback_factories:
+            extension: Extension = TENSORFIELDS[request.type]
+            for factory in extension.callback_factories:
                 if factory in factories:
                     continue
 
