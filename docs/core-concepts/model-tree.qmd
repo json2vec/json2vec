@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -43,9 +44,9 @@ model = rf.Model(
         embed=True,
         sku=rf.Category(size=2048),
         quantity=rf.Number,
-        price=rf.Number(p_mask=0.15),
+        price=rf.Number(mask=rf.Mask(rate=0.15, reconstruct=True)),
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -78,9 +79,11 @@ The generated root is named `record` by default. `Model(name="order", ...)`
 renames it, but it remains a singleton with internal length 1. Repeated root
 data belongs in a child `Branch(length=...)`.
 
-Only leaves bind source values. A branch gives descendants shape and context;
-it does not run a branch-level source query. See
-[Binding Data](binding-data.qmd) for inferred leaf paths and explicit queries.
+Only leaves encode typed values. A branch gives descendants shape and context;
+by default, its name selects the same-named child collection from the processed
+observation. Any node can use a node-relative `query` to select a different
+structural path. See [Binding Data](binding-data.qmd) for direct, query, and
+preprocessor input contracts.
 
 ## Addresses Are Stable Locations
 
@@ -94,8 +97,9 @@ Every node has a slash-delimited `rf.Address` derived from its schema path:
 | target leaf | `rf.Address("order", "returned")` | `order/returned` |
 
 Addresses identify nodes in displays, metric names, mutation predicates, and
-prediction dictionaries. They describe the model contract. A leaf's query can
-read a differently named source path without changing its address.
+prediction dictionaries. They describe the model contract. A preprocessor or
+explicit leaf query can select a differently named source value without
+changing its address.
 
 ## Branches Define Alignment And Context
 
@@ -131,17 +135,18 @@ Node settings change how a schema participates in learning and prediction:
 
 | Setting | Effect |
 | --- | --- |
-| `p_mask=0.15` | Hides sampled leaf positions for reconstruction. |
-| `p_prune=0.15` | Hides sampled whole leaf instances for reconstruction. |
-| `target=True` | Always hides a leaf and learns it as a supervised target; shorthand for `p_prune=1.0`. |
-| `mask=rf.Mask(...)` | Selects candidate branch coordinates/windows; descendant leaves sample independently inside them. |
+| `mask=0.15` | Uses a learned mask at sampled positions during training, without a direct reconstruction loss. |
+| `mask=rf.Mask(rate=0.15, reconstruct=True)` | Reconstructs sampled positions. |
+| `mask=rf.Mask(rate=0.15, skip=True)` | Omits sampled inputs from tensorization and routing during training. |
+| `mask=True` | Always skips a node and reconstructs its leaf values as supervised targets. |
+| branch `mask=...` | Applies one decision atomically to the active descendant subtree. |
 | `embed=True` | Emits an embedding at a root, branch, or leaf address during prediction. |
 | `active=False` | Retains a node in the schema while excluding it from execution. |
 
 The complete learning-role contract belongs to
 [Learning Modes & Embeddings](embeddings.qmd). In particular, embedding export
-does not make a node a target, and pruning is an operation that produces masked
-input rather than a separate value state.
+does not create a reconstruction objective. Structural skipping and a learned
+mask are distinct encoder effects selected through the same policy.
 
 The tree is also the selection surface for explicit schema changes:
 
@@ -160,8 +165,8 @@ compatible. They are blocked while Lightning owns an active train, validation,
 test, or prediction loop.
 
 Compatibility is mechanical, not semantic: reusing a tensor of the same shape
-does not prove that a changed query or field meaning is safe. Validate and save
-schema mutations as new model artifacts.
+does not prove that a changed query, preprocessor contract, or field meaning is
+safe. Validate and save schema mutations as new model artifacts.
 
 ## Architecture Internals
 
@@ -190,6 +195,8 @@ At runtime, a scalar tensorfield carries arrays such as:
 state      (batch, 1, 32)  - valued, null, padded, masked, or reserved other
 content    (batch, 1, 32)  - datatype-specific content
 trainable  (batch, 1, 32)  - whether a retained answer may contribute to loss
+present    (batch, 1, 32)  - whether the coordinate participates in routing
+inferred   (batch, 1, 32)  - whether prediction requested reconstruction
 ```
 
 Some types add content dimensions. `Vector` content includes the configured
@@ -197,7 +204,8 @@ vector width; `Set` content includes its capacity dimension. The authoritative
 state vocabulary and public output contract are documented in
 [Built-In Data Types](data-types.qmd#value-state).
 
-Leaf embedders convert visible state and content into `d_model`-wide payloads:
+Leaf embedders convert present state and content into compact `d_model`-wide
+payloads, then RelFlow scatters them back into fixed schema geometry:
 
 ```text
 leaf embedding payload  (batch, ..., d_model)
@@ -211,19 +219,19 @@ The repeated dimensions before `d_model` come from branch ancestors.
 A forward pass traverses the tree from leaves upward, then decodes selected
 leaves from the context available along their path.
 
-1. Raw records have already been preprocessed, queried, and encoded into active
-   leaf tensorfields.
-2. Masking and pruning mark hidden input positions as `masked`, retain original
-   values in targets, and mark trainable reconstruction positions.
-3. Active visible leaves embed state and content and send vector parcels to
-   their parent branches.
+1. Raw records have already been preprocessed and bound directly or through
+   explicit node-relative queries.
+2. Arrow resolves every mask policy against pristine values, then creates
+   separate input and target `RaggedField` projections.
+3. Datatype codecs tensorize those projections once. Present leaf coordinates
+   embed state and content and send vector parcels to their parent branches.
 4. Branch encoders run from the deepest branches toward the root. Each branch
    combines child parcels, applies configured local attention, pools the child
    context, and sends one representation to its parent.
 5. Nodes configured with `embed=True` make their representations available to
    prediction output.
-6. Leaves that are targets, trainable, or configured for decoded output gather
-   context and run their decoders.
+6. Leaves compiled as fitting objectives, deterministic prediction decodes, or
+   embedding outputs gather context and run their decoders.
 7. During train, validation, or test, tensorfield losses and metrics use retained
    trainable targets. During prediction, writers serialize decoded values and
    configured embeddings.
@@ -249,9 +257,9 @@ cross-attention. `pooling="mean"` repeats the mean heritage context for each
 target slot.
 
 This lets a decoded leaf use ancestor contexts and visible information in its
-own branch. If the leaf was masked, its input parcel can still communicate the
-masked state while the original content remains only in retained targets for
-loss computation.
+own branch. A learned mask can communicate masked state without its original
+content. A skipped coordinate has no input parcel at all; its original value
+exists only in the target projection when reconstruction is enabled.
 
 ## Where Next
 
@@ -259,7 +267,7 @@ loss computation.
 - Use [Branch](../data-types/branch.qmd) for lengths, overflow, attention, and
   pooling configuration.
 - Use [Built-In Data Types](data-types.qmd) to choose leaf tensorfields.
-- Use [Learning Modes & Embeddings](embeddings.qmd) for targets,
-  reconstruction, and exported representations.
-- Use [Dynamic Masking](dynamic-masking.qmd) for coordinated windows inside
-  repeated contexts.
+- Use [Learning Modes & Embeddings](embeddings.qmd) for reconstruction,
+  regularization, and exported representations.
+- Use [Dynamic Masking](dynamic-masking.qmd) for selectors and atomic subtree
+  decisions inside repeated contexts.

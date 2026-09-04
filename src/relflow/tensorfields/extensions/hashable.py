@@ -3,27 +3,30 @@ from __future__ import annotations
 
 import math
 from collections.abc import Hashable as HashableValue
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
 from blake3 import blake3
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
 
 if TYPE_CHECKING:
@@ -31,7 +34,7 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Plugin = Plugin(name="hash")
+hashable: Plugin = Plugin(name="hash", types=(bool, int, float, str, bytes))
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
@@ -74,119 +77,79 @@ class Request(RequestBase):
 class TensorField(TensorFieldBase):
     state: torch.Tensor
     content: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        values: list,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
-        salt: int = 0,
+        context: Context,
     ) -> TensorFieldBase:
         request: Request = schema.requests[address]
         n_hashes: int = request.n_hashes
 
-        array_shape: tuple[int, ...] = schema.shapes[address]
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
+        key = context.salt.to_bytes(32, "big", signed=False)
 
-        data, states = pad(
-            nested=values,
-            shape=leading_shape,
-            dtype=object,
-            pad_value=None,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
+        def encode(field: RaggedField) -> torch.Tensor:
+            values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+            if (
+                pa.types.is_list(values.type)
+                or pa.types.is_large_list(values.type)
+                or pa.types.is_fixed_size_list(values.type)
+                or pa.types.is_struct(values.type)
+                or pa.types.is_map(values.type)
+            ):
+                raise ValueError(f"hash field at '{address}' expects scalar Arrow values, got {values.type}")
+            if pa.types.is_dictionary(values.type):
+                values = pc.dictionary_decode(values)
+            unique = pc.unique(values)
+            unique_hashes = np.empty((len(unique), n_hashes), dtype=np.int64)
+            for index, value in enumerate(unique.to_pylist()):
+                if not isinstance(value, HashableValue):
+                    raise ValueError(
+                        f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
+                    )
+                try:
+                    payload = msgspec.msgpack.encode(value)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError(
+                        f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
+                    ) from error
+                digest = blake3(payload, key=key).digest(length=n_hashes * 8)
+                unique_hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
 
-        hashes = np.zeros((*data.shape, n_hashes), dtype=np.int64)
-        flat_hashes = hashes.reshape(-1, n_hashes)
-        key = salt.to_bytes(32, "big", signed=False)
-        for index, (value, state) in enumerate(zip(data.reshape(-1), states.reshape(-1), strict=True)):
-            if state != Tokens.valued.value:
-                continue
-            if not isinstance(value, HashableValue):
-                raise ValueError(
-                    f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
-                )
-            try:
-                payload = msgspec.msgpack.encode(value)
-            except (TypeError, ValueError, OverflowError) as error:
-                raise ValueError(
-                    f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
-                ) from error
-            digest = blake3(payload, key=key).digest(length=n_hashes * 8)
-            flat_hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
+            positions = pc.index_in(values, value_set=unique)
+            if positions.null_count:
+                raise RuntimeError(f"hash field at '{address}' failed to resolve an Arrow value")
+            hashes = unique_hashes[positions.to_numpy(zero_copy_only=False)]
+            return torch.from_numpy(field.place(hashes, fill=0, value_shape=(n_hashes,)))
 
-        literal_mask_tensor = torch.tensor(literal_data, dtype=torch.bool)
-        state_tensor = torch.tensor(states, dtype=torch.int64).masked_fill(literal_mask_tensor, Tokens.masked.value)
-        content = torch.from_numpy(hashes).masked_fill(literal_mask_tensor.unsqueeze(-1), 0)
+        state_tensor = torch.from_numpy(input.dense)
 
         return cls(
             state=state_tensor,
-            content=content,
-            trainable=torch.zeros_like(input=state_tensor, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=len(values),
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token = torch.full_like(input=self.state, fill_value=Tokens.masked.value)
-
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-
-        self.state = self.state.masked_scatter(selected, mask_token)
-        self.content = self.content.masked_fill(selected.unsqueeze(-1).expand_as(self.content), 0.0)
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        request: Request = schema.requests[address]
-        shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-
-        state = torch.full(shape, Tokens.masked)
-        content = torch.zeros((*shape, request.n_hashes), dtype=torch.int64)
-
-        return cls(
-            state=state,
-            content=content,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            content=encode(input),
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: torch.from_numpy(target.dense),
+                    TensorKey.content: encode(target),
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -211,7 +174,7 @@ class Embedder(EmbedderBase):
         self.d_model = schema.d_model
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N: int
         dims: list[int]
 
@@ -230,6 +193,7 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=embeddings,
+            present=torch.ones(N, dtype=torch.bool, device=embeddings.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
@@ -341,5 +305,10 @@ def loss(
 
 
 @hashable.register
-def write(module: Model, prediction: Prediction):
+def output(module: Model, address: Address) -> None:
+    return None
+
+
+@hashable.register
+def write(module: Model, prediction: Prediction, datatype: None) -> None:
     return None

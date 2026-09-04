@@ -1,490 +1,426 @@
 ---
-marimo-static-output: true
 eval: false
 ---
 
 # Data Modules
 
-**Example status — excerpt:** blocks isolate ingestion choices and assume a
-model or records from the surrounding text. The complete in-memory lifecycle is
-tested in [Getting Started](../getting-started.qmd).
+**Example status — reference:** snippets use the four shipped data modules and
+their current single-process Arrow contracts.
 
-`relflow` data modules are Lightning `LightningDataModule` implementations.
-They load raw records, run an optional RelFlow preprocessor, batch observations,
-tensorize values from the model schema, apply configured masking and target
-pruning in non-predict strata, and return Lightning batches.
+RelFlow has one Arrow data engine and four ways to enter it:
 
-The data module does not define the model schema. It reads schema state from the
-`model` passed to the constructor.
-
-The batch path is:
-
-1. Raw records are read from a DataFrame, files, or a user dataset.
-2. An optional `rf.Preprocessor` emits model-facing observations.
-3. Non-predict strata (train, validation, and test) may apply `sample_rate` and
-   observation-buffer shuffling. Prediction always bypasses those two
-   transforms; it remains complete and ordered within its source/sharding path
-   unless replacement is explicitly enabled for the `predict` split.
-4. Observations are grouped into model batches.
-5. Query paths tensorize values from the model schema and resolve branch
-   `overflow` policies.
-6. `p_mask` hides sampled configured leaf positions for reconstruction,
-   including null and padded positions in the current implementation.
-7. `p_prune` and `target=True` hide selected leaf instances for decoding.
-8. The encoded batch is handed to the Lightning loop.
-
-## Shared Options
-
-Data modules use the same core ideas:
-
-| Option | Meaning |
+| Your source | Use |
 | --- | --- |
-| `model` | Supplies the schema, `batch_size`, and tensorfield encoding state. |
-| `preprocessor` | `Preprocessor` object returned by `@rf.preprocess`. |
-| `num_workers` | PyTorch dataloader worker count. |
-| `persistent_workers` | Keeps worker processes alive between epochs when workers are enabled. |
-| `pin_memory` | Enables dataloader pinning when useful for accelerator transfer. |
-| `sample_rate` | Samples observations before batching in train, validation, and test. Prediction bypasses sampling. |
-| `observation_buffer_size` | Approximate per-rank shuffle-buffer budget for processed observations, divided across local workers. |
-| `chunk_batch_size` | Read chunk size for Polars and streaming sources. This is separate from `model.batch_size`. |
+| `pyarrow.Table`, `RecordBatch`, `Dataset`, `rf.Batch`, or restartable Arrow factory | `rf.ArrowDataModule` |
+| collected `polars.DataFrame` | `rf.PolarsDataModule` |
+| restartable PyTorch `IterableDataset` yielding mappings | `rf.CustomDataModule` |
+| restartable zero-argument generator yielding mappings | `rf.SyntheticDataModule` |
 
-Most execution options accept either one value or a mapping keyed by
-`"train"`, `"validate"`, `"test"`, or `"predict"`.
+After ingress, every module uses the same preprocessing, sampling, shuffling,
+model batching, query, and encoding path. The adapters do not maintain separate
+Polars or Python-row implementations.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+## Start Here: An In-Memory Arrow Table
 
-datamodule = rf.PolarsDataModule(
-    model=model,
-    train=train_frame,
-    validate=valid_frame,
-    num_workers={"train": 8, "validate": 2},
-    sample_rate={"train": 0.25, "validate": 1.0},
-)
-```
-
-## Choosing A Module
-
-| Use case | Recommended module |
-| --- | --- |
-| Tutorial or notebook | `PolarsDataModule` |
-| Unit test or tiny local sample | `PolarsDataModule` |
-| Data already in memory as a Polars DataFrame | `PolarsDataModule` |
-| Data already exposed as a PyTorch `IterableDataset` | `CustomDataModule` |
-| Synthetic observations | `SyntheticDataModule` |
-| SQL, API, queue, or custom SDK feed | User `IterableDataset` plus `CustomDataModule` |
-| Many local files | `StreamingDataModule` |
-| S3-backed data | `StreamingDataModule` |
-| Distributed training or prediction over large inputs | `StreamingDataModule` |
-
-## CustomDataModule
-
-Use `CustomDataModule` when you already have a PyTorch `IterableDataset` that
-yields raw observation dictionaries. The dataset owns the upstream feed.
-`relflow` owns preprocessing, batching, tensorization, masking, and target
-pruning.
-
-For synthetic data, pass zero-argument generator functions directly to
-`SyntheticDataModule`:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import random
-
+```python
+import pyarrow as pa
 import relflow as rf
 
-
-def synthetic_records():
-    for _ in range(100):
-        yield {
-            "amount": random.random() * 100,
-            "merchant": random.choice(["bookstore", "grocery"]),
-            "label": random.choice(["ok", "review"]),
-        }
-
-
-datamodule = rf.SyntheticDataModule(
-    model=model,
-    train=synthetic_records,
-    num_workers=0,
+train = pa.Table.from_pylist(
+    [
+        {"amount": 10.0, "merchant": "market", "fraud": "false"},
+        {"amount": 800.0, "merchant": "unknown", "fraud": "true"},
+    ]
 )
-```
 
-The function is called again for every iteration, so it may yield a finite or
-infinite stream. With multiple data-loader workers, each worker calls the
-function independently; seed or shard inside the function when workers must
-produce distinct observations.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-from torch.utils.data import IterableDataset
-
-import relflow as rf
-
-
-class Records(IterableDataset):
-    def __init__(self, records):
-        self.records = records
-
-    def __iter__(self):
-        yield from self.records
-
-
-datamodule = rf.CustomDataModule(
-    model=model,
-    train=Records([
-        {"amount": 10.5, "merchant": "bookstore", "label": "ok"},
-        {"amount": 99.0, "merchant": "electronics", "label": "review"},
-    ]),
-    validate=Records([
-        {"amount": 24.0, "merchant": "grocery", "label": "ok"},
-    ]),
-    num_workers=0,
-    persistent_workers=False,
-    pin_memory=False,
+model = rf.Model(
+    d_model=16,
+    n_layers=1,
+    n_heads=4,
+    batch_size=32,
+    amount=rf.Number,
+    merchant=rf.Category(size=1024),
+    fraud=rf.Category(mask=True, size=2),
 )
-```
 
-You may pass named splits or one split mapping:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-datamodule = rf.CustomDataModule(
-    model=model,
-    datasets={
-        "train": train_dataset,
-        "validate": valid_dataset,
-        "predict": predict_dataset,
-    },
-)
-```
-
-Each dataset should yield `dict[str, Any]` records. Open external connections
-inside `__iter__`, so dataloader worker processes create their own connections.
-If the dataset needs source-specific sharding, implement that in the dataset
-with PyTorch worker utilities such as `torch.utils.data.get_worker_info()`.
-
-## PolarsDataModule
-
-Use `PolarsDataModule` for in-memory Polars DataFrames. It is the right default
-for examples, notebooks, tests, and small-to-medium local workflows.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import polars as pl
-
-import relflow as rf
-
-train = pl.read_ndjson("docs/data/iris.jsonl")
-valid = train.head(16)
-
-datamodule = rf.PolarsDataModule(
+data = rf.ArrowDataModule(
     model=model,
     train=train,
-    validate=valid,
+    validate=train,
+    seed=42,
+)
+```
+
+Pass only the splits you have. The names are `train`, `validate`, `test`, and
+`predict`; at least one is required. `model.batch_size` is the model-batch
+authority.
+
+## Common Configuration
+
+```python
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=validate,
+    predict=requests,
+    preprocessor=prepare,
+    retain={
+        "train": (),
+        "validate": (),
+        "predict": ("request_id",),
+    },
+    seed=42,
+    shuffle={"train": True, "validate": False, "predict": False},
+    sample={"train": 0.75, "validate": 1.0},
+    epoch_size={"train": 100_000},
+    shuffle_rows=16_384,
+    drop_last={"train": True},
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
 )
 ```
 
-You may pass named splits:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-datamodule = rf.PolarsDataModule(
-    model=model,
-    train=train_frame,
-    validate=valid_frame,
-    test=test_frame,
-    predict=predict_frame,
-)
-```
-
-Or pass one split mapping:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-datamodule = rf.PolarsDataModule(
-    model=model,
-    dataframe={
-        "train": train_frame,
-        "validate": valid_frame,
-        "predict": predict_frame,
-    },
-)
-```
-
-Do not pass `dataframe=...` and named split arguments in the same constructor.
-At least one split is required.
-
-### Polars Prediction
-
-Configure a `predict` split before using the Lightning prediction loop:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-datamodule = rf.PolarsDataModule(
-    model=model,
-    predict=predict_frame,
-)
-
-trainer.predict(model=model, datamodule=datamodule)
-```
-
-For writing outputs to disk, add `rf.Writer`; see
-[Batch Inference](batch-inference.qmd).
-
-## StreamingDataModule
-
-Use `StreamingDataModule` when data lives in files and should not be loaded into
-one in-memory DataFrame. Format support depends on the storage location:
-
-| Location | Supported suffixes |
-| --- | --- |
-| Local paths | `ndjson`, `parquet`, `feather`, `csv`, `orc`, `json` |
-| `s3://...` roots | `parquet`, `feather`, `csv`, `orc`, `json` |
-
-The `ndjson` reader uses local file access, so it cannot read an S3 URI. Avro
-is not supported by the current PyArrow-backed reader; do not select it even
-though the public suffix enum currently accepts the value.
-
-Split arguments are compiled regular expressions matched against discovered
-file paths. Pass either raw regex strings or already compiled `re.Pattern`
-objects.
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-import relflow as rf
-
-datamodule = rf.StreamingDataModule(
-    model=model,
-    root="data/events",
-    suffix="ndjson",
-    train=r"/train/.*\.jsonl$",
-    validate=r"/validate/.*\.jsonl$",
-    predict=r"/predict/.*\.jsonl$",
-    sharding="file",
-)
-```
-
-For S3:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-datamodule = rf.StreamingDataModule(
-    model=model,
-    root="s3://my-bucket/events",
-    suffix="parquet",
-    train=r"/train/.*\.parquet$",
-    validate=r"/validate/.*\.parquet$",
-)
-```
-
-### Sharding
-
-`StreamingDataModule` assigns work across dataloader workers and distributed
-ranks.
-
-| Sharding | Behavior |
-| --- | --- |
-| `"file"` | Assigns whole files to workers. |
-| `"chunk"` | Assigns read chunks to workers. |
-| `"record"` | Assigns individual records to workers. |
-
-Default sharding for streaming data is `"file"`. Use `"chunk"` when individual
-files are large and you need more parallelism. Use `"record"` when distribution
-needs to be fine-grained and record-order locality is not important.
-
-### Streaming Buffers
+Most options can be a scalar for every split or a mapping keyed by split;
+omitted keys retain that option's default. A `retain` mapping is stricter and
+must name every configured split exactly once, because it defines an output
+schema rather than a tuning override.
 
 | Option | Meaning |
 | --- | --- |
-| `file_buffer_size` | Shuffles file order before reading. |
-| `chunk_batch_size` | Read chunk size and chunk ownership unit. |
-| `observation_buffer_size` | Approximate per-rank shuffle budget, divided across local workers, for processed observations. |
+| `preprocessor` | One Arrow `Batch` transform, or one per split |
+| `retain` | Processed top-level columns copied into prediction `inputs` |
+| `seed` | Root seed for sampling, shuffling, and uniform mask selection |
+| `shuffle` | Train defaults to `True`; other splits default to `False` |
+| `sample` | Independent inclusion probability in `(0, 1]` |
+| `epoch_size` | Maximum logical observations emitted per pass |
+| `shuffle_rows` | Streaming shuffle output quantum; the mixer may hold up to twice this row count |
+| `drop_last` | Drop an incomplete final model batch |
+| `num_workers` | PyTorch DataLoader workers; currently `0` only |
+| `persistent_workers` | Currently `False` only |
+| `pin_memory` | Accepted for DataLoader compatibility; leave `False` because the current encoded carrier does not expose PyTorch's recursive pinning protocol |
 
-When `replacement=None`, training uses replacement sampling and non-training
-splits do not. Setting replacement for prediction can repeat records indefinitely,
-so leave it disabled for finite prediction jobs.
+`replacement` is present as a reserved constructor option but currently
+rejects `True`; exact replacement waits for the Arrow identity index.
 
-::: {.callout-note}
-Split patterns are regular expressions, not glob strings. Raw regex strings
-are compiled by `StreamingDataModule`.
+## What Is An Observation?
+
+One post-preprocessor Arrow row is one RelFlow observation. A repeated child is
+a list-of-struct column inside that row:
+
+```text
+orders: table
+└── line_items: large_list<struct<sku: large_string, quantity: int64>>
+```
+
+`Branch(length=32)` is model capacity. It does not require source lists to be
+padded to 32. RelFlow coalesces the ragged Arrow values and applies the branch
+overflow rule when it encodes a model batch.
+
+Preprocessing happens before sampling and shuffling, so a filter or expansion
+changes the logical observation population. A schema `query` only projects
+values; it never changes membership.
+
+## Shuffling And Sampling
+
+The safe default is automatic:
+
+- training shuffles;
+- validation, test, and prediction preserve processed source order;
+- sampling is without replacement;
+- `sample=1.0` keeps every observation.
+
+An in-memory Arrow table receives a complete permutation each training epoch.
+A restartable Arrow factory is mixed through a bounded buffer. `shuffle_rows`
+controls how many logical rows are emitted on each full-buffer drain; the mixer
+may hold up to twice that count. Choose several model batches when contiguous
+records are correlated.
+
+```python
+data = rf.ArrowDataModule(
+    model=model,
+    train=train_source,
+    seed=7331,
+    shuffle=True,
+    shuffle_rows=max(4096, model.batch_size * 64),
+)
+```
+
+Sampling and shuffling use separate deterministic random streams. With the
+same source, seed, and epoch, they reproduce the same sequence. Training uses
+a new epoch in the key, so its order changes across epochs. Evaluation and
+prediction remain stable.
+
+The same seed also drives uniform mask selection. Selection is keyed by batch
+identity, schema address, policy, stratum, and training epoch, so changing a
+source chunk or model-batch boundary does not change which logical coordinates
+are selected. Training selections change by epoch; validation, test, and
+prediction selections remain stable. Datatype-specific transforms such as
+`p_unavailable` retain their own random contract.
+
+::: {.callout-warning}
+Set `shuffle=False` for training only when order is part of the learning
+design—for example a curriculum or strictly temporal pass. Long contiguous
+runs of one target or entity can produce misleading optimization behavior.
 :::
 
-## Preprocessors
+`sample=0.2` means each logical observation has a 20% inclusion probability;
+it is not an exact row count. Apply validation sampling intentionally because
+it changes metric denominators.
 
-Here, **preprocessor** means the public `rf.Preprocessor` object returned by
-`@rf.preprocess`, not any ordinary Python function that happens to transform a
-dictionary. Data modules reject undecorated callables so the input contract and
-pipeline-provided arguments stay explicit.
+`epoch_size=N` caps the eligible post-preprocessor, post-sampling population at
+`N` observations. For a callable stream, RelFlow admits the first `N` eligible
+rows in canonical source order *before* the bounded shuffle, then mixes only
+that finite set. It is a stream cutoff, not reservoir sampling over rows that
+occur later. Use `sample`, rotate the source deterministically, or provide a
+finite Table when every source row should have a chance to enter that epoch.
 
-Preprocessors are optional. If none is configured, each raw dictionary becomes
-one model-facing observation unchanged. Use a query when the source shape is
-stable and selection is enough. Use a RelFlow preprocessor when records need
-Python logic before schema queries run: type coercion, renaming,
-source-specific cleanup, sorting, windowing, session splitting, filtering, or
-derived fields.
+## `ArrowDataModule`
 
-A one-to-one preprocessor returns one wrapped `rf.Observation` for each raw
-dictionary:
+The canonical module accepts a finite Arrow unit, an Arrow Dataset, or a
+restartable factory:
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-@rf.preprocess
-def normalize_transaction(record: dict) -> rf.Observation:
-    return rf.Observation({
-        "amount": float(record["transaction"]["amount_usd"]),
-        "merchant": record["transaction"]["merchant_name"].strip().lower(),
-        "label": record["outcome"],
-    })
+```text
+rf.Batch | pa.Table | pa.RecordBatch
+pyarrow.dataset.Dataset
+Callable[[], pa.RecordBatchReader | Iterable[Arrow unit]]
 ```
 
-Returning a bare dictionary is invalid; the wrapper distinguishes an
-intentional model observation from an accidental intermediate value. Returning
-`None` drops that raw record.
+Let `pyarrow.dataset` own file discovery, format, filesystem, and partitioning:
 
-After preprocessing, queries run against the emitted observation, not the
-original raw record. The schema remains the model-facing contract.
+```python
+import pyarrow.dataset as ds
 
-All data modules accept the same preprocessor forms:
+train_dataset = ds.dataset("train/", format="parquet")
+data = rf.ArrowDataModule(model=model, train=train_dataset)
+```
 
-```{python .marimo}
-#| echo: true
-#| output: true
+A factory must return a fresh reader or iterable every time:
 
-datamodule = rf.PolarsDataModule(
+```python
+import pyarrow.ipc as ipc
+
+def train_source():
+    handle = pa.memory_map("train.arrow", "r")
+    return ipc.open_stream(handle)
+
+data = rf.ArrowDataModule(model=model, train=train_source)
+```
+
+Every emitted unit must have the same Arrow schema. An empty factory may return
+a zero-batch `RecordBatchReader` with a declared schema or emit one typed empty
+unit. A bare iterable or reader is rejected because it may be exhausted after
+the first epoch.
+
+Paths, mappings, Polars frames, and configured Arrow scanners are rejected at
+this boundary. Build a Dataset from a path; pass a Dataset instead of its
+configured Scanner so RelFlow owns each scan plan; use the adapter matching any
+non-Arrow source.
+
+### Current source limits
+
+The first Arrow-native release supports in-memory Arrow, Dataset scans, and
+single-reader factories. These features fail explicitly until their identity
+and scheduling contracts are complete:
+
+- RelFlow-planned source projection pushdown (`requires` is validated metadata
+  today, but the scanner currently reads the Dataset schema as supplied);
+- multiple DataLoader workers;
+- distributed rank scheduling;
+- coordinated caches;
+- replacement sampling;
+- dataset-scoped preprocessing of a factory.
+
+This means a Dataset or streaming source should use `num_workers=0` and one
+process for now. The failures are deliberate: silent
+duplication or ordering drift is worse than a clear capability error.
+
+## `PolarsDataModule`
+
+Install the optional adapter with `pip install "relflow[polars]"`:
+
+```python
+import polars as pl
+import relflow as rf
+
+train_frame = pl.read_parquet("train.parquet")
+validate_frame = pl.read_parquet("validate.parquet")
+
+data = rf.PolarsDataModule(
     model=model,
-    train=records,
-    preprocessor=my_preprocessor,
+    train=train_frame,
+    validate=validate_frame,
+    seed=42,
 )
 ```
 
-Bind user-supplied preprocessor parameters before passing the preprocessor into
-the data module. Pipeline-provided keyword-only parameters named `strata`,
-`schema`, and `encoding_context` are matched by name:
+Each frame calls `to_arrow()` once during construction. Iteration is then
+identical to `ArrowDataModule`. A `LazyFrame` must be collected explicitly:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+train_frame = pl.scan_parquet("train/*.parquet").collect()
+```
 
-datamodule = rf.PolarsDataModule(
+That prevents a hidden query execution in a data module constructor.
+
+## `CustomDataModule`
+
+Use this adapter for a restartable PyTorch `IterableDataset` that yields one
+mapping per observation:
+
+```python
+from torch.utils.data import IterableDataset
+
+class Events(IterableDataset):
+    def __iter__(self):
+        yield {"amount": 10.0, "merchant": "market", "fraud": "false"}
+        yield {"amount": 800.0, "merchant": "unknown", "fraud": "true"}
+
+schema = pa.schema(
+    {
+        "amount": pa.float64(),
+        "merchant": pa.large_string(),
+        "fraud": pa.large_string(),
+    }
+)
+
+data = rf.CustomDataModule(
     model=model,
-    train=records,
-    preprocessor=build_windows.partial(
-        as_of="2026-05-31T00:00:00Z",
-        trailing_days=30,
-    ),
+    train=Events(),
+    arrow_schema=schema,
+    ingress_rows=4096,
 )
 ```
 
-A yielding preprocessor expands one raw dictionary into many independent
-model-facing observations. That is useful when one account history should
-become multiple windows, one session log should become multiple examples, or
-one raw export contains many model records:
+The adapter collects at most `ingress_rows` mappings, calls
+`pa.RecordBatch.from_pylist(...)`, and immediately enters the shared Arrow
+pipeline. The temporary Python collection is bounded; it is not the internal
+data representation.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Without `arrow_schema`, RelFlow infers once from the first non-empty group.
+Provide the schema when:
 
-@rf.preprocess
-def session_windows(account: dict):
-    for session in account["sessions"]:
-        yield rf.Observation({
-            "account_id": account["account_id"],
-            "events": session["events"],
-            "label": session.get("label"),
-        })
+- the source may be empty;
+- the first group has an all-null field;
+- a field may appear only in a later group;
+- integer width, list kind, nullability, or another physical type matters.
+
+The dataset must return a fresh iterator with a stable schema on each pass.
+Every yielded item must be a mapping with string keys.
+
+## `SyntheticDataModule`
+
+Use a zero-argument generator factory for synthetic mappings:
+
+```python
+def generate():
+    for index in range(10_000):
+        yield {
+            "amount": float(index % 100),
+            "merchant": f"merchant-{index % 20}",
+            "fraud": "true" if index % 97 == 0 else "false",
+        }
+
+data = rf.SyntheticDataModule(
+    model=model,
+    train=generate,
+    arrow_schema=schema,
+    ingress_rows=4096,
+    seed=42,
+)
 ```
 
-The same decorated preprocessor object can be passed directly to
-`model.encode(...)` or `model.predict(...)` for debugging:
+The function is called for every new source pass. The module's `seed` controls
+RelFlow sampling and shuffling; it does not seed your generator. Seed a
+stochastic generator internally if you need identical values across restarts.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+## Add A Preprocessor
 
-encoded = model.encode(raw_records[:2], preprocess=normalize_transaction)
-predictions = model.predict(raw_records[:2], preprocess=normalize_transaction)
+Every module accepts the same `Preprocessor`:
+
+```python
+import pyarrow.compute as pc
+
+@rf.preprocess(
+    requires=("amount",),
+    produces=("amount_log",),
+)
+def prepare(batch: rf.Batch) -> rf.Batch:
+    values = pc.ln(pc.add(pc.cast(batch.data["amount"], pa.float64()), 1.0))
+    data = batch.data.append_column("amount_log", values)
+    return batch.replace(data)
+
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=validate,
+    preprocessor=prepare,
+)
 ```
 
-Preprocessor code and bound user values are not stored in `model.save(...)`.
-Version them with the checkpoint and reuse them in validation, batch
-prediction, and online serving. A deployment request must emit exactly one
-observation, even though a data-module preprocessor may emit zero or many; see
-[Online Serving](serving.qmd#reuse-the-training-preprocessor).
+Use a per-split mapping only when the transform genuinely differs:
 
-## Verify The Data Contract
-
-Inspect a small encoded batch before starting a long run:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-batch = next(iter(datamodule.train_dataloader()))
-
-print(batch.keys())
-for address in model.schema.active_requests:
-    assert address in batch
+```python
+preprocessor={"train": augment, "validate": prepare, "predict": prepare}
 ```
 
-Also run a small validation loop and inspect emitted address metrics. An absent
-target metric usually points to an empty split, a query that resolved no
-trainable positions, or a target/pruning configuration mismatch.
+Ordinary feature preparation should be identical across train, validation, and
+prediction. Bound fitted state with `.partial(...)`; RelFlow does not fit
+processor statistics during iteration. [Binding Data](../core-concepts/binding-data.qmd)
+and [Working With Arrow](working-with-arrow.qmd) provide complete recipes.
 
-## Schema Mutation
+## Retain Inputs For Output
 
-Data modules keep a reference to the model when possible. If you mutate the
-model schema between Lightning runs, the data module reads the current
-schema from the model. If you detach or replace the model, rebuild the
-data module so it uses the intended schema and tensorfield encoding context.
+Modeled input columns are not copied into predictions by default. Ask for only
+what an output consumer needs:
 
-Shape-changing mutations can invalidate optimizer or checkpoint state. Apply
-them only between complete Lightning runs; see
-[Model Lifecycle](model-lifecycle.qmd#schema-and-artifact-compatibility).
+```python
+data = rf.ArrowDataModule(
+    model=model,
+    predict=requests,
+    retain=("request_id", "event_time"),
+)
+```
 
-## Common Failures
+Tuple order becomes field order under the prediction `inputs` struct. Use
+`retain="*"` only when copying every processed column is intentional. A
+per-split mapping must describe configured splits; direct `Model.predict(...)`
+accepts only a tuple or `"*"` because it runs in the predict stratum.
 
-| Symptom | Likely cause or next check |
-| --- | --- |
-| `preprocessor must be a Preprocessor object` | Decorate the callable with `@rf.preprocess` and return `rf.Observation`. |
-| Query output is unexpectedly empty | Remember queries run against the emitted observation, not the raw source record. |
-| An explicit Lightning loop has no batches | Configure its matching `validate`, `test`, or `predict` split. |
-| Streaming files are not discovered | Split selectors are regular expressions over discovered paths, not glob patterns. |
-| Records duplicate or disappear in distributed input | Check sharding choice, worker-aware behavior in a custom iterable, and replacement sampling. |
-| Validation looks implausibly strong | Check time/entity overlap and target leakage; see [Temporal Validation And Leakage](temporal-validation.qmd) and [Evaluation](evaluation.qmd#design-a-trustworthy-split). |
+Retained columns are for joining, auditing, and postprocessing. They are not
+automatically model inputs. A postprocessor cannot request a column after the
+data module has discarded it.
 
-## Where Next
+## Lightning Lifecycle
 
-- Use [Training With Lightning](lightning.qmd) for the execution model.
-- Use [Batch Inference](batch-inference.qmd) for `trainer.predict(...)` and
-  `rf.Writer`.
-- Use this page's [preprocessor section](#preprocessors) for input-side
-  transformations.
-- Use [Query Paths](../core-concepts/querypaths.qmd) to map processed records to
-  leaf fields.
-- Design and interpret held-out splits with
-  [Evaluation And Metrics](evaluation.qmd).
+```python
+import lightning.pytorch as lit
+
+trainer = lit.Trainer(max_epochs=10)
+trainer.fit(model=model, datamodule=data)
+trainer.validate(model=model, datamodule=data)
+trainer.test(model=model, datamodule=data)
+trainer.predict(model=model, datamodule=data)
+```
+
+Each method asks the matching named split. Missing optional splits return no
+loader; explicitly requesting an unconfigured split through
+`data.dataloader(...)` is an error.
+
+## Debugging Checklist
+
+When ingestion fails, inspect boundaries in this order:
+
+1. print `table.schema` and confirm nested field names and physical types;
+2. run the preprocessor once through the data module and confirm one exact
+   output schema across chunks;
+3. verify the model's direct bindings and `query` roots exist after
+   preprocessing;
+4. set `shuffle=False` temporarily when investigating row identity or order;
+5. use `num_workers=0`—the current Arrow scheduler requires it;
+6. provide `arrow_schema` for empty, all-null, or evolving mapping sources;
+7. ensure a factory returns a fresh reader or iterator on every invocation.
+
+Continue with [Query Paths](../core-concepts/querypaths.qmd) for nested
+selection, [Working With Arrow](working-with-arrow.qmd) for column operations,
+and [Batch Inference](batch-inference.qmd) for writing predictions.

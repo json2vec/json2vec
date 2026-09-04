@@ -5,12 +5,12 @@ eval: false
 
 # Getting Started
 
-**Example status — runnable:** CI executes this build/train/validate/save/load/
-predict contract with `uv run pytest tests/examples/test_e2e_examples.py`.
+**Example status — runnable:** this page uses the public Arrow pipeline from
+table construction through prediction.
 
 This runnable walkthrough takes one small model through the complete first-use
 lifecycle: install, define a schema, train, inspect validation metrics, save,
-load, and predict with the target omitted.
+load, and predict with the reconstructed field omitted.
 
 The example is deliberately too small to establish model quality. Its job is to
 verify that every part of the workflow is connected correctly.
@@ -36,12 +36,14 @@ Verify the installed distribution and import:
 python -c 'from importlib.metadata import version; import relflow; print(version("relflow"))'
 ```
 
-The core install includes PyTorch, Lightning, Polars, and PyArrow. Add `text`
-for Hugging Face text models or `serving` for the FastAPI runtime:
+The core install includes PyTorch, Lightning, and PyArrow. Add `polars` for its
+ingress adapter, `text` for Hugging Face text models, or `serving` for the
+FastAPI runtime:
 
 ```bash
 python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.git"
 python -m pip install "relflow[serving] @ git+https://github.com/relflow/relflow.git"
+python -m pip install "relflow[polars] @ git+https://github.com/relflow/relflow.git"
 ```
 
 The walkthrough fixes Lightning to `accelerator="cpu"`; no GPU is required.
@@ -60,12 +62,12 @@ to compute loss and metrics.
 #| output: true
 
 import lightning.pytorch as lit
-import polars as pl
+import pyarrow as pa
 import torch
 
 import relflow as rf
 
-train_records = pl.DataFrame(
+train_records = pa.Table.from_pylist(
     [
         {"sepal_length": 5.1, "petal_length": 1.4, "species": "setosa"},
         {"sepal_length": 4.9, "petal_length": 1.4, "species": "setosa"},
@@ -76,7 +78,7 @@ train_records = pl.DataFrame(
     ]
 )
 
-validate_records = pl.DataFrame(
+validate_records = pa.Table.from_pylist(
     [
         {"sepal_length": 5.0, "petal_length": 1.5, "species": "setosa"},
         {"sepal_length": 5.9, "petal_length": 4.2, "species": "versicolor"},
@@ -112,7 +114,7 @@ model = rf.Model(
     optimizer=lambda module: torch.optim.AdamW(module.parameters(), lr=1e-2),
     sepal_length=rf.Number,
     petal_length=rf.Number,
-    species=rf.Category(target=True, size=3, topk=[2]),
+    species=rf.Category(mask=True, size=3, topk=[2]),
 )
 
 model
@@ -123,7 +125,7 @@ The schema expresses four decisions:
 - `sepal_length` and `petal_length` are visible numeric inputs;
 - `species` is a bounded category with capacity for exactly the three labels in
   this example;
-- `target=True` hides `species` from the encoder and trains its decoder from the
+- `mask=True` skips `species` in the encoder and trains its decoder from the
   remaining context;
 - root-level `embed=True` asks prediction to return one `d_model` vector for
   each record.
@@ -132,28 +134,28 @@ The schema expresses four decisions:
 Category capacity is not required for an unavailable class; use extra capacity
 only when the vocabulary is expected to grow.
 
-The generated root is named `record`, so the target address is
+The generated root is named `record`, so the reconstruction address is
 `record/species`. See [Model Tree](core-concepts/model-tree.qmd) for how to read
 the displayed schema.
 
 ## Train And Validate
 
-`PolarsDataModule(...)` handles these in-memory frames. RelFlow models and data
+`ArrowDataModule(...)` handles these in-memory tables. RelFlow models and data
 modules use the regular Lightning training loop.
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-datamodule = rf.PolarsDataModule(
+datamodule = rf.ArrowDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
     num_workers=0,
     persistent_workers=False,
     pin_memory=False,
-    observation_buffer_size=8,
-    sample_rate=1.0,
+    seed=42,
+    sample=1.0,
 )
 
 trainer = lit.Trainer(
@@ -171,7 +173,7 @@ trainer.fit(model=model, datamodule=datamodule)
 metrics = trainer.validate(model=model, datamodule=datamodule, verbose=False)[0]
 
 print(metrics["loss/validate"])
-print(metrics["record:species/validate:accuracy:content"])
+print(metrics["record.species/validate.accuracy.content"])
 ```
 
 `loss/validate` is the weighted total validation loss. The address-qualified
@@ -194,10 +196,12 @@ requiring you to repeat the constructor.
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-requests = [
-    {"sepal_length": 5.0, "petal_length": 1.5},
-    {"sepal_length": 6.2, "petal_length": 4.8},
-]
+requests = pa.Table.from_pylist(
+    [
+        {"sepal_length": 5.0, "petal_length": 1.5},
+        {"sepal_length": 6.2, "petal_length": 4.8},
+    ]
+)
 
 with TemporaryDirectory() as directory:
     artifact = Path(directory) / "iris-relflow.pt"
@@ -206,8 +210,9 @@ with TemporaryDirectory() as directory:
     predictions = restored.predict(requests)
 ```
 
-Notice that `requests` omit `species`. Target omission is the normal prediction
-contract: the target slot is masked, then decoded from the visible inputs. A
+Notice that `requests` omit `species`. Omission is the normal prediction
+contract for `mask=True`: the slot is absent from encoder routing, then decoded
+from the visible inputs. A
 Lightning training checkpoint may additionally contain optimizer, scheduler,
 and loop state; `Model.save(...)` is the compact RelFlow artifact for restoring
 the schema and model state. [Model Lifecycle](guides/model-lifecycle.qmd)
@@ -216,20 +221,25 @@ and processor versioning.
 
 ## Interpret The Prediction
 
-Prediction is a dictionary keyed by schema address:
+Prediction is an Arrow table. Its `predictions` struct is keyed by schema
+address:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-species = predictions[rf.Address("record", "species")]
-record = predictions[rf.Address("record")]
+import pyarrow.compute as pc
 
-print(species["content"]["value"])
-print(species["content"]["probability"])
-print(species["content"]["topk"])
-print(species["inferred"])
-print(record["embedding"])
+output = predictions["predictions"]
+species = pc.struct_field(output, "record/species")
+content = pc.struct_field(species, "content")
+record = pc.struct_field(output, "record")
+
+print(pc.struct_field(content, "value"))
+print(pc.struct_field(content, "probability"))
+print(pc.struct_field(content, "topk"))
+print(pc.struct_field(species, "inferred"))
+print(pc.struct_field(record, "embedding"))
 ```
 
 For each request:
@@ -237,16 +247,17 @@ For each request:
 - `content.value` is the selected vocabulary label;
 - `content.probability` is that label's model probability;
 - `content.topk` contains the two requested ranked candidates;
-- `inferred` is `true` because `species` was masked and decoded;
+- `inferred` is `true` because `species` was requested for deterministic
+  reconstruction;
 - `record.embedding` is the exported 16-dimensional root representation.
 
-The target payload also contains a probability distribution over value states.
+The reconstructed payload also contains a probability distribution over value states.
 Category probabilities rank the learned vocabulary; they are not automatically
 calibrated probabilities and are not an out-of-distribution detector. See
 [Prediction Output](guides/prediction-output.qmd) for the complete shared
 envelope, [Built-In Data Types](core-concepts/data-types.qmd) for state/content
 semantics, and [Postprocessors](guides/postprocessors.qmd) for reshaping the
-address-keyed result.
+canonical Arrow result.
 
 ## Add Structure Next
 
@@ -267,7 +278,7 @@ nested_model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 nested_model
@@ -280,7 +291,9 @@ Continue with:
 - [Built-In Data Types](core-concepts/data-types.qmd) for field choice;
 - [Binding Data](core-concepts/binding-data.qmd) for defaults, queries, and
   preprocessors;
-- [Data Modules](guides/data-modules.qmd) for in-memory and streaming inputs;
+- [Data Modules](guides/data-modules.qmd) for Arrow and adapter inputs;
+- [Working With Arrow](guides/working-with-arrow.qmd) for practical column and
+  nested-array recipes;
 - [Evaluation And Metrics](guides/evaluation.qmd) for meaningful validation;
 - [Model Lifecycle](guides/model-lifecycle.qmd) for production artifacts;
 - [Prediction Output](guides/prediction-output.qmd) for the shared response

@@ -97,7 +97,10 @@ model = rf.Model(
         length=160,
         overflow="tail",
         embed=True,
-        device_id=rf.Hash(p_mask=0.15, embed=True),
+        device_id=rf.Hash(
+            mask=rf.Mask(rate=0.15, reconstruct=True),
+            embed=True,
+        ),
         source=rf.Category(size=2),
         event_type=rf.Category(size=128),
         days_since_event=rf.Number,
@@ -105,7 +108,7 @@ model = rf.Model(
         amount=rf.Number,
         merchant_category=rf.Category(size=1024),
     ),
-    account_takeover=rf.Category(target=True, size=2),
+    account_takeover=rf.Category(mask=True, size=2),
 )
 
 model
@@ -121,11 +124,10 @@ extractor for these simple inferred paths preserves the explicit `None`
 placeholders, so login-only and transaction-only fields stay on the same event
 coordinates.
 
-`p_mask=0.15` hides some individual device occurrences during train and
-validation. The decoder learns quantized hash reconstruction when another
-occurrence remains visible. Using `target=True` on the entire Hash leaf
-would hide every identity occurrence and remove the relationship the model
-needs.
+The reconstructing mask hides some individual device occurrences during
+training. The decoder learns quantized hash reconstruction when another
+occurrence remains visible. Using `mask=True` on the entire Hash leaf would
+skip every identity occurrence and remove the relationship the model needs.
 
 `days_since_event` supplies recency. Root and event embeddings are requested for
 diagnostics; they are not explanations by themselves.
@@ -139,77 +141,115 @@ recurrence matters.
 
 Real histories need one deterministic event-time contract. This public
 preprocessor example stacks both sources, filters events after `as_of`, derives
-recency, and returns a `rf.Observation`:
+recency, and preserves the input row identity. It assumes `as_of` and both
+`timestamp` fields already have an Arrow timestamp type; parse strings once at
+ingress rather than inside this hot path:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-from datetime import datetime
+import awkward as ak
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 
 import relflow as rf
 
+EVENTS = pa.large_list(
+    pa.struct(
+        [
+            pa.field("source", pa.large_string()),
+            pa.field("device_id", pa.large_string()),
+            pa.field("event_type", pa.large_string()),
+            pa.field("days_since_event", pa.float64()),
+            pa.field("ip_country", pa.large_string()),
+            pa.field("amount", pa.float64()),
+            pa.field("merchant_category", pa.large_string()),
+        ]
+    )
+)
 
-def parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
+def missing(values):
+    valid = ak.zeros_like(values, dtype=np.bool_)
+    return ak.mask(values, valid)
 
-@rf.preprocess
-def customer_window(customer):
-    as_of = parse_timestamp(customer["as_of"])
-    events = []
+@rf.preprocess(
+    requires=("as_of", "login_sessions", "transactions"),
+    produces=("events",),
+)
+def customer_window(batch: rf.Batch) -> rf.Batch:
+    rows = ak.from_arrow(batch.data)
 
-    for login in customer.get("login_sessions", []):
-        timestamp = parse_timestamp(login["timestamp"])
-        if timestamp > as_of:
-            continue
-        events.append(
-            {
-                "timestamp": timestamp,
-                "source": "login",
-                "device_id": login["device_id"],
-                "event_type": login["event_type"],
-                "days_since_event": (as_of - timestamp).total_seconds() / 86_400,
-                "ip_country": login.get("ip_country"),
-                "amount": None,
-                "merchant_category": None,
-            }
-        )
+    login_as_of, _ = ak.broadcast_arrays(
+        rows.as_of,
+        rows.login_sessions.timestamp,
+    )
+    transaction_as_of, _ = ak.broadcast_arrays(
+        rows.as_of,
+        rows.transactions.timestamp,
+    )
+    logins = rows.login_sessions[
+        rows.login_sessions.timestamp <= login_as_of
+    ]
+    transactions = rows.transactions[
+        rows.transactions.timestamp <= transaction_as_of
+    ]
 
-    for transaction in customer.get("transactions", []):
-        timestamp = parse_timestamp(transaction["timestamp"])
-        if timestamp > as_of:
-            continue
-        events.append(
-            {
-                "timestamp": timestamp,
-                "source": "transaction",
-                "device_id": transaction["device_id"],
-                "event_type": "purchase",
-                "days_since_event": (as_of - timestamp).total_seconds() / 86_400,
-                "ip_country": None,
-                "amount": transaction["amount"],
-                "merchant_category": transaction["merchant_category"],
-            }
-        )
-
-    events.sort(key=lambda event: event["timestamp"])
-    for event in events:
-        event.pop("timestamp")
-    return rf.Observation(
+    login_events = ak.zip(
         {
-            "customer_id": customer["customer_id"],
-            "as_of": customer["as_of"],
-            "events": events,
-            "account_takeover": customer.get("account_takeover"),
+            "timestamp": logins.timestamp,
+            "source": ak.full_like(logins.device_id, "login"),
+            "device_id": logins.device_id,
+            "event_type": logins.event_type,
+            "ip_country": logins.ip_country,
+            "amount": missing(
+                ak.zeros_like(logins.timestamp, dtype=np.float64)
+            ),
+            "merchant_category": missing(logins.device_id),
         }
     )
+    transaction_events = ak.zip(
+        {
+            "timestamp": transactions.timestamp,
+            "source": ak.full_like(transactions.device_id, "transaction"),
+            "device_id": transactions.device_id,
+            "event_type": ak.full_like(transactions.device_id, "purchase"),
+            "ip_country": missing(transactions.device_id),
+            "amount": transactions.amount,
+            "merchant_category": transactions.merchant_category,
+        }
+    )
+
+    events = ak.concatenate([login_events, transaction_events], axis=1)
+    order = ak.argsort(events.timestamp, axis=1, stable=True)
+    events = events[order]
+
+    event_as_of, _ = ak.broadcast_arrays(rows.as_of, events.timestamp)
+    microseconds = ak.values_astype(
+        event_as_of - events.timestamp,
+        np.float64,
+    )
+    events = ak.with_field(
+        events,
+        microseconds / 86_400_000_000,
+        "days_since_event",
+    )
+    events = ak.without_field(events, "timestamp")
+
+    values = pc.cast(
+        ak.to_arrow(events, extensionarray=False),
+        EVENTS,
+    )
+    return batch.replace(batch.data.append_column("events", values))
 ```
 
 The model branch uses `overflow="tail"`, so sorting oldest to newest retains the
-most recent configured positions if a history exceeds 160 events. A production
-preprocessor should also enforce a maximum lookback window and the source's
-actual data-availability lag.
+most recent configured positions if a history exceeds 160 events. The explicit
+`EVENTS` type prevents empty partitions or all-null optional fields from
+changing the produced schema. A production preprocessor should also enforce a
+maximum lookback window and the source's actual data-availability lag.
 
 ## Train With Honest Splits
 
@@ -217,7 +257,7 @@ actual data-availability lag.
 #| echo: true
 #| output: true
 
-datamodule = rf.PolarsDataModule(
+datamodule = rf.ArrowDataModule(
     model=model,
     train=train_records,
     validate=validate_records,
@@ -249,14 +289,24 @@ path:
 #| echo: true
 #| output: true
 
-predictions = model.predict(customer_requests, preprocess=customer_window)
+import pyarrow.compute as pc
 
-risk = predictions[rf.Address("customer", "account_takeover")]
-customer_embedding = predictions[rf.Address("customer")]["embedding"]
-event_embedding = predictions[rf.Address("customer", "events")]["embedding"]
+result = model.predict(customer_requests, preprocess=customer_window)
+predictions = result["predictions"]
+
+risk = pc.struct_field(predictions, "customer/account_takeover")
+customer_embedding = pc.struct_field(
+    pc.struct_field(predictions, "customer"),
+    "embedding",
+)
+event_embedding = pc.struct_field(
+    pc.struct_field(predictions, "customer/events"),
+    "embedding",
+)
 ```
 
-This is an inference excerpt using trained `model` and raw `customer_requests`.
+This is an inference excerpt using trained `model` and an Arrow
+`customer_requests` table.
 The risk payload includes state/content and `inferred`; configured embeddings
 are normalized contextual representations. Use a
 [postprocessor](../guides/postprocessors.qmd) to expose only the contract needed

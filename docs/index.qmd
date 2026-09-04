@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -15,11 +16,11 @@ pyproject: |
 surface; continue to [Getting Started](getting-started.qmd) for the tested
 artifact lifecycle.
 
-`relflow` builds PyTorch/Lightning models for records that are not naturally
-flat. An order can contain line items, a customer can have several histories,
-and a session can contain events. You describe those fields and relationships
-as a schema; `relflow` uses the schema as both the input contract and the model
-blueprint.
+`relflow` builds PyTorch/Lightning models for Arrow records that are not
+naturally flat. An order can contain line items, a customer can have several
+histories, and a session can contain events. You describe those fields and
+relationships as a schema; `relflow` uses the schema as both the input contract
+and the model blueprint.
 
 ```{python .marimo}
 #| echo: true
@@ -40,7 +41,7 @@ model = rf.Model(
         quantity=rf.Number,
         price=rf.Number,
     ),
-    returned=rf.Category(target=True, size=2),
+    returned=rf.Category(mask=True, size=2),
 )
 
 model
@@ -48,8 +49,9 @@ model
 
 This model reads an order as a structured object. The line items interact in
 their own repeated context before that context is pooled into the order. The
-`returned` value is hidden and learned as a supervised target. The root address
-is `order`, so its target prediction is written at `order/returned`.
+`returned` value is skipped by the encoder and learned as a supervised
+reconstruction. The root address is `order`, so its prediction is written at
+`order/returned`.
 
 ## Why Preserve The Record Shape?
 
@@ -72,15 +74,16 @@ of the approach.
 
 ## What The Schema Controls
 
-- Leaf types such as `Number`, `Category`, `Set`, `Hash`, `DateParts`,
-  `Text`, and `Vector` own value encoding, loss, metrics, and prediction output.
+- Leaf types such as `Number`, `Category`, `Cluster`, `Set`, `Hash`,
+  `DateParts`, `Text`, and `Vector` own value encoding, loss, metrics, and
+  prediction output.
 - `Branch` nodes preserve repeated contexts and pool them into their parent.
-- `target=True`, masking, and pruning decide which values are hidden and
-  learned from context.
+- One `mask` policy controls learned masking, structural skipping, and
+  reconstruction from context.
 - `embed=True` selects root, branch, or leaf representations to export during
   prediction.
-- Field names and optional queries bind raw record values to stable schema
-  addresses.
+- Field names and optional node-relative queries bind Arrow values to stable
+  schema addresses.
 
 Lightning owns the training, validation, test, and prediction loops. RelFlow
 owns the schema-derived model, typed tensors, losses, and output contract.
@@ -93,6 +96,7 @@ owns the schema-derived model, typed tensors, losses, and output contract.
 | See how one raw record becomes tensors, losses, and output | [Data Flow](core-concepts/data-flow.qmd) |
 | Understand branches, leaves, contexts, and addresses | [Model Tree](core-concepts/model-tree.qmd) |
 | Bind ordinary or mismatched input records | [Binding Data](core-concepts/binding-data.qmd) |
+| Learn the practical Arrow surface | [Working With Arrow](guides/working-with-arrow.qmd) |
 | Choose the representation for a field | [Built-In Data Types](core-concepts/data-types.qmd) |
 | Train and evaluate a model | [Training With Lightning](guides/lightning.qmd) |
 | Interpret metrics and select a model | [Evaluation And Metrics](guides/evaluation.qmd) |
@@ -103,11 +107,12 @@ owns the schema-derived model, typed tensors, losses, and output contract.
 
 ## Supported Workflows
 
-The public workflow covers schema construction, in-memory and streaming data
-modules, Lightning training, interactive prediction, Parquet batch output,
-postprocessing, and optional FastAPI-backed serving. Schema mutation, dynamic
-masking, field importance, and field stacking are available as more advanced
-workflows.
+The public workflow covers schema construction, Arrow-native data modules,
+Lightning training, interactive Arrow prediction, direct Parquet batch output,
+postprocessing, and optional FastAPI-backed serving. Polars, custom iterable,
+and synthetic mapping inputs enter through focused adapters. Schema mutation,
+dynamic masking, field importance, and field stacking are available as more
+advanced workflows.
 
 Scale depends on the schema, branch lengths, vocabulary sizes, hardware,
 precision, data pipeline, and batch size. Each page labels its examples as
@@ -123,6 +128,7 @@ production workload.
 [Binding Data](core-concepts/binding-data.qmd) →
 [Learning Modes & Embeddings](core-concepts/embeddings.qmd) →
 [Data Modules](guides/data-modules.qmd) →
+[Working With Arrow](guides/working-with-arrow.qmd) →
 [Training With Lightning](guides/lightning.qmd) →
 [Evaluation And Metrics](guides/evaluation.qmd) →
 [Model Lifecycle](guides/model-lifecycle.qmd) →

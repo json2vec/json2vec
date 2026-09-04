@@ -6,12 +6,12 @@ import pytest
 
 import relflow as rf
 from relflow.structs.enums import TensorKey
-from relflow.tensorfields.shared.counter import CounterUpdateCallback
+from tests.arrow import table
 
 ADDRESS = rf.Address("record/flag")
 
 
-def _model() -> rf.Model:
+def build() -> rf.Model:
     return rf.Model(
         name="record",
         d_model=8,
@@ -23,23 +23,16 @@ def _model() -> rf.Model:
     )
 
 
-def _observe(model: rf.Model, *values: bool | None) -> None:
-    inputs = model.encode(
-        [{"flag": value} for value in values],
+def observe(model: rf.Model, *values: bool | None) -> None:
+    model.encode(
+        table([{"flag": value} for value in values]),
         strata=rf.Strata.train,
-        mask=False,
-    )
-    CounterUpdateCallback().on_train_batch_start(
-        trainer=None,
-        pl_module=model,
-        batch=inputs,
-        batch_idx=0,
     )
 
 
 def test_boolean_counts_returns_defensive_training_count_snapshot() -> None:
-    model = _model()
-    _observe(model, False, True, False, None)
+    model = build()
+    observe(model, False, True, False, None)
 
     counts = rf.Boolean.counts(model, ADDRESS)
 
@@ -50,7 +43,7 @@ def test_boolean_counts_returns_defensive_training_count_snapshot() -> None:
 
 
 def test_boolean_counts_subtracts_and_clamps_internal_prior() -> None:
-    model = _model()
+    model = build()
     assert rf.Boolean.counts(model, ADDRESS) == {False: 0, True: 0}
 
     counter = model.nodes[ADDRESS].embedder.counters[TensorKey.content.name]
@@ -60,7 +53,7 @@ def test_boolean_counts_subtracts_and_clamps_internal_prior() -> None:
 
 
 def test_boolean_counts_validates_model_and_address() -> None:
-    model = _model()
+    model = build()
 
     with pytest.raises(TypeError, match="must be a Model"):
         rf.Boolean.counts({}, ADDRESS)

@@ -8,11 +8,13 @@ from multiprocessing.managers import ListProxy, SyncManager
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Callable
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import torch
 from lightning.pytorch import Callback, Trainer
 from loguru import logger
 
-from relflow.data.nested import MASK_LITERAL
 from relflow.distributed import (
     all_gather_object,
     broadcast_object,
@@ -189,14 +191,34 @@ class VocabularyState:
 
         return self.index.get(word, self.unavailable_index)
 
+    def indices(self, values: pa.Array | pa.ChunkedArray, *, learn: bool) -> np.ndarray:
+        """Encode one whole non-null Arrow token column through unique values."""
+
+        array = values.combine_chunks() if isinstance(values, pa.ChunkedArray) else values
+        if array.null_count:
+            raise ValueError("vocabulary token arrays cannot contain nulls")
+        if not len(array):
+            self.reserve((), learn=learn)
+            return np.empty(0, dtype=np.int64)
+
+        unique = pc.unique(array)
+        candidates = unique.to_pylist()
+        self.reserve(candidates, learn=learn)
+        encoded = pa.array(
+            [self.encode(candidate) for candidate in candidates],
+            type=pa.int64(),
+        )
+        positions = pc.index_in(array, value_set=unique)
+        if positions.null_count:
+            raise RuntimeError("Arrow vocabulary lookup failed to resolve a source token")
+        selected = pc.take(encoded, positions)
+        return selected.to_numpy(zero_copy_only=False)
+
     def _tokens(self, values: Any) -> Iterable[Any]:
         if values is None:
             return
 
         if isinstance(values, str | bytes):
-            if values == MASK_LITERAL:
-                return
-
             yield values
             return
 
@@ -236,6 +258,8 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.proposal_lock: Any = _LocalLock()
         self._snapshot_cache: list[Any] | None = None
         self._snapshot_size: int = -1
+        self._labels_cache: pa.Array | None = None
+        self._labels_source: list[Any] | None = None
 
     @property
     def storage(self) -> _VocabularyStorage:
@@ -334,6 +358,17 @@ class OnlineVocabularyModel(torch.nn.Module):
         self._snapshot_size = size
 
         return self._snapshot_cache
+
+    def labels(self) -> pa.Array:
+        """Return canonical string labels, rebuilding only after vocabulary changes."""
+        snapshot = self.snapshot()
+        if self._labels_cache is None or self._labels_source is not snapshot:
+            self._labels_cache = pa.array([str(value) for value in snapshot], type=pa.large_string())
+            self._labels_source = snapshot
+        elif len(self._labels_cache) != len(snapshot):
+            self._labels_cache = pa.array([str(value) for value in snapshot], type=pa.large_string())
+
+        return self._labels_cache
 
     def drain_proposals(self) -> list[Any]:
         with self.proposal_lock:

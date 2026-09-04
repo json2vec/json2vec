@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -101,7 +102,7 @@ model = rf.Model(
         merchant_category=rf.Category(size=256),
         amount=rf.Number,
     ),
-    is_fraud=rf.Category(target=True, size=2),
+    is_fraud=rf.Category(mask=True, size=2),
 )
 
 model
@@ -154,10 +155,11 @@ Supervised prediction and masked reconstruction use the same basic question:
 
 > Given the visible context, what should this hidden value be?
 
-`target=True` always hides a supervised answer. `p_mask` and `p_prune` sample
-reconstruction tasks. A branch mask limits descendant sampling to candidate
-coordinates or windows; descendants still sample independently, so it is not
-an atomic row mask. Embedding export does not hide a value or create a loss.
+`mask=True` always skips a supervised answer and reconstructs it. Other
+`rf.Mask` policies can select positions for learned masking, structural
+skipping, train-only dropout, or reconstruction. A mask attached to a branch
+is resolved once per branch coordinate and applies atomically to all active
+descendants. Embedding export does not hide a value or create a loss.
 
 A shared mechanism makes it possible to combine supervised and self-supervised
 objectives without creating a separate feature representation. It does not make

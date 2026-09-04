@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -48,14 +49,13 @@ record. Use `Text` when `relflow` should compute embeddings from strings. Use a
 
 - Python lists or tuples.
 - 1D NumPy arrays.
-- 1D PyTorch tensors.
 
 Every valued input must have exactly `n_dim` numeric elements. `None` is encoded
 as a null state, and missing branch positions are encoded as padded state.
 Prepare vector scale and normalization upstream unless a custom tensorfield owns
 that behavior.
 
-Invalid containers, non-1D NumPy/PyTorch values, the wrong vector length, and
+Invalid containers, non-1D NumPy values, the wrong vector length, and
 non-numeric elements raise `ValueError`. Accepted valued vectors are stored as
 `float32`; the built-in does not fit or apply a normalizer.
 
@@ -79,9 +79,9 @@ Increasing `n_dim` grows the input projection, decoder output, activation
 memory, and prediction payload linearly. Prefer the smallest upstream
 representation that preserves the signal you need.
 
-## Target Behavior
+## Reconstruction Behavior
 
-When a `Vector` is masked or used as a target, the decoder predicts:
+When a `Vector` is selected for reconstruction, the decoder predicts:
 
 - `state`: probabilities for `valued`, `null`, `padded`, `masked`, and
   reserved `other`.
@@ -97,26 +97,17 @@ source vector's scale.
 
 ## Prediction Output
 
-`Model.predict(...)` returns state probabilities, reconstructed vector
-content, and the shared inferred mask. This is the complete field envelope:
+`Model.predict(...)` returns an Arrow table. Vector `content` is a
+`fixed_size_list<float32>[size]`, so its width is stable for zero, one, or many
+observations:
 
-```{python .marimo}
-#| echo: true
-#| output: true
+```python
+import pyarrow.compute as pc
 
-{
-    "record/embedding": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": ...,
-        "inferred": ...,
-    }
-}
+embedding = pc.struct_field(result["predictions"], "record/embedding")
+state = pc.struct_field(embedding, "state")
+content = pc.struct_field(embedding, "content")
+inferred = pc.struct_field(embedding, "inferred")
 ```
 
 See [Prediction Output](../guides/prediction-output.qmd) for array shapes and

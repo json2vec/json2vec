@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 import torch
 from tensordict import TensorDict
@@ -41,7 +42,9 @@ def _one_valued_token(index: int) -> TensorField:
     return TensorField(
         state=torch.tensor([[Tokens.valued.value]], dtype=torch.int64),
         content=torch.tensor([[index]], dtype=torch.int64),
+        present=torch.ones((1, 1), dtype=torch.bool),
         trainable=torch.zeros((1, 1), dtype=torch.bool),
+        inferred=torch.zeros((1, 1), dtype=torch.bool),
         targets=TensorDict({}),
         batch_size=1,
     )
@@ -168,7 +171,7 @@ def test_override_applies_only_within_prediction_scope():
     initial_row_2 = embedder.embeddings["cluster"].weight[min(initial_vocab_size, CAPACITY)].detach().clone()
 
     with rf.Cluster.override(model, ADDRESS, {"overridden": 3}):
-        model.predict([{"merchant_id": "overridden"}])
+        model.predict(pa.table({"merchant_id": ["overridden"]}))
 
     assert len(embedder.vocab.master) == initial_vocab_size
     # The row that got temporarily written must be reverted to its original values.
@@ -180,11 +183,11 @@ def test_override_is_used_by_tensorization():
     model = _model()
 
     with rf.Cluster.override(model, ADDRESS, {"overridden": 3}):
-        overridden = model.encode([{"merchant_id": "overridden"}])[Address(ADDRESS)]
+        overridden = model.encode(pa.table({"merchant_id": ["overridden"]}))[Address(ADDRESS)]
         assert int(overridden.content.item()) == 0
         assert int(overridden.state.item()) == Tokens.valued.value
 
-    unavailable = model.encode([{"merchant_id": "overridden"}])[Address(ADDRESS)]
+    unavailable = model.encode(pa.table({"merchant_id": ["overridden"]}))[Address(ADDRESS)]
     assert int(unavailable.content.item()) == CAPACITY
 
 
@@ -277,14 +280,14 @@ def test_override_replaces_encoder_row_for_oov_token():
     with rf.Cluster.override(model, ADDRESS, {"overridden-oov": 2}):
         # During the override, this token is encoded as valued/index 0.
         overridden_index = embedder.vocab.state.index["overridden-oov"]
-        overridden_output = embedder(_one_valued_token(overridden_index)).payload.clone()
+        overridden_output = embedder.embed(_one_valued_token(overridden_index)).payload.clone()
 
     # Reference: forward pass for a hand-built row that argmaxes to cluster 2.
     with torch.no_grad():
         reference_row = torch.full((K,), -10.0)
         reference_row[2] = 10.0
         embedder.embeddings["cluster"].weight[0].copy_(reference_row)
-    reference_output = embedder(_one_valued_token(0)).payload.clone()
+    reference_output = embedder.embed(_one_valued_token(0)).payload.clone()
 
     # Both should route through cluster 2 in eval mode (argmax), so the cluster
     # embedding contribution must match. State embedding is identical either way.
@@ -314,7 +317,7 @@ def test_persistent_assignment_survives_predict_calls():
     first_row = embedder.embeddings["cluster"].weight[assigned_index].detach().clone()
 
     # Simulate a subsequent predict call by running the embedder again.
-    _ = embedder(_one_valued_token(assigned_index))
+    _ = embedder.embed(_one_valued_token(assigned_index))
     second_row = embedder.embeddings["cluster"].weight[assigned_index].detach().clone()
 
     assert torch.equal(first_row, second_row)

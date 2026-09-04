@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -20,7 +21,7 @@ measurements: the child leaves are the attributes of each item in that
 collection.
 
 A branch gives those leaves one coordinate system. `length`, `overflow`, and
-branch-mask windows are defined over that collection; child queries stay aligned
+branch mask decisions are defined over that collection; child values stay aligned
 under the branch address; and branch embeddings represent the grouped context.
 At runtime, child leaf embeddings are gathered into the branch. If
 `attention!="none"`, a transformer encoder lets items in the context interact;
@@ -61,9 +62,10 @@ efficient.
 ## Input Values
 
 For the common repeated-collection case, `Branch` expects a list of child
-objects at the source path named by `name`, unless the child fields use
-explicit `query` expressions. Each child tensorfield is padded to the configured
-`length`, and overlong inputs are handled by the branch's `overflow` policy.
+objects at the processed-observation key named by the branch. A
+`Branch(length=1)` also accepts one child mapping directly. Each child
+tensorfield is padded to the configured `length`, and overlong inputs are
+handled by the branch's `overflow` policy.
 
 ::: {.callout-note}
 Set `length` deliberately for real repeated data. The default is `1`,
@@ -82,11 +84,10 @@ retained, extra items are truncated, and missing slots are padded:
 ```
 
 The first record keeps `a` and `b`; `c` is truncated. The second record keeps
-`a` and adds one padded slot. Branch order is the order returned by the query.
-Sort, window, or filter in a preprocessor when
-order matters.
+`a` and adds one padded slot. Branch order is processed-observation order. Sort,
+window, or filter in a preprocessor when order matters.
 
-Use `overflow="tail"` when the query result is ordered oldest-to-newest and the
+Use `overflow="tail"` when the child collection is ordered oldest-to-newest and the
 most recent records should be retained:
 
 ```{python .marimo}
@@ -104,8 +105,8 @@ events = rf.Branch(
 events
 ```
 
-Use `overflow="error"` when any truncated input would indicate a bad schema,
-bad query, or upstream data contract failure.
+Use `overflow="error"` when any truncated input would indicate a bad schema or
+upstream data contract failure.
 
 For a top-level schema like:
 
@@ -127,33 +128,50 @@ model = rf.Model(
 model
 ```
 
-`relflow` infers child queries like `[*].measurements[*].name` and
-`[*].measurements[*].value`.
+With the default direct path, `relflow` reads each `measurements` child mapping
+and binds its `name` and `value` keys at the same repeated coordinate.
 
-::: {.callout-note}
-Field `name` controls the public schema name. `query` controls where values
-are read. When omitted, `relflow` infers the request query from the field and
-parent branch names. `Branch` itself does not read a value with `query`; its
-child leaves do.
-:::
+For stable path differences, put the shared collection selection on the branch
+and child paths on their owning leaves:
 
-Use explicit queries when the source keys do not match the public schema names:
+```python
+items = rf.Branch(
+    name="items",
+    query="line_items[-32:]",
+    length=32,
+    sku=rf.Category(
+        query="product_sku",
+        size=2048,
+    ),
+    quantity=rf.Number(query="qty"),
+)
+```
+
+Queries are relative to their parent node. The branch selects its collection
+once, so every sibling shares the same repeated coordinates and overflow plan.
+Use a preprocessor for predicates or coordinated data-dependent reshaping:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
+@rf.preprocess(requires=("line_items",), produces=("items",))
+def prepare_items(batch: rf.Batch) -> rf.Batch:
+    data = batch.data.append_column("items", batch.data["line_items"])
+    return batch.replace(data)
+
+
 items = rf.Branch(
     name="items",
     length=32,
-    sku=rf.Category(query="[*].line_items[*].product_sku", size=2048),
-    quantity=rf.Number(query="[*].line_items[*].qty"),
+    sku=rf.Category(size=2048),
+    quantity=rf.Number,
 )
 
 items
 ```
 
-Explicit queries can also stack repeated semantic roles, such as origin and
+Preprocessing can also stack repeated semantic roles, such as origin and
 destination, into one shared field. See [Field Stacking](../guides/field-stacking.qmd).
 
 ## Examples
@@ -170,7 +188,7 @@ Common branch contexts include:
 
 | Option | Default | Notes |
 | --- | --- | --- |
-| `name` | `None`; inferred when bound | Public schema name and inferred source key. A parent keyword normally supplies it; an unbound branch must acquire a name before schema compilation. |
+| `name` | `None`; inferred when bound | Public schema name and default processed-observation key. A parent keyword normally supplies it; an unbound branch must acquire a name before schema compilation. |
 | `fields` | `[]` | Child branches or tensorfields. Positional constructor arguments become `fields`. |
 | `length` | `1` | Number of repeated slots retained per observation. Must be positive. |
 | `overflow` | `"head"` | How to handle more than `length` child records: `"head"` keeps the first records, `"tail"` keeps the last records, and `"error"` raises. |
@@ -179,8 +197,7 @@ Common branch contexts include:
 | `n_heads` | `4` | Attention heads for this branch. Must be positive and even, divide the model's `d_model`, and leave at least two dimensions per head. |
 | `n_linear` | `1` | Number of learned-query cross-attention pooling blocks. Each block contains cross-attention and a feed-forward network. |
 | `dropout` | `None` | Optional dropout rate. |
-| `mask` | `None` | One `rf.Mask(...)` policy for selecting repeated coordinates in train, validation, and test; prediction bypasses configured masks. |
-| `masks` | `[]` | Multiple named or unnamed `rf.Mask(...)` policies for the same branch. |
+| `mask` | `False` | One mask shorthand or a list/tuple of `rf.Mask` policies. The stored value is always a canonical tuple. A branch decision applies atomically to every active descendant. |
 | `embed` | `False` | Includes this branch node in `Model.predict(...)` outputs under `embedding`. See [Learning Modes & Embeddings](../core-concepts/embeddings.qmd). |
 | `description` | `None` | Optional schema metadata. |
 
@@ -229,26 +246,34 @@ Deep nesting is useful when the source shape marks real context boundaries. If
 repeated records are only an artifact of upstream storage, flattening or
 preprocessing the data can be more efficient.
 
-## Target And Prediction Behavior
+## Mask And Prediction Behavior
 
-`Branch` itself is not a supervised target. Its child tensorfields can be
-targets, and the branch context is used to encode those children and route
-information through the model.
+`Branch` does not decode its own typed value. A reconstructing branch mask adds
+objectives for its active descendant leaves, and the branch context routes
+information to their decoders.
 
-`p_mask`, `p_prune`, and `target=True` are configured on leaf tensorfields, not
-on `Branch`. To apply the same masking or pruning rate to every child field, use
-`model.update(...)` with a selector that matches those leaves.
+Every node has the same singular `mask` argument. `False` means no policy, a
+float means uniform train-only learned masking, and `True` means always skip and
+reconstruct. Use an explicit `rf.Mask(...)` to combine a `query`, a `rate`,
+`skip`, `dropout`, and `reconstruct`; pass a list or tuple when a node needs
+multiple policies.
 
-Configure `mask=` or `masks=` on a branch when the candidate window is about
-repeated coordinates rather than independent leaf values. Branch masks are
-resolved after query extraction, overflow handling, and padding. Padding is
-excluded, but null positions remain eligible.
+Configure a mask on a branch when one decision should govern an entire repeated
+object. RelFlow resolves the policy once per retained branch coordinate and
+broadcasts that decision to every active descendant, including descendants in
+nested branches. Padding does not become a mask target.
 
-The current implementation samples each affected descendant leaf independently;
-a single branch policy does not guarantee that sibling fields hide the same row.
-Use `exclude=` to remove leaves from the policy, and do not rely on branch masks
-for atomic row masking until that behavior is explicitly supported. See
-[Dynamic Masking](../core-concepts/dynamic-masking.qmd).
+A query-backed mask reads a Boolean field from the same branch object. Use a
+preprocessor to derive rolling windows, counts, business rules, or other
+coordinated selectors, then reference that field with `Mask(query="selected")`.
+Attach a policy to a narrower branch or leaf when only part of a subtree should
+be affected. See [Dynamic Masking](../core-concepts/dynamic-masking.qmd).
+
+With `skip=False`, selected coordinates remain in model routing as a learned
+mask representation. With `skip=True`, their values are omitted from input
+tensorization and embedding, and attention and pooling ignore their fixed
+geometry slots. A reconstructing branch policy requires compatible descendant
+decoders; schema validation reports an unsupported subtree before execution.
 
 Configure `embed=True` on a branch when you want `Model.predict(...)` to return
 a representation for the grouped context under that branch address. See
@@ -275,7 +300,8 @@ and profiling guidance.
 - Use [Model Tree](../core-concepts/model-tree.qmd) for branch addresses and
   hierarchical context flow.
 - Use [Binding Data](../core-concepts/binding-data.qmd) and
-  [Query Paths](../core-concepts/querypaths.qmd) for child source binding.
+  [Query Paths](../core-concepts/querypaths.qmd) for child source
+  binding and extraction.
 - Use [Dynamic Masking](../core-concepts/dynamic-masking.qmd) for the exact
   repeated-coordinate mask contract.
 - Use [Model Configuration](../guides/model-configuration.qmd) to size branch

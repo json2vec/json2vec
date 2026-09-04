@@ -24,15 +24,19 @@ website:
           - href: core-concepts/binding-data.qmd
             text: Binding Data
           - href: core-concepts/querypaths.qmd
-            text: Advanced Query Paths
+            text: Query Paths
           - href: core-concepts/embeddings.qmd
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
+          - href: guides/dynamic-mask-preprocessors.qmd
+            text: Mask Preprocessor Recipes
       - text: Train & Evaluate
         menu:
           - href: guides/data-modules.qmd
             text: Data Modules
+          - href: guides/working-with-arrow.qmd
+            text: Working With Arrow
           - href: guides/lightning.qmd
             text: Training With Lightning
           - href: guides/evaluation.qmd
@@ -69,6 +73,8 @@ website:
             text: Troubleshooting
           - href: reference/public-api.qmd
             text: Public API Map
+          - href: guides/arrow-migration.qmd
+            text: Arrow Migration
       - text: Case Studies
         menu:
           - href: case-studies/iris-reproducible.qmd
@@ -102,11 +108,13 @@ website:
           - href: core-concepts/binding-data.qmd
             text: Binding Data
           - href: core-concepts/querypaths.qmd
-            text: Advanced Query Paths
+            text: Query Paths
           - href: core-concepts/embeddings.qmd
             text: Learning Modes & Embeddings
           - href: core-concepts/dynamic-masking.qmd
             text: Dynamic Masking
+          - href: guides/dynamic-mask-preprocessors.qmd
+            text: Mask Preprocessor Recipes
       - section: Data Types
         contents:
           - href: data-types/branch.qmd
@@ -117,6 +125,8 @@ website:
             text: Boolean
           - href: data-types/category.qmd
             text: Category
+          - href: data-types/cluster.qmd
+            text: Cluster
           - href: data-types/set.qmd
             text: Set
           - href: data-types/hash.qmd
@@ -131,6 +141,8 @@ website:
         contents:
           - href: guides/data-modules.qmd
             text: Data Modules
+          - href: guides/working-with-arrow.qmd
+            text: Working With Arrow
           - href: guides/lightning.qmd
             text: Training With Lightning
           - href: guides/evaluation.qmd
@@ -169,6 +181,8 @@ website:
         contents:
           - href: reference/public-api.qmd
             text: Public API Map
+          - href: guides/arrow-migration.qmd
+            text: Arrow Migration
       - section: Case Studies
         contents:
           - href: case-studies/iris-reproducible.qmd

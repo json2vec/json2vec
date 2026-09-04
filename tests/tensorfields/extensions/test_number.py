@@ -1,22 +1,40 @@
 from types import SimpleNamespace
+from typing import Any
 
+import pytest
 import torch
 from loguru import logger
 from tensordict import TensorDict
 
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
-from relflow.tensorfields.extensions.number import Decoder, Embedder, GlobalOnlineNormalizer, TensorField, loss, write
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS
+from relflow.tensorfields.extensions.number import (
+    Decoder,
+    Embedder,
+    GlobalOnlineNormalizer,
+    TensorField,
+    loss,
+    moments,
+    write,
+)
+from relflow.tensorfields.extensions.number import (
+    output as output_type,
+)
+from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/amount"
 
 
-def _structure_payload() -> dict:
+def _structure_payload(*, mask: bool | Mask = False) -> dict:
     field: dict = {
         "name": "amount",
         "type": "number",
-        "query": "[*].items[*].amount",
+        "mask": mask,
     }
     return {
         "d_model": 16,
@@ -34,6 +52,19 @@ def _structure_payload() -> dict:
             ],
         },
     }
+
+
+def _tensorfield(rows: list[list[Any]], *, schema: Schema, strata: Strata) -> TensorField:
+    batch = arrow_batch([{"items": [{"amount": value} for value in row]} for row in rows])
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["number"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+    )
 
 
 def test_number_request_allows_jitter_above_one():
@@ -55,17 +86,14 @@ class _TrackingModule:
 
 
 def test_number_loss_does_not_mutate_counter():
-    structure = Schema.model_validate(_structure_payload())
+    structure = Schema.model_validate(_structure_payload(mask=Mask(reconstruct=True)))
     schema = structure
 
-    field = TensorField.new(
-        values=[[[1.0, None]], [[2.0]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[[1.0, None], [2.0]],
         schema=schema,
         strata=Strata.train,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
@@ -102,6 +130,17 @@ def test_number_normalizer_ignores_nonfinite_values_when_updating():
     assert torch.isinf(output[1])
     assert torch.isinf(output[2])
     assert torch.isnan(output[3])
+
+
+def test_number_normalizer_learns_precomputed_finite_moments():
+    normalizer = GlobalOnlineNormalizer()
+    observation = moments(torch.tensor([1.0, 3.0, float("nan"), float("inf")]))
+
+    normalizer.learn(observation)
+
+    assert normalizer.count.item() == 2
+    assert normalizer.mean.item() == pytest.approx(2.0)
+    assert normalizer.var.item() == pytest.approx(1.0)
 
 
 def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
@@ -160,9 +199,8 @@ def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
 
 def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
     structure = Schema.model_validate(_structure_payload())
-    field = TensorField.new(
-        values=[[[1.0, 2.0]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[[1.0, 2.0]],
         schema=structure,
         strata=Strata.train,
     )
@@ -170,14 +208,14 @@ def test_number_embedder_outputs_finite_payload_for_extreme_outliers():
 
     embedder = Embedder(schema=structure, address=ADDRESS)
     embedder.train()
-    parcel = embedder(field)
+    parcel = embedder.embed(field)
 
     assert torch.isfinite(embedder.normalizer.mean).all()
     assert torch.isfinite(embedder.normalizer.var).all()
     assert torch.isfinite(parcel.payload).all()
 
 
-def test_number_write_emits_state_probability_map():
+def test_number_write_emits_flat_arrow_content():
     structure = Schema.model_validate(_structure_payload())
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
@@ -193,11 +231,9 @@ def test_number_write_emits_state_probability_map():
         ),
     )
 
-    output = write(module=SimpleNamespace(schema=structure), prediction=prediction)
-    state_payload = output[TensorKey.state.name]
+    module = SimpleNamespace(schema=structure)
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
 
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    assert all(probabilities.shape == (2, 1) for probabilities in state_payload.values())
-    assert state_payload[Tokens.valued.name][0, 0] > 0.99
-    assert state_payload[Tokens.null.name][1, 0] > 0.99
-    assert output[TensorKey.content.name].shape == (2, 1, 1)
+    assert output.type == datatype
+    assert output.field(TensorKey.content.name).to_pylist() == [1.5, 2.5]

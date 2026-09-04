@@ -1,263 +1,299 @@
 ---
-marimo-static-output: true
 eval: false
 ---
 
 # Data Flow
 
-**Example status — excerpt:** the record and schema blocks form a conceptual
-walkthrough, not a training job.
+RelFlow keeps one CPU representation across the complete model boundary:
+Apache Arrow. A source becomes a typed table, RelFlow attaches row identity,
+and every structural operation stays columnar until selected values become
+tensors.
 
-A RelFlow schema sits in the middle of the complete modeling path. It tells the
-input pipeline where values come from, tells tensorfields how to represent them,
-and tells the model which contexts and predictions to build.
-
-This page follows one record from raw input to public output. It introduces the
-user-facing terms needed by the rest of the docs; architecture internals come
-later in [Model Tree](model-tree.qmd#architecture-internals).
-
-```mermaid
-flowchart LR
-    A[Raw record] --> B[Optional preprocessor]
-    B --> C[Processed observation]
-    C --> D[Leaf queries]
-    D --> E[State + typed content]
-    E --> F[Leaf embeddings]
-    F --> G[Branch and root contexts]
-    G --> H[Decoders, losses, embeddings]
-    H --> I[Address-keyed prediction]
-    I --> J[Optional postprocessor]
+```text
+source
+  → Arrow adaptation
+  → rf.Batch(data, identity)
+  → preprocessing
+  → sampling and shuffling
+  → model-size rebatching
+  → query + ragged coalescing
+  → mask selection + input/target projection
+  → datatype codecs
+  → model
+  → plugin Arrow writers
+  → rf.Batch(prediction table, same identity)
+  → postprocessing
+  → Parquet or explicit JSON conversion
 ```
 
-## One Record And One Schema
+The important boundaries are simple:
 
-Consider an order used to predict whether it will be returned:
+- users normally provide a `pyarrow.Table`;
+- preprocessors and postprocessors receive `rf.Batch`;
+- the model receives typed tensors internally;
+- interactive prediction returns a `pyarrow.Table`;
+- `rf.Writer` persists Arrow directly.
 
-```{python .marimo}
-#| echo: true
-#| output: true
+## 1. Adapt The Source Once
 
-record = {
-    "customer_tier": "gold",
-    "line_items": [
-        {"sku": "A12", "quantity": 2, "price": 19.99},
-        {"sku": "B07", "quantity": 1, "price": 45.50},
-    ],
-    "returned": "false",
-}
+`ArrowDataModule` is canonical. The other modules only adapt their specific
+input and then delegate:
+
+```text
+pa.Table / RecordBatch / Arrow factory ───────────┐
+Polars DataFrame → to_arrow() once ───────────────┤
+IterableDataset mappings → bounded from_pylist() ─┼→ shared Arrow engine
+mapping generator → bounded from_pylist() ────────┘
 ```
 
-```{python .marimo}
-#| echo: true
-#| output: true
+The engine does not alternate between Python records, Polars, Arrow, and
+Awkward containers. Awkward may be a temporary computational view for nested
+arrays, but it returns Arrow before crossing a public boundary.
 
+See [Data Modules](../guides/data-modules.qmd) to select an ingress adapter.
+
+## 2. Attach Row Identity
+
+RelFlow wraps Arrow data in an immutable carrier:
+
+```python
+@dataclass(frozen=True, slots=True)
+class Batch:
+    data: pa.Table
+    identity: pa.Array | pa.ChunkedArray
+```
+
+`Batch.data` contains user-visible columns. `Batch.identity` is protected
+framework lineage and never becomes a model input. It lets RelFlow apply the
+same filtering, taking, ordering, expansion, shuffling, and rebatching to data
+and identity.
+
+Most users never construct identity. RelFlow derives it from the source and
+exposes lineage-safe operations on `Batch`.
+
+::: {.callout-note}
+`len(batch)` is the logical row count. Identity owns that count even when
+`batch.data` has zero columns, because Arrow cannot retain a positive row count
+in a standalone zero-column table.
+:::
+
+## 3. Preprocess Complete Arrow Batches
+
+Preprocessors run before schema queries and datatype codecs:
+
+```python
+import pyarrow.compute as pc
 import relflow as rf
 
+@rf.preprocess(
+    requires=("subtotal", "tax"),
+    produces=("amount",),
+)
+def prepare(batch: rf.Batch) -> rf.Batch:
+    amount = pc.add(batch.data["subtotal"], pc.fill_null(batch.data["tax"], 0))
+    return batch.replace(batch.data.append_column("amount", amount))
+```
+
+This phase owns renaming, type normalization, derived values, filtering,
+ordering, joins, nested filtering, explosion, and regrouping. It can use any
+engine internally, but its input and output contract is Arrow.
+
+Preprocessing can change observation membership. It therefore runs before
+sampling and shuffling. [Binding Data](binding-data.qmd) documents scopes,
+dependency declarations, fitted state, and lineage methods.
+
+## 4. Sample And Shuffle Logical Observations
+
+One post-preprocessor Arrow row is one logical observation. Sampling and
+shuffling act on that unit—not on files, scanner batches, or child list items.
+
+- train shuffles by default;
+- validate, test, and predict preserve processed source order by default;
+- sampling happens before shuffle;
+- in-memory data uses a complete permutation;
+- a factory uses a bounded Arrow buffer.
+
+Random decisions derive from the configured seed, stratum, epoch, operation,
+and stable identity. Sampling and shuffling have separate random streams, so
+changing one does not silently change the other.
+
+Uniform mask selection uses the same identity discipline with a separate
+domain. It is keyed by seed, stratum, training epoch, schema address, normalized
+policy, identity, and nested slot, so rebatching does not change the selected
+logical coordinates. Datatype-specific unavailable simulation keeps its own
+plugin-defined random contract.
+
+## 5. Rebatch For Model Memory
+
+Scanner or producer chunks control I/O. `model.batch_size` controls tensor
+memory and optimizer steps. The engine slices and concatenates Arrow buffers to
+form exact model batches without turning rows into Python objects.
+
+This is why nested values with thousands of child items can still arrive in
+bounded observation batches. Source list length and observation batch size are
+independent controls.
+
+## 6. Resolve Node-Relative Queries
+
+Direct field bindings and explicit `query=...` paths compose into one compiled
+expression per active leaf. Every node's query is relative to the value
+selected by its parent:
+
+```python
 model = rf.Model(
-    name="order",
-    d_model=32,
-    n_layers=1,
-    n_heads=4,
-    embed=True,
-    customer_tier=rf.Category(size=16),
-    line_items=rf.Branch(
-        length=8,
-        sku=rf.Category(size=2048),
-        quantity=rf.Number,
-        price=rf.Number,
+    query="payload",
+    items=rf.Branch(
+        query="line_items[-32:]",
+        length=32,
+        sku=rf.Category(query="product.sku", size=4096),
+        quantity=rf.Number(query="qty"),
     ),
-    returned=rf.Category(target=True, size=2),
 )
 ```
 
-The schema has one root context, one repeated child context, five leaf fields,
-and one target. The stable addresses include `order/customer_tier`,
-`order/line_items/price`, and `order/returned`.
+Both descendants inherit the same `items` selection and branch capacity, so
+their coordinates remain aligned by construction. Users define the collection
+path once on the branch rather than repeating it on every leaf.
 
-## 1. Normalize Raw Input When Necessary
+The structural grammar handles fields, list traversal/index/slice, and literal
+map lookup. Data-dependent logic remains in preprocessing. See
+[Query Paths](querypaths.qmd).
 
-Public convenience methods such as `model.predict(...)` accept a list of raw
-dictionaries. A data module reads the same kind of records for training,
-validation, testing, and batch prediction.
+## 7. Coalesce And Project Ragged Values Once
 
-An optional `Preprocessor` runs before schema queries. Use one when selection is
-not enough—for example, to coerce inconsistent types, sort events, apply an
-`as_of` time window, derive elapsed time, or turn one source object into several
-model observations.
+The coalescing phase prepares every selected leaf for its datatype codec:
 
-The result is a **processed observation**: one model-facing mapping wrapped in
-`rf.Observation`. A preprocessor may yield several observations from one raw
-record, but each output is an independent example with its own singleton root.
-Internally, RelFlow wraps each observation as a one-record list so inferred
-queries can start with `[*]`; that list does not create multiple root items.
+1. build the singleton root layout;
+2. evaluate each active repeated-branch selector and overflow policy once;
+3. reuse each retained branch layout for all active descendants;
+4. project each pristine leaf and retain its values and coordinate state in an
+   Arrow-backed `RaggedField`;
+5. resolve leaf and inherited branch masks against owner coordinates;
+6. validate and canonicalize the pristine Arrow values once with the owning
+   plugin;
+7. split the field into input and target projections, then invoke the datatype
+   codec once for the complete field batch.
 
-::: {.callout-important}
-Use the same preprocessor contract for every data split and inference path.
-Reimplementing normalization separately at serving time creates
-training-serving skew even when the model weights are identical.
-:::
+Branch and leaf plans bind independently and are cached by expression, Arrow
+type, and model address. Branch layouts carry retained records, shape, and
+dense placement; a sibling leaf does not repeat its ancestors' structural work.
 
-## 2. Bind Leaves To Values
+`RaggedField` is a structural carrier, not a catalogue of allowed datatypes.
+Each tensorfield plugin registers the raw atom compatibility families it
+accepts. This keeps shared nesting code extensible: adding a plugin does not
+require editing a central hardcoded type table.
 
-Only leaf tensorfields read values from the observation. Each leaf has a
-JMESPath `query`:
+## 8. Encode Value And State
 
-| Address | Inferred query |
+Datatype plugins convert their Arrow values to tensor content. RelFlow tracks a
+separate state channel for each modeled coordinate:
+
+| State | Meaning |
 | --- | --- |
-| `order/customer_tier` | `[*].customer_tier` |
-| `order/line_items/sku` | `[*].line_items[*].sku` |
-| `order/line_items/price` | `[*].line_items[*].price` |
-| `order/returned` | `[*].returned` |
+| `valued` | a non-null source value exists, even if a vocabulary does not know its label |
+| `null` | the selected leaf is explicitly null |
+| `padded` | structure or configured capacity has no value |
+| `masked` | input is represented by the learned mask rather than original content |
+| `other` | reserved extension state; current built-ins do not produce it from ordinary source data |
 
-Field and branch names provide these defaults. The root name affects addresses,
-not source lookup. Use [Binding Data](binding-data.qmd) to choose among an
-inferred query, an explicit query, and preprocessing. Use
-[Advanced Query Paths](querypaths.qmd) for filters, slices, and quoted keys.
+Arrow null validity and RelFlow value state are related but not interchangeable.
+For example, an out-of-range list index is `padded`; a present leaf with a null
+slot is `null`.
 
-## 3. Tensorfields Separate State From Content
+## 9. Encode, Route, Decode, And Score
 
-A tensorfield converts query results into typed arrays. Every leaf keeps the
-value's **state** separate from its **content**:
+The schema's mask policies determine which coordinates remain visible, use a
+learned mask representation, disappear from encoder routing, or contribute a
+reconstruction objective. `mask=True` is shorthand for an always-skipped
+supervised reconstruction.
 
-- state answers whether a position is valued, null, padded, masked, or in the
-  reserved `other` state;
-- content carries the datatype-specific payload, such as a normalized number,
-  a category index, a multi-hot set, or a vector;
-- trainability identifies positions whose hidden answer can contribute to
-  loss;
-- training targets retain original values that were hidden for reconstruction.
+Every `TensorField` carries `present`, `trainable`, and `inferred` alongside
+state and content. Embedders process only present coordinates and scatter their
+payloads back into fixed schema geometry. Branch attention and pooling ignore
+absent slots; decoders still have a defined zero-context path when an entire row
+is skipped.
 
-This separation matters. A padded line-item slot is not the numeric value zero,
-and a masked category is not an ordinary category label. Datatypes can also
-have their own unavailable-content behavior while retaining state `valued`.
-The [Data Types value-state contract](data-types.qmd#value-state) is the
-authoritative reference.
+The model receives tensors only after all Arrow preprocessing and nested
+coalescing are complete. During prediction, the source `Batch` remains on CPU
+while Lightning transfers tensors to the accelerator.
 
-Use `model.encode(...)` when debugging this boundary:
+## 10. Write Typed Arrow Output
 
-```{python .marimo}
-#| echo: true
-#| output: true
+Every plugin declares its stable Arrow output type and writes one flat Arrow
+struct per model coordinate. The shared runtime adds state probabilities,
+`inferred`, embeddings, and configured repeated-axis wrappers.
 
-encoded = model.encode([record])
-print(encoded)
-```
-
-Most application code should not depend on these internal tensor layouts. They
-are useful for checking that preprocessing and queries found the expected
-values and shapes.
-
-## 4. Visible Values Become Context
-
-Each active, visible leaf embeds its state and content into `d_model`-wide
-vectors. Sibling leaves under `line_items` share the same repeated coordinate:
-the first SKU, quantity, and price describe the first item.
-
-The `line_items` branch lets those item-level values interact, then pools the
-child context into a representation for the order. The root combines that
-representation with visible root fields such as `customer_tier`.
-
-The tree therefore controls which values interact locally before information
-flows upward. `Branch.length` bounds a repeated context; `overflow` decides
-whether excess values keep the head, keep the tail, or raise an error.
-
-## 5. Hidden Values Are Decoded
-
-Training records include `returned`, but `target=True` keeps it out of visible
-input and stores the original value as a trainable answer. Its decoder predicts
-from the remaining order context. The tensorfield owns the target's loss and
-metrics.
-
-At prediction time the request should normally omit target fields:
-
-```{python .marimo}
-#| echo: true
-#| output: true
-
-request = {
-    "customer_tier": "gold",
-    "line_items": [
-        {"sku": "A12", "quantity": 2, "price": 19.99},
-        {"sku": "B07", "quantity": 1, "price": 45.50},
-    ],
-}
-```
-
-RelFlow creates the masked target position and decodes it. Other learning roles
-use the same path: `p_mask` hides sampled positions, `p_prune` hides whole leaf
-instances, and branch masking limits descendant sampling to candidate repeated
-coordinates or windows. Descendant leaves sample independently inside those
-candidates; a branch mask is not an atomic row mask. See
-[Learning Modes & Embeddings](embeddings.qmd) for when to use each role.
-
-## 6. Prediction Preserves Schema Addresses
-
-`model.predict([request])` returns a dictionary keyed by address. In this
-schema, configured outputs can include:
+`Model.write(...)` assembles the address-keyed fields into an identity-aligned
+`rf.Batch`. Its table has a canonical envelope:
 
 ```text
-order
-`-- order/returned
+inputs: struct<explicitly retained processed columns>
+predictions: struct<model address: typed output>
 ```
 
-The root entry contains the embedding requested by `embed=True`. The target
-entry contains state probabilities, type-specific Category content, and an
-`inferred` mask. `inferred=true` identifies positions decoded because their
-input was masked; an embedding emitted for a visible leaf can have
-`inferred=false`.
+Address field order follows model schema traversal, not runtime dictionary
+arrival. Repeated branch axes are Arrow list dimensions and remain present for
+batch size one; prediction shape never depends on `squeeze` heuristics.
 
-The address-keyed representation is the stable model output. An optional
-`Postprocessor` can turn it into an API response or warehouse schema without
-changing what the model predicts. Interactive prediction, the Parquet
-`Writer`, and deployment helpers all use this schema-oriented output boundary.
+`Model.predict(...)` removes framework identity and returns the table. A
+Lightning prediction step keeps the `Batch` so callbacks and writers do not
+reconstruct output from tensors.
 
-## Training And Prediction Use The Same Path
+See [Prediction Output](../guides/prediction-output.qmd) for exact fields.
 
-The major difference between the two paths is what happens after encoding:
+## 11. Postprocess Without Changing Rows
 
-| Stage | Training / validation | Prediction |
+A postprocessor reshapes output columns while preserving row membership,
+order, and identity:
+
+```python
+@rf.postprocess
+def compact(batch: rf.Batch) -> rf.Batch:
+    predictions = batch.data["predictions"]
+    field = pc.struct_field(predictions, "record/fraud")
+    content = pc.struct_field(field, "content")
+    data = pa.table(
+        {
+            "fraud": pc.struct_field(content, "value"),
+            "probability": pc.struct_field(content, "probability"),
+        }
+    )
+    return batch.replace(data)
+```
+
+Postprocessors may project, derive, rename, flatten, nest, and redact. They may
+not filter, reorder, expand, group, or return a zero-column table. Row-changing
+work belongs before the model or in explicit downstream application code.
+
+## 12. Persist Or Serialize At The Edge
+
+`rf.Writer` prepends protected identity and writes Arrow directly with Parquet.
+It never builds a Polars frame or Python row collection. Distributed rank files
+remain sortable by persisted identity rather than file completion order.
+
+JSON deployment is the one intentional Python materialization boundary. After
+one Arrow prediction and postprocessing pass for a valid microbatch, the server
+calls `Table.to_pylist()` once to satisfy the JSON protocol. Identity is
+removed, and retained inputs are excluded by default unless a postprocessor
+chooses to expose them.
+
+## Contracts By Phase
+
+| Phase | May change rows? | Public dynamic format |
 | --- | --- | --- |
-| Raw input and preprocessing | Read records for a named split | Read request or prediction records |
-| Query and tensorization | Bind both context and available answers | Bind visible context; targets may be absent |
-| Masking / pruning | Select trainable answers and retain targets | Create inference positions for configured targets or masks |
-| Model tree | Encode visible context | Encode visible context |
-| Decoder | Produce predictions used by losses and metrics | Produce public predictions |
-| Output | Lightning metrics and optional callbacks | Address-keyed payload, writer, or postprocessor |
+| Source adaptation | establishes rows | Arrow |
+| Preprocessor | yes, with lineage methods | `rf.Batch` |
+| Sampling/shuffling | yes | `rf.Batch` |
+| Query/coalescing | no | Arrow arrays with NumPy offset/placement geometry |
+| Plugin encoding | no | tensors internally |
+| Plugin writing | no | Arrow arrays |
+| Postprocessor | no | `rf.Batch` |
+| Writer | no | Parquet |
+| JSON transport | no | terminal Python objects |
 
-Keeping the schema, vocabulary/normalizer state, and weights in one saved
-artifact—and versioning and deploying the processor code alongside it—is what
-makes those paths comparable. Processor implementations are not serialized in
-the model artifact. Validation still needs an honest split; shared mechanics do
-not prevent data leakage.
+The consistency is the point: custom plumbing has one clearly typed boundary,
+and every row-changing operation has one place where lineage is visible.
 
-## Progressive Glossary
-
-| Term | Meaning |
-| --- | --- |
-| Schema | The serializable tree of model, branch, and tensorfield configuration. |
-| Root | The singleton context representing one processed observation. Named `record` by default. |
-| Branch | A bounded child context, usually corresponding to a repeated list of objects. |
-| Leaf / tensorfield | A typed field that binds source values, tensorizes them, embeds visible input, and optionally decodes predictions. |
-| Request | The configuration object created by `rf.Number`, `rf.Category(...)`, and the other leaf constructors. |
-| Query | A JMESPath expression that selects one leaf's values from a processed observation. |
-| Address | A stable slash-delimited location in the schema and prediction output. |
-| State | The value condition at a position, separate from type-specific content. |
-| Content | The datatype-specific representation or decoded value. |
-| Context | The aligned vectors that may interact inside a root or branch. |
-| Target | The original answer retained when a value is hidden for learning. |
-| Embedding | A learned vector emitted internally between nodes or publicly when `embed=True`. |
-| Preprocessor / postprocessor | Optional transformations immediately before query binding or after prediction writing. |
-
-Terms such as *parcel* and *heritage* describe internal routing. They are useful
-when extending the architecture, but they are not required to build and operate
-a model through the public API.
-
-## Where Next
-
-- Read [Model Tree](model-tree.qmd) for branches, leaves, and addresses.
-- Use [Built-In Data Types](data-types.qmd) for state/content semantics and
-  field selection.
-- Read [Binding Data](binding-data.qmd) before writing custom queries.
-- Use [Data Modules](../guides/data-modules.qmd) for split ingestion and
-  preprocessors.
-- Use [Postprocessors](../guides/postprocessors.qmd) for application output.
+Continue with [Working With Arrow](../guides/working-with-arrow.qmd) for
+practical recipes, [Data Modules](../guides/data-modules.qmd) for scheduling,
+and [Arrow Migration](../guides/arrow-migration.qmd) for removed APIs.

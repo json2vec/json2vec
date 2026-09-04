@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import functools
-import json
-import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
@@ -13,7 +11,7 @@ import pydantic
 from anytree import LevelOrderGroupIter, PreOrderIter
 from rich.text import Text
 
-from relflow.structs.enums import AttentionMode, Overflow
+from relflow.structs.enums import AttentionMode, Component, Overflow, Strata
 from relflow.structs.selectors import (
     ExtendArg,
     NodeAttribute,
@@ -27,7 +25,7 @@ from relflow.structs.selectors import (
     where,
 )
 from relflow.structs.structure import Branch, Mask, RequestTypes
-from relflow.structs.tree import Address, Leaf, Node, Rate, Selection
+from relflow.structs.tree import Address, Leaf, MaskInput, Node, Rate, Selection
 
 __all__ = [
     "ExtendArg",
@@ -93,49 +91,52 @@ class Schema(Node):
     @classmethod
     def update_values(cls, values: Mapping[str, Any]) -> dict[str, Any]:
         normalized = dict(values)
-        target = normalized.get("target", None)
-
-        if target is None:
-            return normalized
-
-        if not isinstance(target, bool):
-            raise ValueError("target must be a boolean")
-
-        if target:
-            if normalized.get("p_prune") not in (None, 1.0):
-                raise ValueError("target=True is shorthand for p_prune=1.0")
-        else:
-            if "p_prune" in normalized and normalized["p_prune"] not in (None, 0.0):
-                raise ValueError("target=False is shorthand for p_prune=0.0")
-
+        removed = sorted({"masks", "p_mask", "p_prune", "target"} & normalized.keys())
+        if removed:
+            raise ValueError(f"removed node field(s): {removed}; use mask")
         return normalized
 
+    @pydantic.model_validator(mode="before")
     @classmethod
-    def jmespath_member(cls, value: str) -> str:
-        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
-            return value
-        return json.dumps(value)
+    def restore_masks(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping):
+            return data
 
-    @classmethod
-    def query_for_source(cls, branch_path: tuple[str, ...], source: str) -> str:
-        """Infer a request-level query for a leaf source field.
+        values = dict(data)
 
-        The encoder prepends the outer batch selector during search. Inferred
-        queries therefore start at the processed-observation level: `[*].amount`,
-        not `[*][*].amount`.
-        """
-        selectors = "".join(f".{cls.jmespath_member(branch)}[*]" for branch in branch_path)
-        return f"[*]{selectors}.{cls.jmespath_member(source)}"
+        def restore_policy(value: Mapping[str, Any]) -> Mask:
+            return Mask.model_validate(dict(value))
+
+        def restore(node: Any) -> Any:
+            if not isinstance(node, Mapping):
+                return node
+            payload = dict(node)
+            if "mask" in payload:
+                value = payload["mask"]
+                if isinstance(value, Mapping):
+                    payload["mask"] = restore_policy(value)
+                elif isinstance(value, (list, tuple)):
+                    payload["mask"] = tuple(
+                        restore_policy(policy) if isinstance(policy, Mapping) else policy for policy in value
+                    )
+            if isinstance(payload.get("fields"), (list, tuple)):
+                payload["fields"] = [restore(field) for field in payload["fields"]]
+            return payload
+
+        if "fields" in values:
+            values["fields"] = restore(values["fields"])
+        return values
 
     @classmethod
     def request_from_leaf(cls, leaf: Leaf) -> RequestTypes:
         from relflow.tensorfields.base import TENSORFIELDS
 
         request_cls = getattr(TENSORFIELDS[leaf.type], "Request")
-        return request_cls.model_validate(leaf.model_dump(mode="python", round_trip=True))
+        payload = leaf.model_dump(mode="python", round_trip=True, exclude={"mask"})
+        return request_cls.model_validate({**payload, "mask": leaf.mask})
 
     @classmethod
-    def from_tree_node(cls, node: SchemaField, *, branch_path: tuple[str, ...] = ()) -> Branch | RequestTypes:
+    def from_tree_node(cls, node: SchemaField) -> Branch | RequestTypes:
         if isinstance(node, Leaf):
             if node.name is None:
                 raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
@@ -148,18 +149,14 @@ class Schema(Node):
                 if node.description is None:
                     updates["description"] = source
 
-            if node.query is None:
-                updates["query"] = cls.query_for_source(branch_path, source)
-
             return cls.request_from_leaf(node.model_copy(update=updates))
 
         if isinstance(node, Branch):
             if node.name is None:
                 raise ValueError("tree field is unnamed; pass it as a keyword or provide a name")
-            child_path = (*branch_path, node.name)
-            fields = [cls.from_tree_node(field, branch_path=child_path) for field in node.fields]
-            payload = node.model_dump(mode="python", round_trip=True, exclude={"fields", "masks"})
-            return Branch(*fields, masks=list(node.masks), **payload)
+            fields = [cls.from_tree_node(field) for field in node.fields]
+            payload = node.model_dump(mode="python", round_trip=True, exclude={"fields", "mask"})
+            return Branch(*fields, mask=node.mask, **payload)
 
         raise TypeError("tree fields must be Branch, Leaf, or concrete request instances")
 
@@ -172,11 +169,13 @@ class Schema(Node):
         n_heads: int,
         fields: Sequence[TreeFieldInput] | None = None,
         name: str = "record",
+        query: str | None = None,
         description: str | None = None,
         embed: bool = False,
         attention: AttentionMode | str = AttentionMode.mha,
         n_linear: Annotated[int, pydantic.Field(gt=0)] = 1,
         dropout: Rate | None = None,
+        mask: MaskInput = False,
         **field_kwargs: TreeFieldInput,
     ) -> Self:
         """Build schema from tree fields."""
@@ -206,6 +205,7 @@ class Schema(Node):
 
         branch = Branch(
             name=name,
+            query=query,
             description=description,
             embed=embed,
             attention=attention,
@@ -215,6 +215,7 @@ class Schema(Node):
             length=1,
             overflow=Overflow.error,
             dropout=dropout,
+            mask=mask,
             fields=root_fields,
         )
         return cls(d_model=d_model, fields=branch)
@@ -245,10 +246,34 @@ class Schema(Node):
         self._post_bind_validate()
 
     @property
-    def target(self) -> list[Address]:
+    def reconstruct(self) -> list[Address]:
         role = NodePredicate(
-            func=lambda node: isinstance(node, Leaf) and node.active and node.target,
-            key=("role", "target"),
+            func=lambda node: (
+                isinstance(node, Leaf)
+                and node.active
+                and any(policy.reconstruct for owner in node.path for policy in getattr(owner, "mask", ()))
+            ),
+            key=("role", "reconstruct"),
+        )
+        return [Address(str(node.address)) for node in self.select(role)]
+
+    @property
+    def objectives(self) -> list[Address]:
+        return self.reconstruct
+
+    @property
+    def decodes(self) -> list[Address]:
+        role = NodePredicate(
+            func=lambda node: (
+                isinstance(node, Leaf)
+                and node.active
+                and any(
+                    policy.reconstruct and policy.rate is None
+                    for owner in node.path
+                    for policy in getattr(owner, "mask", ())
+                )
+            ),
+            key=("role", "decodes"),
         )
         return [Address(str(node.address)) for node in self.select(role)]
 
@@ -279,21 +304,16 @@ class Schema(Node):
     def overflows(self, address: Address) -> tuple[Overflow, ...]:
         return (Overflow.error, *self.requests[Address(str(address))].overflows)
 
-    def branch_masks_for(self, address: Address) -> tuple[tuple[Address, Mask], ...]:
+    def masks_for(self, address: Address) -> tuple[tuple[Address, Mask], ...]:
         request = self.requests[Address(str(address))]
-        applications: list[tuple[Address, Mask]] = []
-        for branch in [node for node in request.path if isinstance(node, Branch)]:
-            for mask in branch.masks:
-                prefix = f"{branch.address}/"
-                excluded = {
-                    value if value.startswith(prefix) else f"{prefix}{value}" for value in map(str, mask.exclude)
-                }
-                if str(request.address) in excluded:
-                    continue
+        return tuple(
+            (node.address, policy) for node in request.path if isinstance(node, (Branch, Leaf)) for policy in node.mask
+        )
 
-                applications.append((branch.address, mask))
-
-        return tuple(applications)
+    def forward_for(self, strata: Strata | str) -> list[Address]:
+        selected = self.decodes if Strata.normalize(strata) is Strata.predict else self.objectives
+        addresses = {*selected, *self.embed}
+        return [node.address for node in PreOrderIter(self.fields) if node.address in addresses]
 
     @functools.cached_property
     def depthwise(self) -> list[list[Address]]:
@@ -337,6 +357,42 @@ class Schema(Node):
 
         for request in self.requests.values():
             request.post_bind_validate()
+
+        self.validate_capabilities()
+
+    def validate_capabilities(self) -> None:
+        """Validate effective leaf roles against registered plugin components."""
+
+        from relflow.tensorfields.base import TENSORFIELDS
+
+        for address, request in self.active_requests.items():
+            owners = [
+                owner.address
+                for owner in request.path
+                if any(policy.reconstruct for policy in getattr(owner, "mask", ()))
+            ]
+            required: list[Component] = []
+            if owners:
+                required.extend((Component.Decoder, Component.loss))
+            elif request.embed:
+                required.append(Component.Decoder)
+
+            plugin = TENSORFIELDS[request.type]
+            missing = [component.value for component in required if component not in plugin.components]
+            if not missing:
+                continue
+
+            names = ", ".join(missing)
+            if owners:
+                sources = ", ".join(repr(str(owner)) for owner in owners)
+                raise ValueError(
+                    f"reconstruction mask at {sources} reaches leaf '{address}', but plugin "
+                    f"'{plugin.name}' is missing required component(s): {names}; register both Decoder and loss"
+                )
+            raise ValueError(
+                f"embedded leaf '{address}' uses plugin '{plugin.name}', which is missing required "
+                f"component: {names}; register a Decoder or set embed=False"
+            )
 
     def select(
         self,
@@ -383,44 +439,63 @@ class Schema(Node):
         use_cache: bool = False,
         **values: Any,
     ) -> None:
-        """Mutate matching schema nodes.
-
-        `target=True` is normalized to `p_prune=1.0`; `target=False` clears the
-        target prune rate by setting `p_prune=0.0`.
-        """
+        """Mutate matching schema nodes."""
         values = self.update_values(values)
         if not values:
             raise ValueError("update requires at least one field value")
 
         nodes = self.select(*predicates, include_root=include_root, use_cache=use_cache)
-        for node in nodes:
-            can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
-            missing = [name for name in values if not _has_model_attribute(node, name) and not can_apply_extra]
-            if missing and strict:
-                label = str(node.address) or node.name
-                raise AttributeError(f"{label} has no attribute(s): {missing}")
+        snapshots: list[tuple[Node, str, Any, bool]] = []
+        try:
+            for node in nodes:
+                can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
+                missing = [name for name in values if not _has_model_attribute(node, name) and not can_apply_extra]
+                if missing and strict:
+                    label = str(node.address) or node.name
+                    raise AttributeError(f"{label} has no attribute(s): {missing}")
 
-            applicable_values = {
-                name: value for name, value in values.items() if _has_model_attribute(node, name) or can_apply_extra
-            }
+                applicable_values = {
+                    name: value for name, value in values.items() if _has_model_attribute(node, name) or can_apply_extra
+                }
 
-            if validate and applicable_values:
-                payload = node.model_dump(mode="python", round_trip=True)
-                if isinstance(node, Branch) and "masks" not in applicable_values:
-                    payload["masks"] = list(node.masks)
-                if "target" in applicable_values and "p_prune" not in applicable_values:
-                    payload.pop("p_prune", None)
-                payload.update(applicable_values)
-                validated = type(node).model_validate(payload)
-                applicable_values = {name: getattr(validated, name) for name in applicable_values}
+                if validate and applicable_values:
+                    payload = node.model_dump(mode="python", round_trip=True, exclude={"mask"})
+                    payload["mask"] = node.mask
+                    payload.update(applicable_values)
+                    validated = type(node).model_validate(payload)
+                    applicable_values = {name: getattr(validated, name) for name in applicable_values}
 
-            for name, value in applicable_values.items():
-                setattr(node, name, value)
+                for name, value in applicable_values.items():
+                    snapshots.append(
+                        (
+                            node,
+                            name,
+                            getattr(node, name, _MISSING),
+                            name in getattr(node, "model_fields_set", set()),
+                        )
+                    )
+                    setattr(node, name, value)
+                    if name in getattr(type(node), "model_fields", {}):
+                        node.model_fields_set.add(name)
+
+            self._clear_tree_caches()
+            self._post_bind_validate()
+        except Exception:
+            for node, name, original, was_set in reversed(snapshots):
+                if original is _MISSING:
+                    if hasattr(node, name):
+                        delattr(node, name)
+                else:
+                    setattr(node, name, original)
                 if name in getattr(type(node), "model_fields", {}):
-                    node.model_fields_set.add(name)
+                    if was_set:
+                        node.model_fields_set.add(name)
+                    else:
+                        node.model_fields_set.discard(name)
+            self._clear_tree_caches()
+            self.refresh_selection_cache()
+            raise
 
-        self._clear_tree_caches()
-        self._post_bind_validate()
         self.refresh_selection_cache()
 
     def extend(
@@ -458,8 +533,7 @@ class Schema(Node):
             raise ValueError(f"extend requires exactly one matching branch node, found {len(candidates)}")
 
         parent = candidates[0]
-        branch_path = tuple(node.name for node in parent.path[2:] if isinstance(node, Branch) and node.name is not None)
-        new_fields = [self.from_tree_node(field, branch_path=branch_path) for field in fields]
+        new_fields = [self.from_tree_node(field) for field in fields]
         existing_names = {field.name for field in parent.fields}
         duplicate_names = sorted({field.name for field in new_fields if field.name in existing_names})
         duplicate_names.extend(
@@ -559,9 +633,9 @@ class Schema(Node):
         snapshot = [
             (
                 node,
-                "p_prune" if name == "target" else name,
-                getattr(node, "p_prune" if name == "target" else name, _MISSING),
-                ("p_prune" if name == "target" else name) in getattr(node, "model_fields_set", set()),
+                name,
+                getattr(node, name, _MISSING),
+                name in getattr(node, "model_fields_set", set()),
             )
             for node in nodes
             for name in normalized_values
@@ -608,7 +682,7 @@ class Schema(Node):
             ("d_model", self.d_model),
             ("branches", len(self.branches)),
             ("fields", len(self.active_requests)),
-            ("targets", len(self.target)),
+            ("reconstruct", len(self.reconstruct)),
             ("embeds", len(self.embed)),
         ):
             heading.append(" ")

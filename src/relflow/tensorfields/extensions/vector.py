@@ -3,33 +3,37 @@ from __future__ import annotations
 
 import enum
 import math
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
 from tensordict import TensorDict, tensorclass
 
-from relflow.data.nested import apply, extract_mask_literals, pad
+from relflow.data.ragged import RaggedField
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
 from relflow.tensorfields.base import (
+    Context,
     DecoderBase,
     EmbedderBase,
     Plugin,
     RequestBase,
     TensorFieldBase,
-    apply_mask_policies,
+    TensorInput,
 )
+from relflow.tensorfields.output import array, fixed, struct
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
     from relflow.structs.experiment import Schema
 
 
-vector: Plugin = Plugin(name="vector")
+vector: Plugin = Plugin(name="vector", types=(int | float,))
 
 
 class Objective(enum.StrEnum):
@@ -52,141 +56,71 @@ class Request(RequestBase):
     objective: Objective = Objective.l2
 
 
-def coerce(value: Any, *, n_dim: int, address: Address) -> np.ndarray:
-    if isinstance(value, np.ndarray):
-        if value.ndim != 1:
-            raise ValueError(f"vector field at '{address}' expects 1D embeddings, got array with ndim={value.ndim}")
-        raw: list[Any] = value.tolist()
-    elif isinstance(value, torch.Tensor):
-        if value.ndim != 1:
-            raise ValueError(f"vector field at '{address}' expects 1D embeddings, got tensor with ndim={value.ndim}")
-        raw = value.detach().cpu().tolist()
-    elif isinstance(value, (list, tuple)):
-        raw = list(value)
-    else:
-        raise ValueError(
-            f"vector field at '{address}' expects embeddings as list/tuple/1D tensor/1D ndarray, got {type(value).__name__}"
-        )
-
-    if len(raw) != n_dim:
-        raise ValueError(f"vector field at '{address}' expects embeddings with length {n_dim}, got {len(raw)}")
-
-    try:
-        return np.asarray(raw, dtype=np.float32)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"vector field at '{address}' contains non-numeric embedding values") from error
-
-
 @vector.register
 @tensorclass
 class TensorField(TensorFieldBase):
     content: torch.Tensor
     state: torch.Tensor
+    present: torch.Tensor
     trainable: torch.Tensor
+    inferred: torch.Tensor
     targets: TensorDict[TensorKey, torch.Tensor]
 
     @classmethod
     def new(
         cls,
-        values: list,
+        input: RaggedField,
+        target: RaggedField,
+        present: torch.Tensor,
+        trainable: torch.Tensor,
+        inferred: torch.Tensor,
         address: Address,
         schema: Schema,
         strata: Strata,
+        context: Context,
     ) -> TensorFieldBase:
-        array_shape: tuple[int, ...] = schema.shapes[address]
         request: Request = schema.requests[address]
 
-        leading_shape: tuple[int, ...] = (len(values), *array_shape)
-        values, literal_masks = extract_mask_literals(
-            values,
-            strata=strata,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
+        def encode(field: RaggedField) -> torch.Tensor:
+            values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+            if not len(values):
+                encoded = np.empty((0, request.n_dim), dtype=np.float32)
+            else:
+                if not (
+                    pa.types.is_list(values.type)
+                    or pa.types.is_large_list(values.type)
+                    or pa.types.is_fixed_size_list(values.type)
+                ):
+                    raise ValueError(f"vector field at '{address}' expects an Arrow list, got {values.type}")
+                lengths = pc.list_value_length(values)
+                if pc.any(pc.not_equal(lengths, request.n_dim)).as_py():
+                    raise ValueError(f"vector field at '{address}' expects every value to have length {request.n_dim}")
+                flattened = pc.list_flatten(values)
+                if flattened.null_count:
+                    raise ValueError(f"vector field at '{address}' expects non-null numeric elements")
+                try:
+                    flattened = pc.cast(flattened, pa.float32(), safe=True)
+                except pa.ArrowException as error:
+                    raise ValueError(f"vector field at '{address}' could not be converted to float32") from error
+                encoded = flattened.to_numpy(zero_copy_only=False).reshape(-1, request.n_dim)
+            return torch.from_numpy(field.place(encoded, fill=0.0, value_shape=(request.n_dim,)))
 
-        coerced = apply(
-            values,
-            coerce,
-            n_dim=request.n_dim,
-            address=address,
-            leaf_depth=len(leading_shape),
-        )
-
-        data, state = pad(
-            nested=coerced,
-            shape=leading_shape,
-            dtype=object,
-            pad_value=None,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-        literal_data, _ = pad(
-            nested=literal_masks,
-            shape=leading_shape,
-            dtype=bool,
-            pad_value=False,
-            overflows=schema.overflows(address),
-            address=address,
-        )
-
-        content = np.zeros((*leading_shape, request.n_dim), dtype=np.float32)
-        valued = state == Tokens.valued.value
-
-        if valued.any():
-            vectors: list[np.ndarray] = data[valued].tolist()
-            content[valued] = np.stack(vectors, axis=0)
+        state = torch.from_numpy(input.dense)
 
         return cls(
-            content=torch.tensor(content, dtype=torch.float32),
-            state=torch.tensor(state, dtype=torch.int64).masked_fill(
-                torch.tensor(literal_data, dtype=torch.bool),
-                Tokens.masked.value,
-            ),
-            trainable=torch.zeros(leading_shape, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=len(values),
-        )
-
-    def hide(self, selected: torch.Tensor, *, cache_targets: bool = True, trainable: bool = True):
-        selected = selected.to(device=self.state.device, dtype=torch.bool)
-        mask_token: torch.Tensor = torch.full_like(input=self.state, fill_value=Tokens.masked)
-        expanded = selected.unsqueeze(-1).expand_as(self.content)
-
-        if cache_targets and TensorKey.state not in self.targets.keys():
-            self.targets[TensorKey.state] = self.state.clone()
-        self.state = self.state.masked_scatter(selected, mask_token)
-
-        if cache_targets and TensorKey.content not in self.targets.keys():
-            self.targets[TensorKey.content] = self.content.clone()
-        self.content = self.content.masked_scatter(expanded, torch.zeros_like(input=self.content))
-
-        if trainable:
-            self.trainable |= selected
-
-    def mask(self, p_mask: float = 0.0, **kwargs: Any):
-        apply_mask_policies(self, p_mask=p_mask, **kwargs)
-
-    def target(self, p_prune: float = 1.0):
-        apply_mask_policies(self, p_prune=p_prune)
-
-    @classmethod
-    def empty(
-        cls,
-        batch_size: int,
-        address: Address,
-        schema: Schema,
-    ):
-        request: Request = schema.requests[address]
-        leading_shape: tuple[int, ...] = (batch_size, *schema.shapes[address])
-        state = torch.full(leading_shape, Tokens.masked)
-        content = torch.zeros((*leading_shape, request.n_dim), dtype=torch.float32)
-
-        return cls(
+            content=encode(input),
             state=state,
-            content=content,
-            trainable=torch.zeros_like(input=state, dtype=torch.bool),
-            targets=TensorDict({}),
-            batch_size=batch_size,
+            present=present,
+            trainable=trainable,
+            inferred=inferred,
+            targets=TensorDict(
+                {
+                    TensorKey.state: torch.from_numpy(target.dense),
+                    TensorKey.content: encode(target),
+                },
+                batch_size=input.shape,
+            ),
+            batch_size=input.batch_size,
         )
 
 
@@ -209,7 +143,7 @@ class Embedder(EmbedderBase):
         )
 
     @beartype
-    def forward(self, inputs: TensorFieldBase) -> Parcel:
+    def forward(self, inputs: TensorInput) -> Parcel:
         N, *dims = inputs.state.shape
         D = math.prod((N, *dims))
 
@@ -221,6 +155,7 @@ class Embedder(EmbedderBase):
 
         return Parcel(
             payload=(projected + embeddings).reshape(N, *dims, -1),
+            present=torch.ones(N, dtype=torch.bool, device=projected.device),
             origin=self.origin,
             destination=self.destination,
             batch_size=N,
@@ -312,19 +247,17 @@ def loss(
 
 
 @vector.register
-def write(module: Model, prediction: Prediction):
-    content: np.ndarray = prediction.payload[TensorKey.content].detach().float().cpu().numpy()
-    state_logits: torch.Tensor = prediction.payload[TensorKey.state]
-    tokens: np.ndarray = np.fromiter((token.name for token in Tokens), dtype=object, count=len(Tokens))
-    state_log_norm = state_logits.logsumexp(dim=-1, keepdim=True)
-    state_distribution = (state_logits - state_log_norm).exp().detach().float().cpu().numpy()
-    state_payload = {token: state_distribution[..., index] for index, token in enumerate(tokens.tolist())}
+def output(module: Model, address: Address) -> pa.StructType:
+    request: Request = module.schema.requests[address]
+    content = pa.list_(pa.float32(), request.n_dim)
+    return pa.struct([pa.field(TensorKey.content.name, content, nullable=False)])
 
-    non_valued = state_logits.argmax(dim=-1).ne(Tokens.valued.value).detach().cpu().numpy()
-    content = content.copy()
+
+@vector.register
+def write(module: Model, prediction: Prediction, datatype: pa.StructType) -> pa.StructArray:
+    request: Request = module.schema.requests[prediction.address]
+    content = prediction.payload[TensorKey.content].detach().float().clone()
+    non_valued = prediction.payload[TensorKey.state].argmax(dim=-1).ne(Tokens.valued.value)
     content[non_valued] = 0.0
-
-    return {
-        TensorKey.state.name: state_payload,
-        TensorKey.content.name: content,
-    }
+    values = fixed(array(content, pa.float32()), request.n_dim)
+    return struct({TensorKey.content.name: values}, datatype)

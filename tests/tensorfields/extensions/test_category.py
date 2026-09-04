@@ -1,12 +1,15 @@
 from types import SimpleNamespace
+from typing import Any
 
-import polars as pl
 import torch
 from tensordict import TensorDict
 
+from relflow.data.ragged import coalesce
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
+from relflow.structs.tree import Mask
+from relflow.tensorfields.base import TENSORFIELDS, Context
 from relflow.tensorfields.extensions.category import (
     Decoder,
     Embedder,
@@ -14,17 +17,27 @@ from relflow.tensorfields.extensions.category import (
     loss,
     write,
 )
-from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel
+from relflow.tensorfields.extensions.category import (
+    output as output_type,
+)
+from relflow.tensorfields.shared.vocabulary import OnlineVocabularyModel, VocabularyState
+from tests.arrow import batch as arrow_batch
+from tests.tensorfields.helpers import tensorize
 
 ADDRESS = "root/items/category"
 
 
-def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | None = None) -> dict:
+def _structure_payload(
+    *,
+    topk: list[int] | None = None,
+    p_unavailable: float | None = None,
+    mask: bool | Mask = False,
+) -> dict:
     field: dict = {
         "name": "category",
         "type": "category",
-        "query": "[*].items[*].label",
         "size": 8,
+        "mask": mask,
     }
     if topk is not None:
         field["topk"] = topk
@@ -51,6 +64,26 @@ def _structure_payload(*, topk: list[int] | None = None, p_unavailable: float | 
 
 def _state(size: int = 8):
     return OnlineVocabularyModel(size=size).state
+
+
+def _tensorfield(
+    rows: list[list[Any]],
+    *,
+    schema: Schema,
+    strata: Strata,
+    state: VocabularyState,
+) -> TensorField:
+    batch = arrow_batch([{"items": [{"category": value} for value in row]} for row in rows])
+    projection = coalesce(batch, schema=schema, strata=strata)[ADDRESS]
+    return tensorize(
+        TensorField,
+        projection,
+        TENSORFIELDS["category"],
+        address=ADDRESS,
+        schema=schema,
+        strata=strata,
+        context=Context(state=state),
+    )
 
 
 def test_category_vocabulary_refreshes_stale_validation_snapshot():
@@ -106,12 +139,11 @@ def test_category_tensorfield_separates_state_and_content():
     schema = structure
     state = _state()
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -141,20 +173,18 @@ def test_category_tensorfield_marks_oov_as_unavailable_without_changing_state():
     schema = structure
     state = _state(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
-        values=[[["ALPHA"]]],
-        address=ADDRESS,
+    _tensorfield(
+        rows=[["ALPHA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
-    field = TensorField.new(
-        values=[[["OMEGA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["OMEGA"]],
         schema=schema,
         strata=Strata.validate,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -172,12 +202,11 @@ def test_category_tensorfield_can_simulate_unavailable_during_training():
     schema = structure
     state = _state(size=structure.requests[ADDRESS].size)
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
 
     assert torch.equal(
@@ -222,12 +251,14 @@ def test_category_embedder_zeroes_unavailable_and_non_valued_content_contributio
             dtype=torch.int64,
         ),
         content=torch.tensor([[0, unavailable, 0, 0, 0, 0]], dtype=torch.int64),
+        present=torch.ones((1, 6), dtype=torch.bool),
         trainable=torch.zeros((1, 6), dtype=torch.bool),
+        inferred=torch.zeros((1, 6), dtype=torch.bool),
         targets=TensorDict({}),
         batch_size=1,
     )
 
-    output = embedder(field).payload
+    output = embedder.embed(field).payload
     expected = embedder.embeddings[TensorKey.state.name](field.state)
     expected[:, 0] += embedder.embeddings[TensorKey.content.name](field.content[:, 0])
 
@@ -255,7 +286,7 @@ class _DummyModule:
         self.schema = SimpleNamespace(requests={ADDRESS: SimpleNamespace(topk=[2, 3, 5, 10], size=8)})
 
 
-def test_category_write_emits_state_and_content_payloads():
+def test_category_write_emits_arrow_content_and_candidates():
     module = _DummyModule()
     state_logits = torch.zeros(2, 1, len(Tokens))
     state_logits[0, 0, Tokens.valued.value] = 10.0
@@ -277,29 +308,17 @@ def test_category_write_emits_state_and_content_payloads():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    state_payload = output[TensorKey.state.name]
-    content_payload = output[TensorKey.content.name]
-    topk_payload = content_payload[TensorKey.topk.name]
+    datatype = output_type(module, ADDRESS)
+    output = write(module=module, prediction=prediction, datatype=datatype)
+    content = output.field(TensorKey.content.name)
+    topk = content.field(TensorKey.topk.name).to_pylist()
 
-    assert set(state_payload.keys()) == set(Tokens.__members__.keys())
-    assert all(probabilities.shape == (2, 1) for probabilities in state_payload.values())
-    assert state_payload[Tokens.valued.name][0, 0] > 0.99
-    assert state_payload[Tokens.padded.name][1, 0] > 0.99
-
-    assert content_payload["value"].tolist() == [["BETA"], ["GAMMA"]]
-    assert content_payload[TensorKey.probability.name].shape == (2, 1)
-
-    assert len(topk_payload) == 2
-    assert len(topk_payload[0][0]) == 5
-    assert len(topk_payload[1][0]) == 5
-
-    for row in topk_payload:
-        assert set(row[0][0].keys()) == {"label", "probability"}
-
-    frame = pl.DataFrame({"state": state_payload, "content": content_payload})
-    assert isinstance(frame.schema["state"], pl.Struct)
-    assert isinstance(frame.schema["content"], pl.Struct)
+    assert output.type == datatype
+    assert len(output) == 2
+    assert content.field(TensorKey.value.name).to_pylist() == ["BETA", "GAMMA"]
+    assert len(topk[0]) == 5
+    assert len(topk[1]) == 5
+    assert set(topk[0][0]) == {TensorKey.value.name, TensorKey.probability.name}
 
 
 def test_category_write_ignores_logits_beyond_vocabulary_snapshot():
@@ -317,10 +336,34 @@ def test_category_write_ignores_logits_beyond_vocabulary_snapshot():
         ),
     )
 
-    output = write(module=module, prediction=prediction)
-    content_payload = output[TensorKey.content.name]
+    output = write(module=module, prediction=prediction, datatype=output_type(module, ADDRESS))
+    content = output.field(TensorKey.content.name)
 
-    assert content_payload[TensorKey.value.name].tolist() == [["EPS"]]
+    assert content.field(TensorKey.value.name).to_pylist() == ["EPS"]
+
+
+def test_category_empty_vocabulary_keeps_declared_schema():
+    module = _DummyModule()
+    module.nodes[ADDRESS].embedder.vocab = OnlineVocabularyModel(size=8)
+    prediction = Prediction(
+        address=ADDRESS,
+        payload=TensorDict(
+            {
+                TensorKey.state: torch.zeros(1, 1, len(Tokens)),
+                TensorKey.content: torch.zeros(1, 1, 8),
+            },
+            batch_size=[1],
+        ),
+    )
+
+    datatype = output_type(module, ADDRESS)
+    written = write(module=module, prediction=prediction, datatype=datatype)
+    content = written.field(TensorKey.content.name)
+
+    assert written.type == datatype
+    assert content.field(TensorKey.value.name).to_pylist() == [None]
+    assert content.field(TensorKey.probability.name).to_pylist() == [0.0]
+    assert content.field(TensorKey.topk.name).to_pylist() == [[]]
 
 
 class _TrackingModule:
@@ -335,19 +378,16 @@ class _TrackingModule:
 
 
 def test_category_loss_does_not_mutate_counters():
-    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0, mask=Mask(reconstruct=True)))
     schema = structure
     state = _state()
 
-    field = TensorField.new(
-        values=[[["ALPHA", None]], [["BETA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["ALPHA", None], ["BETA"]],
         schema=schema,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field.mask(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)
@@ -379,25 +419,21 @@ def test_category_loss_does_not_mutate_counters():
 
 
 def test_category_loss_uses_uniform_target_for_unavailable_content():
-    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0))
+    structure = Schema.model_validate(_structure_payload(p_unavailable=0.0, mask=True))
     state = _state(size=structure.requests[ADDRESS].size)
 
-    TensorField.new(
-        values=[[["ALPHA"]]],
-        address=ADDRESS,
+    _tensorfield(
+        rows=[["ALPHA"]],
         schema=structure,
         strata=Strata.train,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field = TensorField.new(
-        values=[[["OMEGA"]]],
-        address=ADDRESS,
+    field = _tensorfield(
+        rows=[["OMEGA"]],
         schema=structure,
         strata=Strata.validate,
-        interprocess_encoding_context=state,
+        state=state,
     )
-    field.target(1.0)
-
     embedder = Embedder(schema=structure, address=ADDRESS)
     decoder = Decoder(schema=structure, address=ADDRESS)
     module = _TrackingModule(schema=structure, embedder=embedder, decoder=decoder)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from functools import partialmethod, wraps
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,8 @@ class MutationLockCallback(Callback):
     locks: tuple[Strata, ...] = (Strata.train, Strata.validate, Strata.test, Strata.predict)
 
     def _on_loop_start(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
+        if strata == Strata.predict:
+            pl_module.output_plans.clear()
         pl_module.locks[strata] += 1
 
     def _on_loop_end(self, trainer: lit.Trainer, pl_module: "Model", strata: Strata) -> None:
@@ -112,6 +115,21 @@ class SchemaEditor:
     def __init__(self, module: "Model") -> None:
         self.module = module
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Restore the schema and runtime graph when a mutation cannot rebuild."""
+
+        schema = deepcopy(self.module.schema)
+        nodes = self.module.nodes
+        example = self.module.example_input_array
+        try:
+            yield
+        except Exception:
+            self.module.schema = schema
+            self.module.nodes = nodes
+            self.module.example_input_array = example
+            raise
+
     def _assert_mutation_allowed(self, action: str) -> None:
         active = tuple(name for name, count in self.module.locks.items() if count > 0)
         if active:
@@ -149,16 +167,17 @@ class SchemaEditor:
             include_root=include_root,
             use_cache=use_cache,
         )
-        self.module.schema.update(
-            *predicates,
-            strict=strict,
-            allow_extra=allow_extra,
-            include_root=include_root,
-            validate=validate,
-            use_cache=use_cache,
-            **values,
-        )
-        ModelGraph.rebuild(self.module)
+        with self.transaction():
+            self.module.schema.update(
+                *predicates,
+                strict=strict,
+                allow_extra=allow_extra,
+                include_root=include_root,
+                validate=validate,
+                use_cache=use_cache,
+                **values,
+            )
+            ModelGraph.rebuild(self.module)
         self.module._reset_contracts()
         self._log_attribute_changes("update", changes)
 
@@ -170,8 +189,9 @@ class SchemaEditor:
     ) -> None:
         self._assert_mutation_allowed("extend")
         parent, field_count = self._extend_target(*args, include_root=include_root, use_cache=use_cache)
-        self.module.schema.extend(*args, include_root=include_root, use_cache=use_cache)
-        ModelGraph.rebuild(self.module)
+        with self.transaction():
+            self.module.schema.extend(*args, include_root=include_root, use_cache=use_cache)
+            ModelGraph.rebuild(self.module)
         self.module._reset_contracts()
         for field in parent.fields[-field_count:]:
             self._log_node_mutation(
@@ -189,8 +209,9 @@ class SchemaEditor:
     ) -> None:
         self._assert_mutation_allowed("delete")
         roots = self._delete_roots(*predicates, include_root=include_root, use_cache=use_cache)
-        self.module.schema.delete(*predicates, include_root=include_root, use_cache=use_cache)
-        ModelGraph.rebuild(self.module)
+        with self.transaction():
+            self.module.schema.delete(*predicates, include_root=include_root, use_cache=use_cache)
+            ModelGraph.rebuild(self.module)
         self.module._reset_contracts()
         for node in roots:
             self._log_node_mutation(

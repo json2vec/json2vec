@@ -22,9 +22,9 @@ Separate four measurements:
 
 | Measurement | Includes | Use it to diagnose |
 | --- | --- | --- |
-| Data preparation | Read, decode, preprocess, query, vocabulary/normalizer work | File format, workers, remote I/O, and Python transforms. |
+| Data preparation | Arrow scan, batch preprocessing, structural query, ragged coalescing, vocabulary/normalizer work | Storage layout, source binding, nested transforms, and Arrow kernel cost. |
 | Encode + forward | Tensorization and model execution | Branch lengths, datatype capacity, model width/depth, device utilization. |
-| Write/postprocess | CPU transfer, probability conversion, embeddings, top-k, reshaping | Oversized output contracts and Python serialization. |
+| Write/postprocess | CPU transfer, typed Arrow construction, embeddings, top-k, reshaping | Oversized output contracts and unnecessary retained columns. |
 | End-to-end service | Queue, dynamic batching, all stages above, JSON, network | User-visible latency and saturation. |
 
 Lightning runs include RelFlow's `throughput/train`, `throughput/validate`,
@@ -94,7 +94,7 @@ not make a large vocabulary free.
 
 - choose capacity from expected distinct training labels plus explicit
   headroom;
-- monitor Category `vocabulary:size` by address;
+- monitor Category `vocabulary.size` by address;
 - investigate capacity warnings rather than silently increasing every field;
 - use `Hash` when identifier equality matters without a learned vocabulary;
 - keep high-cardinality join identifiers as metadata when they are not a model
@@ -116,27 +116,54 @@ distribution. Left-padded tokenizers conservatively retain their full width.
 
 ## Feed The Accelerator
 
-For small in-memory work, `PolarsDataModule` removes file discovery and remote
-I/O from the experiment. For larger jobs, tune `StreamingDataModule` with the
-actual storage layout.
+For small in-memory work, `ArrowDataModule` with a `pa.Table` removes file
+discovery and remote I/O from the experiment. For larger jobs, construct a
+`pyarrow.dataset.Dataset` with the actual storage layout and pass it to the same
+module.
 
 Important controls include:
 
-- `num_workers`: parallel readers/preprocessors; too many can increase memory
-  and contention;
-- `persistent_workers`: avoids worker restart between epochs when workers are
-  long-lived;
-- `pin_memory`: useful for CUDA transfer, usually unnecessary for CPU-only work;
-- observation and shuffle buffers: larger buffers improve mixing but consume
-  memory;
-- file/chunk/record sharding: choose from file sizes and worker/rank count;
-- file format and row-group size: determine decode and remote-read granularity;
-- `sample_rate`: useful for bounded experiments, not a substitute for a valid
+- `num_workers`: currently must be zero while deterministic Arrow worker
+  ownership is deferred;
+- Dataset fragment and Parquet row-group layout: determine decode and remote
+  read granularity;
+- `pin_memory`: leave this compatibility option `False`; the current encoded
+  carrier does not expose PyTorch's recursive pinning protocol;
+- `shuffle_rows`: larger streaming buffers improve mixing but consume memory;
+- `sample`: useful for bounded experiments, not a substitute for a valid
   split.
 
 Run a data-only or CPU baseline when the accelerator is idle. If increasing
-batch size does not improve device utilization, the bottleneck may be query,
-preprocessing, or I/O.
+batch size does not improve device utilization, the bottleneck may be
+preprocessing, explicit queries, tensorization, or I/O.
+
+## Understand Ragged Preparation
+
+RelFlow eagerly coalesces every encoded address for a processed Arrow batch
+before any datatype codec runs. Fields do not each recursively walk Python
+records. The shared path owns missing versus null, branch overflow, padding,
+final `Tokens` state, and dense placement. Each plugin
+enforces its declared Arrow terminal compatibility families; the ragged core
+does not name concrete leaf types. Datatype codecs still perform inherently
+field-specific work such as vocabulary updates, date parsing, hashing, or
+tokenization after overflow selects retained values.
+
+Direct selection is the default when a node's `query` is `None`. Explicit
+node-relative structural queries are parsed once, bind against an Arrow schema,
+and execute columnarly. RelFlow walks each active schema branch once per model
+batch. A branch's query, retained records, overflow decision, shape, and dense
+placement are shared by all active descendants; each leaf evaluates only its
+node-relative selector and builds its own null/value state. All `RaggedField`
+objects are ready before the first datatype codec runs. Do not add queries that
+merely restate schema names.
+
+Arrow compute kernels and NumPy offset/placement operations perform this
+shared structural work; there is no RelFlow JIT switch to enable. Awkward can
+still be useful as a transient view inside a user preprocessor. A preprocessor
+can dominate when it calls Python once per value.
+Prefer column expressions and whole ragged collection transforms, measure them
+separately, and increase the model batch only within the memory budget. Polars
+converts once at ingress; profile that boundary when frames are large.
 
 ## Use Precision And Batch Size Deliberately
 
@@ -155,28 +182,15 @@ quality.
 
 ## Distributed Training
 
-::: {.callout-warning title="Distributed support level"}
-RelFlow provides Lightning-compatible distributed execution, streaming
-sharding, vocabulary synchronization, and rank-partitioned output, and these
-paths have focused tests. There is no cross-version distributed compatibility
-guarantee or universal topology recipe. Pin the package, validate record
-ownership and vocabulary state at the intended world size, and treat each
-hardware/data layout as an integration you must benchmark.
+::: {.callout-warning title="Current Arrow scheduler"}
+The first Arrow-native data module rejects multiple DataLoader workers and
+distributed world sizes. Stable worker/rank ownership, coordinated caches, and
+equal-step distributed schedules are deferred rather than approximated. Run
+with one process and `num_workers=0`.
 :::
 
-RelFlow registers callbacks that synchronize online vocabularies and place
-late-created modules on the active device. Distributed runs still require a
-consistent contract:
-
-- every rank constructs the same schema and callback set;
-- input shards do not overlap unless repetition is intentional;
-- all ranks perform schema mutations in the same order between loops;
-- vocabulary synchronization cost is included in the benchmark;
-- global batch size and number of optimizer steps are recorded;
-- validation/test aggregation is checked on more than one world size.
-
-Scale only after one rank is input-efficient. More ranks amplify remote I/O,
-worker count, vocabulary coordination, and output files.
+Optimize and benchmark one Arrow reader first. Do not bypass the topology guard;
+duplicate observations or unequal optimizer steps can invalidate a speedup.
 
 ## Optimize Prediction Output
 
@@ -184,7 +198,8 @@ Prediction can spend substantial time moving and serializing data:
 
 - enable `embed=True` only at addresses consumers need;
 - request only useful Category top-k values;
-- use a postprocessor to remove internal or unused fields;
+- retain only source fields an output consumer needs;
+- use an Arrow postprocessor to flatten or remove unused fields;
 - use `Writer` for partitioned batch output rather than collecting a whole
   dataset in memory;
 - set service `max_batch_size` and latency against the real request-size

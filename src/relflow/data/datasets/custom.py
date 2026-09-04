@@ -1,323 +1,179 @@
-"""Custom iterable datasets and Lightning data modules."""
+"""Bounded Python-mapping ingress for the canonical Arrow data module."""
 
 from __future__ import annotations
 
-import os
-import weakref
-from collections.abc import Iterator, Mapping
-from functools import partial, partialmethod
-from typing import TYPE_CHECKING, TypeAlias, cast
+from collections.abc import Callable, Iterator, Mapping
+from typing import Any
 
-import lightning.pytorch as lit
-import torch
-from beartype import beartype
-from torch.utils.data import DataLoader, IterableDataset
+import pyarrow as pa
+from torch.utils.data import IterableDataset
 
-from relflow.data.datasets.base import (
-    InterprocessEncodingContext,
-    NonNegativeInt,
-    Pipeline,
-    PositiveInt,
-    PreprocessorConfig,
-    RawObservation,
-    SampleRate,
-    StrataMap,
-    _worker_buffer_size,
-    identity,
-    share_interprocess_encoding_context,
-)
-from relflow.data.iterables import (
-    JMESPathResolutionMonitor,
-    batch,
-    mask,
-    process,
-    sample,
-    shuffle,
-    transform,
-)
+import relflow
+from relflow.data.arrow import mappings
+from relflow.data.datasets.arrow import ArrowDataModule, ArrowStream, Retain
 from relflow.data.processors import Preprocessor
-from relflow.distributed import rank as distributed_rank
-from relflow.distributed import world_size as distributed_world_size
 from relflow.structs.enums import Strata
-from relflow.structs.experiment import Schema
-
-if TYPE_CHECKING:
-    from relflow.architecture.root import Model
-else:
-    Model = "relflow.architecture.root.Model"
-
-DatasetMap: TypeAlias = Mapping[Strata | str, IterableDataset]
 
 
-@beartype
-def _validate_loader_configuration(
-    num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None],
-    persistent_workers: bool | StrataMap[bool],
-    pin_memory: bool | StrataMap[bool],
-    observation_buffer_size: PositiveInt | StrataMap[PositiveInt],
-    sample_rate: SampleRate | StrataMap[SampleRate],
-) -> None:
-    return None
+def schemas(
+    value: pa.Schema | Mapping[Strata | str, pa.Schema] | None,
+    *,
+    configured: set[Strata],
+) -> dict[Strata, pa.Schema | None]:
+    """Normalize optional explicit schemas for configured mapping sources."""
 
+    if value is None or isinstance(value, pa.Schema):
+        return {strata: value for strata in configured}
+    if not isinstance(value, Mapping):
+        raise TypeError("arrow_schema must be a pyarrow.Schema, named schema mapping, or None")
 
-def _datasets_by_strata(datasets: DatasetMap) -> dict[Strata, IterableDataset]:
-    normalized: dict[Strata, IterableDataset] = {}
-    for key, dataset in cast(DatasetMap, datasets).items():
-        if not isinstance(dataset, IterableDataset):
-            raise TypeError(f"dataset for strata '{key}' must be an IterableDataset")
-        normalized[Strata.normalize(key)] = dataset
-
-    if not normalized:
-        raise ValueError("dataset mapping must include at least one strata")
-
+    normalized = {Strata.normalize(key): schema for key, schema in value.items()}
+    if set(normalized) != configured:
+        missing = sorted(str(item) for item in configured - set(normalized))
+        extra = sorted(str(item) for item in set(normalized) - configured)
+        raise ValueError(f"arrow_schema keys must exactly match configured splits; missing={missing}, extra={extra}")
+    if any(not isinstance(schema, pa.Schema) for schema in normalized.values()):
+        raise TypeError("every arrow_schema mapping value must be a pyarrow.Schema")
     return normalized
 
 
-def observe_dataset(dataset: IterableDataset) -> Iterator[RawObservation]:
-    yield from dataset
+def adapt(
+    source: Callable[[], Iterator[Mapping[str, Any]]],
+    *,
+    schema: pa.Schema | None,
+    rows: int,
+    name: str,
+) -> Callable[[], ArrowStream]:
+    """Convert bounded mapping groups into restartable Arrow record batches."""
+
+    inferred = schema
+    previous: object | None = None
+
+    def factory() -> Iterator[pa.RecordBatch]:
+        nonlocal inferred, previous
+        stream = source()
+        if stream is previous:
+            raise TypeError(f"{name} source must return a fresh iterator for every pass")
+        previous = stream
+        iterator = iter(stream)
+
+        emitted = False
+        while True:
+            values: list[Mapping[str, Any]] = []
+            for _ in range(rows):
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    break
+                if not isinstance(item, Mapping):
+                    raise TypeError(f"{name} source must yield mappings, got {type(item).__name__}")
+                if any(not isinstance(key, str) for key in item):
+                    raise TypeError(f"{name} source mapping keys must be strings")
+                values.append(item)
+
+            if not values:
+                if not emitted and inferred is None:
+                    raise ValueError(f"{name} source is empty; provide arrow_schema")
+                if not emitted and inferred is not None:
+                    yield pa.RecordBatch.from_pylist([], schema=inferred)
+                return
+
+            emitted = True
+            if inferred is None:
+                record_batch = pa.RecordBatch.from_pylist(mappings(values, context=f"{name} source"))
+                ambiguous = [field.name for field in record_batch.schema if pa.types.is_null(field.type)]
+                if ambiguous:
+                    names = ", ".join(repr(field) for field in ambiguous)
+                    raise TypeError(f"{name} source has all-null field(s) {names}; provide arrow_schema")
+                inferred = record_batch.schema
+            else:
+                try:
+                    record_batch = pa.RecordBatch.from_pylist(
+                        mappings(values, schema=inferred, context=f"{name} source"),
+                        schema=inferred,
+                    )
+                except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError) as error:
+                    raise TypeError(f"{name} source does not match arrow_schema: {error}") from error
+
+            yield record_batch
+            if len(values) < rows:
+                return
+
+    return factory
 
 
-class CustomBatchDataset(IterableDataset):
-    def __init__(
-        self,
-        schema: Schema,
-        dataset: IterableDataset,
-        preprocessor: PreprocessorConfig.Value,
-        interprocess_encoding_context: InterprocessEncodingContext,
-        batch_size: int,
-        strata: Strata,
-        observation_buffer_size: int,
-        sample_rate: float,
-        global_rank: int | None = None,
-        world_size: int | None = None,
-    ):
-        super().__init__()
-
-        self.schema = schema
-        self.dataset = dataset
-        self.preprocessor = preprocessor
-        self.interprocess_encoding_context = interprocess_encoding_context
-        self.global_rank = distributed_rank() if global_rank is None else global_rank
-        self.world_size = distributed_world_size() if world_size is None else world_size
-        self.batch_size = batch_size
-        self.strata = strata
-        self.observation_buffer_size = observation_buffer_size
-        self.sample_rate = sample_rate
-
-    def __iter__(self):
-        for field_context in self.interprocess_encoding_context.values():
-            if hasattr(field_context, "configure_distributed"):
-                field_context.configure_distributed(global_rank=self.global_rank, world_size=self.world_size)
-
-        observation_buffer_size = _worker_buffer_size(self.observation_buffer_size)
-        yield from (
-            Pipeline(
-                schema=self.schema,
-                dataset=self.dataset,
-                preprocessor=self.preprocessor,
-                strata=self.strata,
-                interprocess_encoding_context=self.interprocess_encoding_context,
-                jmespath_resolution_monitor=JMESPathResolutionMonitor(),
-                sample_rate=self.sample_rate,
-                batch_size=self.batch_size,
-            )
-            | observe_dataset
-            | process
-            | sample
-            | partial(shuffle, size=observation_buffer_size)
-            | batch
-            | transform
-            | mask
-        )
-
-
-def custom_dataloader(
-    schema: Schema,
-    dataset: IterableDataset,
-    preprocessor: PreprocessorConfig.Value,
-    interprocess_encoding_context: InterprocessEncodingContext,
-    batch_size: int,
-    strata: Strata,
-    num_workers: int | None,
-    persistent_workers: bool,
-    pin_memory: bool,
-    observation_buffer_size: int,
-    sample_rate: float,
-    global_rank: int | None = None,
-    world_size: int | None = None,
-) -> DataLoader:
-    workers = num_workers if num_workers is not None else (os.cpu_count() or 0)
-    active_persistent_workers = persistent_workers and workers > 0
-    active_pin_memory = pin_memory and strata != Strata.predict and torch.cuda.is_available()
-    global_rank = distributed_rank() if global_rank is None else global_rank
-    world_size = distributed_world_size() if world_size is None else world_size
-
-    return DataLoader(
-        dataset=CustomBatchDataset(
-            schema=schema,
-            dataset=dataset,
-            preprocessor=preprocessor,
-            interprocess_encoding_context=interprocess_encoding_context,
-            batch_size=batch_size,
-            strata=strata,
-            observation_buffer_size=observation_buffer_size,
-            sample_rate=sample_rate,
-            global_rank=global_rank,
-            world_size=world_size,
-        ),
-        drop_last=False,
-        batch_size=None,
-        collate_fn=identity,
-        num_workers=workers,
-        persistent_workers=active_persistent_workers,
-        pin_memory=active_pin_memory,
-    )
-
-
-class CustomDataModule(lit.LightningDataModule):
-    """Lightning data module for user-provided iterable datasets."""
+class CustomDataModule(ArrowDataModule):
+    """Adapt restartable mapping ``IterableDataset`` splits to Arrow once per chunk."""
 
     def __init__(
         self,
-        model: Model,
+        model: relflow.Model,
+        *,
         train: IterableDataset | None = None,
         validate: IterableDataset | None = None,
         test: IterableDataset | None = None,
         predict: IterableDataset | None = None,
-        preprocessor: Preprocessor | None = None,
-        datasets: DatasetMap | None = None,
-        num_workers: NonNegativeInt | None | StrataMap[NonNegativeInt | None] = None,
-        persistent_workers: bool | StrataMap[bool] = True,
-        pin_memory: bool | StrataMap[bool] = True,
-        observation_buffer_size: PositiveInt | StrataMap[PositiveInt] = 1,
-        sample_rate: SampleRate | StrataMap[SampleRate] = 1.0,
+        arrow_schema: pa.Schema | Mapping[Strata | str, pa.Schema] | None = None,
+        ingress_rows: int = 4096,
+        preprocessor: Preprocessor | None | Mapping[Strata | str, Preprocessor | None] = None,
+        seed: int = 0,
+        shuffle: bool | None | Mapping[Strata | str, bool | None] = None,
+        sample: float | Mapping[Strata | str, float] = 1.0,
+        replacement: bool | Mapping[Strata | str, bool] = False,
+        epoch_size: int | None | Mapping[Strata | str, int | None] = None,
+        shuffle_rows: int | None | Mapping[Strata | str, int | None] = None,
+        drop_last: bool | Mapping[Strata | str, bool] = False,
+        num_workers: int | Mapping[Strata | str, int] = 0,
+        persistent_workers: bool | Mapping[Strata | str, bool] = False,
+        pin_memory: bool | Mapping[Strata | str, bool] = False,
+        retain: Retain | Mapping[Strata | str, Retain] = (),
     ):
-        super().__init__()
+        if not isinstance(ingress_rows, int) or isinstance(ingress_rows, bool) or ingress_rows < 1:
+            raise ValueError("ingress_rows must be a positive integer")
 
-        _validate_loader_configuration(
+        datasets = {
+            Strata.train: train,
+            Strata.validate: validate,
+            Strata.test: test,
+            Strata.predict: predict,
+        }
+        configured = {strata for strata, dataset in datasets.items() if dataset is not None}
+        if not configured:
+            raise ValueError("at least one named data split is required")
+        resolved_schemas = schemas(arrow_schema, configured=configured)
+
+        sources: dict[Strata, Callable[[], ArrowStream]] = {}
+        for strata, dataset in datasets.items():
+            if dataset is None:
+                continue
+            if not isinstance(dataset, IterableDataset):
+                raise TypeError(f"{strata} must be a torch IterableDataset, got {type(dataset).__name__}")
+            sources[strata] = adapt(
+                dataset.__iter__,
+                schema=resolved_schemas[strata],
+                rows=ingress_rows,
+                name=str(strata),
+            )
+
+        super().__init__(
+            model=model,
+            train=sources.get(Strata.train),
+            validate=sources.get(Strata.validate),
+            test=sources.get(Strata.test),
+            predict=sources.get(Strata.predict),
+            preprocessor=preprocessor,
+            seed=seed,
+            shuffle=shuffle,
+            sample=sample,
+            replacement=replacement,
+            epoch_size=epoch_size,
+            shuffle_rows=shuffle_rows,
+            drop_last=drop_last,
             num_workers=num_workers,
             persistent_workers=persistent_workers,
             pin_memory=pin_memory,
-            observation_buffer_size=observation_buffer_size,
-            sample_rate=sample_rate,
+            retain=retain,
         )
 
-        if datasets is not None and any(dataset is not None for dataset in (train, validate, test, predict)):
-            raise ValueError("pass either datasets or named splits, not both")
 
-        if datasets is None:
-            split_datasets = {}
-            for strata, dataset in {
-                Strata.train: train,
-                Strata.validate: validate,
-                Strata.test: test,
-                Strata.predict: predict,
-            }.items():
-                if dataset is None:
-                    continue
-                if not isinstance(dataset, IterableDataset):
-                    raise TypeError(f"dataset for strata '{strata}' must be an IterableDataset")
-                split_datasets[strata] = dataset
-            if not split_datasets:
-                raise ValueError("at least one dataset split is required")
-        else:
-            split_datasets = _datasets_by_strata(datasets)
-
-        self.datasets = split_datasets
-        self.preprocessor = PreprocessorConfig.normalize(preprocessor)
-        try:
-            self._model_ref = weakref.ref(model)
-        except TypeError:
-            self._model_ref = None
-        self._schema = model.schema
-        self._interprocess_encoding_context = model.interprocess_encoding_context
-        self._batch_size = model.batch_size
-        self.num_workers = Strata.expand(num_workers, default=None)
-        self.persistent_workers = Strata.expand(persistent_workers, default=True)
-        self.pin_memory = Strata.expand(pin_memory, default=True)
-        self.observation_buffer_size = Strata.expand(observation_buffer_size, default=1)
-        self.sample_rate = {strata: float(rate) for strata, rate in Strata.expand(sample_rate, default=1.0).items()}
-
-    def _model(self) -> Model | None:
-        if self._model_ref is None:
-            return None
-
-        return self._model_ref()
-
-    @property
-    def schema(self) -> Schema:
-        model = self._model()
-        if model is not None:
-            return model.schema
-
-        return self._schema
-
-    @schema.setter
-    def schema(self, schema: Schema) -> None:
-        self._model_ref = None
-        self._schema = schema
-
-    @property
-    def batch_size(self) -> int:
-        model = self._model()
-        if model is not None:
-            return model.batch_size
-
-        return self._batch_size
-
-    @batch_size.setter
-    def batch_size(self, batch_size: int) -> None:
-        self._model_ref = None
-        self._batch_size = batch_size
-
-    @property
-    def interprocess_encoding_context(self) -> InterprocessEncodingContext:
-        model = self._model()
-        if model is not None:
-            return model.interprocess_encoding_context
-
-        return self._interprocess_encoding_context
-
-    @interprocess_encoding_context.setter
-    def interprocess_encoding_context(self, context: InterprocessEncodingContext) -> None:
-        self._model_ref = None
-        self._interprocess_encoding_context = context
-
-    def dataloader(self, strata: Strata, required: bool = True) -> DataLoader | None:
-        strata = Strata.normalize(strata)
-        trainer = getattr(self, "trainer", None)
-        global_rank = getattr(trainer, "global_rank", None)
-        world_size = getattr(trainer, "world_size", None)
-        if strata not in self.datasets:
-            if not required:
-                return None
-            raise ValueError(f"no dataset configured for strata: {strata}")
-
-        workers = self.num_workers[strata]
-        if workers is None:
-            workers = os.cpu_count() or 0
-
-        interprocess_encoding_context = self.interprocess_encoding_context
-        if strata == Strata.train and workers > 0:
-            share_interprocess_encoding_context(interprocess_encoding_context)
-
-        return custom_dataloader(
-            schema=self.schema,
-            dataset=self.datasets[strata],
-            preprocessor=self.preprocessor,
-            interprocess_encoding_context=interprocess_encoding_context,
-            batch_size=self.batch_size,
-            strata=strata,
-            num_workers=workers,
-            persistent_workers=self.persistent_workers[strata],
-            pin_memory=self.pin_memory[strata],
-            observation_buffer_size=self.observation_buffer_size[strata],
-            sample_rate=self.sample_rate[strata],
-            global_rank=global_rank,
-            world_size=world_size,
-        )
-
-    train_dataloader = partialmethod(dataloader, strata=Strata.train, required=False)
-    val_dataloader = partialmethod(dataloader, strata=Strata.validate, required=False)
-    test_dataloader = partialmethod(dataloader, strata=Strata.test, required=False)
-    predict_dataloader = partialmethod(dataloader, strata=Strata.predict, required=False)
+__all__ = ["CustomDataModule"]

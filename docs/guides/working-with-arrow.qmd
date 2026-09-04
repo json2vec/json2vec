@@ -1,0 +1,421 @@
+---
+eval: false
+---
+
+# Working With Arrow
+
+**Example status — reference:** snippets are self-contained demonstrations of
+the public Arrow data, lineage, query, and processor APIs.
+
+RelFlow uses [Apache Arrow](https://arrow.apache.org/docs/python/) as its CPU
+data contract. In ordinary use that means three things:
+
+1. build or read a `pyarrow.Table`;
+2. give the table to `rf.ArrowDataModule`;
+3. use Arrow expressions when a preprocessor or postprocessor must change it.
+
+You do **not** need to manage tensors, Awkward layouts, or RelFlow identity to
+train a model. This page covers the small amount of Arrow needed at the public
+boundary, then moves the lineage details to the advanced section.
+
+## The Three Objects To Know
+
+| Object | Meaning | Who normally creates it? |
+| --- | --- | --- |
+| `pa.Table` | Your named, typed columns | You, an Arrow reader, or Polars |
+| `pa.RecordBatch` | One physical chunk of equal-length Arrow arrays | An Arrow scanner or streaming source |
+| `rf.Batch` | A table plus RelFlow's aligned row identity | RelFlow |
+
+A table is data. A batch is data **and lineage**:
+
+```python
+batch.data       # pyarrow.Table
+batch.identity   # protected Arrow struct array
+len(batch)       # logical rows
+```
+
+The identity sidecar never becomes a model feature. RelFlow uses it to keep
+sampling, shuffling, preprocessing, and prediction output aligned. Most users
+first encounter `rf.Batch` as the argument to an `@rf.preprocess` or
+`@rf.postprocess` function.
+
+::: {.callout-tip}
+If your code only defines a schema and trains from a table, work with
+`pa.Table` and let RelFlow create every `rf.Batch`.
+:::
+
+## Build A Table With A Stable Schema
+
+Arrow can infer types from Python values, which is convenient for a notebook.
+For a recurring job, declare the schema so an empty partition, an all-null
+column, and a populated partition all have the same contract.
+
+```python
+import pyarrow as pa
+
+schema = pa.schema(
+    [
+        pa.field("request_id", pa.int64(), nullable=False),
+        pa.field("amount", pa.float64()),
+        pa.field("merchant", pa.large_string()),
+        pa.field(
+            "items",
+            pa.large_list(
+                pa.struct(
+                    [
+                        pa.field("sku", pa.large_string()),
+                        pa.field("quantity", pa.int64()),
+                    ]
+                )
+            ),
+        ),
+        pa.field("fraud", pa.large_string()),
+    ]
+)
+
+train = pa.Table.from_pylist(
+    [
+        {
+            "request_id": 10,
+            "amount": 42.5,
+            "merchant": "market",
+            "items": [{"sku": "A-1", "quantity": 2}],
+            "fraud": "false",
+        },
+        {
+            "request_id": 11,
+            "amount": 900.0,
+            "merchant": "unknown",
+            "items": [],
+            "fraud": "true",
+        },
+    ],
+    schema=schema,
+)
+```
+
+This is an application-boundary conversion. RelFlow does not convert the rows
+back to Python while it scans, preprocesses, selects nested fields, shuffles,
+or forms model batches.
+
+## Train From Arrow
+
+```python
+import lightning.pytorch as lit
+import relflow as rf
+
+model = rf.Model(
+    d_model=32,
+    n_layers=1,
+    n_heads=4,
+    batch_size=64,
+    amount=rf.Number,
+    merchant=rf.Category(size=1024),
+    items=rf.Branch(
+        length=32,
+        sku=rf.Category(size=4096),
+        quantity=rf.Number,
+    ),
+    fraud=rf.Category(mask=True, size=2),
+)
+
+data = rf.ArrowDataModule(
+    model=model,
+    train=train,
+    validate=train,
+    seed=42,
+)
+
+trainer = lit.Trainer(max_epochs=1)
+trainer.fit(model=model, datamodule=data)
+```
+
+Training shuffles by default. Validation, test, and prediction preserve
+processed source order by default. See [Data Modules](data-modules.qmd) for the
+full scheduling contract.
+
+## Select And Derive Columns
+
+`pyarrow.compute` functions operate on complete arrays. A same-row transform
+creates a replacement table and returns `batch.replace(...)`:
+
+```python
+import pyarrow as pa
+import pyarrow.compute as pc
+import relflow as rf
+
+@rf.preprocess(
+    requires=("subtotal", "tax"),
+    produces=("total",),
+)
+def total(batch: rf.Batch) -> rf.Batch:
+    subtotal = pc.cast(batch.data["subtotal"], pa.float64())
+    tax = pc.fill_null(batch.data["tax"], 0.0)
+    data = batch.data.append_column("total", pc.add(subtotal, tax))
+    return batch.replace(data)
+```
+
+There is no row loop and no `to_pylist()`. Arrow applies each kernel to the
+column buffers and preserves nulls according to that kernel's semantics.
+
+Use `set_column` when replacing an existing field so its position stays
+stable:
+
+```python
+@rf.preprocess(
+    requires=("amount",),
+    produces=("amount",),
+)
+def cast_amount(batch: rf.Batch) -> rf.Batch:
+    index = batch.data.schema.get_field_index("amount")
+    field = pa.field("amount", pa.float64())
+    values = pc.cast(batch.data["amount"], field.type)
+    return batch.replace(batch.data.set_column(index, field, values))
+```
+
+## Filter Or Reorder Rows Safely
+
+Never filter `batch.data` by itself. Use the lineage-aware `Batch` method so
+the same operation reaches the identity sidecar.
+
+```python
+@rf.preprocess(requires=("status", "amount"))
+def valid(batch: rf.Batch) -> rf.Batch:
+    keep = pc.and_kleene(
+        pc.equal(batch.data["status"], "complete"),
+        pc.greater(batch.data["amount"], 0),
+    )
+    return batch.filter(pc.fill_null(keep, False))
+```
+
+`batch.take(indices)` selects rows in index order. Use `batch.order(indices)`
+when the operation deliberately establishes a new processed order:
+
+```python
+@rf.preprocess(scope="dataset", requires=("event_time",))
+def chronological(batch: rf.Batch) -> rf.Batch:
+    indices = pc.sort_indices(
+        batch.data,
+        sort_keys=[("event_time", "ascending")],
+    )
+    return batch.order(indices)
+```
+
+Dataset scope matters here: sorting each incoming partition would not create
+one globally chronological split.
+
+## Work With Nested Columns
+
+Use a schema `query` for structural selection such as
+`items[-32:][*].product.sku`. RelFlow compiles and evaluates the path columnarly;
+each active branch selection and overflow geometry is evaluated once, then its
+descendant leaves are projected from the retained records. Siblings therefore
+share coordinates without repeating ancestor traversal. Overflow runs before
+child queries, so malformed content in a discarded child is never inspected.
+Use a preprocessor when you need a predicate, nested sort, or coordinated
+mutation.
+
+Awkward Array is useful inside that preprocessor because it preserves Arrow's
+ragged layout:
+
+```python
+import awkward as ak
+
+@rf.preprocess(
+    requires=("events",),
+    produces=("events",),
+)
+def logins(batch: rf.Batch) -> rf.Batch:
+    index = batch.data.schema.get_field_index("events")
+    field = batch.data.schema.field(index)
+
+    events = ak.from_arrow(batch.data.column(index))
+    keep = ak.fill_none(events["type"] == "login", False)
+    events = events[keep][:, -32:]
+
+    array = ak.to_arrow(events, extensionarray=False)
+    array = pc.cast(array, field.type)
+    data = batch.data.set_column(index, field, array)
+    return batch.replace(data)
+```
+
+Awkward is a temporary computational view here. The processor returns an
+ordinary Arrow-backed `rf.Batch`, so the rest of the pipeline has one format.
+
+To make one observation per list item, use the lineage operation instead of a
+manual flatten-and-repeat implementation:
+
+```python
+@rf.preprocess(
+    requires=("line_items",),
+    produces=("line_item",),
+)
+def explode_items(batch: rf.Batch) -> rf.Batch:
+    return batch.explode("line_items", name="line_item")
+```
+
+Empty and null lists produce no child observations. RelFlow repeats the other
+columns and derives stable child identity from the parent row and item ordinal.
+
+For a general one-to-many transform, provide the complete output table, one
+source-parent index per output, and an ordinal unique within that parent. This
+example emits a base and stress scenario for every observation:
+
+```python
+import numpy as np
+
+@rf.preprocess(produces=("scenario",))
+def scenarios(batch: rf.Batch) -> rf.Batch:
+    size = len(batch)
+    parents = pa.array(
+        np.repeat(np.arange(size), 2),
+        type=pa.int64(),
+    )
+    ordinals = pa.array(
+        np.tile([0, 1], size),
+        type=pa.int64(),
+    )
+    data = batch.data.take(parents).append_column(
+        "scenario",
+        pc.take(
+            pa.array(["base", "stress"], type=pa.large_string()),
+            ordinals,
+        ),
+    )
+    return batch.expand(data, parents, ordinals)
+```
+
+`expand` allows different output counts and arbitrary output order; the
+`parents` and `ordinals` arrays make that relationship explicit. Repeating a
+parent/ordinal pair is an error.
+
+### Advanced: combine parent observations
+
+`batch.group(data, parents)` is the many-to-one lineage operation. `data` has
+one row per output group; `parents` is a list-of-integer Arrow array with one
+ordered list of source row indices per output:
+
+```python
+grouped = pa.table(
+    {
+        "account": ["A", "B"],
+        "total": [31.0, 12.0],
+    }
+)
+parents = pa.array(
+    [[0, 3], [1, 2]],
+    type=pa.large_list(pa.int64()),
+)
+result = batch.group(grouped, parents)
+```
+
+The parent order inside each list defines grouped lineage, so sort it
+deliberately and reproducibly. A parent cannot appear twice in one group, and
+groups cannot be empty. Global regrouping belongs in a dataset-scoped
+preprocessor.
+
+## Use Polars Deliberately
+
+Install the adapter with `pip install "relflow[polars]"`. A collected Polars
+frame crosses into Arrow once:
+
+```python
+import polars as pl
+import relflow as rf
+
+frame = pl.read_parquet("train.parquet")
+data = rf.PolarsDataModule(model=model, train=frame)
+```
+
+`PolarsDataModule` rejects `LazyFrame`. Collect it yourself so the execution
+and materialization boundary is visible:
+
+```python
+frame = (
+    pl.scan_parquet("train/*.parquet")
+    .filter(pl.col("active"))
+    .collect()
+)
+```
+
+Your own preprocessor may temporarily use Polars or another engine. Convert
+back explicitly and return `batch.replace(table)`. RelFlow itself does not
+maintain an Arrow path and a parallel Polars path.
+
+## Read A Dataset Or Chunked Stream
+
+Let `pyarrow.dataset` own file discovery, format, filesystem, and partition
+details:
+
+```python
+import pyarrow.dataset as ds
+
+train_dataset = ds.dataset("train/", format="parquet")
+data = rf.ArrowDataModule(model=model, train=train_dataset)
+```
+
+For a custom Arrow stream, use a restartable source factory:
+
+```python
+import pyarrow.ipc as ipc
+
+def source():
+    handle = pa.memory_map("train.arrow", "r")
+    return ipc.open_stream(handle)
+
+data = rf.ArrowDataModule(model=model, train=source)
+```
+
+The callable is invoked for each new pass and must return a fresh
+`RecordBatchReader` or iterable of `rf.Batch`, `pa.Table`, or
+`pa.RecordBatch`. Do not pass a one-shot reader directly. An empty source may
+return a zero-batch `RecordBatchReader` with a declared schema or yield one
+typed empty unit; it must not erase its schema.
+
+The initial Arrow implementation keeps datasets and factories single-reader:
+use `num_workers=0`, one process, and no replacement sampling. Coordinated
+caches, distributed ownership, and exact replacement sampling are reserved
+until those paths can preserve the same deterministic identity contract.
+
+## Schema And Null Checklist
+
+- Prefer an explicit `pa.Schema` at Python-to-Arrow boundaries.
+- Use one exact field order, nesting, nullability, and physical type per split.
+- Return typed empty Arrow objects; never make emptiness erase the schema.
+- Decide explicitly how null predicates behave—`pc.fill_null(mask, False)` is
+  common for filtering.
+- Use `large_list<struct<...>>` for repeated nested records unless a fixed
+  source width is truly part of the data contract.
+- Keep configured `Branch(length=...)` in the model. Do not pad source lists.
+- Avoid `combine_chunks()` on a whole nested table unless a downstream library
+  genuinely requires contiguous buffers.
+- Avoid `to_pylist()` in hot preprocessing or postprocessing paths.
+
+## Advanced: Why Identity Is Separate
+
+`Batch.identity` is a struct containing logical row identity, draw identity,
+and sortable processed order. Keeping it outside `Batch.data` prevents a
+framework column from accidentally becoming a modeled input or surviving an
+ordinary interactive response.
+
+The rule is simple: any operation that changes row membership or order must go
+through `Batch`. Same-row column work uses `replace`; selection uses `filter`
+or `take`; deliberate ordering uses `order`; one-to-many work uses `explode`
+or `expand`; many-to-one work uses `group`. Postprocessors are stricter and
+must preserve rows and identity.
+
+You should not interpret or synthesize the identity fields in ordinary user
+code. They are persisted by `rf.Writer` so distributed output shards can later
+be sorted and joined without depending on file completion order.
+
+## Where To Continue
+
+- [Data Modules](data-modules.qmd) chooses the correct source adapter and
+  explains shuffling.
+- [Binding Data](../core-concepts/binding-data.qmd) decides between direct
+  binding, `query`, and preprocessing.
+- [Query Paths](../core-concepts/querypaths.qmd) defines the complete structural
+  grammar.
+- [Postprocessors](postprocessors.qmd) shows Arrow-native output shaping.
+- [Arrow Migration](arrow-migration.qmd) maps removed row and streaming APIs to
+  the new surface.

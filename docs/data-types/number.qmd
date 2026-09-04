@@ -3,6 +3,7 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
+    "awkward>=2.13.0",
     "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
@@ -34,7 +35,7 @@ amount = rf.Number(
     "amount",
     jitter=0.02,
     objective="huber",
-    p_mask=0.10,
+    mask=rf.Mask(rate=0.10, reconstruct=True),
 )
 
 amount
@@ -90,9 +91,11 @@ The total number of Fourier frequencies is `n_bands + offset + 1`.
 ## Shared Preprocessing State
 
 `Number` keeps normalization state on the field embedder: mean, variance, and
-count. During training, valued inputs update those statistics before the Fourier
-features are computed. During validation, test, and prediction, the learned
-normalization values are reused without updating them.
+count. During training, every finite valued coordinate in the canonical pristine
+field updates those statistics before mask projection and model computation.
+Masking therefore changes what the encoder sees without biasing the normalizer.
+During validation, test, and prediction, the learned normalization values are
+reused without updating them.
 
 With `alpha=None`, updates are cumulative over observed training values. With an
 `alpha` value, the normalizer uses exponential moving updates. The normalization
@@ -114,15 +117,16 @@ normalization = rf.Number.normalization(model, "record/amount")
 
 `std` is the exact normalization divisor, including the normalizer's numerical
 epsilon. With cumulative normalization (`alpha=None`), `count` is the number of
-finite, valued training presentations observed by the model. Presenting a value
-again in another epoch counts it again. With exponential normalization,
+finite, valued pristine training presentations. Presenting a value again in
+another epoch counts it again. With exponential normalization,
 `count` is `None` because the moving average does not maintain a meaningful
-cumulative sample count. Numeric normalizer state is local to each distributed
-rank rather than synchronized across ranks.
+cumulative sample count. During distributed training, each batch's sufficient
+statistics are reduced across ranks before the normalizer updates, so every rank
+uses the same normalization state.
 
-## Target Behavior
+## Reconstruction Behavior
 
-When a `Number` is masked or used as a target, the decoder predicts:
+When a `Number` is selected for reconstruction, the decoder predicts:
 
 - `state`: probabilities for `valued`, `null`, `padded`, `masked`, and the
   reserved `other` state.
@@ -133,29 +137,17 @@ The content loss is computed in normalized units, while tracked `mae` and
 
 ## Prediction Output
 
-Rendered examples use string paths for readability. The Python dictionary
-returned by `Model.predict(...)` is keyed by `rf.Address` objects.
+`Model.predict(...)` returns a `pa.Table`. Select the Number field from its
+`predictions` struct, then read its shared state, scalar content, and inferred
+flag with Arrow kernels:
 
-`Model.predict(...)` returns a state probability map, numeric content, and the
-shared `inferred` mask. This is the complete field envelope:
+```python
+import pyarrow.compute as pc
 
-```{python .marimo}
-#| echo: true
-#| output: true
-
-{
-    "record/amount": {
-        "state": {
-            "valued": ...,
-            "null": ...,
-            "padded": ...,
-            "masked": ...,
-            "other": ...,
-        },
-        "content": ...,
-        "inferred": ...,
-    }
-}
+amount = pc.struct_field(result["predictions"], "record/amount")
+state = pc.struct_field(amount, "state")
+content = pc.struct_field(amount, "content")  # float64
+inferred = pc.struct_field(amount, "inferred")
 ```
 
 Interpret content together with the state distribution. A numeric prediction is

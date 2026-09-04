@@ -26,6 +26,7 @@ train-majority baseline scores `10 / 30 = 33.3%` test accuracy.
 
 import lightning.pytorch as lit
 import polars as pl
+import pyarrow.compute as pc
 import torch
 
 import relflow as rf
@@ -52,7 +53,7 @@ contract.
 
 ## Model
 
-Each measurement is a visible `Number`; `species` is always hidden and decoded
+Each measurement is a visible `Number`; `species` is always skipped and decoded
 as the supervised target. Capacity is exactly three because unavailable content
 is not an extra class.
 
@@ -74,7 +75,7 @@ model = rf.Model(
     petal_length=rf.Number,
     petal_width=rf.Number,
     species=rf.Category(
-        target=True,
+        mask=True,
         size=3,
         p_unavailable=0.0,
     ),
@@ -139,7 +140,7 @@ test_metrics = trainer.test(
 )[0]
 
 content_accuracy = test_metrics[
-    "flower:species/test:accuracy:content"
+    "flower.species/test.accuracy.content"
 ]
 
 print(content_accuracy)
@@ -153,7 +154,7 @@ The measured run described below produced:
 | RelFlow checkpoint | 90.0% |
 
 The state accuracy is not the task metric: every held-out target position is a
-valued label. `accuracy:content` measures which species was selected.
+valued label. `accuracy.content` measures which species was selected.
 
 ## Save, Load, And Predict Without The Target
 
@@ -164,27 +165,28 @@ valued label. `accuracy:content` measures which species was selected.
 model.save("artifacts/iris-model.rf")
 loaded = rf.Model.load("artifacts/iris-model.rf")
 
-requests = test_records.drop("species").head(3).to_dicts()
-predictions = loaded.predict(requests)
-species = predictions[rf.Address("flower", "species")]
+requests = test_records.drop("species").head(3).to_arrow()
+result = loaded.predict(requests)
+species = pc.struct_field(result["predictions"], "flower/species")
+content = pc.struct_field(species, "content")
 
-print(species["content"]["value"])
-print(species["content"]["probability"])
-print(species["inferred"])
+print(pc.struct_field(content, "value"))
+print(pc.struct_field(content, "probability"))
+print(pc.struct_field(species, "inferred"))
 ```
 
-The target is omitted from requests. RelFlow creates masked target positions,
-decodes them from the four measurements, and returns `inferred=true` for those
-positions. The saved artifact owns schema, weights, Category vocabulary, and
-Number normalization state.
+The target is omitted from requests. Because `mask=True` skips its encoder
+input, RelFlow creates source-less reconstruction positions, decodes them from
+the four measurements, and returns `inferred=true` for those positions. The
+saved artifact owns schema, weights, Category vocabulary, and Number
+normalization state.
 
 ## Reproduction Record
 
-The checked result was produced on 2026-08-01 with:
+The checked result was reproduced on 2026-09-02 with:
 
-- RelFlow `0.4.11`, source revision `224ff43`;
-- Python 3.12;
-- PyTorch `2.12.0`, Lightning `2.6.4`, Polars `1.41.0`;
+- the repository's locked development environment;
+- Python 3.12 and the current Arrow-native pipeline;
 - Apple arm64 CPU, full precision;
 - seed 7, deterministic Lightning execution;
 - 100 maximum epochs and best `loss/validate` rollback;

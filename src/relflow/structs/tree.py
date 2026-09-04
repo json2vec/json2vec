@@ -7,17 +7,83 @@ from abc import ABC
 from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
-import jmespath
 import pydantic
 from anytree import NodeMixin
-from jmespath.exceptions import JMESPathError
 from rich.console import Console
 from rich.text import Text
 
 from relflow.structs.enums import Overflow
 
 Rate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, lt=1.0)]
-PruneRate: TypeAlias = Annotated[float, pydantic.Field(ge=0.0, le=1.0)]
+
+
+class Mask(pydantic.BaseModel):
+    """Selection, encoder effect, and objective policy for a schema node."""
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    query: str | None = None
+    rate: Annotated[float, pydantic.Field(ge=0.0, le=1.0)] | None = None
+    skip: bool = False
+    dropout: bool | None = None
+    reconstruct: bool = False
+
+    @pydantic.field_validator("rate", mode="before")
+    @classmethod
+    def validate_rate(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise TypeError("Mask.rate must be a number, not a boolean")
+        return value
+
+    @pydantic.model_validator(mode="after")
+    def validate_policy(self):
+        dropout = not self.reconstruct if self.dropout is None else self.dropout
+        if dropout and self.reconstruct:
+            raise ValueError("Mask.dropout=True cannot be combined with reconstruct=True")
+
+        if self.query is not None:
+            from relflow.data.query import compile
+
+            compile(self.query)
+
+        object.__setattr__(self, "dropout", dropout)
+        return self
+
+    @classmethod
+    def normalize(cls, value: Any) -> tuple["Mask", ...]:
+        """Normalize one public node value to immutable canonical policies."""
+        if value is False:
+            return ()
+        if value is True:
+            return (cls(skip=True, dropout=False, reconstruct=True),)
+        if value is None:
+            raise TypeError("mask cannot be None; use False or an empty list or tuple")
+        if isinstance(value, cls):
+            policies = (value,)
+        elif isinstance(value, float):
+            policies = (cls(rate=value),)
+        elif isinstance(value, (list, tuple)):
+            if not all(isinstance(policy, cls) for policy in value):
+                raise TypeError("mask list and tuple entries must be Mask objects")
+            policies = tuple(value)
+        else:
+            raise TypeError("mask must be False, True, a float, a Mask, or a list or tuple of Mask objects")
+
+        normalized: list[Mask] = []
+        seen: set[Mask] = set()
+        for policy in policies:
+            if policy.rate == 0.0:
+                continue
+            if policy.rate == 1.0:
+                policy = policy.model_copy(update={"rate": None})
+            if policy in seen:
+                continue
+            seen.add(policy)
+            normalized.append(policy)
+        return tuple(normalized)
+
+
+MaskInput: TypeAlias = Mask | float | bool | list[Mask] | tuple[Mask, ...]
 
 
 class Renderable(ABC):
@@ -183,7 +249,7 @@ class Leaf(Node):
     from this class through their registered request models.
     """
 
-    model_config = pydantic.ConfigDict(extra="allow")
+    model_config = pydantic.ConfigDict(extra="allow", validate_default=True)
 
     active: bool = True
     embed: bool = False
@@ -193,8 +259,7 @@ class Leaf(Node):
     nullable: bool = True
     pooling: Literal["query", "mean"] = "query"
     weight: Annotated[float, pydantic.Field(gt=0.0, default=1.0)] = 1.0
-    p_mask: Rate = 0.0
-    p_prune: PruneRate = 0.0
+    mask: tuple[Mask, ...] = pydantic.Field(default=False)
     n_linear: Annotated[int, pydantic.Field(gt=0, default=1)] = 1
 
     def __init__(self, name: str | None = None, **data: Any):
@@ -204,62 +269,31 @@ class Leaf(Node):
             data["name"] = name
         super().__init__(**data)
 
-    @property
-    def target(self) -> bool:
-        return self.p_prune == 1.0
-
-    @target.setter
-    def target(self, value: bool) -> None:
-        if not isinstance(value, bool):
-            raise ValueError("target must be a boolean")
-
-        self.p_prune = 1.0 if value else 0.0
-        self.model_fields_set.add("p_prune")
-
     @pydantic.model_validator(mode="before")
     @classmethod
-    def resolve_role_shorthands(cls, data: Any) -> Any:
-        if not isinstance(data, Mapping):
-            return data
-
-        values = dict(data)
-        target = values.pop("target", None)
-
-        if target is None:
-            return values
-
-        if not isinstance(target, bool):
-            raise ValueError("target must be a boolean")
-
-        if target:
-            if values.get("p_prune") not in (None, 1.0):
-                raise ValueError("target=True is shorthand for p_prune=1.0")
-            values["p_prune"] = 1.0
-        else:
-            if values.get("p_prune") not in (None, 0.0):
-                raise ValueError("target=False is shorthand for p_prune=0.0")
-            values["p_prune"] = 0.0
-
-        return values
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def merge_constructor_kwargs(cls, data: Any) -> Any:
+    def validate_fields(cls, data: Any) -> Any:
         if not isinstance(data, Mapping):
             return data
 
         values = dict(data)
         kwargs = values.pop("kwargs", None)
 
-        if kwargs is None:
-            return values
-        if not isinstance(kwargs, Mapping):
-            raise TypeError("kwargs must be a mapping")
+        if kwargs is not None:
+            if not isinstance(kwargs, Mapping):
+                raise TypeError("kwargs must be a mapping")
+            for key, value in kwargs.items():
+                values.setdefault(key, value)
 
-        for key, value in kwargs.items():
-            values.setdefault(key, value)
+        removed = sorted({"masks", "p_mask", "p_prune", "target"} & values.keys())
+        if removed:
+            raise ValueError(f"removed node field(s): {removed}; use mask")
 
         return values
+
+    @pydantic.field_validator("mask", mode="before")
+    @classmethod
+    def normalize_mask(cls, value: Any) -> tuple[Mask, ...]:
+        return Mask.normalize(value)
 
     @pydantic.field_validator("type")
     @classmethod
@@ -273,30 +307,21 @@ class Leaf(Node):
         return value
 
     @pydantic.model_validator(mode="after")
-    def check_jmespath_query(self):
+    def check_query(self):
         if self.query is None:
             return self
 
-        if not isinstance(self.query, str) or not self.query.strip():
-            raise ValueError("query must be a non-empty string")
+        from relflow.data.query import compile
 
-        try:
-            jmespath.compile(self.query)
-        except JMESPathError as e:
-            raise ValueError(f"invalid jmespath query: {e}") from e
-
+        compile(self.query)
         return self
-
-    def post_bind_validate(self):
-        if self.query is None:
-            raise ValueError(f"request '{self.address}' must define query")
 
     def __rich_console__(self, console, options):
         flags = ["active" if self.active else "inactive"]
         if self.embed:
             flags.append("embed")
-        if self.target:
-            flags.append("target")
+        if any(policy.reconstruct for owner in self.path for policy in getattr(owner, "mask", ())):
+            flags.append("reconstruct")
 
         heading = Text()
         heading.append(self.name, style=self.RICH_NAME_STYLE)
@@ -310,7 +335,7 @@ class Leaf(Node):
                     "active": "bold #64748b",
                     "inactive": "bold #7f1d1d",
                     "embed": "bold #065f46",
-                    "target": "bold #713f12",
+                    "reconstruct": "bold #713f12",
                 }.get(flag, "bold"),
             )
         if self.query is not None:
@@ -319,7 +344,7 @@ class Leaf(Node):
             heading.append(self.query, style="cyan")
         yield heading
 
-        common_names = ("pooling", "weight", "p_mask", "p_prune", "n_heads", "n_linear", "dropout")
+        common_names = ("pooling", "weight", "n_heads", "n_linear", "dropout")
         common = Text()
         first = True
         for name in common_names:
@@ -340,7 +365,7 @@ class Leaf(Node):
             line.append_text(common)
             yield line
 
-        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", *common_names}
+        excluded = {"name", "type", "description", "active", "embed", "query", "nullable", "mask", *common_names}
         specific = Text()
         first = True
         for name, field in type(self).model_fields.items():

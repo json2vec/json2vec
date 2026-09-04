@@ -2,67 +2,57 @@ from __future__ import annotations
 
 import asyncio
 
+import pyarrow as pa
 import pydantic
 import pytest
 import torch
-from tensordict import TensorDict
 
 import relflow as rf
 import relflow.inference.deployment as deployment_module
 from relflow import Model, Number, where
-from relflow.inference.deployment import Deployment, ErrorItem, RequestItem
-from relflow.structs.enums import Strata, TensorKey
-from relflow.structs.packages import Prediction
+from relflow.data.datasets.arrow import identity
+from relflow.inference.deployment import Deployment, ErrorItem
 
 
-class _DummyModel:
-    def __init__(self):
-        self.calls = 0
-        self.write_calls = 0
-        self.schema = object()
-        self.interprocess_encoding_context = {}
+class PredictModel:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
 
-    def to(self, device):
-        return self
-
-    def eval(self):
-        return self
-
-    def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
-        assert Strata.normalize(strata) == Strata.predict
-        self.calls += 1
-        batch_size = int(data.batch_size[0])
-        return [
-            Prediction(
-                address="root/label",
-                payload=TensorDict(
-                    {TensorKey.content: torch.zeros(batch_size, 1)},
-                    batch_size=[batch_size],
-                ),
-            )
-        ]
-
-    def write(self, predictions: list[Prediction]):
-        self.write_calls += 1
-        batch_size = int(predictions[0].payload.batch_size[0]) if predictions else 0
-        return {"root/label": {"value": ["ok"] * batch_size}}
+    def predict(self, source, *, preprocess, postprocess, retain):
+        self.calls.append(
+            {
+                "source": source,
+                "preprocess": preprocess,
+                "postprocess": postprocess,
+                "retain": retain,
+            }
+        )
+        ids = source.data["id"].combine_chunks()
+        inputs = pa.StructArray.from_arrays([ids], names=["id"])
+        labels = pa.array([str(value) for value in ids.to_pylist()], type=pa.large_string())
+        predictions = pa.StructArray.from_arrays([labels], names=["label"])
+        result = rf.Batch(
+            data=pa.table({"inputs": inputs, "predictions": predictions}),
+            identity=source.identity,
+        )
+        if postprocess is not None:
+            result = postprocess.run(result)
+        return result.data
 
 
-def _runtime(model=None, **kwargs) -> deployment_module.FastAPIRuntime:
-    runtime = deployment_module.FastAPIRuntime(
+def runtime(model=None, **kwargs) -> deployment_module.FastAPIRuntime:
+    server = deployment_module.FastAPIRuntime(
         checkpoint="unused",
         accelerator=deployment_module.Accelerator.cpu,
         **kwargs,
     )
-    runtime.model = _DummyModel() if model is None else model
-    runtime.device = torch.device("cpu")
-    runtime.interprocess_encoding_context = {}
-    runtime.jmespath_resolution_monitor = None
-    return runtime
+    server.model = PredictModel() if model is None else model
+    server.device = torch.device("cpu")
+    return server
 
 
-def test_fastapi_batcher_submit_many_splits_large_payload_by_max_batch_size():
-    class FakeRuntime:
+def test_fastapi_batcher_splits_ready_requests_by_max_batch_size():
+    class Runtime:
         def __init__(self):
             self.started = False
             self.batches = []
@@ -75,360 +65,391 @@ def test_fastapi_batcher_submit_many_splits_large_payload_by_max_batch_size():
             return [{"id": payload["id"]} for payload in payloads]
 
     async def run():
-        runtime = FakeRuntime()
-        batcher = deployment_module.FastAPIBatcher(runtime=runtime, max_batch_size=2, batch_timeout=0.0)
+        server = Runtime()
+        batcher = deployment_module.FastAPIBatcher(runtime=server, max_batch_size=2, batch_timeout=0.0)
         await batcher.start()
         try:
             responses = await batcher.submit_many([{"id": 1}, {"id": 2}, {"id": 3}])
         finally:
             await batcher.stop()
+        return server, responses
 
-        return runtime, responses
+    server, responses = asyncio.run(run())
 
-    runtime, responses = asyncio.run(run())
-
-    assert runtime.started is True
-    assert runtime.batches == [[1, 2], [3]]
+    assert server.started is True
+    assert server.batches == [[1, 2], [3]]
     assert responses == [{"id": 1}, {"id": 2}, {"id": 3}]
 
 
-def test_fastapi_runtime_encodes_real_batched_requests_once(monkeypatch):
-    model = Model(
-        Number(name="amount"),
-        d_model=8,
-        n_layers=1,
-        n_heads=2,
-        batch_size=2,
-        embed=True,
+def test_batcher_runs_processors_once_for_one_collated_arrow_batch():
+    preprocessed = []
+    postprocessed = []
+
+    @rf.preprocess
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        preprocessed.append(batch)
+        return batch.take(pa.array([2, 0, 1], type=pa.int64()))
+
+    @rf.postprocess
+    def compact(batch: rf.Batch) -> rf.Batch:
+        postprocessed.append(batch)
+        values = pa.compute.struct_field(batch.data["inputs"], "value")
+        return batch.replace(pa.table({"value": values}))
+
+    async def run():
+        model = Model(
+            value=Number,
+            d_model=8,
+            n_layers=1,
+            n_heads=2,
+            embed=True,
+        )
+        server = deployment_module.FastAPIRuntime(
+            checkpoint=model,
+            accelerator=deployment_module.Accelerator.cpu,
+            preprocessor=prepare,
+            postprocessor=compact,
+            retain=("value",),
+        )
+        batcher = deployment_module.FastAPIBatcher(
+            runtime=server,
+            max_batch_size=3,
+            batch_timeout=0.05,
+        )
+        await batcher.start()
+        try:
+            return await asyncio.gather(
+                batcher.submit({"value": 3.0}),
+                batcher.submit({"value": 1.0}),
+                batcher.submit({"value": 2.0}),
+            )
+        finally:
+            await batcher.stop()
+
+    responses = asyncio.run(run())
+
+    assert len(preprocessed) == 1
+    assert len(postprocessed) == 1
+    assert isinstance(preprocessed[0], rf.Batch)
+    assert isinstance(postprocessed[0], rf.Batch)
+    assert preprocessed[0].data["value"].to_pylist() == [3.0, 1.0, 2.0]
+    assert pa.compute.struct_field(postprocessed[0].data["inputs"], "value").to_pylist() == [2.0, 3.0, 1.0]
+    assert responses == [{"value": 3.0}, {"value": 1.0}, {"value": 2.0}]
+
+
+def test_runtime_converts_valid_requests_to_one_arrow_prediction_call():
+    model = PredictModel()
+
+    @rf.preprocess
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    server = runtime(model=model, preprocessor=prepare, retain=("id",))
+    outputs = server.predict_payloads([{"id": 3}, {"id": 1}])
+
+    assert len(model.calls) == 1
+    call = model.calls[0]
+    assert isinstance(call["source"], rf.Batch)
+    assert call["source"].data.to_pylist() == [{"id": 3}, {"id": 1}]
+    assert call["preprocess"] is prepare
+    assert isinstance(call["postprocess"], rf.Postprocessor)
+    assert call["retain"] == ("id",)
+    assert outputs == [
+        {"predictions": {"label": "3"}},
+        {"predictions": {"label": "1"}},
+    ]
+
+
+def test_runtime_preserves_request_fields_introduced_after_the_first_row():
+    model = PredictModel()
+    server = runtime(model=model)
+
+    server.predict_payloads([{"id": 3}, {"id": 1, "context": "kept"}])
+
+    assert model.calls[0]["source"].data.to_pylist() == [
+        {"id": 3, "context": None},
+        {"id": 1, "context": "kept"},
+    ]
+
+
+def test_runtime_preserves_request_order_around_validation_errors():
+    class Request(pydantic.BaseModel):
+        id: int = pydantic.Field(gt=0)
+
+    model = PredictModel()
+    server = runtime(model=model, request_signature=Request)
+
+    outputs = server.predict_payloads([{"id": 2}, {"id": 0}, "wrong", {"id": 4}])
+
+    assert len(model.calls) == 1
+    assert model.calls[0]["source"].data.to_pylist() == [{"id": 2}, {"id": 4}]
+    assert outputs[0] == {"predictions": {"label": "2"}}
+    assert outputs[1]["error"]["status_code"] == 422
+    assert "greater than 0" in outputs[1]["error"]["message"]
+    assert outputs[2] == {
+        "predictions": {},
+        "error": {"status_code": 422, "message": "each request must be a JSON object, got str"},
+    }
+    assert outputs[3] == {"predictions": {"label": "4"}}
+
+
+def test_runtime_restores_order_after_arrow_preprocessing():
+    class ReorderingModel(PredictModel):
+        def predict(self, source, *, preprocess, postprocess, retain):
+            reversed_source = source.take(pa.array([1, 0], type=pa.int64()))
+            return super().predict(
+                reversed_source,
+                preprocess=preprocess,
+                postprocess=postprocess,
+                retain=retain,
+            )
+
+    server = runtime(model=ReorderingModel())
+
+    assert server.predict_payloads([{"id": 3}, {"id": 9}]) == [
+        {"predictions": {"label": "3"}},
+        {"predictions": {"label": "9"}},
+    ]
+
+
+def test_default_response_never_exposes_retained_inputs():
+    server = runtime(retain=("id",))
+
+    output = server.predict_payloads([{"id": 8}])[0]
+
+    assert output == {"predictions": {"label": "8"}}
+    assert "inputs" not in output
+    assert "identity" not in output
+
+
+def test_postprocessor_runs_inside_the_single_model_prediction_call():
+    seen = []
+
+    @rf.postprocess
+    def compact(batch: rf.Batch) -> rf.Batch:
+        seen.append(batch)
+        return batch.replace(
+            pa.table(
+                {
+                    "request_id": pa.compute.struct_field(batch.data["inputs"], "id"),
+                    "label": pa.compute.struct_field(batch.data["predictions"], "label"),
+                }
+            )
+        )
+
+    model = PredictModel()
+    server = runtime(model=model, postprocessor=compact, retain=("id",))
+
+    output = server.predict_payloads([{"id": 5}])[0]
+
+    assert len(model.calls) == 1
+    assert isinstance(model.calls[0]["postprocess"], rf.Postprocessor)
+    assert model.calls[0]["postprocess"] is not compact
+    assert len(seen) == 1
+    assert output == {"request_id": 5, "label": "5"}
+
+
+def test_postprocessor_cannot_claim_the_deployment_identity_column():
+    @rf.postprocess
+    def collide(batch: rf.Batch) -> rf.Batch:
+        return batch.replace(
+            batch.data.append_column(
+                deployment_module.TRANSPORT_IDENTITY,
+                pa.array(["mine"] * len(batch)),
+            )
+        )
+
+    server = runtime(postprocessor=collide)
+
+    with pytest.raises(ValueError, match="reserved column"):
+        server.predict_payloads([{"id": 1}])
+
+
+def test_runtime_rejects_replaced_request_identity():
+    class ReplacingModel(PredictModel):
+        def predict(self, source, *, preprocess, postprocess, retain):
+            replaced = rf.Batch(
+                data=source.data,
+                identity=identity(len(source), namespace="replaced"),
+            )
+            return super().predict(
+                replaced,
+                preprocess=preprocess,
+                postprocess=postprocess,
+                retain=retain,
+            )
+
+    server = runtime(model=ReplacingModel())
+
+    with pytest.raises(ValueError, match="exactly one output for each request"):
+        server.predict_payloads([{"id": 1}])
+
+
+def test_response_signature_validates_each_terminal_arrow_row():
+    class Response(pydantic.BaseModel):
+        predictions: dict[str, str]
+
+    server = runtime(response_signature=Response)
+
+    assert server.predict_payloads([{"id": 7}]) == [{"predictions": {"label": "7"}}]
+
+
+def test_runtime_rejects_non_arrow_model_output():
+    class BrokenModel:
+        def predict(self, source, **kwargs):
+            return [{"predictions": {}}]
+
+    server = runtime(model=BrokenModel())
+
+    with pytest.raises(TypeError, match="Model.predict must return a pyarrow.Table"):
+        server.predict_payloads([{"id": 1}])
+
+
+def test_runtime_rejects_prediction_row_count_drift():
+    class BrokenModel:
+        def predict(self, source, **kwargs):
+            return pa.table({"predictions": pa.array([], type=pa.null())})
+
+    server = runtime(model=BrokenModel())
+
+    with pytest.raises(ValueError, match="returned 0 rows for 1 valid"):
+        server.predict_payloads([{"id": 1}])
+
+
+def test_runtime_reports_arrow_incompatible_requests_without_calling_model():
+    model = PredictModel()
+    server = runtime(model=model)
+    opaque = object()
+
+    output = server.predict_payloads([{"id": opaque}])[0]
+
+    assert model.calls == []
+    assert output["error"]["status_code"] == 422
+    assert "Arrow-compatible" in output["error"]["message"]
+
+
+def test_runtime_setup_applies_updates_before_device_placement(monkeypatch):
+    calls = []
+
+    class LoadedModel:
+        def update(self, *predicates, **values):
+            calls.append(("update", predicates, values))
+            return self
+
+        def to(self, device):
+            calls.append(("to", str(device)))
+            return self
+
+        def eval(self):
+            calls.append(("eval",))
+            return self
+
+    loaded = LoadedModel()
+    monkeypatch.setattr(deployment_module.Model, "load", classmethod(lambda cls, checkpoint: loaded))
+    predicate = where("name") == "label"
+    server = deployment_module.FastAPIRuntime(
+        checkpoint="unused",
+        accelerator=deployment_module.Accelerator.cpu,
+        update_operations=[((predicate,), {"target": False})],
     )
-    runtime = deployment_module.FastAPIRuntime(
+
+    server.setup()
+
+    assert calls == [
+        ("update", (predicate,), {"target": False}),
+        ("to", "cpu"),
+        ("eval",),
+    ]
+
+
+def test_runtime_setup_uses_an_in_memory_model(monkeypatch):
+    model = Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+    monkeypatch.setattr(
+        deployment_module.Model,
+        "load",
+        classmethod(lambda cls, checkpoint: (_ for _ in ()).throw(AssertionError("checkpoint should not load"))),
+    )
+    server = deployment_module.FastAPIRuntime(
         checkpoint=model,
         accelerator=deployment_module.Accelerator.cpu,
     )
-    runtime.setup()
 
-    captured_batches = []
-    captured_monitors = []
-    real_encode = deployment_module.encode
+    server.setup()
 
-    def spy_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        captured_batches.append(batch)
-        captured_monitors.append(jmespath_resolution_monitor)
-        return real_encode(
-            batch=batch,
-            schema=schema,
-            strata=strata,
-            interprocess_encoding_context=interprocess_encoding_context,
-            jmespath_resolution_monitor=jmespath_resolution_monitor,
-        )
-
-    monkeypatch.setattr(deployment_module, "encode", spy_encode)
-
-    outputs = runtime.predict_payloads([{"amount": 1.5}, {"amount": 2.5}])
-
-    assert captured_batches == [[[{"amount": 1.5}], [{"amount": 2.5}]]]
-    assert captured_monitors == [None]
-    assert len(outputs) == 2
-    assert all("predictions" in output for output in outputs)
+    assert server.model is model
 
 
-def test_fastapi_runtime_preserves_per_item_errors_and_batches_valid_requests_once(monkeypatch):
+def test_deployment_builder_keeps_arrow_processors_and_retention():
     @rf.preprocess
-    def __deployment_preprocess(observation: dict):
-        if observation["hue"] == "bad":
-            raise ValueError("bad hue")
-        return rf.Observation({"color": observation["hue"]})
-
-    captured = {"calls": 0}
-
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        captured["calls"] += 1
-        captured["batch"] = batch
-        captured["strata"] = strata
-        return TensorDict({"dummy": torch.tensor([1, 2])}, batch_size=[2])
-
-    monkeypatch.setattr(deployment_module, "encode", fake_encode)
-
-    model = _DummyModel()
-    runtime = _runtime(model=model, preprocessor=__deployment_preprocess)
-
-    outputs = runtime.predict_payloads(
-        [
-            {"hue": "red"},
-            {"hue": "bad"},
-            {"hue": "blue"},
-        ]
-    )
-
-    assert captured["calls"] == 1
-    assert captured["batch"] == [[{"color": "red"}], [{"color": "blue"}]]
-    assert captured["strata"] == Strata.predict
-    assert model.calls == 1
-    assert model.write_calls == 1
-    assert outputs[0]["predictions"]["root/label"]["value"] == "ok"
-    assert outputs[1]["predictions"] == {}
-    assert outputs[1]["error"]["status_code"] == 422
-    assert "bad hue" in outputs[1]["error"]["message"]
-    assert outputs[2]["predictions"]["root/label"]["value"] == "ok"
-
-
-def test_fastapi_runtime_postprocess_can_rewrite_response(monkeypatch):
-    seen = {}
-
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        return batch
 
     @rf.postprocess
-    def processor(predictions, *, request, observations, input):
-        seen["request"] = request
-        seen["observations"] = observations
-        seen["input"] = input
-        seen["predictions"] = predictions
-        return {
-            "root/label": {"value": ["rewritten"]},
-            "root/vector": {"embedding": [[1.0, 2.0]]},
-        }
+    def compact(batch: rf.Batch) -> rf.Batch:
+        return batch
 
-    monkeypatch.setattr(deployment_module, "encode", fake_encode)
+    deployment = Deployment(checkpoint="unused", retain=("request_id",)).preprocess(prepare).postprocess(compact)
 
-    runtime = _runtime(postprocessor=processor)
-    output = runtime.predict_payloads([{"color": "r"}])[0]
-
-    assert seen["request"] == {"color": "r"}
-    assert seen["observations"] == [[{"color": "r"}]]
-    assert seen["input"] is not None
-    assert seen["predictions"]["root/label"]["value"] == ["ok"]
-    assert output["predictions"]["root/label"]["value"] == "rewritten"
-    assert output["predictions"]["root/vector"]["embedding"] == [1.0, 2.0]
+    assert deployment.retain == ("request_id",)
+    assert deployment._preprocessor is prepare
+    assert deployment._postprocessor is compact
 
 
-def test_fastapi_runtime_postprocess_receives_device_moved_input(monkeypatch):
-    seen = {}
-
-    class DeviceCheckingModel(_DummyModel):
-        def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
-            assert data["dummy"].device == torch.device("meta")
-            return super().__call__(data, strata=strata)
-
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
-
-    @rf.postprocess
-    def processor(predictions, *, input):
-        seen["input_device"] = input["dummy"].device
-        return predictions
-
-    monkeypatch.setattr(deployment_module, "encode", fake_encode)
-
-    runtime = _runtime(model=DeviceCheckingModel(), postprocessor=processor)
-    runtime.device = torch.device("meta")
-
-    output = runtime.predict_payloads([{"color": "r"}])[0]
-
-    assert seen["input_device"] == torch.device("meta")
-    assert output["predictions"]["root/label"]["value"] == "ok"
-
-
-def test_fastapi_runtime_with_no_predictions_returns_empty_response(monkeypatch):
-    class EmptyModel(_DummyModel):
-        def __call__(self, data: TensorDict, *, strata: Strata | str) -> list[Prediction]:
-            assert Strata.normalize(strata) == Strata.predict
-            self.calls += 1
-            return []
-
-        def write(self, predictions: list[Prediction]):
-            assert predictions == []
-            return {}
-
-    def fake_encode(batch, schema, strata, interprocess_encoding_context, jmespath_resolution_monitor):
-        return TensorDict({"dummy": torch.tensor([1])}, batch_size=[1])
-
-    monkeypatch.setattr(deployment_module, "encode", fake_encode)
-
-    model = EmptyModel()
-    runtime = _runtime(model=model)
-    output = runtime.predict_payloads([{"amount": 1}])[0]
-
-    assert model.calls == 1
-    assert output == {"predictions": {}}
-
-
-def test_fastapi_runtime_decode_rejects_multiple_preprocessor_outputs():
-    @rf.preprocess
-    def __deployment_generator(observation: dict):
-        yield rf.Observation({"color": observation["hue"]})
-        yield rf.Observation({"color": observation["hue"] + "2"})
-
-    runtime = _runtime(preprocessor=__deployment_generator)
-    context = {}
-
-    error = runtime.decode_payload({"hue": "red"}, context=context)
-
-    assert isinstance(error, ErrorItem)
-    assert error.status_code == 422
-    assert "deployment requests must encode exactly one observation" in error.message
-
-
-def test_fastapi_runtime_decode_validates_pydantic_request_model():
-    class Request(pydantic.BaseModel):
-        hue: str
-
-    @rf.preprocess
-    def __deployment_preprocess(observation: dict):
-        return rf.Observation({"color": observation["hue"]})
-
-    runtime = _runtime(
-        request_signature=Request,
-        preprocessor=__deployment_preprocess,
-    )
-    context = {}
-
-    decoded = runtime.decode_payload({"hue": "red"}, context=context)
-
-    assert isinstance(decoded, RequestItem)
-    assert decoded.observations == [[{"color": "red"}]]
-    assert context["request"] == {"hue": "red"}
-
-
-def test_fastapi_runtime_setup_can_enable_query_monitor():
-    runtime = deployment_module.FastAPIRuntime(
-        checkpoint=Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2),
-        accelerator=deployment_module.Accelerator.cpu,
-        monitor_queries=True,
-        query_monitor_every=7,
-    )
-
-    runtime.setup()
-
-    assert runtime.jmespath_resolution_monitor is not None
-    assert runtime.jmespath_resolution_monitor.every == 7
-
-
-def test_deployment_launcher_configures_fastapi_app(monkeypatch):
-    class Request(pydantic.BaseModel):
-        color: str
-
-    class Response(pydantic.BaseModel):
-        predictions: dict = {}
-
-    captured = {}
-
-    def fake_run(app, *, host, port, log_level):
-        captured["app"] = app
-        captured["host"] = host
-        captured["port"] = port
-        captured["log_level"] = log_level
-
-    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
-
-    Deployment(
-        checkpoint="unused",
-        max_batch_size=16,
-        batch_timeout=0.25,
-        accelerator="cpu",
-        host="127.0.0.1",
-        port=8765,
-        log_level="error",
-    ).update(where("name") == "label", target=False).forge(request=Request, response=Response).serve()
-
-    assert isinstance(captured["app"], deployment_module.fastapi.FastAPI)
-    assert {route.path for route in captured["app"].routes} >= {"/health", "/predict"}
-    assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 8765
-    assert captured["log_level"] == "error"
+@pytest.mark.parametrize("retain", [("id", "id"), ("",), ["id"]])
+def test_deployment_rejects_invalid_retention(retain):
+    with pytest.raises((TypeError, ValueError, pydantic.ValidationError)):
+        Deployment(checkpoint="unused", retain=retain)
 
 
 def test_deployment_forge_registers_openapi_signatures():
     class Request(pydantic.BaseModel):
         amount: float
 
-    class Candidate(pydantic.BaseModel):
-        label: str
-        probability: float
-
     class Response(pydantic.BaseModel):
-        predictions: list[Candidate]
+        predictions: dict[str, object]
 
     app = Deployment(checkpoint="unused").forge(request=Request, response=Response).app()
-
     schema = app.openapi()
-    components = schema["components"]["schemas"]
     operation = schema["paths"]["/predict"]["post"]
 
-    assert {"Request", "Candidate", "Response"} <= set(components)
-
-    request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
-    assert request_schema == {
+    assert {"Request", "Response"} <= set(schema["components"]["schemas"])
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
         "anyOf": [
             {"$ref": "#/components/schemas/Request"},
             {"type": "array", "items": {"$ref": "#/components/schemas/Request"}},
         ]
     }
 
-    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
-    assert response_schema == {
-        "anyOf": [
-            {"$ref": "#/components/schemas/Response"},
-            {"type": "array", "items": {"$ref": "#/components/schemas/Response"}},
-        ]
-    }
-    assert components["Response"]["properties"]["predictions"]["items"] == {"$ref": "#/components/schemas/Candidate"}
 
-
-def test_deployment_launcher_configures_worker_import_string(monkeypatch):
+def test_deployment_serve_configures_uvicorn(monkeypatch):
     captured = {}
 
-    def fake_run(app, *, factory, workers, host, port, log_level):
-        captured["app"] = app
-        captured["factory"] = factory
-        captured["workers"] = workers
-        captured["host"] = host
-        captured["port"] = port
-        captured["log_level"] = log_level
+    def run(app, *, host, port, log_level):
+        captured.update(app=app, host=host, port=port, log_level=log_level)
 
-    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
+    monkeypatch.setattr(deployment_module.uvicorn, "run", run)
 
-    Deployment(checkpoint="model.ckpt", workers=2, accelerator="cpu", port=8765).serve()
+    Deployment(
+        checkpoint="unused",
+        accelerator="cpu",
+        host="127.0.0.1",
+        port=8765,
+        log_level="error",
+    ).serve()
 
-    assert captured == {
-        "app": "relflow.inference.deployment:create_app",
-        "factory": True,
-        "workers": 2,
-        "host": "0.0.0.0",
-        "port": 8765,
-        "log_level": "info",
-    }
+    assert isinstance(captured["app"], deployment_module.fastapi.FastAPI)
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8765
+    assert captured["log_level"] == "error"
 
 
-def test_deployment_launcher_rejects_workers_with_model_instance():
-    model = Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
+def test_multiworker_deployment_rejects_in_process_builder_configuration():
+    @rf.postprocess
+    def compact(batch: rf.Batch) -> rf.Batch:
+        return batch
 
-    with pytest.raises(ValueError, match="workers > 1"):
-        Deployment(model=model, workers=2).serve()
-
-
-def test_deployment_launcher_accepts_model_instance(monkeypatch):
-    model = Model(
-        Number(name="amount"),
-        d_model=8,
-        n_layers=1,
-        n_heads=2,
-        batch_size=1,
-        embed=True,
-    )
-    captured = []
-
-    def fake_run(app, *, host, port, log_level):
-        captured.append({"app": app, "host": host, "port": port, "log_level": log_level})
-
-    monkeypatch.setattr(deployment_module.uvicorn, "run", fake_run)
-
-    Deployment(model=model, accelerator="cpu", port=9001).serve()
-    Deployment(checkpoint=model, accelerator="cpu", port=9002).serve()
-
-    assert len(captured) == 2
-    for item in captured:
-        assert isinstance(item["app"], deployment_module.fastapi.FastAPI)
+    with pytest.raises(ValueError, match="cannot serialize in-process"):
+        Deployment(checkpoint="model.ckpt", workers=2).postprocess(compact).serve()
 
 
 def test_deployment_rejects_explicit_checkpoint_and_model():
@@ -438,82 +459,10 @@ def test_deployment_rejects_explicit_checkpoint_and_model():
         Deployment(checkpoint="model.ckpt", model=model)
 
 
-def test_fastapi_runtime_setup_applies_queued_update_operations(monkeypatch):
-    calls = []
+def test_error_item_is_stable():
+    error = ErrorItem(status_code=422, message="bad input")
 
-    class FakeModel:
-        interprocess_encoding_context = {}
-
-        def __init__(self):
-            self.placed = False
-
-        def to(self, device):
-            calls.append(("to", str(device)))
-            self.placed = True
-            return self
-
-        def update(self, *predicates, **values):
-            calls.append(("update", predicates, values))
-            self.placed = False
-            return self
-
-        def eval(self):
-            assert self.placed is True
-            calls.append(("eval",))
-            return self
-
-    fake = FakeModel()
-    monkeypatch.setattr(deployment_module.Model, "load", classmethod(lambda cls, checkpoint: fake))
-
-    predicate = where("name") == "label"
-    runtime = deployment_module.FastAPIRuntime(
-        checkpoint="unused",
-        accelerator=deployment_module.Accelerator.cpu,
-        update_operations=[
-            ((predicate,), {"target": False}),
-        ],
-    )
-
-    runtime.setup()
-
-    assert calls[0] == ("update", (predicate,), {"target": False})
-    assert calls[1] == ("to", "cpu")
-    assert calls[2] == ("eval",)
-
-
-def test_fastapi_runtime_setup_uses_model_instance(monkeypatch):
-    model = Model(Number(name="amount"), d_model=8, n_layers=1, n_heads=2)
-    monkeypatch.setattr(
-        deployment_module.Model,
-        "load",
-        classmethod(lambda cls, checkpoint: (_ for _ in ()).throw(AssertionError("checkpoint should not load"))),
-    )
-
-    runtime = deployment_module.FastAPIRuntime(
-        checkpoint=model,
-        accelerator=deployment_module.Accelerator.cpu,
-    )
-
-    runtime.setup()
-
-    assert runtime.model is model
-
-
-def test_deployment_uses_bound_preprocessor_object():
-    @rf.preprocess
-    def __deployment_preprocess(observation: dict, *, suffix: str):
-        return rf.Observation({"color": observation["hue"] + suffix})
-
-    deployment = Deployment(checkpoint="unused").preprocess(__deployment_preprocess.partial(suffix="!"))
-    runtime = deployment_module.FastAPIRuntime(
-        checkpoint="unused",
-        accelerator=deployment_module.Accelerator.cpu,
-        preprocessor=deployment._preprocessor,
-    )
-    context = {}
-
-    decoded = runtime.decode_payload({"hue": "red"}, context=context)
-
-    assert isinstance(decoded, RequestItem)
-    assert decoded.observations == [[{"color": "red!"}]]
-    assert context["observations"] == [[{"color": "red!"}]]
+    assert runtime().failure(error) == {
+        "predictions": {},
+        "error": {"status_code": 422, "message": "bad input"},
+    }

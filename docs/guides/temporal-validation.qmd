@@ -40,59 +40,55 @@ or joining but should not be learned as raw inputs.
 
 ## Build Windows In One Preprocessor
 
-Use the public preprocessor contract when raw histories need sorting, filtering,
-or feature derivation. Return `rf.Observation`, not a plain dictionary:
+Use the public Arrow preprocessor contract when raw histories need sorting,
+filtering, or feature derivation. This example assumes `as_of_s` and each event's
+`timestamp_s` are UTC epoch seconds; normalize timestamp strings at the source
+boundary so parsing rules are not hidden inside every batch:
 
 ```{python .marimo}
 #| echo: true
 #| output: true
 
-from datetime import datetime, timezone
-
+import awkward as ak
+import pyarrow as pa
+import pyarrow.compute as pc
 import relflow as rf
 
 
-@rf.preprocess
-def trailing_history(observation, *, strata, cutoffs):
-    as_of = datetime.fromisoformat(cutoffs[str(strata)].replace("Z", "+00:00"))
-    events = []
+@rf.preprocess(requires=("as_of_s", "events"), produces=("history",))
+def trailing_history(batch: rf.Batch, *, window_days: int) -> rf.Batch:
+    events = ak.from_arrow(batch.data["events"])
+    as_of = ak.from_arrow(batch.data["as_of_s"])
 
-    for event in observation["events"]:
-        timestamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
-        if timestamp > as_of:
-            continue
-
-        age_days = (as_of - timestamp).total_seconds() / 86_400
-        if age_days <= 90:
-            events.append(
-                {
-                    "kind": event["kind"],
-                    "days_since_event": age_days,
-                }
-            )
-
-    events.sort(key=lambda event: event["days_since_event"], reverse=True)
-    return rf.Observation(
-        {
-            "events": events,
-            "outcome_in_next_7_days": observation.get("outcome_in_next_7_days"),
-        }
+    age_days = (as_of[:, None] - events["timestamp_s"]) / 86_400
+    keep = ak.fill_none((age_days >= 0) & (age_days <= window_days), False)
+    selected = events[keep]
+    ages = age_days[keep]
+    prepared = ak.zip(
+        {"kind": selected["kind"], "days_since_event": ages},
+        depth_limit=2,
     )
+    order = ak.argsort(prepared["days_since_event"], axis=1, ascending=False)
+    prepared = prepared[order]
+
+    datatype = pa.large_list(
+        pa.struct(
+            [
+                pa.field("kind", pa.large_string()),
+                pa.field("days_since_event", pa.float64()),
+            ]
+        )
+    )
+    values = pc.cast(ak.to_arrow(prepared, extensionarray=False), datatype)
+    return batch.replace(batch.data.append_column("history", values))
 
 
-preprocessor = trailing_history.partial(
-    cutoffs={
-        "train": "2025-06-30T23:59:59Z",
-        "validate": "2025-09-30T23:59:59Z",
-        "test": "2025-12-31T23:59:59Z",
-        "predict": "2026-01-15T12:00:00Z",
-    }
-)
+preprocessor = trailing_history.partial(window_days=90)
 ```
 
-This is an illustrative cutoff policy. Many datasets already contain a distinct
-`as_of` per observation; in that case, read it from the observation and still
-use `strata` to enforce allowed ranges.
+Each observation owns its own cutoff, which avoids a split-wide date silently
+being applied to examples with different prediction times. The explicit cast
+makes the produced `history` schema stable for empty and all-null batches.
 
 Pass the same preprocessor to data modules and interactive or online inference:
 
@@ -100,15 +96,15 @@ Pass the same preprocessor to data modules and interactive or online inference:
 #| echo: true
 #| output: true
 
-datamodule = rf.PolarsDataModule(
+datamodule = rf.ArrowDataModule(
     model=model,
-    train=train_records,
-    validate=validate_records,
-    test=test_records,
+    train=train_table,
+    validate=validate_table,
+    test=test_table,
     preprocessor=preprocessor,
 )
 
-predictions = model.predict(requests, preprocess=preprocessor)
+predictions = model.predict(request_table, preprocess=preprocessor)
 ```
 
 ## Choose Split Boundaries Deliberately
@@ -168,7 +164,7 @@ For each sampled observation, verify:
 1. no input event is newer than its `as_of`;
 2. the target window begins after `as_of`;
 3. branch truncation kept the intended side of the history;
-4. the target is hidden from model input;
+4. the reconstruction field is skipped from model input;
 5. validation-only categories are unavailable rather than added to vocabulary;
 6. the same raw request produces the same model-facing shape in serving.
 
@@ -195,7 +191,7 @@ Use them as diagnostics alongside held-out outcomes.
 
 | Signal | Diagnostic | Likely fix |
 | --- | --- | --- |
-| Validation is implausibly strong | Search visible nested events and derived fields for post-`as_of` information | Rebuild windows before query/tensorization and regenerate splits. |
+| Validation is implausibly strong | Search visible nested events and derived fields for post-`as_of` information | Rebuild windows before query/binding and tensorization, then regenerate splits. |
 | Validation vocabulary grows | Inspect which strata populated encoding state | Fit vocabulary/normalization only from training, then encode validation and test without updates. |
 | The same entity appears across splits | Join split membership by customer/account/device/session key | Split by the identity unit that can leak, not individual rows. |
 | Serving records differ from validation | Run the same raw example through both processor bindings | Version and deploy processor code and bound parameters with the artifact. |

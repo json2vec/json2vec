@@ -21,7 +21,6 @@ def test_category_topk_rejects_non_positive():
         {
             "name": "cat",
             "type": "category",
-            "query": "[*].code",
             "size": 64,
             "topk": [0],
         }
@@ -35,7 +34,6 @@ def test_category_topk_rejects_values_at_or_above_vocab():
         {
             "name": "cat",
             "type": "category",
-            "query": "[*].code",
             "size": 8,
             "topk": [8],
         }
@@ -49,7 +47,6 @@ def test_category_allows_extra_n_bands_option():
         {
             "name": "cat",
             "type": "category",
-            "query": "[*].code",
             "size": 64,
             "n_bands": 8,
         }
@@ -64,7 +61,6 @@ def test_set_threshold_rejects_values_above_one():
         {
             "name": "tags",
             "type": "set",
-            "query": "[*].tags",
             "threshold": 1.1,
         }
     )
@@ -77,7 +73,6 @@ def test_boolean_threshold_rejects_values_above_one():
         {
             "name": "enabled",
             "type": "boolean",
-            "query": "[*].enabled",
             "threshold": 1.1,
         }
     )
@@ -98,7 +93,6 @@ def test_boolean_threshold_rejects_invalid_lists(threshold: list[float], match: 
         {
             "name": "enabled",
             "type": "boolean",
-            "query": "[*].enabled",
             "threshold": threshold,
         }
     )
@@ -112,7 +106,6 @@ def test_dateparts_dateparts_reject_duplicates():
         {
             "name": "ts",
             "type": "dateparts",
-            "query": "[*].created_at",
             "dateparts": ["day_of_week", "day_of_week"],
         }
     )
@@ -125,7 +118,6 @@ def test_dateparts_normalizes_friendly_datepart_names():
         {
             "name": "ts",
             "type": "dateparts",
-            "query": "[*].created_at",
             "dateparts": ["Day Of Week", "month-of-year", "HourOfDay"],
         }
     )
@@ -144,7 +136,6 @@ def test_dateparts_unknown_name_suggests_canonical_value():
         {
             "name": "ts",
             "type": "dateparts",
-            "query": "[*].created_at",
             "dateparts": ["day of wek"],
         }
     )
@@ -157,7 +148,6 @@ def test_dateparts_pattern_rejects_invalid_tokens():
         {
             "name": "ts",
             "type": "dateparts",
-            "query": "[*].created_at",
             "dateparts": ["day_of_week"],
             "pattern": "%Q-%m-%d",
         }
@@ -171,7 +161,6 @@ def test_dateparts_pattern_accepts_valid_format():
         {
             "name": "ts",
             "type": "dateparts",
-            "query": "[*].created_at",
             "dateparts": ["day_of_week", "month_of_year"],
             "pattern": "%Y-%m-%d",
         }
