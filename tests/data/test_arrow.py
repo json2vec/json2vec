@@ -6,7 +6,7 @@ import torch
 from tensordict import TensorDict
 
 import relflow as rf
-from relflow.data.arrow import IDENTITY, Batch, Encoded, variants
+from relflow.data.arrow import IDENTITY, Batch, Encoded, mappings, variants
 from relflow.structs.tree import Address
 
 
@@ -26,6 +26,25 @@ def identities(size: int) -> pa.Array:
 
 def test_batch_is_public():
     assert rf.Batch is Batch
+
+
+def test_mappings_reuses_uniform_dicts_without_rebuilding_rows():
+    values = [{"a": 1, "b": 2}, {"b": 3, "a": 4}]
+
+    aligned = mappings(values)
+
+    assert aligned == values
+    assert aligned[0] is values[0]
+    assert aligned[1] is values[1]
+
+
+def test_mappings_aligns_sparse_rows_with_fields_introduced_later():
+    values = [{"a": 1}, {"a": 2, "b": 3}]
+
+    aligned = mappings(values)
+
+    assert aligned == [{"a": 1, "b": None}, {"a": 2, "b": 3}]
+    assert aligned[0] is not values[0]
 
 
 def test_variants_respects_sliced_union_offsets():

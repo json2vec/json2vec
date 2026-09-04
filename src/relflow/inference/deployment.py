@@ -15,6 +15,7 @@ import fastapi
 import orjson
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.ipc as ipc
 import pydantic
 import torch
 import uvicorn
@@ -36,6 +37,8 @@ ModelSource: TypeAlias = str | Path | Model
 Retain: TypeAlias = tuple[str, ...] | Literal["*"]
 UpdateOperation: TypeAlias = tuple[tuple[NodePredicate | NodeAttribute | Callable[[Node], bool], ...], dict[str, Any]]
 TRANSPORT_IDENTITY = "__relflow_identity__"
+JSON_MEDIA_TYPE = "application/json"
+ARROW_MEDIA_TYPE = "application/vnd.apache.arrow.stream"
 
 
 class Accelerator(StrEnum):
@@ -107,6 +110,7 @@ class FastAPIRuntime:
         response_signature: type[pydantic.BaseModel] | None = None,
     ) -> None:
         self.model_source = checkpoint
+        self.checkpoint = None if isinstance(checkpoint, Model) else Path(checkpoint).name
         self.accelerator = accelerator
         self.preprocessors = Preprocessor.normalize(preprocessor)
         self.postprocessors = Postprocessor.normalize(postprocessor)
@@ -163,6 +167,95 @@ class FastAPIRuntime:
             },
         }
 
+    def provenance(self) -> dict[str, str | None]:
+        """Describe the loaded model without exposing its checkpoint path."""
+
+        return {
+            "version": self.model.version,
+            "checkpoint": self.checkpoint,
+        }
+
+    def annotate(self, content: dict[str, Any] | list[dict[str, Any]]) -> dict[str, Any] | list[dict[str, Any]]:
+        """Add model provenance to successful JSON response rows."""
+
+        rows = content if isinstance(content, list) else [content]
+        if any("model" in row for row in rows):
+            raise ValueError("deployment response cannot use reserved field 'model'")
+        provenance = self.provenance()
+        annotated = [{**row, "model": provenance} for row in rows]
+        return annotated if isinstance(content, list) else annotated[0]
+
+    def annotate_table(self, data: pa.Table) -> pa.Table:
+        """Add model provenance to successful Arrow response rows."""
+
+        if "model" in data.column_names:
+            raise ValueError("deployment response cannot use reserved column 'model'")
+        provenance = self.provenance()
+        model = pa.StructArray.from_arrays(
+            [
+                pa.array([provenance["version"]] * data.num_rows, type=pa.string()),
+                pa.array([provenance["checkpoint"]] * data.num_rows, type=pa.string()),
+            ],
+            names=["version", "checkpoint"],
+        )
+        return data.append_column("model", model)
+
+    def predict_table(self, data: pa.Table) -> pa.Table:
+        """Predict one Arrow microbatch without crossing the Python-row boundary."""
+
+        if not isinstance(data, pa.Table):
+            raise TypeError(f"deployment prediction input must be a pyarrow.Table, got {type(data).__name__}")
+
+        source = Batch(
+            data=data,
+            identity=identity(data.num_rows, namespace="deployment"),
+        )
+
+        def transport(batch: Batch) -> Batch:
+            if TRANSPORT_IDENTITY in batch.data.column_names:
+                raise ValueError(f"postprocessor output cannot use reserved column {TRANSPORT_IDENTITY!r}")
+            return batch.replace(batch.data.append_column(TRANSPORT_IDENTITY, batch.identity))
+
+        result = self.model.predict(
+            source,
+            preprocess=self.preprocessors,
+            postprocess=(*self.postprocessors, Postprocessor(func=transport)),
+            retain=self.retain,
+        )
+        if not isinstance(result, pa.Table):
+            raise TypeError(f"Model.predict must return a pyarrow.Table, got {type(result).__name__}")
+        if result.num_rows != data.num_rows:
+            raise ValueError(
+                f"Model.predict returned {result.num_rows} rows for {data.num_rows} valid deployment requests"
+            )
+        if TRANSPORT_IDENTITY not in result.column_names:
+            raise ValueError("Model.predict did not preserve deployment identity through postprocessing")
+
+        source_instances = pc.struct_field(source.identity, "instance")
+        source_logical = pc.struct_field(source.identity, "logical")
+        result_identity = result[TRANSPORT_IDENTITY]
+        result_instances = pc.struct_field(result_identity, "instance")
+        result_logical = pc.struct_field(result_identity, "logical")
+        if not equal(result_instances, source_instances) or not equal(result_logical, source_logical):
+            if pc.count_distinct(result_instances).as_py() != len(result_instances):
+                raise ValueError("deployment preprocessing produced duplicate request identities")
+            alignment = pc.index_in(source_instances, value_set=result_instances)
+            if alignment.null_count:
+                raise ValueError("deployment preprocessing must produce exactly one output for each request")
+            result = result.take(alignment)
+            aligned = result[TRANSPORT_IDENTITY]
+            if not equal(pc.struct_field(aligned, "logical"), source_logical) or not equal(
+                pc.struct_field(aligned, "instance"), source_instances
+            ):
+                raise ValueError("deployment preprocessing must produce exactly one output for each request")
+        result = result.drop([TRANSPORT_IDENTITY])
+
+        if not self.postprocessors:
+            if "predictions" not in result.column_names:
+                raise ValueError("canonical model output is missing its 'predictions' column")
+            result = result.select(["predictions"])
+        return result
+
     def predict_payloads(self, payloads: list[Any]) -> list[dict[str, Any]]:
         """Validate, predict, serialize, and scatter one request microbatch.
 
@@ -195,51 +288,7 @@ class FastAPIRuntime:
                     outputs[position] = error
                 return [cast(dict[str, Any], output) for output in outputs]
 
-            source = Batch(
-                data=data,
-                identity=identity(len(valid), namespace="deployment"),
-            )
-
-            def transport(batch: Batch) -> Batch:
-                if TRANSPORT_IDENTITY in batch.data.column_names:
-                    raise ValueError(f"postprocessor output cannot use reserved column {TRANSPORT_IDENTITY!r}")
-                return batch.replace(batch.data.append_column(TRANSPORT_IDENTITY, batch.identity))
-
-            result = self.model.predict(
-                source,
-                preprocess=self.preprocessors,
-                postprocess=(*self.postprocessors, Postprocessor(func=transport)),
-                retain=self.retain,
-            )
-            if not isinstance(result, pa.Table):
-                raise TypeError(f"Model.predict must return a pyarrow.Table, got {type(result).__name__}")
-            if result.num_rows != len(valid):
-                raise ValueError(
-                    f"Model.predict returned {result.num_rows} rows for {len(valid)} valid deployment requests"
-                )
-            if TRANSPORT_IDENTITY not in result.column_names:
-                raise ValueError("Model.predict did not preserve deployment identity through postprocessing")
-
-            source_instances = pc.struct_field(source.identity, "instance")
-            result_instances = pc.struct_field(result[TRANSPORT_IDENTITY], "instance")
-            if pc.count_distinct(result_instances).as_py() != len(result_instances):
-                raise ValueError("deployment preprocessing produced duplicate request identities")
-            alignment = pc.index_in(source_instances, value_set=result_instances)
-            if alignment.null_count:
-                raise ValueError("deployment preprocessing must produce exactly one output for each request")
-            result = result.take(alignment)
-            aligned = result[TRANSPORT_IDENTITY]
-            if not equal(pc.struct_field(aligned, "logical"), pc.struct_field(source.identity, "logical")) or not equal(
-                pc.struct_field(aligned, "instance"), source_instances
-            ):
-                raise ValueError("deployment preprocessing must produce exactly one output for each request")
-            result = result.drop([TRANSPORT_IDENTITY])
-
-            if not self.postprocessors:
-                if "predictions" not in result.column_names:
-                    raise ValueError("canonical model output is missing its 'predictions' column")
-                result = result.select(["predictions"])
-
+            result = self.predict_table(data)
             rows = result.to_pylist()
             for position, row in zip(request_positions, rows, strict=True):
                 if self.response_signature is not None:
@@ -353,8 +402,8 @@ class Deployment(BaseSettings):
 
     Pydantic request signatures validate each item before the valid rows are
     converted into one Arrow table. ``retain`` controls which processed input
-    columns are available to an Arrow postprocessor; the default JSON response
-    still exposes predictions only.
+    columns are available to an Arrow postprocessor. Deployment responses add
+    loaded-model provenance after application response validation.
     """
 
     model_config = SettingsConfigDict(
@@ -526,17 +575,62 @@ class Deployment(BaseSettings):
         async def health() -> dict[str, str]:
             return {"status": "ok"}
 
-        def json_response(content: Any, status_code: int = 200) -> fastapi.Response:
+        def json_response(
+            content: Any,
+            status_code: int = 200,
+            headers: dict[str, str] | None = None,
+        ) -> fastapi.Response:
             if self.json_backend == JSONBackend.orjson:
                 return fastapi.Response(
                     content=orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS),
                     status_code=status_code,
                     media_type="application/json",
+                    headers=headers,
                 )
-            return JSONResponse(content=content, status_code=status_code)
+            return JSONResponse(content=content, status_code=status_code, headers=headers)
 
         @app.post("/predict")
         async def predict(request: fastapi.Request) -> fastapi.Response:
+            media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+            if media_type == ARROW_MEDIA_TYPE:
+                try:
+                    table = ipc.open_stream(pa.BufferReader(await request.body())).read_all()
+                except (pa.ArrowException, OSError, ValueError) as exception:
+                    return json_response(
+                        self.error(status_code=400, message=f"invalid Arrow IPC stream: {exception}"),
+                        status_code=400,
+                    )
+
+                chunks = [
+                    table.slice(offset, self.max_batch_size) for offset in range(0, table.num_rows, self.max_batch_size)
+                ]
+                if not chunks:
+                    chunks = [table]
+                predicted = await asyncio.to_thread(
+                    lambda: pa.concat_tables([runtime.predict_table(chunk) for chunk in chunks])
+                )
+                predicted = runtime.annotate_table(predicted)
+                sink = pa.BufferOutputStream()
+                with ipc.new_stream(sink, predicted.schema) as writer:
+                    writer.write_table(predicted)
+                return fastapi.Response(
+                    content=memoryview(sink.getvalue()),
+                    media_type=ARROW_MEDIA_TYPE,
+                )
+
+            if media_type != JSON_MEDIA_TYPE:
+                return json_response(
+                    self.error(
+                        status_code=415,
+                        message=(
+                            f"unsupported content type {media_type or '<missing>'!r}; "
+                            f"use {JSON_MEDIA_TYPE!r} or {ARROW_MEDIA_TYPE!r}"
+                        ),
+                    ),
+                    status_code=415,
+                    headers={"Accept": f"{JSON_MEDIA_TYPE}, {ARROW_MEDIA_TYPE}"},
+                )
+
             try:
                 payload = (
                     orjson.loads(await request.body())
@@ -550,9 +644,9 @@ class Deployment(BaseSettings):
                 )
 
             if isinstance(payload, dict):
-                return json_response(await batcher.submit(payload))
+                return json_response(runtime.annotate(await batcher.submit(payload)))
             if isinstance(payload, list):
-                return json_response(await batcher.submit_many(payload))
+                return json_response(runtime.annotate(await batcher.submit_many(payload)))
             return json_response(
                 self.error(
                     status_code=422,
@@ -578,10 +672,9 @@ class Deployment(BaseSettings):
         }
 
     def register(self, app: fastapi.FastAPI) -> None:
-        """Register optional Pydantic signatures in the OpenAPI schema."""
+        """Register both wire formats and optional Pydantic signatures in OpenAPI."""
 
-        if self._request_signature is None and self._response_signature is None:
-            return
+        provenance = {"$ref": "#/components/schemas/ModelProvenance"}
 
         def register_model(openapi_schema: dict[str, Any], model: type[pydantic.BaseModel]) -> str:
             schema = model.model_json_schema(ref_template="#/components/schemas/{model}")
@@ -593,9 +686,19 @@ class Deployment(BaseSettings):
             components.setdefault(name, schema)
             return name
 
-        def cardinality(name: str) -> dict[str, Any]:
-            item = {"$ref": f"#/components/schemas/{name}"}
+        def cardinality(item: dict[str, Any]) -> dict[str, Any]:
             return {"anyOf": [item, {"type": "array", "items": item}]}
+
+        def result(item: dict[str, Any]) -> dict[str, Any]:
+            required = list(item.get("required", []))
+            if "model" not in required:
+                required.append("model")
+            return {
+                **item,
+                "type": "object",
+                "required": required,
+                "properties": {**item.get("properties", {}), "model": provenance},
+            }
 
         def schema() -> dict[str, Any]:
             if app.openapi_schema is not None:
@@ -610,17 +713,109 @@ class Deployment(BaseSettings):
                 routes=app.routes,
             )
             operation = openapi_schema["paths"]["/predict"]["post"]
+            operation["summary"] = "Predict JSON or Arrow records"
+            operation["description"] = (
+                f"Set `Content-Type` to `{JSON_MEDIA_TYPE}` for JSON or `{ARROW_MEDIA_TYPE}` for an Arrow IPC "
+                "stream. A successful response uses the same media type as the request. JSON request and response "
+                "signatures apply only to the JSON representation; Arrow schemas are validated by preprocessing "
+                "and the model. The response representation is not independently negotiated with `Accept`."
+            )
+            generic_request = {
+                "anyOf": [
+                    {"type": "object"},
+                    {"type": "array", "items": {"type": "object"}},
+                ]
+            }
             if self._request_signature is not None:
                 request_name = register_model(openapi_schema, self._request_signature)
-                operation["requestBody"] = {
-                    "required": True,
-                    "content": {"application/json": {"schema": cardinality(request_name)}},
-                }
+                request_schema = cardinality({"$ref": f"#/components/schemas/{request_name}"})
+            else:
+                request_schema = generic_request
+            operation["requestBody"] = {
+                "required": True,
+                "description": (
+                    "One JSON record, an array of JSON records, or one Arrow IPC stream. "
+                    "The request Content-Type selects the deserializer."
+                ),
+                "content": {
+                    JSON_MEDIA_TYPE: {"schema": request_schema},
+                    ARROW_MEDIA_TYPE: {},
+                },
+            }
+            success = operation.setdefault("responses", {}).setdefault("200", {})
+            success["description"] = (
+                "Prediction output in the request's media type. JSON output preserves object/array cardinality; "
+                "Arrow output is an IPC stream whose rows remain in input order. Every output row includes the "
+                "loaded model version and checkpoint filename in `model`."
+            )
+            responses = success.setdefault("content", {})
+            components = openapi_schema.setdefault("components", {}).setdefault("schemas", {})
+            components.setdefault(
+                "ModelProvenance",
+                {
+                    "type": "object",
+                    "required": ["version", "checkpoint"],
+                    "properties": {
+                        "version": {
+                            "type": "string",
+                            "description": "RelFlow version stored in the loaded model checkpoint.",
+                        },
+                        "checkpoint": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Configured checkpoint filename without its path, or null for an in-memory model."
+                            ),
+                        },
+                    },
+                },
+            )
             if self._response_signature is not None:
                 response_name = register_model(openapi_schema, self._response_signature)
-                operation.setdefault("responses", {}).setdefault("200", {}).setdefault("content", {})[
-                    "application/json"
-                ] = {"schema": cardinality(response_name)}
+                item = components[response_name]
+            else:
+                item = {"type": "object"}
+            response_schema = cardinality(result(item))
+            responses[JSON_MEDIA_TYPE] = {"schema": response_schema}
+            responses[ARROW_MEDIA_TYPE] = {}
+
+            components.setdefault(
+                "DeploymentError",
+                {
+                    "type": "object",
+                    "required": ["predictions", "error"],
+                    "properties": {
+                        "predictions": {"type": "object", "maxProperties": 0},
+                        "error": {
+                            "type": "object",
+                            "required": ["status_code", "message"],
+                            "properties": {
+                                "status_code": {"type": "integer"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            )
+            error = {"schema": {"$ref": "#/components/schemas/DeploymentError"}}
+            operation["responses"]["400"] = {
+                "description": "The declared JSON or Arrow IPC representation is malformed.",
+                "content": {JSON_MEDIA_TYPE: error},
+            }
+            operation["responses"]["415"] = {
+                "description": "The request Content-Type is missing or unsupported.",
+                "headers": {
+                    "Accept": {
+                        "description": "Media types accepted as request content.",
+                        "schema": {"type": "string"},
+                        "example": f"{JSON_MEDIA_TYPE}, {ARROW_MEDIA_TYPE}",
+                    }
+                },
+                "content": {JSON_MEDIA_TYPE: error},
+            }
+            operation["responses"]["422"] = {
+                "description": "The JSON body is not an object or an array of objects.",
+                "content": {JSON_MEDIA_TYPE: error},
+            }
 
             app.openapi_schema = openapi_schema
             return openapi_schema
@@ -662,8 +857,7 @@ class Deployment(BaseSettings):
             try:
                 os.environ.update(env_updates)
                 uvicorn.run(
-                    "relflow.inference.deployment:create_app",
-                    factory=True,
+                    "relflow.inference.asgi:app",
                     workers=self.workers,
                     host=self.host,
                     port=self.port,
@@ -680,12 +874,6 @@ class Deployment(BaseSettings):
         uvicorn.run(self.app(), host=self.host, port=self.port, log_level=self.log_level)
 
 
-def create_app() -> fastapi.FastAPI:
-    """Build a FastAPI app from deployment environment variables."""
-
-    return Deployment().app()
-
-
 __all__ = [
     "Accelerator",
     "Deployment",
@@ -696,5 +884,4 @@ __all__ = [
     "ModelSource",
     "Retain",
     "UpdateOperation",
-    "create_app",
 ]

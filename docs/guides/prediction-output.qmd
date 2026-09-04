@@ -316,8 +316,9 @@ instead of converting tensors again.
 | `rf.Writer` | rank Parquet file | persisted as protected `identity` column | none |
 | deployment JSON | JSON response rows | removed | one terminal `Table.to_pylist()` |
 
-Without a deployment postprocessor, JSON responses expose predictions but not
-retained inputs. With a postprocessor, its columns define the response row.
+Without a deployment postprocessor, JSON responses expose predictions and the
+deployment's `model` provenance, but not retained inputs. With a postprocessor,
+its columns define the application fields and deployment adds `model` afterward.
 Identity is never serialized to an ordinary HTTP response.
 
 Call `.to_pylist()` yourself only when an application boundary actually needs

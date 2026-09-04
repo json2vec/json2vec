@@ -62,8 +62,29 @@ process, use `deployment.app()` to obtain the FastAPI application instead.
 
 The runtime exposes:
 
-- `GET /health`, returning `{"status": "ok"}`; and
-- `POST /predict`, accepting one JSON object or an array of JSON objects.
+- `GET /health`, returning `{"status": "ok"}`;
+- `POST /predict`, accepting JSON or an Arrow IPC stream according to the
+  request's `Content-Type` header.
+
+## Discover The Wire Formats
+
+Every deployment publishes the contract as OpenAPI 3.1 at `/openapi.json` and
+through FastAPI's interactive `/docs` and `/redoc` pages. The `/predict`
+operation lists both request and successful-response representations under the
+standard OpenAPI `content` map:
+
+- `application/json` for one object or an array of objects; and
+- `application/vnd.apache.arrow.stream` for a binary Arrow IPC stream.
+
+This follows [OpenAPI 3.1's representation model](https://spec.openapis.org/oas/v3.1.1.html#media-type-object):
+the media-type key describes raw binary content, so the Arrow entry does not
+use the older OpenAPI 3.0 `format: binary` schema. The Arrow media type is
+[registered with IANA](https://www.iana.org/assignments/media-types/application/vnd.apache.arrow.stream).
+
+For this operation, a successful response uses the same representation as the
+request. OpenAPI enumerates both alternatives but cannot express that pairing,
+so the operation and `200` response descriptions state it explicitly. RelFlow
+does not independently negotiate the response with `Accept`.
 
 ## Send Requests
 
@@ -86,12 +107,20 @@ A successful single-record response is:
       "content": {"value": "no", "probability": 0.78, "topk": []},
       "inferred": true
     }
+  },
+  "model": {
+    "version": "0.2.0",
+    "checkpoint": "fraud-model.ckpt"
   }
 }
 ```
 
-Scores are illustrative. See [Prediction Output](prediction-output.qmd) for the
-full envelope and datatype-specific differences.
+Scores and the version are illustrative. The `model.version` value comes from
+the loaded model's immutable checkpoint provenance. `model.checkpoint` is only
+the configured checkpoint's filename, never its directory path. It is `null`
+when the deployment uses an in-memory model instead of a checkpoint file. See
+[Prediction Output](prediction-output.qmd) for the full prediction envelope and
+datatype-specific differences.
 
 Post an array to submit several independent records:
 
@@ -102,6 +131,59 @@ curl -X POST http://localhost:8000/predict \
 ```
 
 The response is an array with one response object per input, in input order.
+
+## Send Arrow IPC Batches
+
+Use the same prediction endpoint with the Arrow media type for trusted bulk
+clients that already own typed Arrow data. It avoids JSON parsing, Python row
+materialization, and JSON response encoding:
+
+```python
+import urllib.request
+
+import pyarrow as pa
+import pyarrow.ipc as ipc
+
+source = pa.table(
+    {
+        "amount": [12.5, 8.0],
+        "merchant": ["books", "coffee"],
+    }
+)
+sink = pa.BufferOutputStream()
+with ipc.new_stream(sink, source.schema) as writer:
+    writer.write_table(source)
+
+request = urllib.request.Request(
+    "http://localhost:8000/predict",
+    data=sink.getvalue().to_pybytes(),
+    headers={"content-type": "application/vnd.apache.arrow.stream"},
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    predictions = ipc.open_stream(pa.BufferReader(response.read())).read_all()
+```
+
+The output table has the same columns as the deployment's Arrow postprocessing
+result plus a `model` struct containing `version` and `checkpoint`. Without a
+postprocessor, its columns are `"predictions"` and `"model"`. Provenance is
+repeated per row so JSON and Arrow have the same record-level contract. The
+endpoint preserves row order and splits a table larger than `max_batch_size`
+into bounded model calls before concatenating their outputs.
+
+An Arrow request bypasses Pydantic request and response signatures. Its Arrow
+schema and values are validated by preprocessing and the model's tensorfield
+extensions instead. Invalid IPC framing produces a JSON `400` response;
+model-input contract failures remain request failures. Each IPC request is one
+bulk submission, so clients seeking maximum throughput should form batches
+deliberately rather than sending one-row Arrow streams.
+
+`application/json` selects JSON input and output;
+`application/vnd.apache.arrow.stream` selects Arrow IPC input and output. Other
+or missing content types produce HTTP `415`. RelFlow does not sniff the body,
+so malformed data cannot be mistaken for the other wire format. The `415`
+response includes an `Accept` header listing both supported request media
+types, following [HTTP semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.16).
 
 ## Configure Dynamic Batching
 
@@ -225,9 +307,11 @@ Each builder method sets the complete pipeline. Calling `.preprocess(...)` or
 Compose the intended order once and pass it in one call.
 
 Without a postprocessor, deployment discards the canonical `inputs` column and
-serializes only `{"predictions": ...}`. This prevents `retain` from exposing
-request data accidentally. With a postprocessor, its table columns define each
-response row. Framework identity is always removed before JSON serialization.
+serializes `predictions` plus framework-owned `model` provenance. This prevents
+`retain` from exposing request data accidentally. With a postprocessor, its
+table columns define the application portion of each response row. `model` is a
+reserved response field, and framework identity is always removed before JSON
+serialization.
 
 ## Validate Request And Response Schemas
 
@@ -252,7 +336,8 @@ deployment = rf.Deployment(
 
 `forge(request=..., response=...)` accepts either model independently. The
 request model is validated before preprocessing. The response model validates
-the final, postprocessed response and also defines its OpenAPI schema. Because
+the final, postprocessed application fields and also defines their OpenAPI
+schema; deployment adds the documented `model` provenance afterward. Because
 the default canonical `predictions` struct varies with the model schema, a
 fixed response model is most useful after a postprocessor creates an
 application-specific shape.
@@ -323,7 +408,9 @@ environment variables:
 | Condition | Response or behavior |
 | --- | --- |
 | Model cannot load | Application startup fails; the server does not become ready. |
+| Missing or unsupported `Content-Type` | HTTP `415` with empty `predictions` and an `error` object. |
 | Malformed JSON | HTTP `400` with empty `predictions` and an `error` object. |
+| Malformed Arrow IPC | HTTP `400` with empty `predictions` and an `error` object. |
 | Body is not an object or array of objects | HTTP `422` with an error envelope. |
 | Request validation or preprocessing fails after an object is accepted | HTTP `200` with empty `predictions` and `error.status_code=422`; clients must inspect the body. |
 | Inference or postprocessing raises unexpectedly | Unhandled server error; log and monitor it as HTTP `500`. |

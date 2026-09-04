@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import pyarrow as pa
@@ -32,6 +32,18 @@ def mappings(
 
     if any(not isinstance(value, Mapping) for value in values):
         raise TypeError(f"{context} must contain only mappings")
+
+    if schema is None and values:
+        first = values[0]
+        names = tuple(first)
+        if (
+            names
+            and all(isinstance(name, str) for name in names)
+            and isinstance(first, dict)
+            and all(isinstance(value, dict) and value.keys() == first.keys() for value in values)
+        ):
+            return cast(list[dict[str, Any]], list(values))
+
     keys: list[str] = []
     seen: set[str] = set()
     for value in values:

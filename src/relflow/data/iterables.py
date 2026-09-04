@@ -48,15 +48,15 @@ def encode(
             )
 
         values = pa.nulls(0) if projection.vacant else extension.prepare(pristine.values, address=address)
-        canonical = replace(pristine, values=values)
         observation = None
-        if not projection.vacant:
+        if strata == Strata.train and not projection.vacant:
+            canonical = replace(pristine, values=values)
             observation = extension.observe(
                 field=canonical,
                 address=address,
                 schema=schema,
                 state=interprocess_encoding_context.get(address),
-                learn=strata == Strata.train,
+                learn=True,
             )
 
         learner = extension.components.get(Component.learn)

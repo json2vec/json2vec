@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+import orjson
 import pyarrow as pa
 import pydantic
 import pytest
@@ -163,6 +165,19 @@ def test_runtime_converts_valid_requests_to_one_arrow_prediction_call():
         {"predictions": {"label": "3"}},
         {"predictions": {"label": "1"}},
     ]
+
+
+def test_runtime_predicts_an_arrow_table_without_python_rows():
+    model = PredictModel()
+    server = runtime(model=model)
+
+    output = server.predict_table(pa.table({"id": [3, 1]}))
+
+    assert output.to_pylist() == [
+        {"predictions": {"label": "3"}},
+        {"predictions": {"label": "1"}},
+    ]
+    assert len(model.calls) == 1
 
 
 def test_runtime_preserves_request_fields_introduced_after_the_first_row():
@@ -461,6 +476,139 @@ def test_deployment_forge_registers_openapi_signatures():
             {"type": "array", "items": {"$ref": "#/components/schemas/Request"}},
         ]
     }
+    assert operation["summary"] == "Predict JSON or Arrow records"
+    assert "same media type as the request" in operation["description"]
+    assert operation["requestBody"]["content"]["application/vnd.apache.arrow.stream"] == {}
+    assert operation["responses"]["200"]["content"]["application/vnd.apache.arrow.stream"] == {}
+    assert {"200", "400", "415", "422"} <= set(operation["responses"])
+    assert operation["responses"]["415"]["headers"]["Accept"]["example"] == (
+        "application/json, application/vnd.apache.arrow.stream"
+    )
+    assert "DeploymentError" in schema["components"]["schemas"]
+    assert schema["components"]["schemas"]["ModelProvenance"] == {
+        "type": "object",
+        "required": ["version", "checkpoint"],
+        "properties": {
+            "version": {
+                "type": "string",
+                "description": "RelFlow version stored in the loaded model checkpoint.",
+            },
+            "checkpoint": {
+                "type": ["string", "null"],
+                "description": "Configured checkpoint filename without its path, or null for an in-memory model.",
+            },
+        },
+    }
+    response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema["anyOf"][0]["required"] == ["predictions", "model"]
+    assert response_schema["anyOf"][0]["properties"]["model"] == {"$ref": "#/components/schemas/ModelProvenance"}
+
+
+def test_runtime_annotates_responses_with_model_provenance():
+    server = runtime()
+    server.model.version = "1.2.3"
+    server.checkpoint = "fraud-model.ckpt"
+
+    assert server.annotate({"predictions": {"label": "yes"}}) == {
+        "predictions": {"label": "yes"},
+        "model": {"version": "1.2.3", "checkpoint": "fraud-model.ckpt"},
+    }
+    output = server.annotate_table(pa.table({"score": [0.75]}))
+    assert output.to_pylist() == [
+        {
+            "score": 0.75,
+            "model": {"version": "1.2.3", "checkpoint": "fraud-model.ckpt"},
+        }
+    ]
+
+
+def test_runtime_reports_only_the_checkpoint_basename_and_null_for_an_in_memory_model():
+    path_server = deployment_module.FastAPIRuntime(
+        checkpoint="/private/models/releases/fraud-v7.ckpt",
+        accelerator=deployment_module.Accelerator.cpu,
+    )
+    path_server.model = SimpleNamespace(version="7.0.0")
+    model = Model(value=Number, d_model=8, n_layers=1, n_heads=2)
+    memory_server = deployment_module.FastAPIRuntime(
+        checkpoint=model,
+        accelerator=deployment_module.Accelerator.cpu,
+    )
+    memory_server.model = model
+
+    assert path_server.provenance() == {"version": "7.0.0", "checkpoint": "fraud-v7.ckpt"}
+    assert memory_server.provenance() == {"version": model.version, "checkpoint": None}
+
+
+def test_deployment_predict_dispatches_arrow_ipc_and_respects_max_batch_size(monkeypatch):
+    batches = []
+
+    def predict_table(runtime, source):
+        batches.append(source)
+        runtime.model = SimpleNamespace(version="1.2.3")
+        labels = pa.array([str(value) for value in source["id"].to_pylist()], type=pa.large_string())
+        return pa.table({"predictions": pa.StructArray.from_arrays([labels], names=["label"])})
+
+    monkeypatch.setattr(deployment_module.FastAPIRuntime, "predict_table", predict_table)
+    app = Deployment(checkpoint="unused", accelerator="cpu", max_batch_size=2).app()
+    source = pa.table({"id": [3, 1, 8]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, source.schema) as writer:
+        writer.write_table(source)
+
+    class Request:
+        headers = {"content-type": "application/vnd.apache.arrow.stream"}
+
+        async def body(self):
+            return sink.getvalue().to_pybytes()
+
+    endpoint = next(route.endpoint for route in app.routes if route.path == "/predict")
+    response = asyncio.run(endpoint(Request()))
+
+    assert response.status_code == 200
+    assert response.media_type == "application/vnd.apache.arrow.stream"
+    output = pa.ipc.open_stream(pa.BufferReader(response.body)).read_all()
+    assert output.to_pylist() == [
+        {"predictions": {"label": "3"}, "model": {"version": "1.2.3", "checkpoint": "unused"}},
+        {"predictions": {"label": "1"}, "model": {"version": "1.2.3", "checkpoint": "unused"}},
+        {"predictions": {"label": "8"}, "model": {"version": "1.2.3", "checkpoint": "unused"}},
+    ]
+    assert [len(batch) for batch in batches] == [2, 1]
+
+
+def test_deployment_predict_rejects_an_invalid_arrow_stream(monkeypatch):
+    app = Deployment(checkpoint="unused", accelerator="cpu").app()
+
+    class Request:
+        headers = {"content-type": "application/vnd.apache.arrow.stream"}
+
+        async def body(self):
+            return b"not arrow"
+
+    endpoint = next(route.endpoint for route in app.routes if route.path == "/predict")
+    response = asyncio.run(endpoint(Request()))
+    assert response.status_code == 400
+    assert orjson.loads(response.body)["error"]["message"].startswith("invalid Arrow IPC stream:")
+
+
+def test_deployment_predict_rejects_an_unsupported_content_type():
+    app = Deployment(checkpoint="unused", accelerator="cpu").app()
+
+    class Request:
+        headers = {"content-type": "application/octet-stream"}
+
+    endpoint = next(route.endpoint for route in app.routes if route.path == "/predict")
+    response = asyncio.run(endpoint(Request()))
+
+    assert response.status_code == 415
+    assert response.headers["accept"] == "application/json, application/vnd.apache.arrow.stream"
+    assert orjson.loads(response.body)["error"] == {
+        "status_code": 415,
+        "message": (
+            "unsupported content type 'application/octet-stream'; use 'application/json' "
+            "or 'application/vnd.apache.arrow.stream'"
+        ),
+    }
+    assert all(route.path != "/predict-arrow" for route in app.routes)
 
 
 def test_deployment_serve_configures_uvicorn(monkeypatch):
@@ -483,6 +631,20 @@ def test_deployment_serve_configures_uvicorn(monkeypatch):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 8765
     assert captured["log_level"] == "error"
+
+
+def test_multiworker_deployment_uses_the_importable_asgi_app(monkeypatch):
+    captured = {}
+
+    def run(app, *, workers, host, port, log_level):
+        captured.update(app=app, workers=workers, host=host, port=port, log_level=log_level)
+
+    monkeypatch.setattr(deployment_module.uvicorn, "run", run)
+
+    Deployment(checkpoint="model.ckpt", workers=2).serve()
+
+    assert captured["app"] == "relflow.inference.asgi:app"
+    assert captured["workers"] == 2
 
 
 def test_multiworker_deployment_rejects_in_process_builder_configuration():
