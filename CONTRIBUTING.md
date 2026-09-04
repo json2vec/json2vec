@@ -160,18 +160,23 @@ flushing, and other lifecycle behavior behind extension-owned objects.
 ## Preprocessors And Postprocessors
 
 Preprocessors accept identity-bearing `rf.Batch` objects and return `Batch`, an
-iterable of `Batch`, or `None`. Use them for Arrow-native renaming, derivation,
-normalization, windowing, joins, or deliberate row expansion/grouping. Declare
-required and produced columns when the processor contract depends on them.
+iterable of `Batch`, or `None`. User-facing processor arguments normalize a
+decorated singleton, list, tuple, or `None` to an immutable tuple and execute it
+strictly left to right. Use stages for Arrow-native renaming, derivation,
+normalization, windowing, joins, or deliberate row expansion/grouping. Check
+declared required and produced columns at every stage; never infer a new order.
 
 Partition preprocessors must be safe on each source partition independently.
-Use dataset scope only when the operation truly needs the materialized split.
+Use dataset scope only when the operation truly needs the materialized split;
+each dataset-scoped stage is a barrier at its exact pipeline position.
 Datatype encoding and model semantics still belong in tensorfield extensions.
 
 Postprocessors accept and return one `rf.Batch`. They may reshape prediction
-columns for an application or warehouse, but must preserve row count and exact
-batch identity. JSON conversion belongs after postprocessing at the serving
-boundary.
+columns for an application or warehouse, and use the same `requires` and
+`produces` declarations for ordered composition. Validate `requires` before
+each stage, then validate `produces`, row count, exact batch identity, and
+nonempty output on its result. JSON conversion belongs after postprocessing at
+the serving boundary.
 
 ## Runtime State
 

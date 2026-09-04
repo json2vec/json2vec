@@ -188,6 +188,21 @@ deferred. `produces` declares columns the processor creates or replaces.
 Omitting `requires` means the processor may read any column, while
 `requires=()` explicitly says that it reads no source columns.
 
+Do not merge unrelated old row callbacks into one large function merely because
+the old API accepted one callback. Processor arguments now accept a decorated
+singleton, list, tuple, or `None` and normalize it to an immutable tuple:
+
+```python
+prepare = (normalize_source, derive_amount, select_history)
+```
+
+Stages run strictly left to right. `requires` is checked against the actual
+columns entering each stage and `produces` against every output it emits;
+RelFlow validates the declared dependency order but never rearranges it.
+Preprocessor outputs flat-map into the next stage. A dataset-scoped stage is a
+materialization barrier at its exact tuple position, and a pipeline containing
+one retains the callable-source restriction.
+
 Keyword-only user settings are immutable:
 
 ```python
@@ -309,7 +324,10 @@ mappings. Everything needed from the request must be named in `retain` and
 read from `batch.data["inputs"]`.
 
 ```python
-@rf.postprocess
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "fraud_probability", "review"),
+)
 def warehouse(batch: rf.Batch, *, threshold: float) -> rf.Batch:
     inputs = batch.data["inputs"]
     predictions = batch.data["predictions"]
@@ -335,6 +353,13 @@ It may not filter, reorder, expand, or group rows. Do that after prediction in
 application code, or before prediction when the operation should change model
 execution.
 
+Postprocessor arguments use the same singleton/list/tuple/`None`
+normalization. `@rf.postprocess` now accepts `requires` and `produces`, making
+an ordered migration explicit when one output transform consumes another's
+columns. Every stage is checked for declared columns, unchanged rows and
+identity, and a nonempty table. Retained fields are assembled under `inputs`
+before the first stage.
+
 ## Verification Checklist
 
 Before removing the old pipeline, test these contracts on an empty batch, one
@@ -344,14 +369,15 @@ row, and more than one model batch:
   types and nullability;
 - direct and explicit queries select the same values you intend;
 - every row-changing preprocessor uses a lineage-aware `Batch` method;
-- the same fitted preprocessor values are used for train, validation, and
-  prediction;
+- the same ordered preprocessor pipeline and fitted values are used for train,
+  validation, and prediction;
 - training order changes between epochs and reproduces from the same seed;
 - validation and prediction retain processed source order;
 - requested `retain` columns appear under `inputs` and no other source columns
   leak into output;
 - prediction schema is identical for batch size one and larger batches;
-- postprocessors preserve row count, order, and identity;
+- every postprocessor stage satisfies its declarations and preserves row count,
+  order, and identity;
 - Parquet output reads back with the expected schema.
 
 The [Working With Arrow](working-with-arrow.qmd) guide is the practical Arrow

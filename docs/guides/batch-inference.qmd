@@ -102,7 +102,10 @@ Pass an Arrow postprocessor when the Parquet table should be flat or renamed:
 import pyarrow as pa
 import pyarrow.compute as pc
 
-@rf.postprocess
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "fraud_probability"),
+)
 def warehouse(batch: rf.Batch) -> rf.Batch:
     inputs = batch.data["inputs"]
     predictions = batch.data["predictions"]
@@ -118,14 +121,30 @@ def warehouse(batch: rf.Batch) -> rf.Batch:
     )
     return batch.replace(table)
 
+@rf.postprocess(
+    requires=("fraud_probability",),
+    produces=("review",),
+)
+def triage(batch: rf.Batch, *, threshold: float) -> rf.Batch:
+    review = pc.greater_equal(batch.data["fraud_probability"], threshold)
+    return batch.replace(batch.data.append_column("review", review))
+
+output = (warehouse, triage.partial(threshold=0.8))
+
 writer = rf.Writer(
     "predictions/run-2026-09-02",
-    postprocessor=warehouse,
+    postprocessor=output,
 )
 ```
 
-The persisted table then contains `identity` followed by the postprocessor's
+The persisted table then contains `identity` followed by the final stage's
 columns. `identity` cannot be used as a postprocessor output name.
+
+`postprocessor=` accepts one decorated stage, a list, a tuple, or `None` and
+snapshots it as an immutable tuple. Stages run left to right. Their top-level
+`requires` and `produces` declarations are checked at each boundary, and every
+stage must preserve row count and identity and return at least one column.
+RelFlow never sorts stages by dependency.
 
 Postprocessors preserve row count, order, and identity. Filtering, expansion,
 grouping, or global aggregation belongs in an explicit downstream Arrow job or
@@ -239,7 +258,7 @@ this by declaring their Arrow type before the first prediction batch.
 ## Operational Checklist
 
 - Omit unconditional `mask=True` reconstruction fields from prediction source data.
-- Use the same preprocessor and bound fitted state as training.
+- Use the same ordered preprocessor pipeline and bound fitted state as training.
 - Keep `shuffle=False` unless randomized output order is intentional.
 - Set `retain` on the data module for every source field needed downstream.
 - Use a unique output path per run.

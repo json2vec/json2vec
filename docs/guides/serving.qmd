@@ -141,21 +141,30 @@ non-string-key behavior if you switch backends.
 
 ## Reuse Arrow Processors
 
-Attach the same decorated RelFlow preprocessor and bound arguments used by the
-training data module.
+Attach the same decorated RelFlow preprocessor pipeline and bound arguments
+used by the training data module. `.preprocess(...)` and `.postprocess(...)`
+each accept a decorated singleton, a list, a tuple, or `None` and snapshot it
+as an immutable ordered tuple.
 
 In online serving, each HTTP object must produce exactly one
 processed Arrow observation. The runtime validates JSON objects individually,
-converts all valid objects with one `pa.Table.from_pylist(...)`, and calls
-the preprocessor, `Model.predict(...)`, and the postprocessor once each for the
-complete microbatch. Neither processor runs once per request. A preprocessor
-may reorder valid rows because protected identity restores caller order, but
-it may not drop or expand them at the request boundary. A one-to-zero or
-one-to-many result fails instead of associating a prediction with the wrong
-caller.
+converts all valid objects with one `pa.Table.from_pylist(...)`, and enters the
+preprocessor pipeline with one Arrow batch. Processing is vectorized over rows,
+not called once per request. Stages execute strictly left to right; `requires`
+and `produces` are checked at each boundary. If a preprocessor emits several
+batches, each downstream partition-scoped stage runs once for each emitted
+batch; a dataset-scoped stage merges its upstream stream at that point. Final
+preprocessor outputs are merged before one model call, and each postprocessor
+stage then runs once on that model microbatch.
 
-`max_batch_size` bounds that contract: a larger request list is split and each
-resulting model microbatch gets one preprocessor and one postprocessor call.
+A preprocessor pipeline may reorder valid rows because protected identity
+restores caller order, but its final result may not drop or expand them at the
+request boundary. A one-to-zero or one-to-many result fails instead of
+associating a prediction with the wrong caller.
+
+`max_batch_size` bounds that contract: a larger request list is split into
+separate Arrow/model microbatches. Preprocessor fan-out semantics apply inside
+each one.
 Pydantic validation remains item-wise so malformed requests can fail without
 discarding valid neighbors.
 
@@ -168,7 +177,10 @@ field it needs on the deployment:
 import pyarrow as pa
 import pyarrow.compute as pc
 
-@rf.postprocess
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "probability"),
+)
 def compact_response(batch: rf.Batch) -> rf.Batch:
     inputs = batch.data["inputs"]
     predictions = batch.data["predictions"]
@@ -184,16 +196,33 @@ def compact_response(batch: rf.Batch) -> rf.Batch:
         )
     )
 
-# `normalize_transaction` is the training-time @rf.preprocess object.
+@rf.postprocess(requires=("request_id", "fraud", "probability"))
+def public_response(batch: rf.Batch) -> rf.Batch:
+    return batch.replace(batch.data.drop(["request_id"]))
+
+# `prepare` is the ordered tuple installed on the training data module.
+prepare = training_preprocessors
+output = (compact_response, public_response)
+
 deployment = (
     rf.Deployment(
         checkpoint="artifacts/fraud-model.ckpt",
         retain=("request_id",),
     )
-    .preprocess(normalize_transaction)
-    .postprocess(compact_response)
+    .preprocess(prepare)
+    .postprocess(output)
 )
 ```
+
+The names `preprocess` and `postprocess` stay singular even when their value is
+a collection. Reversing either tuple changes its meaning; RelFlow validates
+dependencies but never sorts stages. A dataset-scoped preprocessor has no
+special advantage for one request microbatch and should normally be avoided in
+latency-sensitive serving.
+
+Each builder method sets the complete pipeline. Calling `.preprocess(...)` or
+`.postprocess(...)` again replaces the earlier tuple; it does not append.
+Compose the intended order once and pass it in one call.
 
 Without a postprocessor, deployment discards the canonical `inputs` column and
 serializes only `{"predictions": ...}`. This prevents `retain` from exposing
@@ -263,7 +292,7 @@ loads its own model and owns its own request queue.
 There are two important limits in the current launcher:
 
 1. each worker replicates model memory, including accelerator memory; and
-2. attached `forge`, `preprocess`, `postprocess`, and `update` builder state is
+2. attached `forge`, processor pipelines, and `update` builder state is
    not transferred to worker processes by `serve()`.
 
 Use a single worker when those attachments are required. For a multi-worker

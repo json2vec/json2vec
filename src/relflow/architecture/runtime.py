@@ -19,7 +19,13 @@ from relflow.architecture.node import NodeModule
 from relflow.data.arrow import Batch, Encoded, mappings
 from relflow.data.datasets.base import EncodedInput
 from relflow.data.iterables import encode as encode_batch
-from relflow.data.processors import Postprocessor, Preprocessor
+from relflow.data.processors import (
+    Postprocessor,
+    PostprocessorInput,
+    Preprocessor,
+    PreprocessorInput,
+    apply,
+)
 from relflow.distributed import all_reduce_max
 from relflow.structs.enums import Component, Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
@@ -563,7 +569,7 @@ class ModelRuntime:
         module: Model,
         batch: Batch | pa.Table | pa.RecordBatch,
         *,
-        preprocess: Preprocessor | None,
+        preprocess: PreprocessorInput,
         strata: Strata,
         seed: int = 0,
         epoch: int = 0,
@@ -573,19 +579,19 @@ class ModelRuntime:
         from relflow.data.datasets.arrow import convert, merge, process
 
         source = batch if isinstance(batch, Batch) else convert(batch, namespace=f"direct:{strata}", offset=0)
-        processor = Preprocessor.normalize(preprocess)
-        if processor is not None:
+        processors = Preprocessor.normalize(preprocess)
+        if processors:
             source = merge(
                 process(
                     (source,),
-                    preprocessor=processor,
+                    preprocessor=processors,
                     strata=strata,
                     schema=module.schema,
                     encoding_context=module.interprocess_encoding_context,
                 )
             )
             if source is None:
-                raise ValueError(f"preprocessor '{processor.name}' returned no observations")
+                raise ValueError("preprocessor pipeline returned no observations")
 
         return encode_batch(
             batch=source,
@@ -640,7 +646,7 @@ class ModelRuntime:
     def encode(
         module: Model,
         batch: Batch | pa.Table | pa.RecordBatch,
-        preprocess: Preprocessor | None = None,
+        preprocess: PreprocessorInput = (),
         strata: Strata | str = Strata.predict,
         seed: int = 0,
         epoch: int = 0,
@@ -663,12 +669,13 @@ class ModelRuntime:
     def predict(
         module: Model,
         batch: PredictionInput,
-        preprocess: Preprocessor | None = None,
-        postprocess: Postprocessor | None = None,
+        preprocess: PreprocessorInput = (),
+        postprocess: PostprocessorInput = (),
         retain: Retain = (),
     ) -> pa.Table:
         """Predict one Arrow input unit and return an Arrow table."""
 
+        postprocessors = Postprocessor.normalize(postprocess)
         encoded = ModelRuntime.prepare(
             module,
             ingress(batch),
@@ -690,10 +697,7 @@ class ModelRuntime:
                     module.train()
 
         written = ModelRuntime.write(module, raw, source=source, retain=retain, compiled=compiled)
-        processor = Postprocessor.normalize(postprocess)
-        if processor is not None:
-            written = processor.run(written)
-        return written.data
+        return apply(written, postprocessors).data
 
 
 step = ModelRuntime.step

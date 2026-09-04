@@ -249,7 +249,10 @@ Pass a same-row Arrow postprocessor when a consumer needs flat or renamed
 columns:
 
 ```python
-@rf.postprocess
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "fraud_probability"),
+)
 def warehouse(batch: rf.Batch) -> rf.Batch:
     inputs = batch.data["inputs"]
     predictions = batch.data["predictions"]
@@ -275,6 +278,14 @@ result = model.predict(
 With a postprocessor, `Model.predict` returns exactly the replacement table;
 the canonical `inputs` / `predictions` envelope need not remain. Version that
 table schema as an application contract. See [Postprocessors](postprocessors.qmd).
+
+`postprocess=` also accepts a list or tuple of decorated postprocessors. RelFlow
+snapshots it as an immutable tuple, then applies stages strictly left to right.
+Each stage's `requires` is checked against the table returned by its predecessor
+and `produces` against its own result. Row count, identity, and a nonempty table
+are enforced after every stage. The retained `inputs` struct is available
+before the first stage; if an early stage removes it, later stages cannot read
+it.
 
 ## Lower-Level `Model.write`
 

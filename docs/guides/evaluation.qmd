@@ -228,8 +228,9 @@ A validation metric is useful only when the split represents future use.
 - Fit vocabularies and numeric normalization from training observations. Do not
   send validation records through the training dataloader merely to populate
   preprocessing state.
-- Apply the same RelFlow preprocessor code and bound parameters to every
-  split, while allowing stage-aware behavior only when it is intentional.
+- Apply the same ordered RelFlow preprocessor pipeline, declarations, and bound
+  parameters to every split, while allowing stage-aware behavior only when it
+  is intentional.
 - Keep labels and post-outcome events out of visible nested context.
 
 Using the training frame as validation is acceptable only in a tiny API

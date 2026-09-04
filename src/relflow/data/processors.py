@@ -6,7 +6,7 @@ import inspect
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, Literal, Self, overload
+from typing import Any, Literal, Self, TypeAlias, overload
 
 import pyarrow as pa
 
@@ -63,12 +63,20 @@ class Processor:
     kind: str
     providers: frozenset[str]
     bound: Mapping[str, Any] = field(default_factory=dict)
+    requires: tuple[str, ...] | None = None
+    produces: tuple[str, ...] = ()
     signature: inspect.Signature = field(init=False)
     runtime: frozenset[str] = field(init=False)
     user: frozenset[str] = field(init=False)
     name: str = field(init=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "requires", columns(self.requires, name="requires"))
+        produces = columns(self.produces, name="produces")
+        if produces is None:
+            raise TypeError("produces must be a tuple of top-level column names")
+        object.__setattr__(self, "produces", produces)
+
         signature = inspect.signature(self.func)
         runtime, user = self.classify(signature)
         object.__setattr__(self, "signature", signature)
@@ -76,6 +84,29 @@ class Processor:
         object.__setattr__(self, "user", frozenset(user))
         object.__setattr__(self, "name", label(self.func))
         self.bindings()
+
+    @classmethod
+    def normalize(cls, value: Self | list[Self] | tuple[Self, ...] | None) -> tuple[Self, ...]:
+        """Normalize optional processor configuration to an immutable pipeline."""
+
+        if value is None:
+            return ()
+        if isinstance(value, cls):
+            processors = (value,)
+        elif isinstance(value, (list, tuple)):
+            processors = tuple(value)
+        else:
+            raise TypeError(
+                f"{cls.__name__.lower()} must be a {cls.__name__}, list, tuple, or None; got {type(value).__name__}"
+            )
+
+        for index, processor in enumerate(processors):
+            if not isinstance(processor, cls):
+                raise TypeError(
+                    f"{cls.__name__.lower()} at index {index} must be a {cls.__name__}; got {type(processor).__name__}"
+                )
+            processor.ready()
+        return processors
 
     def classify(self, signature: inspect.Signature) -> tuple[set[str], set[str]]:
         """Classify callable parameters as pipeline-owned or user-bound."""
@@ -148,6 +179,11 @@ class Processor:
 
         if not isinstance(batch, Batch):
             raise TypeError(f"{self.kind} '{self.name}' requires an rf.Batch, got {type(batch).__name__}")
+        if self.requires is not None:
+            missing = [name for name in self.requires if name not in batch.data.column_names]
+            if missing:
+                names = ", ".join(repr(name) for name in missing)
+                raise KeyError(f"{self.kind} '{self.name}' requires absent column(s): {names}")
         self.ready()
         missing = sorted(self.runtime - runtime.keys())
         if missing:
@@ -155,6 +191,14 @@ class Processor:
             raise ValueError(f"{self.kind} '{self.name}' is missing pipeline parameter(s): {formatted}")
         supplied = {name: runtime[name] for name in self.runtime}
         return self.func(batch, **dict(self.bound), **supplied)
+
+    def verify(self, batch: Batch) -> None:
+        """Validate the processor's declared output columns."""
+
+        missing = [name for name in self.produces if name not in batch.data.column_names]
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            raise KeyError(f"{self.kind} '{self.name}' did not produce declared column(s): {names}")
 
     def __call__(self, batch: Batch, **runtime: Any) -> Any:
         return self.call(batch, runtime)
@@ -166,31 +210,13 @@ class Preprocessor(Processor):
 
     func: Callable[..., Any]
     scope: Scope = "partition"
-    requires: tuple[str, ...] | None = None
-    produces: tuple[str, ...] = ()
     kind: str = field(default="preprocessor", init=False)
     providers: frozenset[str] = field(default=PREPROCESSOR_PROVIDERS, init=False)
 
     def __post_init__(self) -> None:
         if self.scope not in ("partition", "dataset"):
             raise ValueError("preprocessor scope must be 'partition' or 'dataset'")
-        object.__setattr__(self, "requires", columns(self.requires, name="requires"))
-        produces = columns(self.produces, name="produces")
-        if produces is None:
-            raise TypeError("produces must be a tuple of top-level column names")
-        object.__setattr__(self, "produces", produces)
         Processor.__post_init__(self)
-
-    @classmethod
-    def normalize(cls, value: Preprocessor | None) -> Preprocessor | None:
-        """Validate an optional preprocessor object."""
-
-        if value is None:
-            return None
-        if not isinstance(value, cls):
-            raise TypeError(f"preprocessor must be a Preprocessor object or None, got {type(value).__name__}")
-        value.ready()
-        return value
 
     def run(
         self,
@@ -213,6 +239,7 @@ class Preprocessor(Processor):
         if result is None:
             return
         if isinstance(result, Batch):
+            self.verify(result)
             yield result
             return
         if isinstance(result, (str, bytes, Mapping, pa.Table)) or not isinstance(result, Iterable):
@@ -223,6 +250,7 @@ class Preprocessor(Processor):
         for item in result:
             if not isinstance(item, Batch):
                 raise TypeError(f"preprocessor '{self.name}' yielded {type(item).__name__}; expected Batch")
+            self.verify(item)
             yield item
 
 
@@ -234,17 +262,6 @@ class Postprocessor(Processor):
     kind: str = field(default="postprocessor", init=False)
     providers: frozenset[str] = field(default_factory=frozenset, init=False)
 
-    @classmethod
-    def normalize(cls, value: Postprocessor | None) -> Postprocessor | None:
-        """Validate an optional postprocessor object."""
-
-        if value is None:
-            return None
-        if not isinstance(value, cls):
-            raise TypeError(f"postprocessor must be a Postprocessor object or None, got {type(value).__name__}")
-        value.ready()
-        return value
-
     def run(self, batch: Batch) -> Batch:
         """Apply a same-row output transform and validate its Arrow contract."""
 
@@ -255,18 +272,40 @@ class Postprocessor(Processor):
             raise ValueError(f"postprocessor '{self.name}' returned {len(result)} rows; expected {len(batch)}")
         if not equal(result.identity, batch.identity):
             raise ValueError(f"postprocessor '{self.name}' must preserve Batch identity")
+        self.verify(result)
         if result.data.num_columns == 0:
             raise ValueError(f"postprocessor '{self.name}' must return at least one Arrow column")
         return result
 
 
+PreprocessorInput: TypeAlias = Preprocessor | list[Preprocessor] | tuple[Preprocessor, ...] | None
+PostprocessorInput: TypeAlias = Postprocessor | list[Postprocessor] | tuple[Postprocessor, ...] | None
+
+
+def apply(batch: Batch, processors: PostprocessorInput = ()) -> Batch:
+    """Apply an ordered postprocessor pipeline to one Arrow batch."""
+
+    result = batch
+    for processor in Postprocessor.normalize(processors):
+        result = processor.run(result)
+    return result
+
+
 @overload
-def preprocess(func: Callable[..., Any], /) -> Preprocessor: ...
+def preprocess(
+    func: Callable[..., Any],
+    /,
+    *,
+    scope: Scope = "partition",
+    requires: tuple[str, ...] | None = None,
+    produces: tuple[str, ...] = (),
+) -> Preprocessor: ...
 
 
 @overload
 def preprocess(
     func: None = None,
+    /,
     *,
     scope: Scope = "partition",
     requires: tuple[str, ...] | None = None,
@@ -276,6 +315,7 @@ def preprocess(
 
 def preprocess(
     func: Callable[..., Any] | None = None,
+    /,
     *,
     scope: Scope = "partition",
     requires: tuple[str, ...] | None = None,
@@ -294,22 +334,38 @@ def preprocess(
 
 
 @overload
-def postprocess(func: Callable[..., Any], /) -> Postprocessor: ...
+def postprocess(
+    func: Callable[..., Any],
+    /,
+    *,
+    requires: tuple[str, ...] | None = None,
+    produces: tuple[str, ...] = (),
+) -> Postprocessor: ...
 
 
 @overload
-def postprocess(func: None = None) -> Callable[[Callable[..., Any]], Postprocessor]: ...
+def postprocess(
+    func: None = None,
+    /,
+    *,
+    requires: tuple[str, ...] | None = None,
+    produces: tuple[str, ...] = (),
+) -> Callable[[Callable[..., Any]], Postprocessor]: ...
 
 
 def postprocess(
     func: Callable[..., Any] | None = None,
+    /,
+    *,
+    requires: tuple[str, ...] | None = None,
+    produces: tuple[str, ...] = (),
 ) -> Callable[[Callable[..., Any]], Postprocessor] | Postprocessor:
     """Wrap a callable as a same-row Arrow postprocessor."""
 
     def decorate(inner: Callable[..., Any]) -> Postprocessor:
         if not callable(inner):
             raise TypeError("postprocess can only decorate callables")
-        return Postprocessor(func=inner)
+        return Postprocessor(func=inner, requires=requires, produces=produces)
 
     if func is None:
         return decorate

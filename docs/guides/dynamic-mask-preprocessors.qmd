@@ -104,7 +104,7 @@ predictions = model.predict(
 )
 ```
 
-Serving attaches the same object to the deployment builder:
+Serving attaches the same processor value to the deployment builder:
 
 ```python
 deployment = (
@@ -120,7 +120,9 @@ deployment = (
 | `model.predict(...)` | `preprocess=prepare` |
 | `rf.Deployment(...)` | `.preprocess(prepare)` |
 
-Use the same selector implementation across training, batch inference, and
+Each value may be one decorated processor, a list, a tuple, or `None`; RelFlow
+normalizes it to an immutable ordered tuple. Use the same selector pipeline,
+including stage order and bound values, across training, batch inference, and
 online inference whenever its source fields are available. This is the easiest
 way to avoid training-serving skew.
 
@@ -143,10 +145,19 @@ data = rf.ArrowDataModule(
 )
 ```
 
-The values may be different `rf.Preprocessor` objects or `None`. Omitted map
-keys default to no processor. That is convenient for a train-only dropout query,
-which is inactive elsewhere. A deterministic reconstruction or persistent
-ablation query still needs its selector in every active split.
+The values may be different processor singletons, lists, tuples, or `None`.
+Each is normalized independently; omitted map keys default to no processor.
+That is convenient for a train-only dropout query, which is inactive elsewhere.
+A deterministic reconstruction or persistent ablation query still needs its
+selector in every active split.
+
+When selector construction has distinct phases, keep them as separate stages
+in an ordered tuple—for example, normalization followed by eligibility
+derivation and then selector construction. Stages run strictly left to right.
+`requires` is checked against the actual columns entering every stage and
+`produces` against every batch it emits. RelFlow never sorts the tuple. A stage
+returning several batches flat-maps them through the remaining stages in
+emission order; `None` ends only that output path.
 
 ## Inspect Before Training
 
@@ -710,9 +721,12 @@ def top_five_percent(batch: rf.Batch) -> rf.Batch:
 ```
 
 Dataset scope materializes the finite split before each iteration; it is not a
-persisted preprocessing cache. It is unsupported for restartable callable
-sources today. Prefer partition scope for request-time logic and use
-`Mask.rate` for epoch-varying randomness.
+persisted preprocessing cache. In a pipeline, it is a materialization barrier
+at that stage's exact position: partition stages before it remain streaming and
+partition stages after it resume over its output. A pipeline containing any
+dataset-scoped stage is unsupported for restartable callable sources today.
+Prefer partition scope for request-time logic and use `Mask.rate` for
+epoch-varying randomness.
 
 ## Preserve Schema and Identity
 
@@ -720,8 +734,8 @@ sources today. Prefer partition scope for request-time logic and use
 
 - `requires` and `produces` contain unique top-level column names.
 - Every declared output must exist when the function returns.
-- Processed Arrow schemas are locked within a split across partitions and
-  epochs.
+- Final preprocessor-pipeline Arrow schemas are locked within a split across
+  partitions and epochs.
 - Use `pc.fill_null(..., False)` for nullable decisions.
 - Cast Awkward output to an explicit Arrow type, especially when a partition
   may be empty or all-null.

@@ -173,6 +173,21 @@ def cast_amount(batch: rf.Batch) -> rf.Batch:
     return batch.replace(batch.data.set_column(index, field, values))
 ```
 
+Keep separate Arrow operations as separate processors when that makes their
+contracts clearer:
+
+```python
+prepare = (cast_amount, total)
+```
+
+Processor arguments accept a decorated singleton, list, tuple, or `None` and
+snapshot the value as an immutable tuple. Stages run strictly left to right.
+At every boundary RelFlow checks `requires` against the incoming top-level
+columns and `produces` against each emitted output; it does not infer or sort
+dependencies. Preprocessor outputs flat-map through the remaining stages in
+emission order. A dataset-scoped stage materializes all upstream outputs at its
+exact tuple position.
+
 ## Filter Or Reorder Rows Safely
 
 Never filter `batch.data` by itself. Use the lineage-aware `Batch` method so

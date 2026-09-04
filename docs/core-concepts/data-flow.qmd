@@ -13,7 +13,7 @@ tensors.
 source
   → Arrow adaptation
   → rf.Batch(data, identity)
-  → preprocessing
+  → ordered preprocessing stages
   → sampling and shuffling
   → model-size rebatching
   → query + ragged coalescing
@@ -22,7 +22,7 @@ source
   → model
   → extension Arrow writers
   → rf.Batch(prediction table, same identity)
-  → postprocessing
+  → ordered postprocessing stages
   → Parquet or explicit JSON conversion
 ```
 
@@ -79,7 +79,9 @@ in a standalone zero-column table.
 
 ## 3. Preprocess Complete Arrow Batches
 
-Preprocessors run before schema queries and datatype codecs:
+Preprocessors run before schema queries and datatype codecs. One processor
+argument may contain a decorated singleton, list, tuple, or `None`; RelFlow
+normalizes it to an immutable tuple and executes it left to right:
 
 ```python
 import pyarrow.compute as pc
@@ -89,14 +91,29 @@ import relflow as rf
     requires=("subtotal", "tax"),
     produces=("amount",),
 )
-def prepare(batch: rf.Batch) -> rf.Batch:
+def total(batch: rf.Batch) -> rf.Batch:
     amount = pc.add(batch.data["subtotal"], pc.fill_null(batch.data["tax"], 0))
     return batch.replace(batch.data.append_column("amount", amount))
+
+@rf.preprocess(
+    requires=("amount",),
+    produces=("amount_log",),
+)
+def logarithm(batch: rf.Batch) -> rf.Batch:
+    values = pc.ln(pc.add(batch.data["amount"], 1))
+    return batch.replace(batch.data.append_column("amount_log", values))
+
+prepare = (total, logarithm)
 ```
 
 This phase owns renaming, type normalization, derived values, filtering,
 ordering, joins, nested filtering, explosion, and regrouping. It can use any
 engine internally, but its input and output contract is Arrow.
+
+`requires` is checked against each stage's actual input and `produces` against
+each emitted output. RelFlow never rearranges stages. Multiple outputs are
+flat-mapped through the remaining tuple in emission order; a dataset-scoped
+stage materializes its complete upstream stream exactly where it appears.
 
 Preprocessing can change observation membership. It therefore runs before
 sampling and shuffling. [Binding Data](binding-data.qmd) documents scopes,
@@ -243,11 +260,15 @@ See [Prediction Output](../guides/prediction-output.qmd) for exact fields.
 
 ## 11. Postprocess Without Changing Rows
 
-A postprocessor reshapes output columns while preserving row membership,
-order, and identity:
+A postprocessor pipeline reshapes output columns while preserving row
+membership, order, and identity. It accepts the same singleton, list, tuple,
+and `None` forms and folds them strictly left to right:
 
 ```python
-@rf.postprocess
+@rf.postprocess(
+    requires=("predictions",),
+    produces=("fraud", "probability"),
+)
 def compact(batch: rf.Batch) -> rf.Batch:
     predictions = batch.data["predictions"]
     field = pc.struct_field(predictions, "record/fraud")
@@ -264,6 +285,9 @@ def compact(batch: rf.Batch) -> rf.Batch:
 Postprocessors may project, derive, rename, flatten, nest, and redact. They may
 not filter, reorder, expand, group, or return a zero-column table. Row-changing
 work belongs before the model or in explicit downstream application code.
+`requires` and `produces` are checked at every stage, as are row count and
+identity, so a failure names the transform that broke the contract. Retained
+input columns are already available to the first stage under `inputs`.
 
 ## 12. Persist Or Serialize At The Edge
 
@@ -282,12 +306,12 @@ chooses to expose them.
 | Phase | May change rows? | Public dynamic format |
 | --- | --- | --- |
 | Source adaptation | establishes rows | Arrow |
-| Preprocessor | yes, with lineage methods | `rf.Batch` |
+| Preprocessor pipeline | yes, with lineage methods | `rf.Batch` |
 | Sampling/shuffling | yes | `rf.Batch` |
 | Query/coalescing | no | Arrow arrays with NumPy offset/placement geometry |
 | Extension encoding | no | tensors internally |
 | Extension writing | no | Arrow arrays |
-| Postprocessor | no | `rf.Batch` |
+| Postprocessor pipeline | no | `rf.Batch` |
 | Writer | no | Parquet |
 | JSON transport | no | terminal Python objects |
 

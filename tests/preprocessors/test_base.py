@@ -66,6 +66,64 @@ def test_preprocess_declarations_are_validated():
         processors.preprocess(produces=None)(lambda batch: batch)  # type: ignore[arg-type]
 
 
+def test_processor_decorators_accept_direct_call_declarations():
+    prepare = processors.preprocess(
+        lambda batch: batch,
+        scope="dataset",
+        requires=("source",),
+        produces=("prepared",),
+    )
+    finish = processors.postprocess(
+        lambda batch: batch,
+        requires=("predictions",),
+        produces=("score",),
+    )
+
+    assert prepare.scope == "dataset"
+    assert prepare.requires == ("source",)
+    assert prepare.produces == ("prepared",)
+    assert finish.requires == ("predictions",)
+    assert finish.produces == ("score",)
+
+
+def test_processor_pipelines_normalize_to_immutable_tuples():
+    @rf.preprocess
+    def first(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    @rf.preprocess
+    def second(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    configured = [first, second, first]
+
+    assert rf.Preprocessor.normalize(None) == ()
+    assert rf.Preprocessor.normalize(first) == (first,)
+    assert rf.Preprocessor.normalize(configured) == (first, second, first)
+    assert rf.Preprocessor.normalize(tuple(configured)) == (first, second, first)
+
+    normalized = rf.Preprocessor.normalize(configured)
+    configured.pop()
+    assert normalized == (first, second, first)
+
+
+def test_processor_pipeline_rejects_wrong_and_nested_members_by_index():
+    @rf.preprocess
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    @rf.postprocess
+    def finish(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    with pytest.raises(TypeError, match="preprocessor at index 1.*Postprocessor"):
+        rf.Preprocessor.normalize([prepare, finish])
+    with pytest.raises(TypeError, match="preprocessor at index 1.*list"):
+        rf.Preprocessor.normalize([prepare, [prepare]])  # type: ignore[list-item]
+    with pytest.raises(TypeError, match="preprocessor must be a Preprocessor, list, tuple, or None"):
+        rf.Preprocessor.normalize(processor for processor in (prepare,))  # type: ignore[arg-type]
+
+
 def test_preprocessor_discards_none_and_expands_batches():
     @processors.preprocess
     def discard(batch: rf.Batch):
@@ -97,6 +155,20 @@ def test_preprocessor_rejects_non_batch_results(value):
 
     with pytest.raises(TypeError, match="Batch"):
         list(invalid.run(make_batch([1]), strata=Strata.train, schema=None, encoding_context={}))
+
+
+def test_preprocessor_run_validates_its_declared_columns():
+    @rf.preprocess(requires=("source",), produces=("result",))
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    source = make_batch([1])
+    with pytest.raises(KeyError, match="requires absent column.*source"):
+        list(prepare.run(source, strata=Strata.train, schema=None, encoding_context={}))
+
+    renamed = source.replace(pa.table({"source": [1]}))
+    with pytest.raises(KeyError, match="did not produce declared column.*result"):
+        list(prepare.run(renamed, strata=Strata.train, schema=None, encoding_context={}))
 
 
 def test_preprocessor_receives_only_named_pipeline_providers():
@@ -174,6 +246,39 @@ def test_postprocessor_preserves_rows_and_identity():
     output = compact.partial(threshold=2).run(source)
     assert output.data.to_pydict() == {"large": [False, True]}
     assert output.identity.equals(source.identity)
+
+
+def test_postprocessor_pipeline_runs_in_order_with_declared_columns():
+    calls: list[str] = []
+
+    @rf.postprocess(requires=("value",), produces=("doubled",))
+    def double(batch: rf.Batch) -> rf.Batch:
+        calls.append("double")
+        return batch.replace(pa.table({"doubled": pc.multiply(batch.data["value"], 2)}))
+
+    @rf.postprocess(requires=("doubled",), produces=("large",))
+    def classify(batch: rf.Batch) -> rf.Batch:
+        calls.append("classify")
+        return batch.replace(pa.table({"large": pc.greater(batch.data["doubled"], 3)}))
+
+    result = processors.apply(make_batch([1, 2]), [double, classify])
+
+    assert calls == ["double", "classify"]
+    assert result.data.to_pydict() == {"large": [False, True]}
+    assert double.requires == ("value",)
+    assert double.produces == ("doubled",)
+
+    with pytest.raises(KeyError, match="requires absent column.*doubled"):
+        processors.apply(make_batch([1]), (classify, double))
+
+
+def test_postprocessor_run_validates_declared_output_columns():
+    @rf.postprocess(produces=("result",))
+    def incomplete(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    with pytest.raises(KeyError, match="did not produce declared column.*result"):
+        incomplete.run(make_batch([1]))
 
 
 def test_postprocessor_rejects_invalid_output_contracts():

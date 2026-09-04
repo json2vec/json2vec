@@ -3,7 +3,7 @@
 The top-level package exports the constructors and helpers used by most
 applications: `Model(...)` for model construction, tensorfield
 request constructors such as `Category` and `Number`, data modules, schema
-mutation predicates, and the `@preprocess` decorator.
+mutation predicates, and the `@preprocess` and `@postprocess` decorators.
 """
 
 from typing import TYPE_CHECKING, Any

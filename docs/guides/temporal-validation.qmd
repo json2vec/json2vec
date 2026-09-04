@@ -38,7 +38,7 @@ The contract is:
 Keep `as_of` and stable identifiers as metadata when they are needed for audit
 or joining but should not be learned as raw inputs.
 
-## Build Windows In One Preprocessor
+## Build Windows In A Preprocessor Stage
 
 Use the public Arrow preprocessor contract when raw histories need sorting,
 filtering, or feature derivation. This example assumes `as_of_s` and each event's
@@ -90,7 +90,8 @@ Each observation owns its own cutoff, which avoids a split-wide date silently
 being applied to examples with different prediction times. The explicit cast
 makes the produced `history` schema stable for empty and all-null batches.
 
-Pass the same preprocessor to data modules and interactive or online inference:
+Pass the same preprocessor—or the same ordered tuple containing it—to data
+modules and interactive or online inference:
 
 ```{python .marimo}
 #| echo: true

@@ -192,6 +192,14 @@ with one process and `num_workers=0`.
 Optimize and benchmark one Arrow reader first. Do not bypass the topology guard;
 duplicate observations or unequal optimizer steps can invalidate a speedup.
 
+For an ordered preprocessor pipeline, time each stage separately as well as the
+complete tuple. A partition-scoped stage streams its outputs into the next;
+each dataset-scoped stage is a full materialization barrier at its exact tuple
+position. Moving that barrier changes both memory and semantics, so RelFlow
+never reorders stages from `requires` and `produces`. Record processor order,
+scope, input rows, emitted rows, and Arrow schemas with a preprocessing
+benchmark.
+
 ## Optimize Prediction Output
 
 Prediction can spend substantial time moving and serializing data:
@@ -205,6 +213,11 @@ Prediction can spend substantial time moving and serializing data:
 - set service `max_batch_size` and latency against the real request-size
   distribution;
 - benchmark JSON backend and response schema validation separately.
+
+When several postprocessors are installed, benchmark the ordered tuple and
+each stage. Every stage receives a complete Arrow batch and must preserve rows
+and identity; splitting one vectorized expression into many tiny stages can
+make fixed dispatch and schema validation visible at real-time batch sizes.
 
 An online latency target and an offline throughput target usually need different
 batch sizes.
@@ -234,7 +247,7 @@ The values above are a reporting template, not a benchmark result.
 
 | Signal | Diagnostic | Likely fix |
 | --- | --- | --- |
-| Accelerator utilization is low | Time read/preprocess/encode separately from forward | Increase appropriate workers/buffers, simplify Python preprocessing, or fix remote I/O before widening the model. |
+| Accelerator utilization is low | Time read/each preprocess stage/encode separately from forward | Simplify or combine the measured bottleneck, remove an unnecessary dataset barrier, or fix remote I/O before widening the model. |
 | Memory is high with mostly short histories | Compare observed lengths with configured branch shapes | Shorten/window branches or choose a justified overflow policy. |
 | More ranks do not improve throughput | Check ownership, remote I/O, worker multiplication, and synchronization time | Correct sharding and remove the serial bottleneck before adding ranks. |
 | Prediction is slower than training forward | Measure CPU conversion, top-k, embeddings, postprocessing, and writes | Narrow the output contract and use partitioned `Writer` output. |

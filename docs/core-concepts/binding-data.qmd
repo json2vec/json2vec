@@ -117,8 +117,11 @@ deliberately, do not depend on hash-table arrival order, and use dataset scope
 when groups may cross source partitions.
 
 `None` or zero emitted rows discards that input. Returning several batches can
-bound memory during expansion. Every output in a split must have exactly the
-same Arrow schema, including field order, nested types, and nullability.
+bound memory during expansion. Every final pipeline output in a split must have
+exactly the same Arrow schema, including field order, nested types, and
+nullability. Intermediate stages may deliberately normalize differing input
+schemas before that final lock, although a dataset-scope barrier must still be
+able to merge its upstream batches.
 
 ### Declare source and output columns
 
@@ -145,6 +148,52 @@ Declarations are contracts, not guesses made by inspecting Python code.
 `requires` is validated metadata in this release; Dataset scanner projection
 pushdown is deferred, so declaring it does not yet reduce columns read from
 storage.
+
+### Compose processors in order
+
+Every processor argument accepts one decorated processor, a list, a tuple, or
+`None`. RelFlow snapshots that value as an immutable tuple:
+
+| Supplied value | Canonical pipeline |
+| --- | --- |
+| `None` | `()` |
+| `total` | `(total,)` |
+| `[total, logarithm]` | `(total, logarithm)` |
+| `(total, logarithm)` | `(total, logarithm)` |
+
+Only objects returned by `@rf.preprocess` are accepted; decorate a function
+before adding it to a pipeline. A tuple is the clearest form for a reusable
+pipeline, while accepting a list is convenient when configuration code builds
+the stages incrementally.
+
+Execution is strictly left to right. RelFlow does not topologically sort
+processors or infer dependencies from their Python bodies. Instead, it checks
+`requires` against the actual top-level columns entering each stage and checks
+`produces` on every batch emitted by that stage:
+
+```python
+@rf.preprocess(
+    requires=("amount",),
+    produces=("amount_log",),
+)
+def logarithm(batch: rf.Batch) -> rf.Batch:
+    values = pc.ln(pc.add(batch.data["amount"], 1.0))
+    return batch.replace(batch.data.append_column("amount_log", values))
+
+prepare = (total, logarithm)
+```
+
+Here `total` creates `amount` before `logarithm` requires it. Reversing the
+tuple is an error; RelFlow will not silently reorder business logic. If a stage
+returns several batches, each is passed through every remaining stage in the
+same emission order. Returning `None` ends only that output path. This is
+ordinary ordered flat-map composition, so filtering, expansion, and splitting
+remain explicit.
+
+A processor may replace a column produced by an earlier stage. Put the column
+in both its `requires` and `produces` declarations. `produces` does not promise
+that unrelated columns survive: the returned Arrow schema remains the source
+of truth.
 
 ### Partition and dataset scope
 
@@ -177,6 +226,13 @@ materialization requirement explicit. The initial release materializes the
 complete split before the processor for an in-memory Arrow unit or a
 `pyarrow.dataset.Dataset`; a callable factory requires a future coordinated
 cache and is rejected.
+
+Scope belongs to each stage, not to the pipeline as a whole. In a mixed
+pipeline such as `(clean, chronological, derive)`, partition-scoped `clean`
+streams first, dataset-scoped `chronological` materializes all of its upstream
+outputs at that exact position, and partition-scoped `derive` resumes over the
+result. Every dataset-scoped stage is such a barrier. A pipeline containing any
+dataset-scoped stage retains the callable-source restriction.
 
 ## Bind User Configuration
 
@@ -318,9 +374,10 @@ def recent_logins(batch: rf.Batch) -> rf.Batch:
 The predicate moves whole event structs, so every sibling remains aligned.
 Awkward does not become a second pipeline format; the function returns Arrow.
 
-## Install The Same Contract Everywhere
+## Install The Same Pipeline Everywhere
 
-Data modules use `preprocessor=`:
+Data modules use `preprocessor=`. The value may be the singleton `total` or the
+ordered `prepare` tuple defined above:
 
 ```python
 data = rf.ArrowDataModule(
@@ -337,11 +394,15 @@ Direct prediction uses `preprocess=`:
 result = model.predict(requests, preprocess=prepare)
 ```
 
-The singular names are intentional: install one coordinated processor that can
-transform sibling columns together. Compose ordinary Arrow functions inside it
-when preparation has several phases. For Boolean selectors consumed by
-`Mask.query`, including nested Awkward examples and exact-count decisions, see
-[Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd).
+The existing singular noun and verb argument names remain stable even when the
+value contains several stages. `preprocessor=` configures a data module;
+`.preprocess(...)` configures a deployment; `preprocess=` is the action requested from
+`Model.encode` or `Model.predict`. Both normalize singleton, list, tuple, and
+`None` values identically.
+
+Reuse the same tuple, in the same order, at training and inference boundaries.
+For Boolean selectors consumed by `Mask.query`, including nested Awkward
+examples and exact-count decisions, see [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd).
 
 ## Retention Is Output, Not Binding
 
@@ -375,8 +436,9 @@ request and ragged code must not hardcode datatype-specific Python classes.
 
 - Start with direct same-name binding.
 - Put a structural mismatch in the nearest owning node's `query`.
-- Put coordinated or data-dependent work in one Arrow preprocessor.
+- Put coordinated or data-dependent work in an ordered Arrow preprocessor pipeline.
 - Declare `requires` and `produces` when the dependencies are knowable.
+- Order stages explicitly; RelFlow validates dependencies but never rearranges them.
 - Use a lineage-aware `Batch` method for every row change.
 - Keep one exact post-preprocessor Arrow schema per split.
 - Fit state before iteration and bind it with `.partial(...)`.

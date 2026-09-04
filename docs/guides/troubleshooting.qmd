@@ -99,8 +99,10 @@ content value in isolation.
 ## Debug A Preprocessor
 
 A RelFlow preprocessor is an object produced by `@rf.preprocess` and must return
-`rf.Batch`, `None`, or an iterable of batches. A bare Arrow table drops lineage
-and is not a valid processor result.
+`rf.Batch`, `None`, or an iterable of batches. A processor argument may contain
+one such object, a list, a tuple, or `None`; RelFlow snapshots it as an immutable
+tuple and runs it left to right. A bare Arrow table drops lineage and is not a
+valid processor result.
 
 Exercise it through `model.encode` to include RelFlow identity and any
 runtime-provided values:
@@ -109,23 +111,35 @@ runtime-provided values:
 #| echo: true
 #| output: true
 
-@rf.preprocess
+@rf.preprocess(requires=("raw_amount",), produces=("amount",))
 def rename_amount(batch: rf.Batch) -> rf.Batch:
     data = batch.data.rename_columns(
         ["amount" if name == "raw_amount" else name for name in batch.data.column_names]
     )
     return batch.replace(data)
 
+@rf.preprocess(requires=("amount",), produces=("amount_copy",))
+def derive_features(batch: rf.Batch) -> rf.Batch:
+    data = batch.data.append_column("amount_copy", batch.data["amount"])
+    return batch.replace(data)
+
 records = pa.table({"raw_amount": [12.5]})
 encoded = model.encode(
     records,
-    preprocess=rename_amount,
+    preprocess=(rename_amount, derive_features),
 )
 ```
 
 If the preprocessor requests `strata`, `schema`, or `encoding_context`, test it
 through a data module or `model.encode(..., strata=...)` so those providers are
 present. Bind required user parameters with `.partial(...)`.
+
+When a pipeline fails, inspect the named stage's actual input schema. RelFlow
+checks `requires` before every stage and `produces` on every emitted output; it
+does not move a producer ahead of its consumer. A missing requirement therefore
+usually means the tuple is reversed, an earlier stage dropped a column, or that
+stage did not return a declared output. For mixed scopes, remember that each
+dataset-scoped stage materializes all upstream outputs exactly where it appears.
 
 ## Debug Prediction Output
 
@@ -144,6 +158,13 @@ Decoded address structs can contain `state`, datatype-specific `content`,
 `inferred`, and optional `embedding`. `inferred` is positional: it marks values
 that were masked in prediction input. Read [Prediction Output](prediction-output.qmd)
 for the full envelope before flattening it in a postprocessor.
+
+Postprocessor arguments use the same singleton/list/tuple/`None` forms and run
+strictly left to right. RelFlow checks `requires` before each stage, then checks
+`produces`, row count, identity, and nonempty output on that stage's result. If
+a later stage cannot see `inputs`, confirm both that prediction retained the
+needed source columns and that no earlier postprocessor removed the canonical
+envelope.
 
 ## Reduce A Distributed Failure
 

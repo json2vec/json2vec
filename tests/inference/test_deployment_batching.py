@@ -35,8 +35,8 @@ class PredictModel:
             data=pa.table({"inputs": inputs, "predictions": predictions}),
             identity=source.identity,
         )
-        if postprocess is not None:
-            result = postprocess.run(result)
+        for processor in rf.Postprocessor.normalize(postprocess):
+            result = processor.run(result)
         return result.data
 
 
@@ -90,11 +90,16 @@ def test_batcher_runs_processors_once_for_one_collated_arrow_batch():
         preprocessed.append(batch)
         return batch.take(pa.array([2, 0, 1], type=pa.int64()))
 
-    @rf.postprocess
+    @rf.postprocess(requires=("inputs",), produces=("value",))
     def compact(batch: rf.Batch) -> rf.Batch:
-        postprocessed.append(batch)
+        postprocessed.append("compact")
         values = pa.compute.struct_field(batch.data["inputs"], "value")
         return batch.replace(pa.table({"value": values}))
+
+    @rf.postprocess(requires=("value",), produces=("value",))
+    def finish(batch: rf.Batch) -> rf.Batch:
+        postprocessed.append("finish")
+        return batch.replace(pa.table({"value": batch.data["value"]}))
 
     async def run():
         model = Model(
@@ -108,7 +113,7 @@ def test_batcher_runs_processors_once_for_one_collated_arrow_batch():
             checkpoint=model,
             accelerator=deployment_module.Accelerator.cpu,
             preprocessor=prepare,
-            postprocessor=compact,
+            postprocessor=[compact, finish],
             retain=("value",),
         )
         batcher = deployment_module.FastAPIBatcher(
@@ -129,11 +134,9 @@ def test_batcher_runs_processors_once_for_one_collated_arrow_batch():
     responses = asyncio.run(run())
 
     assert len(preprocessed) == 1
-    assert len(postprocessed) == 1
+    assert postprocessed == ["compact", "finish"]
     assert isinstance(preprocessed[0], rf.Batch)
-    assert isinstance(postprocessed[0], rf.Batch)
     assert preprocessed[0].data["value"].to_pylist() == [3.0, 1.0, 2.0]
-    assert pa.compute.struct_field(postprocessed[0].data["inputs"], "value").to_pylist() == [2.0, 3.0, 1.0]
     assert responses == [{"value": 3.0}, {"value": 1.0}, {"value": 2.0}]
 
 
@@ -151,8 +154,10 @@ def test_runtime_converts_valid_requests_to_one_arrow_prediction_call():
     call = model.calls[0]
     assert isinstance(call["source"], rf.Batch)
     assert call["source"].data.to_pylist() == [{"id": 3}, {"id": 1}]
-    assert call["preprocess"] is prepare
-    assert isinstance(call["postprocess"], rf.Postprocessor)
+    assert call["preprocess"] == (prepare,)
+    assert isinstance(call["postprocess"], tuple)
+    assert len(call["postprocess"]) == 1
+    assert isinstance(call["postprocess"][0], rf.Postprocessor)
     assert call["retain"] == ("id",)
     assert outputs == [
         {"predictions": {"label": "3"}},
@@ -222,12 +227,12 @@ def test_default_response_never_exposes_retained_inputs():
     assert "identity" not in output
 
 
-def test_postprocessor_runs_inside_the_single_model_prediction_call():
+def test_postprocessors_run_inside_the_single_model_prediction_call():
     seen = []
 
-    @rf.postprocess
+    @rf.postprocess(requires=("inputs", "predictions"), produces=("request_id", "label"))
     def compact(batch: rf.Batch) -> rf.Batch:
-        seen.append(batch)
+        seen.append("compact")
         return batch.replace(
             pa.table(
                 {
@@ -237,15 +242,23 @@ def test_postprocessor_runs_inside_the_single_model_prediction_call():
             )
         )
 
+    @rf.postprocess(requires=("request_id", "label"), produces=("request_id", "label"))
+    def finish(batch: rf.Batch) -> rf.Batch:
+        seen.append("finish")
+        return batch.replace(batch.data.select(["request_id", "label"]))
+
     model = PredictModel()
-    server = runtime(model=model, postprocessor=compact, retain=("id",))
+    server = runtime(model=model, postprocessor=(compact, finish), retain=("id",))
 
     output = server.predict_payloads([{"id": 5}])[0]
 
     assert len(model.calls) == 1
-    assert isinstance(model.calls[0]["postprocess"], rf.Postprocessor)
-    assert model.calls[0]["postprocess"] is not compact
-    assert len(seen) == 1
+    pipeline = model.calls[0]["postprocess"]
+    assert isinstance(pipeline, tuple)
+    assert pipeline[:2] == (compact, finish)
+    assert len(pipeline) == 3
+    assert isinstance(pipeline[-1], rf.Postprocessor)
+    assert seen == ["compact", "finish"]
     assert output == {"request_id": 5, "label": "5"}
 
 
@@ -391,8 +404,37 @@ def test_deployment_builder_keeps_arrow_processors_and_retention():
     deployment = Deployment(checkpoint="unused", retain=("request_id",)).preprocess(prepare).postprocess(compact)
 
     assert deployment.retain == ("request_id",)
-    assert deployment._preprocessor is prepare
-    assert deployment._postprocessor is compact
+    assert deployment._preprocessors == (prepare,)
+    assert deployment._postprocessors == (compact,)
+
+
+def test_deployment_builder_replaces_processor_collections():
+    @rf.preprocess
+    def prepare(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    @rf.preprocess
+    def replace(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    @rf.postprocess
+    def compact(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    @rf.postprocess
+    def finish(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    deployment = (
+        Deployment(checkpoint="unused")
+        .preprocess([prepare])
+        .preprocess((replace,))
+        .postprocess([compact])
+        .postprocess((finish,))
+    )
+
+    assert deployment._preprocessors == (replace,)
+    assert deployment._postprocessors == (finish,)
 
 
 @pytest.mark.parametrize("retain", [("id", "id"), ("",), ["id"]])

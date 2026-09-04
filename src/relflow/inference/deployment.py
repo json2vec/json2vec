@@ -27,7 +27,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from relflow.architecture.root import Model
 from relflow.data.arrow import Batch, mappings
 from relflow.data.datasets.arrow import identity
-from relflow.data.processors import Postprocessor, Preprocessor, equal
+from relflow.data.processors import Postprocessor, PostprocessorInput, Preprocessor, PreprocessorInput, equal
 from relflow.structs.experiment import NodeAttribute, NodePredicate
 from relflow.structs.tree import Node
 
@@ -99,8 +99,8 @@ class FastAPIRuntime:
         *,
         checkpoint: ModelSource,
         accelerator: Accelerator,
-        preprocessor: Preprocessor | None = None,
-        postprocessor: Postprocessor | None = None,
+        preprocessor: PreprocessorInput = (),
+        postprocessor: PostprocessorInput = (),
         retain: Retain = (),
         update_operations: list[UpdateOperation] | None = None,
         request_signature: type[pydantic.BaseModel] | None = None,
@@ -108,8 +108,8 @@ class FastAPIRuntime:
     ) -> None:
         self.model_source = checkpoint
         self.accelerator = accelerator
-        self.preprocessor = Preprocessor.normalize(preprocessor)
-        self.postprocessor = Postprocessor.normalize(postprocessor)
+        self.preprocessors = Preprocessor.normalize(preprocessor)
+        self.postprocessors = Postprocessor.normalize(postprocessor)
         self.retain = retention(retain)
         self.update_operations = list(update_operations or [])
         self.request_signature = request_signature
@@ -166,9 +166,9 @@ class FastAPIRuntime:
     def predict_payloads(self, payloads: list[Any]) -> list[dict[str, Any]]:
         """Validate, predict, serialize, and scatter one request microbatch.
 
-        Valid requests cross the Python-to-Arrow boundary together, call
-        the preprocessor, ``Model.predict``, and the postprocessor once for the
-        whole microbatch, then cross back to Python with one terminal
+        Valid requests cross the Python-to-Arrow boundary together. Ordered
+        preprocessing stays batchwise, ``Model.predict`` is called once, and
+        ordered postprocessing receives the written batch before one terminal
         ``Table.to_pylist``. Invalid request rows retain their original slots.
         """
 
@@ -201,15 +201,14 @@ class FastAPIRuntime:
             )
 
             def transport(batch: Batch) -> Batch:
-                result = self.postprocessor.run(batch) if self.postprocessor is not None else batch
-                if TRANSPORT_IDENTITY in result.data.column_names:
+                if TRANSPORT_IDENTITY in batch.data.column_names:
                     raise ValueError(f"postprocessor output cannot use reserved column {TRANSPORT_IDENTITY!r}")
-                return result.replace(result.data.append_column(TRANSPORT_IDENTITY, result.identity))
+                return batch.replace(batch.data.append_column(TRANSPORT_IDENTITY, batch.identity))
 
             result = self.model.predict(
                 source,
-                preprocess=self.preprocessor,
-                postprocess=Postprocessor(func=transport),
+                preprocess=self.preprocessors,
+                postprocess=(*self.postprocessors, Postprocessor(func=transport)),
                 retain=self.retain,
             )
             if not isinstance(result, pa.Table):
@@ -236,7 +235,7 @@ class FastAPIRuntime:
                 raise ValueError("deployment preprocessing must produce exactly one output for each request")
             result = result.drop([TRANSPORT_IDENTITY])
 
-            if self.postprocessor is None:
+            if not self.postprocessors:
                 if "predictions" not in result.column_names:
                     raise ValueError("canonical model output is missing its 'predictions' column")
                 result = result.select(["predictions"])
@@ -415,8 +414,8 @@ class Deployment(BaseSettings):
 
     _request_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
     _response_signature: type[pydantic.BaseModel] | None = pydantic.PrivateAttr(default=None)
-    _preprocessor: Preprocessor | None = pydantic.PrivateAttr(default=None)
-    _postprocessor: Postprocessor | None = pydantic.PrivateAttr(default=None)
+    _preprocessors: tuple[Preprocessor, ...] = pydantic.PrivateAttr(default=())
+    _postprocessors: tuple[Postprocessor, ...] = pydantic.PrivateAttr(default=())
     _update_operations: list[UpdateOperation] = pydantic.PrivateAttr(default_factory=list)
 
     @field_validator("checkpoint", mode="before")
@@ -453,17 +452,17 @@ class Deployment(BaseSettings):
         return self
 
     @beartype
-    def preprocess(self, preprocessor: Preprocessor) -> Deployment:
-        """Attach one Arrow batch preprocessor."""
+    def preprocess(self, preprocessor: PreprocessorInput) -> Deployment:
+        """Attach an ordered Arrow batch preprocessor collection."""
 
-        self._preprocessor = Preprocessor.normalize(preprocessor)
+        self._preprocessors = Preprocessor.normalize(preprocessor)
         return self
 
     @beartype
-    def postprocess(self, postprocessor: Postprocessor) -> Deployment:
-        """Attach one Arrow output postprocessor."""
+    def postprocess(self, postprocessor: PostprocessorInput) -> Deployment:
+        """Attach an ordered Arrow output postprocessor collection."""
 
-        self._postprocessor = Postprocessor.normalize(postprocessor)
+        self._postprocessors = Postprocessor.normalize(postprocessor)
         return self
 
     @beartype
@@ -498,8 +497,8 @@ class Deployment(BaseSettings):
         runtime = FastAPIRuntime(
             checkpoint=self.model if self.model is not None else self.checkpoint,
             accelerator=self.accelerator,
-            preprocessor=self._preprocessor,
-            postprocessor=self._postprocessor,
+            preprocessor=self._preprocessors,
+            postprocessor=self._postprocessors,
             retain=self.retain,
             update_operations=self._update_operations,
             request_signature=self._request_signature,
@@ -638,8 +637,8 @@ class Deployment(BaseSettings):
                 (
                     self._request_signature is not None,
                     self._response_signature is not None,
-                    self._preprocessor is not None,
-                    self._postprocessor is not None,
+                    bool(self._preprocessors),
+                    bool(self._postprocessors),
                     bool(self._update_operations),
                 )
             ):

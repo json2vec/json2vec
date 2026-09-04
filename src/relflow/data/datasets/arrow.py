@@ -20,7 +20,7 @@ import relflow
 from relflow.data.arrow import IDENTITY, Batch, matrix, mix
 from relflow.data.datasets.base import InterprocessEncodingContext
 from relflow.data.iterables import encode
-from relflow.data.processors import Preprocessor
+from relflow.data.processors import Preprocessor, PreprocessorInput
 from relflow.distributed import world_size
 from relflow.structs.enums import Strata
 
@@ -199,47 +199,58 @@ def merge(batches: Iterable[Batch]) -> Batch | None:
     return Batch(data=data, identity=pa.chunked_array(chunks, type=IDENTITY))
 
 
+def stage(
+    batches: Iterable[Batch],
+    *,
+    preprocessor: Preprocessor,
+    strata: Strata,
+    schema: Any,
+    encoding_context: InterprocessEncodingContext,
+) -> Iterator[Batch]:
+    """Apply one preprocessor to every batch emitted by the preceding stage."""
+
+    for item in batches:
+        yield from preprocessor.run(
+            item,
+            strata=strata,
+            schema=schema,
+            encoding_context=encoding_context,
+        )
+
+
 def process(
     batches: Iterable[Batch],
     *,
-    preprocessor: Preprocessor | None,
+    preprocessor: PreprocessorInput = (),
     strata: Strata,
     schema: Any,
     encoding_context: InterprocessEncodingContext,
     schemas: Schemas | None = None,
 ) -> Iterator[Batch]:
-    """Apply the configured Arrow preprocessor and enforce one output schema."""
+    """Apply an ordered preprocessor pipeline and enforce its final schema."""
+
+    current = batches
+    for processor in Preprocessor.normalize(preprocessor):
+        if processor.scope == "dataset":
+            materialized = merge(current)
+            current = () if materialized is None else (materialized,)
+        current = stage(
+            current,
+            preprocessor=processor,
+            strata=strata,
+            schema=schema,
+            encoding_context=encoding_context,
+        )
 
     schemas = Schemas() if schemas is None else schemas
-    for item in batches:
-        if preprocessor is not None and preprocessor.requires is not None:
-            missing = [name for name in preprocessor.requires if name not in item.data.column_names]
-            if missing:
-                names = ", ".join(repr(name) for name in missing)
-                raise KeyError(f"preprocessor '{preprocessor.name}' requires absent column(s): {names}")
-        outputs = (
-            (item,)
-            if preprocessor is None
-            else preprocessor.run(
-                item,
-                strata=strata,
-                schema=schema,
-                encoding_context=encoding_context,
-            )
+    for output in current:
+        lock(
+            schemas,
+            "processed",
+            output.data.schema,
+            context=f"preprocessor schema changed in {strata}",
         )
-        for output in outputs:
-            if preprocessor is not None:
-                missing = [name for name in preprocessor.produces if name not in output.data.column_names]
-                if missing:
-                    names = ", ".join(repr(name) for name in missing)
-                    raise KeyError(f"preprocessor '{preprocessor.name}' did not produce declared column(s): {names}")
-            lock(
-                schemas,
-                "processed",
-                output.data.schema,
-                context=f"preprocessor schema changed in {strata}",
-            )
-            yield output
+        yield output
 
 
 def randomizer(seed: int, *, strata: Strata, epoch: int, operation: str) -> np.uint64:
@@ -350,7 +361,7 @@ class ArrowDataset(IterableDataset):
         *,
         source: ArrowSource,
         schema: Any,
-        preprocessor: Preprocessor | None,
+        preprocessors: tuple[Preprocessor, ...],
         encoding_context: InterprocessEncodingContext,
         batch_size: int,
         strata: Strata,
@@ -367,7 +378,7 @@ class ArrowDataset(IterableDataset):
         super().__init__()
         self.source = source
         self.schema = schema
-        self.preprocessor = preprocessor
+        self.preprocessors = preprocessors
         self.encoding_context = encoding_context
         self.batch_size = batch_size
         self.strata = strata
@@ -395,13 +406,9 @@ class ArrowDataset(IterableDataset):
             namespace=f"{self.strata}:source",
             schemas=self.schemas,
         )
-        if self.preprocessor is not None and self.preprocessor.scope == "dataset":
-            materialized = merge(scanned)
-            scanned = () if materialized is None else (materialized,)
-
         batches: Iterable[Batch] = process(
             scanned,
-            preprocessor=self.preprocessor,
+            preprocessor=self.preprocessors,
             strata=self.strata,
             schema=self.schema,
             encoding_context=self.encoding_context,
@@ -450,7 +457,7 @@ def loader(
     *,
     source: ArrowSource,
     schema: Any,
-    preprocessor: Preprocessor | None,
+    preprocessors: tuple[Preprocessor, ...],
     encoding_context: InterprocessEncodingContext,
     batch_size: int,
     strata: Strata,
@@ -471,7 +478,7 @@ def loader(
         dataset=ArrowDataset(
             source=source,
             schema=schema,
-            preprocessor=preprocessor,
+            preprocessors=preprocessors,
             encoding_context=encoding_context,
             batch_size=batch_size,
             strata=strata,
@@ -514,7 +521,7 @@ class ArrowDataModule(lit.LightningDataModule):
         validate: ArrowSource | None = None,
         test: ArrowSource | None = None,
         predict: ArrowSource | None = None,
-        preprocessor: Preprocessor | None | Mapping[Strata | str, Preprocessor | None] = None,
+        preprocessor: PreprocessorInput | Mapping[Strata | str, PreprocessorInput] = (),
         seed: int = 0,
         shuffle: bool | None | Mapping[Strata | str, bool | None] = None,
         sample: float | Mapping[Strata | str, float] = 1.0,
@@ -559,14 +566,12 @@ class ArrowDataModule(lit.LightningDataModule):
                 or len(set(names)) != len(names)
             ):
                 raise ValueError(f"retain for {strata} must be '*', or a tuple of unique non-empty column names")
-        self.preprocessor = expand(preprocessor, default=None)
-        for strata, processor in self.preprocessor.items():
-            self.preprocessor[strata] = Preprocessor.normalize(processor)
-            if (
-                self.preprocessor[strata] is not None
-                and self.preprocessor[strata].scope == "dataset"
-                and callable(self.sources.get(strata))
-            ):
+        configured_preprocessors = expand(preprocessor, default=())
+        self.preprocessors = {
+            strata: Preprocessor.normalize(processors) for strata, processors in configured_preprocessors.items()
+        }
+        for strata, processors in self.preprocessors.items():
+            if any(processor.scope == "dataset" for processor in processors) and callable(self.sources.get(strata)):
                 raise NotImplementedError(
                     "dataset-scoped preprocessing of an Arrow factory requires the deferred coordinated cache"
                 )
@@ -658,7 +663,7 @@ class ArrowDataModule(lit.LightningDataModule):
         return loader(
             source=self.sources[normalized],
             schema=self.schema,
-            preprocessor=self.preprocessor[normalized],
+            preprocessors=self.preprocessors[normalized],
             encoding_context=self.encoding_context,
             batch_size=self.batch_size,
             strata=normalized,

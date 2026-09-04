@@ -199,6 +199,153 @@ def test_dataset_scope_preprocessor_receives_one_logical_split(monkeypatch: pyte
     assert calls == [9]
 
 
+def test_preprocessor_pipeline_runs_in_order_and_is_stored_as_a_tuple(monkeypatch: pytest.MonkeyPatch):
+    calls: list[str] = []
+
+    @rf.preprocess(requires=("id",), produces=("amount",))
+    def derive(batch: rf.Batch) -> rf.Batch:
+        calls.append("derive")
+        return batch.replace(batch.data.append_column("amount", pa.compute.add(batch.data["id"], 1)))
+
+    @rf.preprocess(requires=("amount",), produces=("id",))
+    def replace(batch: rf.Batch) -> rf.Batch:
+        calls.append("replace")
+        return batch.replace(pa.table({"id": pa.compute.multiply(batch.data["amount"], 2)}))
+
+    configured = [derive, replace]
+    module = rf.ArrowDataModule(
+        model=model(),
+        validate=pa.table({"id": [1, 2, 3]}),
+        preprocessor=configured,
+        shuffle=False,
+    )
+    configured.reverse()
+
+    batches = collect(module.val_dataloader().dataset, monkeypatch)
+
+    assert module.preprocessors[Strata.validate] == (derive, replace)
+    assert calls == ["derive", "replace"]
+    assert pa.concat_tables([batch.data for batch in batches])["id"].to_pylist() == [4, 6, 8]
+
+
+def test_preprocessor_mapping_accepts_an_ordered_pipeline_per_split(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[Strata, str]] = []
+
+    @rf.preprocess
+    def first(batch: rf.Batch, *, strata: Strata) -> rf.Batch:
+        calls.append((strata, "first"))
+        return batch
+
+    @rf.preprocess
+    def second(batch: rf.Batch, *, strata: Strata) -> rf.Batch:
+        calls.append((strata, "second"))
+        return batch
+
+    source = pa.table({"id": [1, 2]})
+    module = rf.ArrowDataModule(
+        model=model(),
+        train=source,
+        validate=source,
+        preprocessor={
+            "train": [first, second],
+            "validate": (second,),
+        },
+        shuffle=False,
+    )
+
+    collect(module.train_dataloader().dataset, monkeypatch)
+    collect(module.val_dataloader().dataset, monkeypatch)
+
+    assert module.preprocessors[Strata.train] == (first, second)
+    assert module.preprocessors[Strata.validate] == (second,)
+    assert calls == [
+        (Strata.train, "first"),
+        (Strata.train, "second"),
+        (Strata.validate, "second"),
+    ]
+
+
+def test_preprocessor_pipeline_flat_maps_each_stage():
+    calls: list[int] = []
+
+    @rf.preprocess
+    def split(batch: rf.Batch):
+        yield batch.slice(0, 1)
+        yield batch.slice(1)
+
+    @rf.preprocess
+    def inspect(batch: rf.Batch) -> rf.Batch:
+        calls.append(len(batch))
+        return batch
+
+    source = arrow.convert(pa.table({"id": [1, 2, 3]}), namespace="pipeline", offset=0)
+    outputs = list(
+        arrow.process(
+            (source,),
+            preprocessor=(split, inspect),
+            strata=Strata.validate,
+            schema=None,
+            encoding_context={},
+        )
+    )
+
+    assert calls == [1, 2]
+    assert [batch.data["id"].to_pylist() for batch in outputs] == [[1], [2, 3]]
+
+
+def test_dataset_scope_materializes_at_its_ordered_pipeline_stage():
+    calls: list[tuple[str, int]] = []
+
+    @rf.preprocess
+    def before(batch: rf.Batch) -> rf.Batch:
+        calls.append(("before", len(batch)))
+        return batch.replace(batch.data.append_column("ready", pa.repeat(True, len(batch))))
+
+    @rf.preprocess(scope="dataset", requires=("ready",))
+    def global_order(batch: rf.Batch) -> rf.Batch:
+        calls.append(("global", len(batch)))
+        return batch
+
+    @rf.preprocess
+    def after(batch: rf.Batch) -> rf.Batch:
+        calls.append(("after", len(batch)))
+        return batch
+
+    sources = (
+        arrow.convert(pa.table({"id": [1, 2]}), namespace="pipeline", offset=0),
+        arrow.convert(pa.table({"id": [3, 4, 5]}), namespace="pipeline", offset=2),
+    )
+    outputs = list(
+        arrow.process(
+            sources,
+            preprocessor=(before, global_order, after),
+            strata=Strata.validate,
+            schema=None,
+            encoding_context={},
+        )
+    )
+
+    assert calls == [("before", 2), ("before", 3), ("global", 5), ("after", 5)]
+    assert len(outputs) == 1
+    assert outputs[0].data["id"].to_pylist() == [1, 2, 3, 4, 5]
+
+
+def test_callable_source_rejects_dataset_scope_anywhere_in_pipeline():
+    @rf.preprocess
+    def local(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    @rf.preprocess(scope="dataset")
+    def global_order(batch: rf.Batch) -> rf.Batch:
+        return batch
+
+    def source():
+        yield pa.record_batch({"id": [1]})
+
+    with pytest.raises(NotImplementedError, match="dataset-scoped preprocessing"):
+        rf.ArrowDataModule(model=model(), validate=source, preprocessor=(local, global_order), shuffle=False)
+
+
 def test_training_shuffle_is_reproducible_and_changes_by_epoch(monkeypatch: pytest.MonkeyPatch):
     source = pa.table({"id": list(range(32))})
     first = rf.ArrowDataModule(model=model(8), train=source, seed=7).train_dataloader().dataset

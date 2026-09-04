@@ -55,18 +55,30 @@ def test_writer_persists_the_written_arrow_batch_and_identity(tmp_path):
     assert writer.writer is None
 
 
-def test_writer_applies_one_arrow_postprocessor_before_persistence(tmp_path):
+def test_writer_applies_arrow_postprocessors_in_order_before_persistence(tmp_path):
     calls = []
 
-    @rf.postprocess
+    @rf.postprocess(requires=("inputs", "predictions"), produces=("request_id", "score"))
     def compact(batch: rf.Batch) -> rf.Batch:
-        calls.append(batch)
+        calls.append("compact")
         predictions = batch.data["predictions"]
         return batch.replace(
             pa.table(
                 {
                     "request_id": pc.struct_field(batch.data["inputs"], "request_id"),
                     "score": pc.struct_field(predictions, "score"),
+                }
+            )
+        )
+
+    @rf.postprocess(requires=("request_id", "score"), produces=("request_id", "review"))
+    def decide(batch: rf.Batch) -> rf.Batch:
+        calls.append("decide")
+        return batch.replace(
+            pa.table(
+                {
+                    "request_id": batch.data["request_id"],
+                    "review": pc.greater_equal(batch.data["score"], 0.5),
                 }
             )
         )
@@ -79,15 +91,45 @@ def test_writer_applies_one_arrow_postprocessor_before_persistence(tmp_path):
             }
         )
     )
-    writer = Writer(tmp_path, postprocessor=compact)
+    writer = Writer(tmp_path, postprocessor=[compact, decide])
 
     write(writer, output)
     writer.close()
 
-    assert calls == [output]
+    assert calls == ["compact", "decide"]
+    assert writer.postprocessors == (compact, decide)
     table = pq.read_table(tmp_path / "rank-0.parquet")
-    assert table.column_names == ["identity", "request_id", "score"]
-    assert table.select(["request_id", "score"]).to_pylist() == [{"request_id": "a", "score": 0.5}]
+    assert table.column_names == ["identity", "request_id", "review"]
+    assert table.select(["request_id", "review"]).to_pylist() == [{"request_id": "a", "review": True}]
+
+
+def test_writer_stops_after_a_middle_postprocessor_breaks_identity(tmp_path):
+    calls = []
+
+    @rf.postprocess
+    def first(batch: rf.Batch) -> rf.Batch:
+        calls.append("first")
+        return batch
+
+    @rf.postprocess
+    def reorder(batch: rf.Batch) -> rf.Batch:
+        calls.append("reorder")
+        return batch.take(pa.array([1, 0], type=pa.int64())).replace(batch.data)
+
+    @rf.postprocess
+    def last(batch: rf.Batch) -> rf.Batch:
+        calls.append("last")
+        return batch
+
+    writer = Writer(tmp_path, postprocessor=(first, reorder, last))
+    output = result(pa.table({"score": [0.25, 0.75]}))
+
+    with pytest.raises(ValueError, match="postprocessor 'reorder'.*preserve Batch identity"):
+        write(writer, output)
+
+    assert calls == ["first", "reorder"]
+    assert writer.writer is None
+    assert not list(tmp_path.glob("*.parquet"))
 
 
 def test_writer_locks_the_exact_first_batch_schema_and_closes_on_drift(tmp_path):

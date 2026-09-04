@@ -98,26 +98,31 @@ run. See
 | `PolarsDataModule` | Convert collected Polars frames once and delegate to Arrow. | [Data Modules](../guides/data-modules.qmd) |
 | `CustomDataModule` | Convert bounded `IterableDataset` mapping groups to Arrow. | [Data Modules](../guides/data-modules.qmd) |
 | `SyntheticDataModule` | Convert bounded restartable mapping generators to Arrow. | [Data Modules](../guides/data-modules.qmd) |
-| `preprocess`, `Preprocessor` | Transform zero, one, or many Arrow batches before model binding, including dynamic mask selectors. | [Binding Data](../core-concepts/binding-data.qmd), [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) |
-| `postprocess`, `Postprocessor` | Reshape same-row Arrow prediction output. | [Postprocessors](../guides/postprocessors.qmd) |
+| `preprocess`, `Preprocessor` | Define one stage in an ordered Arrow input pipeline, including dynamic mask selectors. | [Binding Data](../core-concepts/binding-data.qmd), [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) |
+| `postprocess`, `Postprocessor` | Define one stage in an ordered, same-row Arrow output pipeline. | [Postprocessors](../guides/postprocessors.qmd) |
 
 `PreprocessorProvider` describes the optional `strata`, `schema`, and
 `encoding_context` names that the pipeline can inject after `batch`. All other
 keyword-only parameters are bound by users with `.partial(...)`.
+Both decorators accept top-level `requires=(...)` and `produces=(...)`
+declarations. Processor arguments accept a decorated singleton, list, tuple,
+or `None`, normalize it to an immutable tuple, and execute it left to right.
+RelFlow validates declared columns at every stage and never topologically sorts
+the tuple.
 
 ### Direct model data methods
 
 ```python
 encoded = model.encode(
     batch,
-    preprocess=None,
+    preprocess=(normalize, derive),
     strata="predict",
 )
 
 result = model.predict(
     batch,
-    preprocess=None,
-    postprocess=None,
+    preprocess=(normalize, derive),
+    postprocess=(flatten, decide),
     retain=(),
 )
 ```

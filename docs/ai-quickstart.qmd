@@ -153,7 +153,10 @@ A preprocessor is part of the Arrow input contract:
 import pyarrow as pa
 import pyarrow.compute as pc
 
-@rf.preprocess
+@rf.preprocess(
+    requires=("tier", "items"),
+    produces=("customer_tier", "line_items"),
+)
 def normalize_order(batch: rf.Batch) -> rf.Batch:
     tier = pc.utf8_lower(pc.utf8_trim_whitespace(batch.data["tier"]))
     data = pa.table(
@@ -168,7 +171,10 @@ def normalize_order(batch: rf.Batch) -> rf.Batch:
 A postprocessor is part of the application output contract:
 
 ```python
-@rf.postprocess
+@rf.postprocess(
+    requires=("predictions",),
+    produces=("returned",),
+)
 def response(batch: rf.Batch) -> rf.Batch:
     predictions = batch.data["predictions"]
     returned = pc.struct_field(predictions, "order/returned")
@@ -178,8 +184,12 @@ def response(batch: rf.Batch) -> rf.Batch:
     )
 ```
 
-Pass the same preprocessor through training and inference. Keep the stable,
-typed model output intact until the postprocessor boundary. See
+Each processor argument accepts a decorated singleton, list, tuple, or `None`
+and snapshots it as an immutable tuple. A multi-stage pipeline runs strictly
+left to right; `requires` and `produces` validate each boundary but never
+reorder it. Pass the same ordered preprocessor tuple through training and
+inference. Keep the stable, typed model output intact until the first
+postprocessor stage. See
 [Data Flow](core-concepts/data-flow.qmd) and
 [Postprocessors](guides/postprocessors.qmd).
 

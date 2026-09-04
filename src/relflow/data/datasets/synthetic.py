@@ -10,7 +10,7 @@ import pyarrow as pa
 import relflow
 from relflow.data.datasets.arrow import ArrowDataModule, ArrowStream, Retain
 from relflow.data.datasets.custom import adapt, schemas
-from relflow.data.processors import Preprocessor
+from relflow.data.processors import PreprocessorInput
 from relflow.structs.enums import Strata
 
 Generator: TypeAlias = Callable[[], Iterator[Mapping[str, Any]]]
@@ -29,7 +29,7 @@ class SyntheticDataModule(ArrowDataModule):
         predict: Generator | None = None,
         arrow_schema: pa.Schema | Mapping[Strata | str, pa.Schema] | None = None,
         ingress_rows: int = 4096,
-        preprocessor: Preprocessor | None | Mapping[Strata | str, Preprocessor | None] = None,
+        preprocessor: PreprocessorInput | Mapping[Strata | str, PreprocessorInput] = (),
         seed: int = 0,
         shuffle: bool | None | Mapping[Strata | str, bool | None] = None,
         sample: float | Mapping[Strata | str, float] = 1.0,

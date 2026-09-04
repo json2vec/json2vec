@@ -27,9 +27,10 @@ from relflow.architecture.mutations import (
     SchemaEditor,
     immutable,
 )
-from relflow.architecture.runtime import ModelRuntime, Postprocessor, PredictionInput, Preprocessor, Retain, step
+from relflow.architecture.runtime import ModelRuntime, PredictionInput, Retain, step
 from relflow.data.arrow import Batch, Encoded
 from relflow.data.datasets.base import EncodedInput
+from relflow.data.processors import PostprocessorInput, PreprocessorInput
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata
 from relflow.structs.experiment import (
@@ -537,7 +538,7 @@ class Model(lit.LightningModule, Renderable):
     def encode(
         self,
         batch: Batch | pa.Table | pa.RecordBatch,
-        preprocess: Preprocessor | None = None,
+        preprocess: PreprocessorInput = (),
         strata: Strata | str = Strata.predict,
         seed: int = 0,
         epoch: int = 0,
@@ -556,8 +557,8 @@ class Model(lit.LightningModule, Renderable):
     def predict(
         self,
         batch: PredictionInput,
-        preprocess: Preprocessor | None = None,
-        postprocess: Postprocessor | None = None,
+        preprocess: PreprocessorInput = (),
+        postprocess: PostprocessorInput = (),
         retain: Retain = (),
     ) -> pa.Table:
         """Predict one Arrow input unit and return a typed Arrow table."""

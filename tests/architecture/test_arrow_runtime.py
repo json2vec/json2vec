@@ -238,6 +238,60 @@ def test_predict_runs_arrow_preprocessor_and_postprocessor_once():
     assert result.to_pydict() == {"prepared": [2.0, 4.0]}
 
 
+def test_predict_runs_postprocessors_in_order():
+    calls = []
+
+    @rf.postprocess(requires=("inputs",), produces=("prepared",))
+    def project(batch: rf.Batch) -> rf.Batch:
+        calls.append("project")
+        values = pc.struct_field(batch.data["inputs"], "value")
+        return batch.replace(pa.table({"prepared": values}))
+
+    @rf.postprocess(requires=("prepared",), produces=("doubled",))
+    def double(batch: rf.Batch) -> rf.Batch:
+        calls.append("double")
+        return batch.replace(pa.table({"doubled": pc.multiply(batch.data["prepared"], 2)}))
+
+    result = model().predict(
+        pa.table({"value": [1.0, 2.0]}),
+        postprocess=[project, double],
+        retain=("value",),
+    )
+
+    assert calls == ["project", "double"]
+    assert result.to_pydict() == {"doubled": [2.0, 4.0]}
+
+
+def test_predict_snapshots_postprocessors_before_preprocessing():
+    calls: list[str] = []
+
+    @rf.postprocess
+    def first(batch: rf.Batch) -> rf.Batch:
+        calls.append("first")
+        return batch
+
+    @rf.postprocess
+    def late(batch: rf.Batch) -> rf.Batch:
+        calls.append("late")
+        return batch
+
+    configured = [first]
+
+    @rf.preprocess
+    def mutate(batch: rf.Batch) -> rf.Batch:
+        configured.append(late)
+        return batch
+
+    model().predict(
+        pa.table({"value": [1.0]}),
+        preprocess=mutate,
+        postprocess=configured,
+    )
+
+    assert configured == [first, late]
+    assert calls == ["first"]
+
+
 def test_predict_restores_training_mode_after_inference():
     configured = model()
     configured.train()

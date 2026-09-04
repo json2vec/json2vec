@@ -88,7 +88,7 @@ schema rather than a tuning override.
 
 | Option | Meaning |
 | --- | --- |
-| `preprocessor` | One Arrow `Batch` transform, or one per split |
+| `preprocessor` | One Arrow `Batch` transform, an ordered collection, or one such value per split |
 | `retain` | Processed top-level columns copied into prediction `inputs` |
 | `seed` | Root seed for sampling, shuffling, and uniform mask selection |
 | `shuffle` | Train defaults to `True`; other splits default to `False` |
@@ -334,9 +334,10 @@ The function is called for every new source pass. The module's `seed` controls
 RelFlow sampling and shuffling; it does not seed your generator. Seed a
 stochastic generator internally if you need identical values across restarts.
 
-## Add A Preprocessor
+## Add A Preprocessor Pipeline
 
-Every module accepts the same `Preprocessor`:
+Every module accepts one decorated `Preprocessor`, a list, a tuple, or `None`.
+The module snapshots each configured value as an immutable ordered tuple:
 
 ```python
 import pyarrow.compute as pc
@@ -345,10 +346,25 @@ import pyarrow.compute as pc
     requires=("amount",),
     produces=("amount_log",),
 )
-def prepare(batch: rf.Batch) -> rf.Batch:
+def logarithm(batch: rf.Batch) -> rf.Batch:
     values = pc.ln(pc.add(pc.cast(batch.data["amount"], pa.float64()), 1.0))
     data = batch.data.append_column("amount_log", values)
     return batch.replace(data)
+
+@rf.preprocess(
+    requires=("amount_log",),
+    produces=("amount_log",),
+)
+def cap(batch: rf.Batch, *, maximum: float) -> rf.Batch:
+    values = pc.if_else(
+        pc.greater(batch.data["amount_log"], maximum),
+        maximum,
+        batch.data["amount_log"],
+    )
+    index = batch.data.schema.get_field_index("amount_log")
+    return batch.replace(batch.data.set_column(index, "amount_log", values))
+
+prepare = (logarithm, cap.partial(maximum=12.0))
 
 data = rf.ArrowDataModule(
     model=model,
@@ -358,10 +374,22 @@ data = rf.ArrowDataModule(
 )
 ```
 
-Use a per-split mapping only when the transform genuinely differs:
+Stages run strictly left to right. Before each stage, `requires` is checked
+against its actual input columns; after each stage, `produces` is checked on
+every emitted batch. RelFlow does not reorder stages. A partition-scoped stage
+flat-maps its outputs into the next stage. A dataset-scoped stage materializes
+all upstream outputs at its exact pipeline position before downstream stages
+resume.
+
+Use a per-split mapping only when the pipeline genuinely differs. Each mapping
+value independently accepts a singleton, list, tuple, or `None`:
 
 ```python
-preprocessor={"train": augment, "validate": prepare, "predict": prepare}
+preprocessor={
+    "train": (*prepare, augment),
+    "validate": prepare,
+    "predict": prepare,
+}
 ```
 
 Ordinary feature preparation should be identical across train, validation, and
@@ -412,8 +440,8 @@ loader; explicitly requesting an unconfigured split through
 When ingestion fails, inspect boundaries in this order:
 
 1. print `table.schema` and confirm nested field names and physical types;
-2. run the preprocessor once through the data module and confirm one exact
-   output schema across chunks;
+2. run each preprocessor stage in order, confirm its declared outputs, and
+   confirm one exact final pipeline schema across chunks;
 3. verify the model's direct bindings and `query` roots exist after
    preprocessing;
 4. set `shuffle=False` temporarily when investigating row identity or order;

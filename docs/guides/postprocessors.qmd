@@ -12,7 +12,7 @@ table an application actually wants. It receives and returns `rf.Batch`:
 
 ```python
 @rf.postprocess
-def output(batch: rf.Batch) -> rf.Batch:
+def reshape(batch: rf.Batch) -> rf.Batch:
     ...
 ```
 
@@ -30,8 +30,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import relflow as rf
 
-@rf.postprocess
-def warehouse(batch: rf.Batch, *, review_at: float) -> rf.Batch:
+@rf.postprocess(
+    requires=("inputs", "predictions"),
+    produces=("request_id", "fraud", "fraud_probability"),
+)
+def warehouse(batch: rf.Batch) -> rf.Batch:
     inputs = batch.data["inputs"]
     predictions = batch.data["predictions"]
     fraud = pc.struct_field(predictions, "record/fraud")
@@ -43,22 +46,61 @@ def warehouse(batch: rf.Batch, *, review_at: float) -> rf.Batch:
             "request_id": pc.struct_field(inputs, "request_id"),
             "fraud": pc.struct_field(content, "value"),
             "fraud_probability": probability,
-            "send_to_review": pc.greater_equal(probability, review_at),
         }
     )
     return batch.replace(table)
 
-postprocessor = warehouse.partial(review_at=0.8)
+@rf.postprocess(
+    requires=("fraud_probability",),
+    produces=("send_to_review",),
+)
+def review(batch: rf.Batch, *, threshold: float) -> rf.Batch:
+    selected = pc.greater_equal(batch.data["fraud_probability"], threshold)
+    return batch.replace(batch.data.append_column("send_to_review", selected))
+
+review_stage = review.partial(threshold=0.8)
+output = (warehouse, review_stage)
 
 result = model.predict(
     requests,
     retain=("request_id",),
-    postprocess=postprocessor,
+    postprocess=output,
 )
 ```
 
 `result` is the replacement `pyarrow.Table`, not a Python mapping and not the
-original `inputs` / `predictions` envelope.
+original `inputs` / `predictions` envelope. `warehouse` runs first and replaces
+that envelope; `review` then reads the column declared and returned by
+`warehouse`.
+
+## Build An Ordered Pipeline
+
+Every postprocessor argument accepts one decorated postprocessor, a list, a
+tuple, or `None`. RelFlow snapshots the value as an immutable tuple:
+
+| Supplied value | Canonical pipeline |
+| --- | --- |
+| `None` | `()` |
+| `warehouse` | `(warehouse,)` |
+| `[warehouse, review_stage]` | `(warehouse, review_stage)` |
+| `(warehouse, review_stage)` | `(warehouse, review_stage)` |
+
+Only objects returned by `@rf.postprocess` are accepted. Execution is strictly
+left to right; RelFlow never topologically sorts stages. Prefer a tuple for a
+pipeline reused by interactive prediction, a writer, and deployment.
+
+`@rf.postprocess` accepts the same top-level `requires` and `produces`
+declarations as `@rf.preprocess`. Before each stage, RelFlow checks that its
+declared requirements exist in the actual input table. Afterward, it checks
+that every declared output exists. Reversing `(warehouse, review_stage)` therefore
+fails because `fraud_probability` does not exist before `warehouse` creates it.
+Declarations validate composition; they do not preserve columns, infer what
+Python code reads, or reorder the pipeline.
+
+The canonical prediction envelope is assembled before the first stage. Thus
+the first postprocessor can require `predictions` and, when `retain` is not
+empty, `inputs`. A later stage sees exactly the table returned by its
+predecessor.
 
 ## The Same-Row Contract
 
@@ -72,7 +114,7 @@ A postprocessor may:
 - redact inputs or predictions;
 - replace the canonical envelope completely.
 
-It may **not**:
+No stage may:
 
 - filter rows;
 - reorder rows;
@@ -81,10 +123,12 @@ It may **not**:
 - return a bare `pa.Table`;
 - return a zero-column table.
 
-Return `batch.replace(table)`. RelFlow validates that the result has the same
-row count and identity. Preserving value order is also part of your contract:
-`replace` cannot discover that arbitrary user code reordered values before
-constructing a same-length table.
+Return `batch.replace(table)`. After every stage, RelFlow validates the same row
+count, the same identity, and at least one Arrow column. This identifies the
+stage that violated the contract instead of allowing a later transform to hide
+it. Preserving value order is also part of your contract: `replace` cannot
+discover that arbitrary user code reordered values before constructing a
+same-length table.
 
 If a row-changing operation should affect model execution, put it in a
 preprocessor and use `batch.filter`, `order`, `expand`, `explode`, or `group`.
@@ -145,7 +189,10 @@ The first argument must be named `batch`. Every additional parameter is
 keyword-only and user-owned. Configure it immutably with `.partial(...)`:
 
 ```python
-@rf.postprocess
+@rf.postprocess(
+    requires=("predictions",),
+    produces=("queue", "score", "selected"),
+)
 def decide(
     batch: rf.Batch,
     *,
@@ -237,15 +284,16 @@ Tie behavior in that example treats a tied `valued` score as valued. If ties
 matter, define a deterministic policy explicitly. Do not treat `inferred` as a
 confidence score; it records whether input was masked.
 
-## Install A Postprocessor
+## Install A Postprocessor Pipeline
 
-Interactive prediction uses `postprocess=`:
+Interactive prediction uses `postprocess=` with either one stage or an ordered
+collection:
 
 ```python
 result = model.predict(
     requests,
     retain=("request_id",),
-    postprocess=postprocessor,
+    postprocess=output,
 )
 ```
 
@@ -254,18 +302,18 @@ The Parquet callback uses `postprocessor=`:
 ```python
 writer = rf.Writer(
     "predictions",
-    postprocessor=postprocessor,
+    postprocessor=output,
 )
 ```
 
-In both cases it runs once on each already-written model batch. The writer then
-prepends protected identity and locks the first result's exact Arrow schema.
-Deployment runs the same postprocessor once per valid microbatch before its
-terminal JSON conversion.
+In both cases every stage runs once, in order, on each already-written model
+batch. The writer then prepends protected identity and locks the first result's
+exact Arrow schema. Deployment runs the same pipeline once per valid
+microbatch before its terminal JSON conversion.
 
 ## Schema Stability
 
-A postprocessor's exact Arrow schema is part of the consumer contract:
+The final postprocessor-pipeline Arrow schema is part of the consumer contract:
 
 - keep field names and order stable;
 - choose explicit physical types;
@@ -274,11 +322,11 @@ A postprocessor's exact Arrow schema is part of the consumer contract:
 - do not infer schema from the first non-empty prediction;
 - test one-row and multi-row inputs.
 
-`rf.Writer` uses the first batch to open its Parquet schema. A later field
+`rf.Writer` uses the first final pipeline result to open its Parquet schema. A later field
 addition, removal, reordering, or type change is an error; it is never silently
 cast through Python or Polars.
 
-## Testing A Postprocessor
+## Testing A Postprocessor Pipeline
 
 Test it through `Model.predict` for a true end-to-end contract:
 
@@ -286,7 +334,7 @@ Test it through `Model.predict` for a true end-to-end contract:
 result = model.predict(
     requests,
     retain=("request_id",),
-    postprocess=warehouse.partial(review_at=0.8),
+    postprocess=output,
 )
 
 assert result.column_names == [
@@ -300,12 +348,15 @@ assert result.schema.field("fraud").type == pa.large_string()
 assert result.schema.field("fraud_probability").type == pa.float32()
 ```
 
-Also test typed empty output if your source can be empty and an order-sensitive
-identifier column so an accidental reorder cannot hide behind equal row count.
+Also test each stage directly, the complete tuple, typed empty output if your
+source can be empty, and an order-sensitive identifier column so an accidental
+reorder cannot hide behind equal row count.
 
 ## Common Mistakes
 
 - Forgetting to name a needed source column in `retain`.
+- Reversing stages and expecting RelFlow to infer dependency order.
+- Declaring `produces=("score",)` but returning a table without `score`.
 - Returning `pa.Table` instead of `batch.replace(table)`.
 - Filtering inside the postprocessor.
 - Calling `.to_pylist()` merely to rename or select fields.

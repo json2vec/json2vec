@@ -527,13 +527,16 @@ amount=rf.Number(
 
 Attach the processor with `preprocessor=prepare` on a data module,
 `preprocess=prepare` on `model.encode`/`model.predict`, and
-`.preprocess(prepare)` on a deployment. The same function should normally serve
-training, batch inference, and online inference to avoid skew.
+`.preprocess(prepare)` on a deployment. `prepare` may be one decorated
+processor, a list, a tuple, or `None`; a collection runs strictly left to right
+after normalization to an immutable tuple. The same ordered pipeline should
+normally serve training, batch inference, and online inference to avoid skew.
 
 Preprocessing runs before mask resolution and, in an `ArrowDataModule`, before
 sampling, shuffling, and model rebatching. `requires` and `produces` name
 top-level Arrow columns. A nested edit therefore declares the containing branch
-column, such as `produces=("events",)`.
+column, such as `produces=("events",)`. They are checked at each pipeline stage
+but never used to reorder stages.
 
 See [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) for
 complete Arrow and Awkward recipes covering nested selectors, exact counts,

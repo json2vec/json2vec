@@ -208,8 +208,8 @@ together:
 | Artifact | Why it must stay aligned |
 | --- | --- |
 | RelFlow checkpoint | Owns schema, tensorfield state, and weights. |
-| Preprocessor code and bound values | Produces the model-facing observation shape. |
-| Postprocessor code | Defines the external response or warehouse schema. |
+| Preprocessor code, order, declarations, scopes, and bound values | Produces the model-facing observation shape. |
+| Postprocessor code, order, declarations, and bound values | Defines the external response or warehouse schema. |
 | Package and Python versions | Determine checkpoint and runtime compatibility. |
 | Validation report | Records the split, metric, threshold, and selection rule. |
 | Serving configuration | Records device, batching, and any startup schema updates. |
@@ -245,6 +245,12 @@ For a stronger release check, keep fixed representative inputs and assert the
 documented output contract. Avoid asserting exact floating-point scores across
 hardware unless deterministic equivalence is a requirement.
 
+Processor arguments normalize a singleton, list, tuple, or `None` to an
+immutable ordered tuple. Persist the ordered names and each stage's
+`requires`/`produces` declarations with release metadata; the same functions in
+a different order are a different contract. RelFlow validates dependencies but
+does not sort the pipeline.
+
 ## Common Failures
 
 | Symptom | Likely cause or next check |
@@ -252,7 +258,7 @@ hardware unless deterministic equivalence is a requirement.
 | `missing schema in checkpoint` | The file is a generic or weights-only PyTorch checkpoint, not a full RelFlow artifact. |
 | Missing or unexpected state-dict keys | The runtime schema or package version differs from the saved artifact. |
 | A loaded model cannot fit | `Model.load` does not restore the optimizer factory; configure it before training. |
-| Predictions change after handoff | Pre/postprocessor code, thresholds, package version, or startup mutations differ. |
+| Predictions change after handoff | Processor order/code/bound values, package version, or startup mutations differ. |
 | Resume starts at epoch zero | A compact artifact was used, or the path was not passed as Lightning's `ckpt_path`. |
 | Lightning reports a weights-only unpickling error | Pass `weights_only=False` for a trusted full RelFlow checkpoint. |
 | Best checkpoint exists but final predictions are worse | Load `best_model_path` explicitly or use `RollbackCheckpoint`. |

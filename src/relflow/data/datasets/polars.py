@@ -7,7 +7,7 @@ from typing import Any
 
 import relflow
 from relflow.data.datasets.arrow import ArrowDataModule, Retain
-from relflow.data.processors import Preprocessor
+from relflow.data.processors import PreprocessorInput
 from relflow.structs.enums import Strata
 
 try:
@@ -31,7 +31,7 @@ class PolarsDataModule(ArrowDataModule):
         validate: pl.DataFrame | None = None,
         test: pl.DataFrame | None = None,
         predict: pl.DataFrame | None = None,
-        preprocessor: Preprocessor | None | Mapping[Strata | str, Preprocessor | None] = None,
+        preprocessor: PreprocessorInput | Mapping[Strata | str, PreprocessorInput] = (),
         seed: int = 0,
         shuffle: bool | None | Mapping[Strata | str, bool | None] = None,
         sample: float | Mapping[Strata | str, float] = 1.0,

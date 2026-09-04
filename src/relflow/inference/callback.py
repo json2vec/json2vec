@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 from lightning.pytorch import callbacks
 
 from relflow.data.arrow import Batch
-from relflow.data.processors import Postprocessor
+from relflow.data.processors import Postprocessor, PostprocessorInput, apply
 
 
 class Writer(callbacks.BasePredictionWriter):
@@ -20,19 +20,19 @@ class Writer(callbacks.BasePredictionWriter):
 
     ``Model.predict_step`` has already converted tensors into an
     identity-aligned :class:`~relflow.Batch`. The callback therefore does no
-    model writing, shape inference, or Python-row assembly. An optional Arrow
-    postprocessor runs once before the protected ``identity`` column is added.
-    The first result locks the exact Parquet schema for the rank.
+    model writing, shape inference, or Python-row assembly. Configured Arrow
+    postprocessors run in order before the protected ``identity`` column is
+    added. The first result locks the exact Parquet schema for the rank.
     """
 
     def __init__(
         self,
         path: os.PathLike[str] | str,
-        postprocessor: Postprocessor | None = None,
+        postprocessor: PostprocessorInput = (),
     ) -> None:
         super().__init__(write_interval="batch")
         self.path = Path(path)
-        self.postprocessor = Postprocessor.normalize(postprocessor)
+        self.postprocessors = Postprocessor.normalize(postprocessor)
         self.schema: pa.Schema | None = None
         self.writer: pq.ParquetWriter | None = None
 
@@ -52,7 +52,7 @@ class Writer(callbacks.BasePredictionWriter):
             if not isinstance(output, Batch):
                 raise TypeError(f"Writer requires predict_step to return an rf.Batch, got {type(output).__name__}")
 
-            result = self.postprocessor.run(output) if self.postprocessor is not None else output
+            result = apply(output, self.postprocessors)
             if "identity" in result.data.column_names:
                 raise ValueError("prediction output cannot use the reserved column name 'identity'")
 
