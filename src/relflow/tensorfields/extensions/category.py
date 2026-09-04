@@ -146,7 +146,6 @@ class Request(RequestBase):
         if self.topk is None:
             self.topk = []
 
-        # enforce uniqueness
         self.topk = sorted(set(self.topk))
 
         for topk in self.topk:

@@ -102,7 +102,7 @@ class CheckpointState:
         module.load_state_dict(state_dict=checkpoint["state_dict"])
         module.train(was_training)
         CheckpointState.restore_version(module, checkpoint)
-        module._reset_contracts()
+        module.reset_contracts()
 
     @staticmethod
     def load(model_cls: type["Model"], checkpoint: str | Path) -> "Model":

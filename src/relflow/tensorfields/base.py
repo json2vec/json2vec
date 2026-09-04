@@ -361,15 +361,15 @@ class TensorFieldBase(Renderable):
         yield heading
 
         if torch.is_tensor(state):
-            yield self._state_counts_text(state)
-            yield self._state_preview_text(state)
+            yield self.state_counts_text(state)
+            yield self.state_preview_text(state)
 
         if isinstance(targets, TensorDict) and targets.keys():
             text = Text(" targets=", style="dim")
             text.append(", ".join(str(key) for key in sorted(targets.keys(), key=str)), style="cyan")
             yield text
 
-    def _state_counts_text(self, state: torch.Tensor) -> Text:
+    def state_counts_text(self, state: torch.Tensor) -> Text:
         values = state.detach().reshape(-1).to(device="cpu", dtype=torch.int64)
         text = Text(" counts ", style="dim")
         for token in Tokens:
@@ -379,8 +379,8 @@ class TensorFieldBase(Renderable):
 
         return text
 
-    def _state_preview_text(self, state: torch.Tensor) -> Text:
-        preview = self._first_root_slice(state)
+    def state_preview_text(self, state: torch.Tensor) -> Text:
+        preview = self.first_root_slice(state)
         text = Text(" state ", style="dim")
 
         if preview.ndim <= 1:
@@ -414,7 +414,7 @@ class TensorFieldBase(Renderable):
 
         return text
 
-    def _first_root_slice(self, tensor: torch.Tensor) -> torch.Tensor:
+    def first_root_slice(self, tensor: torch.Tensor) -> torch.Tensor:
         values = tensor.detach().to(device="cpu")
         if values.ndim > 0:
             values = values[0]
@@ -449,7 +449,6 @@ class Extension:
         if not isinstance(name, str):
             raise TypeError("Extension name must be a string")
 
-        # should start with a letter and contain only lowercase letters, numbers, and underscores
         if not re.match(r"^[a-z0-9_]+$", name):
             raise ValueError("Extension name must consist of lowercase letters, numbers, and underscores only")
 
@@ -757,7 +756,6 @@ class Extension:
                 if not issubclass(obj, EmbedderBase):
                     raise TypeError("Embedder must be a subclass of EmbedderBase")
 
-                # confirm the init method is expecting schema and address
                 init_params = list(obj.__init__.__annotations__.keys())
                 if "schema" not in init_params or "address" not in init_params:
                     raise TypeError("Embedder __init__ method must accept 'schema' and 'address' parameters")

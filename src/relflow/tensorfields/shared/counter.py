@@ -20,8 +20,7 @@ class Counter(torch.nn.Module):
 
         self.size: int = size
 
-        # init with ones to avoid division by zero
-        # it doesn't matter much since we will normalize over time
+        # Seed each category so downstream normalizations are defined before observations.
         self.counts: torch.Tensor
         self._pending_counts: torch.Tensor
         self.register_buffer("counts", torch.ones(size, dtype=torch.int64))

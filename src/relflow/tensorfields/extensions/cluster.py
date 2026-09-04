@@ -51,7 +51,7 @@ _REVIVE_NOISE: float = 0.02
 _REVIVE_WARMUP: int = 1
 _OVERRIDE_LOCK: str = "cluster assignment overrides"
 
-_Assignment = int | torch.Tensor | list[float] | tuple[float, ...]
+Assignment = int | torch.Tensor | list[float] | tuple[float, ...]
 
 
 @cluster.register
@@ -81,7 +81,7 @@ class Request(RequestBase):
 
     @pydantic.field_validator("n_clusters", mode="before")
     @classmethod
-    def _broadcast_n_clusters(cls, value: Any) -> Any:
+    def broadcast_n_clusters(cls, value: Any) -> Any:
         if isinstance(value, int) and not isinstance(value, bool):
             return (value, value)
         return value
@@ -119,7 +119,7 @@ class Request(RequestBase):
         /,
     ) -> int:
         """Persistently assign one token to a cluster or cluster distribution."""
-        return _ClusterRuntime(model=model, address=address).assign(token, assignment)
+        return ClusterRuntime(model=model, address=address).assign(token, assignment)
 
     @classmethod
     def vocabulary(
@@ -133,7 +133,7 @@ class Request(RequestBase):
 
         normalized = Address(str(address))
         if isinstance(source, Model):
-            embedder = _resolve_cluster_embedder(source, normalized)
+            embedder = resolve_cluster_embedder(source, normalized)
             with embedder.vocab.lock:
                 return tuple(embedder.vocab.master)
         elif isinstance(source, Mapping):
@@ -161,7 +161,7 @@ class Request(RequestBase):
         /,
     ) -> dict[Any, dict[str, int | tuple[float, ...]]]:
         """Return evaluation-time assignments for every populated token."""
-        embedder = _resolve_cluster_embedder(model, address)
+        embedder = resolve_cluster_embedder(model, address)
         with embedder.vocab.lock:
             vocabulary = tuple(embedder.vocab.master)
             logits = embedder.embeddings[TensorKey.cluster.name].weight[: len(vocabulary)].detach().clone()
@@ -188,7 +188,7 @@ class Request(RequestBase):
         /,
     ) -> dict[str, tuple[int, ...] | tuple[float, ...]]:
         """Return committed cluster IDs and their usage EMA snapshot."""
-        embedder = _resolve_cluster_embedder(model, address)
+        embedder = resolve_cluster_embedder(model, address)
         committed = embedder.committed.detach().cpu().clone()
         usage = embedder.usage_ema.detach().cpu().clone()
 
@@ -206,7 +206,7 @@ class Request(RequestBase):
         /,
     ) -> AbstractContextManager[None]:
         """Temporarily override token assignments within a context."""
-        return _ClusterRuntime(model=model, address=address).override(assignments)
+        return ClusterRuntime(model=model, address=address).override(assignments)
 
 
 @cluster.register
@@ -419,7 +419,7 @@ class Embedder(EmbedderBase):
     def context(self) -> VocabularyState:
         return self.vocab.state
 
-    def _resolve_assignment(self, assignment: _Assignment) -> torch.Tensor:
+    def assignment_logits(self, assignment: Assignment) -> torch.Tensor:
         weight = self.embeddings[TensorKey.cluster.name].weight
         if isinstance(assignment, bool):
             raise TypeError("assignment must be a cluster index or probability vector")
@@ -441,8 +441,8 @@ class Embedder(EmbedderBase):
             raise ValueError(f"assignment probabilities must sum to 1; got {total}")
         return torch.log(distribution.clamp_min(1e-8))
 
-    def _assign(self, token: Any, assignment: _Assignment) -> int:
-        logits = self._resolve_assignment(assignment)
+    def assign_token(self, token: Any, assignment: Assignment) -> int:
+        logits = self.assignment_logits(assignment)
         weight = self.embeddings[TensorKey.cluster.name].weight
         index = self.vocab.state.index.get(token)
         if index is None:
@@ -454,59 +454,42 @@ class Embedder(EmbedderBase):
             weight[index].copy_(logits)
         return index
 
-    def _override(self, assignments: Mapping[Any, _Assignment]):
-        embedder = self
+    @contextmanager
+    def override_assignments(self, assignments: Mapping[Any, Assignment]) -> Iterator[None]:
+        if self._override_depth:
+            raise RuntimeError("Cluster assignment overrides cannot be nested")
 
-        class _Override:
-            def __enter__(self):
-                if embedder._override_depth:
-                    raise RuntimeError("Cluster assignment overrides cannot be nested")
-                embedder._override_depth += 1
-                weight = embedder.embeddings[TensorKey.cluster.name].weight
-                # (index, original_row, was_new_append) — LIFO on exit
-                self.saved: list[tuple[int, torch.Tensor, bool]] = []
-                try:
-                    for token, assignment in assignments.items():
-                        existing = embedder.vocab.state.index.get(token)
-                        if existing is not None:
-                            original = weight[existing].detach().clone()
-                            embedder._assign(token, assignment)
-                            self.saved.append((existing, original, False))
-                        else:
-                            if len(embedder.vocab.master) >= embedder.capacity:
-                                raise ValueError(
-                                    f"cluster field {embedder.origin} at capacity ({embedder.capacity}); "
-                                    f"cannot override {token!r}"
-                                )
-                            new_index = len(embedder.vocab.master)
-                            original = weight[new_index].detach().clone()
-                            embedder._assign(token, assignment)
-                            self.saved.append((new_index, original, True))
-                except BaseException:
-                    try:
-                        self._rollback()
-                    finally:
-                        embedder._override_depth -= 1
-                    raise
-                return None
+        self._override_depth += 1
+        weight = self.embeddings[TensorKey.cluster.name].weight
+        saved: list[tuple[int, torch.Tensor, bool]] = []
+        try:
+            for token, assignment in assignments.items():
+                existing = self.vocab.state.index.get(token)
+                if existing is not None:
+                    original = weight[existing].detach().clone()
+                    self.assign_token(token, assignment)
+                    saved.append((existing, original, False))
+                    continue
 
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                try:
-                    self._rollback()
-                finally:
-                    embedder._override_depth -= 1
-                return False
+                if len(self.vocab.master) >= self.capacity:
+                    raise ValueError(
+                        f"cluster field {self.origin} at capacity ({self.capacity}); cannot override {token!r}"
+                    )
+                new_index = len(self.vocab.master)
+                original = weight[new_index].detach().clone()
+                self.assign_token(token, assignment)
+                saved.append((new_index, original, True))
 
-            def _rollback(self):
-                weight = embedder.embeddings[TensorKey.cluster.name].weight
+            yield
+        finally:
+            try:
                 with torch.no_grad():
-                    for index, original, was_new in reversed(self.saved):
+                    for index, original, was_new in reversed(saved):
                         weight[index].copy_(original)
-                        if was_new and embedder.vocab.master:
-                            embedder.vocab.master.pop()
-                self.saved.clear()
-
-        return _Override()
+                        if was_new and self.vocab.master:
+                            self.vocab.master.pop()
+            finally:
+                self._override_depth -= 1
 
     def _save_to_state_dict(self, state_dict, prefix, keep_vars):  # ty:ignore[invalid-method-override]
         if self._override_depth:
@@ -531,7 +514,7 @@ def learn(
     embedder.counters[TensorKey.content.name].learn(observation[TensorKey.content])
 
 
-def _resolve_cluster_embedder(model: "Model", address: Address | str) -> Embedder:
+def resolve_cluster_embedder(model: "Model", address: Address | str) -> Embedder:
     """Resolve a live Cluster embedder without importing Model at module load."""
     from relflow.architecture.root import Model
 
@@ -548,15 +531,15 @@ def _resolve_cluster_embedder(model: "Model", address: Address | str) -> Embedde
     return embedder
 
 
-class _ClusterRuntime:
+class ClusterRuntime:
     """Resolve and mutate one Cluster field's model-owned runtime state."""
 
     def __init__(self, model: "Model", address: Address | str):
         self._model: ReferenceType[Model] = ref(model)
         self.address: Address = Address(str(address))
-        self._embedder()
+        self.resolve()
 
-    def _resolve(self) -> tuple[Model, Embedder]:
+    def resolve(self) -> tuple[Model, Embedder]:
         model = self._model()
         if model is None:
             raise RuntimeError("the model bound to this Cluster field no longer exists")
@@ -568,31 +551,28 @@ class _ClusterRuntime:
             raise TypeError(f"address {str(self.address)!r} is not a Cluster field (got {type(embedder).__name__})")
         return model, embedder
 
-    def _embedder(self) -> Embedder:
-        return self._resolve()[1]
-
     @staticmethod
-    def _assert_writable(model: Model, embedder: Embedder) -> None:
+    def assert_writable(model: Model, embedder: Embedder) -> None:
         if embedder.vocab.is_shared:
             raise RuntimeError("Cluster assignments cannot change while vocabulary state is shared")
         active = tuple(str(name) for name, count in model.locks.items() if count > 0)
         if active:
             raise RuntimeError(f"Cluster assignments cannot change while the model is active: {', '.join(active)}")
 
-    def assign(self, token: Any, assignment: _Assignment) -> int:
-        model, embedder = self._resolve()
+    def assign(self, token: Any, assignment: Assignment) -> int:
+        model, embedder = self.resolve()
         with embedder.vocab.lock:
-            self._assert_writable(model, embedder)
-            return embedder._assign(token, assignment)
+            self.assert_writable(model, embedder)
+            return embedder.assign_token(token, assignment)
 
     @contextmanager
-    def override(self, assignments: Mapping[Any, _Assignment]) -> Iterator[None]:
-        model, embedder = self._resolve()
+    def override(self, assignments: Mapping[Any, Assignment]) -> Iterator[None]:
+        model, embedder = self.resolve()
         with embedder.vocab.lock:
-            self._assert_writable(model, embedder)
+            self.assert_writable(model, embedder)
             model.locks[_OVERRIDE_LOCK] += 1
             try:
-                with embedder._override(assignments):
+                with embedder.override_assignments(assignments):
                     yield
             finally:
                 if model.locks[_OVERRIDE_LOCK] <= 1:
@@ -866,14 +846,14 @@ class ClusterReviveCallback(Callback):
         plans: dict[Address, dict[str, Any] | None] = {}
         if trainer.is_global_zero:
             for address, (embedder, _, request) in targets.items():
-                plans[address] = self._plan(embedder, request, epoch=epoch)
+                plans[address] = self.plan(embedder, request, epoch=epoch)
         plans = broadcast_object(plans, src=0)
 
         for address, (embedder, decoder, request) in targets.items():
-            self._apply(embedder, decoder, plans.get(address))
+            self.apply(embedder, decoder, plans.get(address))
 
     @staticmethod
-    def _plan(embedder: "Embedder", request: "Request", *, epoch: int) -> dict[str, Any] | None:
+    def plan(embedder: "Embedder", request: "Request", *, epoch: int) -> dict[str, Any] | None:
         dead = (~embedder.committed).nonzero(as_tuple=True)[0]
         n_dead = int(dead.numel())
         if n_dead == 0:
@@ -923,7 +903,7 @@ class ClusterReviveCallback(Callback):
         }
 
     @staticmethod
-    def _apply(embedder: "Embedder", decoder: "Decoder", plan: dict[str, Any] | None) -> None:
+    def apply(embedder: "Embedder", decoder: "Decoder", plan: dict[str, Any] | None) -> None:
         if plan is None:
             return
 
@@ -971,14 +951,14 @@ class ClusterMergeCallback(Callback):
         plans: dict[Address, dict[str, int] | None] = {}
         if trainer.is_global_zero:
             for address, (embedder, decoder, request) in targets.items():
-                plans[address] = self._plan(embedder, decoder, request)
+                plans[address] = self.plan(embedder, decoder, request)
         plans = broadcast_object(plans, src=0)
 
         for address, (embedder, decoder, _) in targets.items():
-            self._apply(embedder, decoder, plans.get(address))
+            self.apply(embedder, decoder, plans.get(address))
 
     @staticmethod
-    def _plan(embedder: "Embedder", decoder: "Decoder", request: "Request") -> dict[str, int] | None:
+    def plan(embedder: "Embedder", decoder: "Decoder", request: "Request") -> dict[str, int] | None:
         committed_idx = embedder.committed.nonzero(as_tuple=True)[0]
         n_committed = int(committed_idx.numel())
         lower = request.n_clusters[0]
@@ -1015,7 +995,7 @@ class ClusterMergeCallback(Callback):
         return {"loser": loser, "winner": winner}
 
     @staticmethod
-    def _apply(embedder: "Embedder", decoder: "Decoder", plan: dict[str, int] | None) -> None:
+    def apply(embedder: "Embedder", decoder: "Decoder", plan: dict[str, int] | None) -> None:
         if plan is None:
             return
 

@@ -230,7 +230,7 @@ class Model(lit.LightningModule, Renderable):
         self._contract_scheduler: ContractScheduler = ContractScheduler()
         self.output_plans: dict[Any, Any] = {}
 
-        self._build()
+        ModelGraph.install(self)
 
         logger.bind(
             component="model",
@@ -245,14 +245,7 @@ class Model(lit.LightningModule, Renderable):
         """RelFlow version associated with this model's checkpoint provenance."""
         return self._version
 
-    def _build(self) -> None:
-        ModelGraph.install(self)
-
-    def _rebuild(self) -> None:
-        ModelGraph.rebuild(self)
-        self._reset_contracts()
-
-    def _reset_contracts(self) -> None:
+    def reset_contracts(self) -> None:
         self._contract_generation += 1
         self._contract_scheduler.reset()
         self.output_plans.clear()

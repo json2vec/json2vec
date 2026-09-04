@@ -960,7 +960,7 @@ def test_revive_callback_warmup_caps_expected_revivals_at_one_per_epoch():
     n_dead = int((~embedder.committed).sum().item())
     assert n_dead == 11
 
-    # ``_apply`` sets ``usage_ema[k] = usage_ema[donor] * 0.5`` for each revived dead column,
+    # ``apply`` sets ``usage_ema[k] = usage_ema[donor] * 0.5`` for each revived dead column,
     # so counting non-zero entries after the callback is an exact proxy for revive count.
     revive_counts: list[int] = []
     module = _TrackingModule(structure, embedder, decoder)

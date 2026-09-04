@@ -253,7 +253,6 @@ class GlobalOnlineNormalizer(torch.nn.Module):
             new_mean = (1 - alpha) * self.mean + alpha * batch_mean
             new_var = (1 - alpha) * self.var + alpha * batch_var
 
-            # Commit updates
             self.mean = new_mean
             self.var = new_var
 
@@ -263,17 +262,14 @@ class GlobalOnlineNormalizer(torch.nn.Module):
         new_count = old_count + batch_count
 
         delta = batch_mean - self.mean
-
-        # New mean
+        # Merge sufficient statistics without retaining prior observations.
         new_mean = self.mean + delta * (batch_count / new_count)
 
-        # Variance update
         m_a = self.var * old_count
         m_b = batch_var * batch_count
         m_c = delta.pow(2) * old_count * batch_count / new_count
         new_var = (m_a + m_b + m_c) / new_count
 
-        # Commit
         self.mean = new_mean
         self.var = new_var
         self.count = new_count
@@ -368,10 +364,7 @@ class Embedder(EmbedderBase):
 
         content = self.clamp(content=content, state=state)
 
-        # weight inputs with buffers of precision bands
         weighted = content.unsqueeze(dim=1).mul(self.weights)
-
-        # apply sine and cosine functions to weighted inputs
         fourier = torch.cat([torch.sin(weighted), torch.cos(weighted)], dim=1)
 
         projection = torch.nn.functional.gelu(self.linear(fourier)).reshape(N, *dims, -1)

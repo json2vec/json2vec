@@ -11,7 +11,7 @@ OptimizerFactory = Callable[[torch.nn.Module], torch.optim.Optimizer]
 __all__ = ["OptimizerFactory", "adamw"]
 
 
-def _uses_weight_decay(
+def uses_weight_decay(
     name: str,
     parameter: Parameter,
     *,
@@ -50,7 +50,7 @@ def adamw(
             if not parameter.requires_grad:
                 continue
 
-            if _uses_weight_decay(
+            if uses_weight_decay(
                 name,
                 parameter,
                 decay_bias=decay_bias,

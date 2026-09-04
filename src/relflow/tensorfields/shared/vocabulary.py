@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from relflow.architecture.root import Model
 
 
-class _LocalLock:
+class LocalLock:
     """Pickle-friendly local lock used outside multiprocessing data workers."""
 
     def __init__(self) -> None:
@@ -48,7 +48,7 @@ class _LocalLock:
 
 
 @dataclass
-class _VocabularyStorage:
+class VocabularyStorage:
     master: list[Any] | ListProxy[Any]
     lock: Any
     proposals: list[Any] | ListProxy[Any]
@@ -58,9 +58,9 @@ class _VocabularyStorage:
 class VocabularyState:
     def __init__(
         self,
-        storage: _VocabularyStorage,
+        storage: VocabularyStorage,
         size: int,
-        share: Callable[[], _VocabularyStorage] | None = None,
+        share: Callable[[], VocabularyStorage] | None = None,
     ):
         self.storage = storage
         self.size: int = size
@@ -139,7 +139,7 @@ class VocabularyState:
 
         candidates: list[Any] = []
         seen: set[Any] = set()
-        for word in self._tokens(values):
+        for word in self.tokens(values):
             if word is None or word in self.index or word in seen:
                 continue
 
@@ -214,7 +214,7 @@ class VocabularyState:
         selected = pc.take(encoded, positions)
         return selected.to_numpy(zero_copy_only=False)
 
-    def _tokens(self, values: Any) -> Iterable[Any]:
+    def tokens(self, values: Any) -> Iterable[Any]:
         if values is None:
             return
 
@@ -224,7 +224,7 @@ class VocabularyState:
 
         if isinstance(values, Iterable):
             for value in values:
-                yield from self._tokens(value)
+                yield from self.tokens(value)
             return
 
         yield values
@@ -253,17 +253,17 @@ class OnlineVocabularyModel(torch.nn.Module):
         self.size: int = size
         self.manager: SyncManager | None = None
         self.master: list[Any] | ListProxy[Any] = []
-        self.lock: Any = _LocalLock()
+        self.lock: Any = LocalLock()
         self.proposals: list[Any] | ListProxy[Any] = []
-        self.proposal_lock: Any = _LocalLock()
+        self.proposal_lock: Any = LocalLock()
         self._snapshot_cache: list[Any] | None = None
         self._snapshot_size: int = -1
         self._labels_cache: pa.Array | None = None
         self._labels_source: list[Any] | None = None
 
     @property
-    def storage(self) -> _VocabularyStorage:
-        return _VocabularyStorage(
+    def storage(self) -> VocabularyStorage:
+        return VocabularyStorage(
             master=self.master,
             lock=self.lock,
             proposals=self.proposals,
@@ -296,15 +296,15 @@ class OnlineVocabularyModel(torch.nn.Module):
 
         manager = self.manager
         self.master = list(self.master)
-        self.lock = _LocalLock()
+        self.lock = LocalLock()
         self.proposals = []
-        self.proposal_lock = _LocalLock()
+        self.proposal_lock = LocalLock()
         self.manager = None
         self._snapshot_cache = None
         self._snapshot_size = -1
         manager.shutdown()
 
-    def _shared_state(self) -> _VocabularyStorage:
+    def shared_state(self) -> VocabularyStorage:
         self.share()
         return self.storage
 
@@ -346,7 +346,7 @@ class OnlineVocabularyModel(torch.nn.Module):
         return VocabularyState(
             storage=self.storage,
             size=self.size,
-            share=self._shared_state,
+            share=self.shared_state,
         )
 
     def snapshot(self) -> list[Any]:

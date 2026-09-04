@@ -53,7 +53,7 @@ class ModelGraph:
 
     @staticmethod
     def rebuild(module: "Model") -> None:
-        module.schema._clear_tree_caches()
+        module.schema.clear_tree_caches()
         was_training = module.training
         device = module.device
         previous = {

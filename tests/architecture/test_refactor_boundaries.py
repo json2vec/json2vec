@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import torch
 from lightning.pytorch.utilities.model_summary.model_summary import summarize
 from loguru import logger
@@ -9,6 +12,17 @@ from relflow.architecture.checkpoint import CheckpointState
 from relflow.architecture.graph import ModelGraph
 from relflow.architecture.mutations import SchemaEditor
 from relflow.structs import experiment, selectors
+
+FRAMEWORK_PROTOCOL_METHODS = frozenset(
+    {
+        "_load_from_state_dict",
+        "_mime_",
+        "_missing_",
+        "_repr_html_",
+        "_repr_mimebundle_",
+        "_save_to_state_dict",
+    }
+)
 
 
 def _model() -> rf.Model:
@@ -142,3 +156,21 @@ def test_experiment_reexports_selector_api() -> None:
     assert experiment.where is selectors.where
     assert experiment.NodePredicate is selectors.NodePredicate
     assert experiment.NodeAttribute is selectors.NodeAttribute
+
+
+def test_source_functions_and_classes_do_not_use_private_names() -> None:
+    source = Path(__file__).parents[2] / "src" / "relflow"
+    violations: list[str] = []
+
+    for path in sorted(source.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+                continue
+            if not node.name.startswith("_") or node.name.startswith("__"):
+                continue
+            if node.name in FRAMEWORK_PROTOCOL_METHODS:
+                continue
+            violations.append(f"{path.relative_to(source)}:{node.lineno}: {node.name}")
+
+    assert not violations, "private function/class names:\n" + "\n".join(violations)

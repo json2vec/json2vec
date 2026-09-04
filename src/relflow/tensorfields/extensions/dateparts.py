@@ -51,7 +51,6 @@ class DatePart(enum.StrEnum):
     def register(self, func: Callable[..., Any]) -> Callable[..., Any]:
         cls = type(self)
 
-        # Lazy initialization
         if not hasattr(cls, "REGISTRY"):
             cls.REGISTRY: dict[DatePart, Callable[..., Any]] = {}
 
@@ -71,16 +70,16 @@ class DatePart(enum.StrEnum):
         return func(*args, **kwargs)
 
 
-def _normalize_datepart_key(value: str) -> str:
+def normalize_datepart_key(value: str) -> str:
     value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", value.strip())
     value = re.sub(r"[^0-9A-Za-z]+", "_", value)
     return value.strip("_").casefold()
 
 
-def _datepart_lookup() -> dict[str, DatePart]:
+def datepart_lookup() -> dict[str, DatePart]:
     lookup: dict[str, DatePart] = {}
     for datepart in DatePart:
-        normalized = _normalize_datepart_key(datepart.value)
+        normalized = normalize_datepart_key(datepart.value)
         lookup[normalized] = datepart
         lookup[normalized.replace("_", "")] = datepart
 
@@ -88,7 +87,7 @@ def _datepart_lookup() -> dict[str, DatePart]:
 
 
 @DatePart.day_of_month.register
-def _(arr: np.ndarray) -> np.ndarray:
+def day_of_month(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 31
     month_start = arr.astype("datetime64[M]")
     value = (arr - month_start).astype("timedelta64[D]").astype(int) + 1
@@ -97,7 +96,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.day_of_year.register
-def _(arr: np.ndarray) -> np.ndarray:
+def day_of_year(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 366
     year_start = arr.astype("datetime64[Y]")
     value = (arr - year_start).astype("timedelta64[D]").astype(int) + 1
@@ -106,7 +105,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.month_of_year.register
-def _(arr: np.ndarray) -> np.ndarray:
+def month_of_year(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 12
     value = (arr.astype("datetime64[M]") - arr.astype("datetime64[Y]")).astype(int) + 1
     radians = 2 * np.pi * value / max_value
@@ -114,7 +113,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.week_of_year.register
-def _(arr: np.ndarray) -> np.ndarray:
+def week_of_year(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 53
     year_start = arr.astype("datetime64[Y]")
     value = ((arr.astype("datetime64[W]") - year_start.astype("datetime64[W]")).astype(int) + 1).astype(int)
@@ -123,7 +122,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.day_of_week.register
-def _(arr: np.ndarray) -> np.ndarray:
+def day_of_week(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 7
     value = (arr.astype("datetime64[D]").astype(int) + 4) % 7
     radians = 2 * np.pi * value / max_value
@@ -131,7 +130,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.week_of_month.register
-def _(arr: np.ndarray) -> np.ndarray:
+def week_of_month(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 6
     month_start = arr.astype("datetime64[M]")
     month_start_dow = (month_start.astype("datetime64[D]").astype(int) + 4) % 7
@@ -142,7 +141,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.hour_of_day.register
-def _(arr: np.ndarray) -> np.ndarray:
+def hour_of_day(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 24
     day_start = arr.astype("datetime64[D]")
     value = (arr - day_start).astype("timedelta64[h]").astype(int)
@@ -151,7 +150,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.minute_of_hour.register
-def _(arr: np.ndarray) -> np.ndarray:
+def minute_of_hour(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 60
     hour_start = arr.astype("datetime64[h]")
     value = (arr - hour_start).astype("timedelta64[m]").astype(int)
@@ -160,7 +159,7 @@ def _(arr: np.ndarray) -> np.ndarray:
 
 
 @DatePart.second_of_minute.register
-def _(arr: np.ndarray) -> np.ndarray:
+def second_of_minute(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     max_value = 60
     minute_start = arr.astype("datetime64[m]")
     value = (arr - minute_start).astype("timedelta64[s]").astype(int)
@@ -218,11 +217,11 @@ class Request(RequestBase):
 
     @pydantic.field_validator("dateparts", mode="before", check_fields=False)
     @classmethod
-    def _coerce_dateparts(cls, value: Any) -> Any:
+    def coerce_dateparts(cls, value: Any) -> Any:
         if not isinstance(value, (list, tuple)):
             return value
 
-        lookup = _datepart_lookup()
+        lookup = datepart_lookup()
         canonical = [datepart.value for datepart in DatePart]
         dateparts: list[DatePart] = []
         for item in value:
@@ -233,7 +232,7 @@ class Request(RequestBase):
             if not isinstance(item, str):
                 raise ValueError(f"datepart values must be strings, got {type(item).__name__}")
 
-            key = _normalize_datepart_key(item)
+            key = normalize_datepart_key(item)
             match = lookup.get(key) or lookup.get(key.replace("_", ""))
             if match is not None:
                 dateparts.append(match)

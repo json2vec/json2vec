@@ -20,7 +20,7 @@ from relflow.structs.selectors import (
     SchemaField,
     SelectionCacheEntry,
     SelectionKey,
-    _has_model_attribute,
+    has_model_attribute,
     predicate,
     where,
 )
@@ -243,7 +243,7 @@ class Schema(Node):
         self.fields.length = 1
         self.fields.overflow = Overflow.error
         self.fields.parent: Self = self
-        self._post_bind_validate()
+        self.post_bind_validate()
 
     @property
     def reconstruct(self) -> list[Address]:
@@ -325,7 +325,7 @@ class Schema(Node):
 
         return out
 
-    def _clear_tree_caches(self) -> None:
+    def clear_tree_caches(self) -> None:
         for name in ("branches", "requests", "active_requests", "shapes", "depthwise"):
             self.__dict__.pop(name, None)
 
@@ -351,7 +351,7 @@ class Schema(Node):
             for key, entry in self._selection_cache.items()
         }
 
-    def _post_bind_validate(self) -> None:
+    def post_bind_validate(self) -> None:
         for branch in self.branches.values():
             branch.post_bind_validate()
 
@@ -449,13 +449,13 @@ class Schema(Node):
         try:
             for node in nodes:
                 can_apply_extra = allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow"
-                missing = [name for name in values if not _has_model_attribute(node, name) and not can_apply_extra]
+                missing = [name for name in values if not has_model_attribute(node, name) and not can_apply_extra]
                 if missing and strict:
                     label = str(node.address) or node.name
                     raise AttributeError(f"{label} has no attribute(s): {missing}")
 
                 applicable_values = {
-                    name: value for name, value in values.items() if _has_model_attribute(node, name) or can_apply_extra
+                    name: value for name, value in values.items() if has_model_attribute(node, name) or can_apply_extra
                 }
 
                 if validate and applicable_values:
@@ -478,8 +478,8 @@ class Schema(Node):
                     if name in getattr(type(node), "model_fields", {}):
                         node.model_fields_set.add(name)
 
-            self._clear_tree_caches()
-            self._post_bind_validate()
+            self.clear_tree_caches()
+            self.post_bind_validate()
         except Exception:
             for node, name, original, was_set in reversed(snapshots):
                 if original is _MISSING:
@@ -492,7 +492,7 @@ class Schema(Node):
                         node.model_fields_set.add(name)
                     else:
                         node.model_fields_set.discard(name)
-            self._clear_tree_caches()
+            self.clear_tree_caches()
             self.refresh_selection_cache()
             raise
 
@@ -554,14 +554,14 @@ class Schema(Node):
             for field in new_fields:
                 field.parent = parent
 
-            self._clear_tree_caches()
-            self._post_bind_validate()
+            self.clear_tree_caches()
+            self.post_bind_validate()
         except Exception:
             parent.fields = original_fields
             for field in new_fields:
                 field.parent = None
-            self._clear_tree_caches()
-            self._post_bind_validate()
+            self.clear_tree_caches()
+            self.post_bind_validate()
             self.refresh_selection_cache()
             raise
 
@@ -613,8 +613,8 @@ class Schema(Node):
             parent.fields = [field for field in parent.fields if field is not node]
             node.parent = None
 
-        self._clear_tree_caches()
-        self._post_bind_validate()
+        self.clear_tree_caches()
+        self.post_bind_validate()
         self.refresh_selection_cache()
 
     @contextmanager
@@ -639,7 +639,7 @@ class Schema(Node):
             )
             for node in nodes
             for name in normalized_values
-            if _has_model_attribute(node, name)
+            if has_model_attribute(node, name)
             or (allow_extra and getattr(type(node), "model_config", {}).get("extra") == "allow")
         ]
 
@@ -669,8 +669,8 @@ class Schema(Node):
                         else:
                             node.model_fields_set.discard(name)
 
-            self._clear_tree_caches()
-            self._post_bind_validate()
+            self.clear_tree_caches()
+            self.post_bind_validate()
             self.refresh_selection_cache()
 
     def __rich_console__(self, console, options):
