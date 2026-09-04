@@ -77,7 +77,7 @@ problem occurred.
 | Loaded built-in model has different vocabulary or normalizer behavior | Wrong artifact or unsupported manual reconstruction | Load the saved RelFlow/Lightning checkpoint that owns schema state; do not reconstruct it from copied constructor code. Dynamically registered custom request types do not currently support artifact round-trips. |
 | Serving symbol import fails | Optional serving dependencies are absent | Install the `serving` extra in the service environment. |
 | Text construction/import fails | Optional tokenizer/model dependencies are absent | Install the `text` extra and pin the tokenizer/model artifact used in training. |
-| Workers or distributed Arrow loading raises | Deterministic worker/rank ownership is not implemented in the first Arrow release | Use one process with `num_workers=0`; do not bypass the guard. |
+| Arrow DataLoader workers raise | Deterministic worker ownership is not implemented | Use `num_workers=0`; distributed ranks are supported independently. |
 | Accelerator is idle | Input/preprocessor/query/tensorization or output serialization is the bottleneck | Benchmark preparation, forward, and writing separately; tune workers and output before scaling ranks. |
 | NaN/unstable loss | Invalid numeric input, aggressive optimizer, precision issue, or empty metric selection | Inspect raw/encoded values, lower learning rate, reproduce at full precision, and identify the exact address/content loss. |
 

@@ -387,10 +387,11 @@ The callable is invoked for each new pass and must return a fresh
 return a zero-batch `RecordBatchReader` with a declared schema or yield one
 typed empty unit; it must not erase its schema.
 
-The initial Arrow implementation keeps datasets and factories single-reader:
-use `num_workers=0`, one process, and no replacement sampling. Coordinated
-caches, distributed ownership, and exact replacement sampling are reserved
-until those paths can preserve the same deterministic identity contract.
+The Arrow implementation keeps datasets and factories single-reader per rank:
+use `num_workers=0` and no replacement sampling. Distributed ranks replay the
+same deterministic stream and receive disjoint rows; source-native rank scans,
+coordinated caches, and exact replacement sampling remain reserved until those
+paths can preserve the same deterministic identity contract.
 
 ## Schema And Null Checklist
 

@@ -21,7 +21,7 @@ from relflow.data.arrow import IDENTITY, Batch, matrix, mix
 from relflow.data.datasets.base import InterprocessEncodingContext
 from relflow.data.iterables import encode
 from relflow.data.processors import Preprocessor, PreprocessorInput
-from relflow.distributed import world_size
+from relflow.distributed import rank, world_size
 from relflow.structs.enums import Strata
 
 ArrowUnit: TypeAlias = Batch | pa.Table | pa.RecordBatch
@@ -353,6 +353,28 @@ def rebatch(batches: Iterable[Batch], *, size: int, drop_last: bool) -> Iterator
         yield held
 
 
+def distribute(
+    batches: Iterable[Batch],
+    *,
+    size: int,
+    global_rank: int,
+    world_size: int,
+    drop_last: bool,
+) -> Iterator[Batch]:
+    """Give every distributed rank disjoint batches with an equal step count."""
+
+    global_size = size * world_size
+    for item in rebatch(batches, size=global_size, drop_last=False):
+        if len(item) < global_size and drop_last:
+            return
+
+        usable = len(item) - len(item) % world_size
+        if not usable:
+            return
+        indices = pa.array(np.arange(global_rank, usable, world_size), type=pa.int64())
+        yield item.take(indices)
+
+
 class ArrowDataset(IterableDataset):
     """Feed one Arrow source through the shared model-input pipeline."""
 
@@ -396,10 +418,12 @@ class ArrowDataset(IterableDataset):
         epoch = self.epochs[self.strata] if self.strata == Strata.train else 0
         if self.strata == Strata.train:
             self.epochs[self.strata] += 1
+        global_rank = rank()
+        replicas = world_size()
         for field_context in self.encoding_context.values():
             configure = getattr(field_context, "configure_distributed", None)
             if callable(configure):
-                configure(global_rank=0, world_size=1)
+                configure(global_rank=global_rank, world_size=replicas)
 
         scanned: Iterable[Batch] = scan(
             self.source,
@@ -441,7 +465,13 @@ class ArrowDataset(IterableDataset):
                 )
             batches = limit(batches, size=self.epoch_size)
 
-        for item in rebatch(batches, size=self.batch_size, drop_last=self.drop_last):
+        for item in distribute(
+            batches,
+            size=self.batch_size,
+            global_rank=global_rank,
+            world_size=replicas,
+            drop_last=self.drop_last,
+        ):
             yield encode(
                 batch=item,
                 schema=self.schema,
@@ -507,10 +537,10 @@ class ArrowDataModule(lit.LightningDataModule):
     shuffling, and model rebatching. A callable source must create a fresh
     ``RecordBatchReader`` or Arrow-unit iterable for every iteration.
 
-    Arrow Datasets are scanned afresh for each iteration. Projection pushdown,
-    coordinated caches, DataLoader workers, and distributed scheduling are
-    intentionally deferred until they can preserve the same identity and
-    ordering guarantees as this single-reader implementation.
+    Arrow Datasets are scanned afresh for each iteration. Distributed ranks
+    replay the deterministic global stream and receive disjoint rows from equal
+    global superbatches. Projection pushdown, source-native rank scans,
+    coordinated caches, and DataLoader workers remain deferred.
     """
 
     def __init__(
@@ -655,11 +685,6 @@ class ArrowDataModule(lit.LightningDataModule):
             if not required:
                 return None
             raise ValueError(f"no source configured for strata: {normalized}")
-        if world_size() > 1:
-            raise NotImplementedError(
-                "distributed Arrow scheduling is deferred until stable rank ownership and equal-step tails are implemented"
-            )
-
         return loader(
             source=self.sources[normalized],
             schema=self.schema,

@@ -182,15 +182,17 @@ quality.
 
 ## Distributed Training
 
-::: {.callout-warning title="Current Arrow scheduler"}
-The first Arrow-native data module rejects multiple DataLoader workers and
-distributed world sizes. Stable worker/rank ownership, coordinated caches, and
-equal-step distributed schedules are deferred rather than approximated. Run
-with one process and `num_workers=0`.
+::: {.callout-note title="Current Arrow scheduler"}
+The Arrow-native data module supports distributed ranks by replaying one
+deterministic global stream on every rank and assigning disjoint rows from each
+global superbatch. This preserves equal step counts and stable ownership, but
+repeats source I/O and preprocessing on every rank. DataLoader workers and
+source-native distributed scans remain deferred. Use `num_workers=0`.
 :::
 
-Optimize and benchmark one Arrow reader first. Do not bypass the topology guard;
-duplicate observations or unequal optimizer steps can invalidate a speedup.
+Optimize and benchmark one Arrow reader first. Rank scheduling repeats source
+I/O and preprocessing, so measure those costs before attributing a multi-GPU
+speedup to model throughput.
 
 For an ordered preprocessor pipeline, time each stage separately as well as the
 complete tuple. A partition-scoped stage streams its outputs into the next;

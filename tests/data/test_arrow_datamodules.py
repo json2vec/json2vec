@@ -173,6 +173,85 @@ def test_arrow_pipeline_batches_without_materializing_rows(monkeypatch: pytest.M
     assert len(set(logical.to_pylist())) == 5
 
 
+@pytest.mark.parametrize(
+    ("drop_last", "expected_sizes", "expected_values"),
+    [
+        (False, [3, 2], set(range(20))),
+        (True, [3], set(range(12))),
+    ],
+)
+def test_distributed_batches_are_disjoint_and_have_equal_tails(drop_last, expected_sizes, expected_values):
+    source = arrow.convert(pa.table({"id": list(range(23))}), namespace="distributed", offset=0)
+    ranks = [
+        list(
+            arrow.distribute(
+                (source,),
+                size=3,
+                global_rank=global_rank,
+                world_size=4,
+                drop_last=drop_last,
+            )
+        )
+        for global_rank in range(4)
+    ]
+
+    assert [[len(batch) for batch in batches] for batches in ranks] == [expected_sizes] * 4
+    values = [{value for batch in batches for value in batch.data["id"].to_pylist()} for batches in ranks]
+    assert set().union(*values) == expected_values
+    assert sum(map(len, values)) == len(set().union(*values))
+
+
+def test_distributed_ownership_is_independent_of_arrow_batch_boundaries():
+    table = pa.table({"id": list(range(24))})
+
+    def assignments(sizes):
+        offset = 0
+        batches = []
+        for size in sizes:
+            batches.append(arrow.convert(table.slice(offset, size), namespace="distributed", offset=offset))
+            offset += size
+        return [
+            [
+                value
+                for batch in arrow.distribute(
+                    batches,
+                    size=3,
+                    global_rank=global_rank,
+                    world_size=4,
+                    drop_last=False,
+                )
+                for value in batch.data["id"].to_pylist()
+            ]
+            for global_rank in range(4)
+        ]
+
+    assert assignments([24]) == assignments([1, 7, 3, 13])
+
+
+def test_arrow_dataset_uses_distributed_rank_and_world_size(monkeypatch: pytest.MonkeyPatch):
+    configured = rf.Model(
+        id=rf.Category(size=32),
+        d_model=8,
+        n_layers=1,
+        n_heads=4,
+        batch_size=2,
+    )
+    module = rf.ArrowDataModule(
+        model=configured,
+        validate=pa.table({"id": ["a", "b", "c", "d", "e"]}),
+        shuffle=False,
+    )
+    monkeypatch.setattr(arrow, "rank", lambda: 1)
+    monkeypatch.setattr(arrow, "world_size", lambda: 2)
+
+    dataset = module.val_dataloader().dataset
+    batches = collect(dataset, monkeypatch)
+
+    assert [batch.data["id"].to_pylist() for batch in batches] == [["b", "d"]]
+    context = dataset.encoding_context[next(iter(dataset.encoding_context))]
+    assert context.global_rank == 1
+
+
 def test_arrow_dataset_source_scans_through_the_shared_pipeline(monkeypatch: pytest.MonkeyPatch):
     source = ds.dataset(pa.table({"id": list(range(5))}))
     module = rf.ArrowDataModule(model=model(), validate=source, shuffle=False)

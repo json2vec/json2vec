@@ -239,7 +239,7 @@ Support maturity differs by workflow:
 | --- | --- |
 | Built-in schema, training, persistence, and interactive/batch prediction | Covered by the repository test suite; pin a revision because no long-term compatibility window is published. |
 | Online serving | Provided and tested, but version-coupled and without an availability or compatibility guarantee. See [Online Serving](../guides/serving.qmd). |
-| Dataset and factory input | Arrow-native and currently single-process with `num_workers=0`; distributed ownership and coordinated caching are deferred. See [Data Modules](../guides/data-modules.qmd). |
+| Dataset and factory input | Arrow-native with deterministic distributed rank ownership and `num_workers=0`; source-native sharding and coordinated caching are deferred. See [Data Modules](../guides/data-modules.qmd). |
 | Custom tensorfields | Experimental extension surface; artifacts require the same extension registration and compatible code before loading. See [Experimental Custom Tensorfields](../guides/custom-tensorfields.qmd). |
 
 When upgrading:

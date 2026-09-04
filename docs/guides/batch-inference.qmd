@@ -196,10 +196,10 @@ ordered = with_keys.take(indices).drop(
 
 Do not use shard filename or modification time as global observation order.
 
-The current Arrow scheduler is single-process and requires `num_workers=0`;
-distributed ownership is deferred until it can guarantee disjoint, equal-step
-logical schedules. The rank-qualified file schema is already stable for that
-future extension.
+The Arrow scheduler supports distributed ranks and requires `num_workers=0`.
+Every rank replays the deterministic global stream and receives disjoint rows
+from equal global superbatches. Rank-qualified output files can be merged and
+restored to canonical order through the identity columns above.
 
 ## Choose Interactive Or Batch Prediction
 
@@ -267,7 +267,7 @@ this by declaring their Arrow type before the first prediction batch.
 - Read back the Parquet footer and row count after completion.
 - Preserve `identity` until downstream joins and canonical ordering are done.
 - Keep `return_predictions=False` for a write-only Lightning job.
-- Run with `num_workers=0` and one process in the current Arrow release.
+- Run with `num_workers=0`; distributed ranks use equal, disjoint schedules.
 
 See [Prediction Output](prediction-output.qmd) for the nested Arrow contract,
 [Postprocessors](postprocessors.qmd) for output shaping, and

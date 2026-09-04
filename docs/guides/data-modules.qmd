@@ -5,7 +5,7 @@ eval: false
 # Data Modules
 
 **Example status — reference:** snippets use the four shipped data modules and
-their current single-process Arrow contracts.
+their current Arrow contracts.
 
 RelFlow has one Arrow data engine and four ways to enter it:
 
@@ -219,21 +219,29 @@ non-Arrow source.
 
 ### Current source limits
 
-The first Arrow-native release supports in-memory Arrow, Dataset scans, and
-single-reader factories. These features fail explicitly until their identity
-and scheduling contracts are complete:
+The Arrow-native release supports in-memory Arrow, Dataset scans, single-reader
+factories, and deterministic distributed rank ownership. These features remain
+deferred until their identity and scheduling contracts are complete:
 
 - RelFlow-planned source projection pushdown (`requires` is validated metadata
   today, but the scanner currently reads the Dataset schema as supplied);
 - multiple DataLoader workers;
-- distributed rank scheduling;
+- source-native distributed scans;
 - coordinated caches;
 - replacement sampling;
 - dataset-scoped preprocessing of a factory.
 
-This means a Dataset or streaming source should use `num_workers=0` and one
-process for now. The failures are deliberate: silent
-duplication or ordering drift is worse than a clear capability error.
+Distributed ranks currently replay the same deterministic global stream, then
+take disjoint rows from each global superbatch. This guarantees equal step
+counts and stable ownership at the cost of repeated source I/O and
+preprocessing. Continue to use `num_workers=0`; the remaining failures are
+deliberate because silent duplication or ordering drift is worse than a clear
+capability error.
+
+Distributed `epoch_size` is the global row limit. With `drop_last=False`, each
+rank receives an equal final partial batch and fewer than `world_size` trailing
+rows may be omitted. With `drop_last=True`, the scheduler emits only complete
+global superbatches of `model.batch_size * world_size` rows.
 
 ## `PolarsDataModule`
 
