@@ -131,6 +131,7 @@ class Request(RequestBase):
     type: Literal["text"] = "text"
     model: Annotated[str, pydantic.Field(min_length=1)] = DEFAULT_TEXT_MODEL
     max_length: Annotated[int, pydantic.Field(gt=0, default=128)] = 128
+    tokenizer_batch_size: Annotated[int, pydantic.Field(gt=0, default=4096)] = 4096
     encoder_batch_size: Annotated[int, pydantic.Field(gt=0, default=32)] = 32
     encoder_pooling: Pooling = Pooling.cls
     objective: Objective = Objective.l2
@@ -182,33 +183,42 @@ class TensorField(TensorFieldBase):
         request: Request = schema.requests[address]
 
         def encode(field: RaggedField) -> TensorDict[str, torch.Tensor]:
+            length = request.max_length
+            size = math.prod(field.shape)
+            encoded_ids = np.zeros((size, length), dtype=np.int64)
+            encoded_mask = np.zeros((size, length), dtype=np.int64)
 
-            # converting arrow backed arrays to a pylist is an antipattern ...
-            # ... if you are using a large amount of textual data ...
-            # ... your performance is cooked anyways
-
-            values = field.values.to_pylist()
-            if values:
+            if len(field.values):
                 tokenizer = CachedModel.get_tokenizer(request.model)
-                encoded = tokenizer(
-                    values,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=request.max_length,
-                    return_tensors="pt",
-                )
-                encoded_ids = encoded[INPUT_IDS].to(dtype=torch.int64).numpy()
-                encoded_mask = encoded[ATTENTION_MASK].to(dtype=torch.int64).numpy()
-            else:
-                encoded_ids = np.empty((0, request.max_length), dtype=np.int64)
-                encoded_mask = np.empty((0, request.max_length), dtype=np.int64)
+                placement = field.placement.to_numpy(zero_copy_only=False)
+                for start in range(0, len(field.values), request.tokenizer_batch_size):
+                    stop = min(start + request.tokenizer_batch_size, len(field.values))
+                    texts = field.values.slice(start, stop - start).to_numpy(zero_copy_only=False).tolist()
+                    encoded = tokenizer(
+                        texts,
+                        padding="max_length",
+                        truncation=True,
+                        max_length=length,
+                        return_tensors="np",
+                    )
+                    positions = placement[start:stop]
+                    expected = (stop - start, length)
+                    for name, destination in (
+                        (INPUT_IDS, encoded_ids),
+                        (ATTENTION_MASK, encoded_mask),
+                    ):
+                        values = np.asarray(encoded[name], dtype=np.int64)
+                        if values.shape != expected:
+                            raise ValueError(
+                                f"text tokenizer '{request.model}' returned {name} shape {values.shape}, "
+                                f"expected {expected}"
+                            )
+                        destination[positions] = values
 
             return TensorDict(
                 {
-                    INPUT_IDS: torch.from_numpy(field.place(encoded_ids, fill=0, value_shape=(request.max_length,))),
-                    ATTENTION_MASK: torch.from_numpy(
-                        field.place(encoded_mask, fill=0, value_shape=(request.max_length,))
-                    ),
+                    INPUT_IDS: torch.from_numpy(encoded_ids.reshape(*field.shape, length)),
+                    ATTENTION_MASK: torch.from_numpy(encoded_mask.reshape(*field.shape, length)),
                 },
                 batch_size=field.shape,
             )

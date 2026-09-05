@@ -160,6 +160,7 @@ output.
 | --- | --- | --- |
 | `model` | `"google/bert_uncased_L-2_H-128_A-2"` | Hugging Face model or local path. Must be a non-empty string. |
 | `max_length` | `128` | Tokenizer max length. Must be positive. |
+| `tokenizer_batch_size` | `4096` | Maximum Arrow strings materialized for one batched tokenizer call. Must be positive. |
 | `encoder_batch_size` | `32` | Maximum number of length-grouped, flattened text values per Hugging Face forward pass. |
 | `encoder_pooling` | `"cls"` | Pooling mode: `"cls"`, `"mean"`, or `"pooler"`. |
 | `objective` | `"l2"` | Hidden-embedding reconstruction objective: `"l1"` or `"l2"`. |
@@ -234,11 +235,15 @@ the separate contract of the embeddings returned to callers.
 
 ## Notes
 
-The Hugging Face encoder is cached, run in evaluation mode, and not fine-tuned
-by `relflow`. Use `encoder_batch_size` to manage memory when many text values are
-flattened from nested branches. Right-padding removal is dynamic within each
-encoder call, so `max_length` remains a truncation and storage limit rather than
-the amount of encoder work paid by every microbatch.
+Text values remain Arrow-backed until each tokenizer batch is needed. RelFlow
+materializes at most `tokenizer_batch_size` Python strings for the Hugging Face
+boundary, writes NumPy tokenizer output directly into the dense batch, and then
+releases that transient batch. The Hugging Face encoder is cached, run in
+evaluation mode, and not fine-tuned by `relflow`. Use `encoder_batch_size` to
+manage device memory when many text values are flattened from nested branches.
+Right-padding removal is dynamic within each encoder call, so `max_length`
+remains a truncation and storage limit rather than the amount of encoder work
+paid by every microbatch.
 
 ## Where Next
 

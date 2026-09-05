@@ -2,6 +2,7 @@ import builtins
 import sys
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from tensordict import TensorDict
@@ -34,6 +35,7 @@ def _structure_payload(
     objective: str = "l2",
     encoder_pooling: str = "cls",
     encoder_batch_size: int = 2,
+    tokenizer_batch_size: int | None = None,
     mask: bool | Mask = False,
     jitter: Jitter | dict[str, object] | None = None,
 ) -> dict:
@@ -47,6 +49,8 @@ def _structure_payload(
         "objective": objective,
         "mask": mask,
     }
+    if tokenizer_batch_size is not None:
+        field["tokenizer_batch_size"] = tokenizer_batch_size
     if jitter is not None:
         field["jitter"] = jitter
     return {
@@ -93,10 +97,14 @@ class FakeTokenizer:
     sep_token = "[SEP]"
     padding_side = "right"
 
+    def __init__(self):
+        self.batches: list[list[str]] = []
+
     def __call__(self, texts, *, padding, truncation, max_length, return_tensors):
         assert padding == "max_length"
         assert truncation is True
-        assert return_tensors == "pt"
+        assert return_tensors == "np"
+        self.batches.append(texts)
 
         token_rows: list[list[int]] = []
         mask_rows: list[list[int]] = []
@@ -108,8 +116,8 @@ class FakeTokenizer:
             mask_rows.append([1] * used + [0] * (max_length - used))
 
         return {
-            INPUT_IDS: torch.tensor(token_rows, dtype=torch.int64),
-            ATTENTION_MASK: torch.tensor(mask_rows, dtype=torch.int64),
+            INPUT_IDS: np.asarray(token_rows, dtype=np.int64),
+            ATTENTION_MASK: np.asarray(mask_rows, dtype=np.int64),
         }
 
 
@@ -179,6 +187,7 @@ def test_text_request_is_available_in_structure():
     assert request.type == "text"
     assert request.model == "bert-base-uncased"
     assert request.max_length == 4
+    assert request.tokenizer_batch_size == 4096
 
 
 def test_text_request_uses_default_model():
@@ -206,6 +215,12 @@ def test_text_request_strips_model():
     request = Schema.model_validate(payload).requests[ADDRESS]
 
     assert request.model == "bert-base-uncased"
+
+
+@pytest.mark.parametrize("tokenizer_batch_size", [0, -1])
+def test_text_request_rejects_nonpositive_tokenizer_batch_size(tokenizer_batch_size: int):
+    with pytest.raises(ValueError, match="greater than 0"):
+        Schema.model_validate(_structure_payload(tokenizer_batch_size=tokenizer_batch_size))
 
 
 def test_text_request_hydrates_jitter_from_mapping():
@@ -317,6 +332,22 @@ def test_text_tensorfield_tokenizes_strings(monkeypatch: pytest.MonkeyPatch):
     assert field.content[ATTENTION_MASK].shape == (2, 1, 2, 4)
     assert field.content[INPUT_IDS][0, 0, 0].tolist() == [5, 6, 0, 0]
     assert field.content[ATTENTION_MASK][0, 0, 0].tolist() == [1, 1, 0, 0]
+
+
+def test_text_tensorfield_tokenizes_bounded_numpy_batches(monkeypatch: pytest.MonkeyPatch):
+    _patch_hf(monkeypatch)
+
+    structure = Schema.model_validate(_structure_payload(tokenizer_batch_size=2))
+    field = _new_tensorfield(
+        values=[[["a", "bb"]], [["ccc", "dddd"]], [["eeeee", None]]],
+        schema=structure,
+        strata=Strata.train,
+    )
+    tokenizer = CachedModel.get_tokenizer("bert-base-uncased")
+
+    assert tokenizer.batches == [["a", "bb"], ["ccc", "dddd"], ["eeeee"]]
+    assert field.content[INPUT_IDS].shape == (3, 1, 2, 4)
+    assert torch.count_nonzero(field.content[INPUT_IDS][2, 0, 1]) == 0
 
 
 def test_text_embedder_and_decoder_shapes(monkeypatch: pytest.MonkeyPatch):

@@ -111,8 +111,11 @@ when vectors arrive from another service.
 `Text` groups valued rows by attended length and removes trailing right padding
 inside each frozen-encoder microbatch. `max_length` still controls truncation
 and storage, and unusually long rows can still determine a microbatch's cost.
-Tune `encoder_batch_size` and `max_length` from the observed token-length
-distribution. Left-padded tokenizers conservatively retain their full width.
+Tune `tokenizer_batch_size`, `encoder_batch_size`, and `max_length` from the
+observed row and token-length distributions. `tokenizer_batch_size` bounds
+transient Python strings at the Hugging Face boundary; `encoder_batch_size`
+bounds frozen-model forward passes. Left-padded tokenizers conservatively retain
+their full width.
 
 ## Feed The Accelerator
 
