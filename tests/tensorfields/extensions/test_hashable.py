@@ -1,3 +1,6 @@
+import builtins
+
+import pyarrow as pa
 import pytest
 import torch
 
@@ -11,6 +14,7 @@ from relflow.tensorfields.extensions.hashable import (
     Decoder,
     Embedder,
     TensorField,
+    hashable,
 )
 from tests.arrow import batch as arrow_batch
 from tests.arrow import table
@@ -113,6 +117,10 @@ def test_hashable_allows_single_slot_length():
     assert schema.shapes[ADDRESS] == (1, 1)
 
 
+def test_hashable_accepts_only_identifier_atoms():
+    assert hashable.types == (int, str, bytes)
+
+
 # --- hash primitive verification --------------------------------------------------
 
 
@@ -128,21 +136,55 @@ def test_hash_vector_channels_are_independent():
     assert outputs.unique().numel() == outputs.numel()
 
 
-def test_hash_value_preserves_python_scalar_identity_across_batches():
+def test_hash_value_preserves_identifier_type_across_batches():
     integer = _hash_matrix([1], n_hashes=4)[0]
     string = _hash_matrix(["1"], n_hashes=4)[0]
-    boolean = _hash_matrix([True], n_hashes=4)[0]
-    floating = _hash_matrix([1.0], n_hashes=4)[0]
+    binary = _hash_matrix([b"1"], n_hashes=4)[0]
 
     assert not torch.equal(integer, string)
-    assert not torch.equal(boolean, integer)
-    assert not torch.equal(floating, integer)
+    assert not torch.equal(binary, integer)
+    assert not torch.equal(binary, string)
 
 
-def test_hash_value_uses_one_canonical_arrow_type_within_a_batch():
-    outputs = _hash_matrix([1, 1.0], n_hashes=4)
+def test_hash_value_is_consistent_across_arrow_integer_widths():
+    model = rf.Model(
+        narrow=rf.Hash,
+        wide=rf.Hash,
+        d_model=8,
+        n_layers=1,
+        n_heads=2,
+    )
+    inputs = model.encode(
+        pa.table(
+            {
+                "narrow": pa.array([1, 2], type=pa.int8()),
+                "wide": pa.array([1, 2], type=pa.int64()),
+            }
+        ),
+        strata=Strata.test,
+    )
 
-    assert torch.equal(outputs[0], outputs[1])
+    assert torch.equal(inputs["record/narrow"].content, inputs["record/wide"].content)
+
+
+@pytest.mark.parametrize("value", [True, 1.0])
+def test_hashable_rejects_non_identifier_scalars(value):
+    with pytest.raises(TypeError, match="extension 'hash'.*does not accept Arrow type"):
+        _hash_matrix([value], n_hashes=4)
+
+
+def test_hashable_raises_when_polars_is_missing(monkeypatch: pytest.MonkeyPatch):
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "polars":
+            raise ImportError("missing polars")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ImportError, match="relflow\\[polars\\]"):
+        _hash_matrix(["identifier"], n_hashes=4)
 
 
 # --- tensorfield content behaviour ------------------------------------------------
@@ -265,9 +307,8 @@ def _bucket_ids(content: torch.Tensor, n_buckets: int) -> torch.Tensor:
 def test_hashable_hashes_never_collide_over_10000_distinct_strings():
     """Empirical injectivity probe.
 
-    BLAKE3 is a cryptographic hash (not a perfect hash function). Its extended
-    output provides 64 * n_hashes bits per input, so fingerprint collisions on
-    10k short strings should be improbable.
+    Each seeded Polars lane provides 64 bits per input, so fingerprint
+    collisions on 10k short strings should be improbable.
     """
     n_hashes = 4
     values = [f"user-{index}" for index in range(10_000)]

@@ -207,7 +207,8 @@ Arrow preprocessor where their schema and lineage are explicit.
 For example, filter login events once and let the branch bind directly:
 
 ```python
-import awkward as ak
+import numpy as np
+import pyarrow as pa
 import pyarrow.compute as pc
 
 @rf.preprocess(
@@ -216,10 +217,26 @@ import pyarrow.compute as pc
 )
 def select_logins(batch: rf.Batch) -> rf.Batch:
     field = batch.data.schema.field("events")
-    events = ak.from_arrow(batch.data["events"])
-    keep = ak.fill_none(events["type"] == "login", False)
-    values = ak.to_arrow(events[keep], extensionarray=False)
-    values = pc.cast(values, field.type)
+    lists = batch.data["events"].combine_chunks()
+    records = pc.list_flatten(lists)
+    parents = pc.list_parent_indices(lists)
+    keep = pc.fill_null(pc.equal(records.field("type"), "login"), False)
+    values = pc.filter(records, keep)
+    parents = pc.filter(parents, keep)
+    counts = np.bincount(
+        parents.to_numpy(zero_copy_only=False),
+        minlength=len(lists),
+    )
+    offsets = pa.array(
+        np.concatenate(([0], np.cumsum(counts))),
+        type=pa.int64(),
+    )
+    values = pa.LargeListArray.from_arrays(
+        offsets,
+        values,
+        type=field.type,
+        mask=pc.is_null(lists),
+    )
     data = batch.data.append_column("login_events", values)
     return batch.replace(data)
 

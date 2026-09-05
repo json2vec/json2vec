@@ -4,7 +4,7 @@ eval: false
 
 # Field Stacking
 
-**Example status — reference:** processor examples are columnar Arrow/Awkward
+**Example status — reference:** processor examples are columnar Arrow
 transforms intended to be tested against the application's exact source schema.
 
 Field stacking maps several source roles into one repeated schema field so they
@@ -131,37 +131,35 @@ learned.
 
 ## Stack Roles Inside A Ragged Collection
 
-When every segment has an origin and destination, Awkward can add the role axis
-and flatten it inside each observation while preserving ragged offsets:
+When every segment has an origin and destination, flatten the Arrow child
+records, interleave both roles, and double the list offsets:
 
 ```python
-import awkward as ak
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 
 @rf.preprocess(requires=("segments",), produces=("locations",))
 def stack_segments(batch: rf.Batch) -> rf.Batch:
-    segments = ak.from_arrow(batch.data["segments"])
-    origin = ak.zip(
-        {
-            "location": segments["origin"],
-            "role": ak.zeros_like(
-                ak.local_index(segments["origin"], axis=1),
-                dtype=np.int8,
-            ),
-        }
+    lists = batch.data["segments"].combine_chunks()
+    segments = pc.list_flatten(lists)
+    size = len(segments)
+    locations = pa.concat_arrays(
+        [segments.field("origin"), segments.field("destination")]
     )
-    destination = ak.zip(
-        {
-            "location": segments["destination"],
-            "role": ak.ones_like(
-                ak.local_index(segments["destination"], axis=1),
-                dtype=np.int8,
-            ),
-        }
+    roles = pa.array(
+        np.concatenate(
+            [np.zeros(size, dtype=np.int8), np.ones(size, dtype=np.int8)]
+        )
     )
-
-    paired = ak.concatenate([origin[:, :, None], destination[:, :, None]], axis=2)
-    locations = ak.flatten(paired, axis=2)
+    order = pa.array(
+        np.column_stack((np.arange(size), np.arange(size) + size)).reshape(-1),
+        type=pa.int64(),
+    )
+    records = pa.StructArray.from_arrays(
+        [pc.take(locations, order), pc.take(roles, order)],
+        names=["location", "role"],
+    )
     datatype = pa.large_list(
         pa.struct(
             [
@@ -170,7 +168,16 @@ def stack_segments(batch: rf.Batch) -> rf.Batch:
             ]
         )
     )
-    values = pc.cast(ak.to_arrow(locations, extensionarray=False), datatype)
+    offsets = pc.multiply(
+        pc.subtract(lists.offsets, lists.offsets[0]),
+        2,
+    )
+    values = pa.LargeListArray.from_arrays(
+        offsets,
+        records,
+        type=datatype,
+        mask=pc.is_null(lists),
+    )
     return batch.replace(batch.data.append_column("locations", values))
 ```
 

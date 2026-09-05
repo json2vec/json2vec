@@ -350,11 +350,12 @@ ambiguous.
 
 ## Transform A Nested Collection
 
-Awkward Array is useful as a transient view for ragged filtering, slicing, and
-sorting:
+Operate on the flattened Arrow child records, then rebuild the list offsets:
 
 ```python
-import awkward as ak
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 
 @rf.preprocess(
     requires=("events",),
@@ -363,16 +364,30 @@ import awkward as ak
 def recent_logins(batch: rf.Batch) -> rf.Batch:
     index = batch.data.schema.get_field_index("events")
     field = batch.data.schema.field(index)
-    events = ak.from_arrow(batch.data.column(index))
-    keep = ak.fill_none(events["type"] == "login", False)
-    events = events[keep][:, -32:]
-    array = ak.to_arrow(events, extensionarray=False)
-    array = pc.cast(array, field.type)
+    lists = batch.data.column(index).combine_chunks()
+    records = pc.list_flatten(lists)
+    parents = pc.list_parent_indices(lists)
+    keep = pc.fill_null(pc.equal(records.field("type"), "login"), False)
+    records = pc.filter(records, keep)
+    parents = pc.filter(parents, keep)
+
+    counts = np.bincount(
+        parents.to_numpy(zero_copy_only=False),
+        minlength=len(lists),
+    )
+    offsets = np.concatenate(([0], np.cumsum(counts)))
+    positions = np.arange(len(records)) - np.repeat(offsets[:-1], counts)
+    tail = positions >= np.repeat(counts - 32, counts)
+    records = pc.filter(records, pa.array(tail))
+    counts = np.minimum(counts, 32)
+    offsets = pa.array(np.concatenate(([0], np.cumsum(counts))), type=pa.int64())
+    mask = pc.is_null(lists)
+    array = pa.LargeListArray.from_arrays(offsets, records, type=field.type, mask=mask)
     return batch.replace(batch.data.set_column(index, field, array))
 ```
 
 The predicate moves whole event structs, so every sibling remains aligned.
-Awkward does not become a second pipeline format; the function returns Arrow.
+The function returns the same explicit Arrow type.
 
 ## Install The Same Pipeline Everywhere
 
@@ -401,7 +416,7 @@ value contains several stages. `preprocessor=` configures a data module;
 `None` values identically.
 
 Reuse the same tuple, in the same order, at training and inference boundaries.
-For Boolean selectors consumed by `Mask.query`, including nested Awkward
+For Boolean selectors consumed by `Mask.query`, including nested Arrow
 examples and exact-count decisions, see [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd).
 
 ## Retention Is Output, Not Binding

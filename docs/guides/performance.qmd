@@ -158,9 +158,8 @@ objects are ready before the first datatype codec runs. Do not add queries that
 merely restate schema names.
 
 Arrow compute kernels and NumPy offset/placement operations perform this
-shared structural work; there is no RelFlow JIT switch to enable. Awkward can
-still be useful as a transient view inside a user preprocessor. A preprocessor
-can dominate when it calls Python once per value.
+shared structural work; there is no RelFlow JIT switch to enable. A
+preprocessor can dominate when it calls Python once per value.
 Prefer column expressions and whole ragged collection transforms, measure them
 separately, and increase the model batch only within the memory budget. Polars
 converts once at ingress; profile that boundary when frames are large.

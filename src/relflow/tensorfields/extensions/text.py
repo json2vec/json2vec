@@ -182,6 +182,11 @@ class TensorField(TensorFieldBase):
         request: Request = schema.requests[address]
 
         def encode(field: RaggedField) -> TensorDict[str, torch.Tensor]:
+
+            # converting arrow backed arrays to a pylist is an antipattern ...
+            # ... if you are using a large amount of textual data ...
+            # ... your performance is cooked anyways
+
             values = field.values.to_pylist()
             if values:
                 tokenizer = CachedModel.get_tokenizer(request.model)

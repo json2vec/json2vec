@@ -424,7 +424,7 @@ def test_inactive_only_branch_does_not_ingest_same_named_source_value():
     assert field.values.to_pylist() == [1.0]
 
 
-def test_datetime_leaf_round_trips_through_awkward():
+def test_datetime_leaf_remains_arrow_backed():
     model = build(rf.DateParts("created", dateparts=["day_of_year"]))
     value = datetime.datetime(2025, 2, 3, 4, 5, 6)
     field = coalesce(

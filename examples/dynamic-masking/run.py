@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import awkward as ak
 import pyarrow as pa
 import pyarrow.compute as pc
 from rich import print
@@ -29,14 +28,21 @@ MASKED_EVENTS = pa.large_list(
 @rf.preprocess(requires=("events",), produces=("events",))
 def refunds(batch: rf.Batch) -> rf.Batch:
     column = batch.data.schema.get_field_index("events")
-    source = batch.data["events"]
-    if source.null_count == len(source):
-        values = pa.nulls(len(source), type=MASKED_EVENTS)
-    else:
-        events = ak.from_arrow(source)
-        selected = ak.fill_none(events["amount"] < 0, False)
-        events = ak.with_field(events, selected, "mask_event")
-        values = pc.cast(ak.to_arrow(events, extensionarray=False), MASKED_EVENTS)
+    lists = batch.data["events"].combine_chunks()
+    records = pc.list_flatten(lists)
+    selected = pc.fill_null(pc.less(records.field("amount"), 0), False)
+    fields = list(MASKED_EVENTS.value_type)
+    records = pa.StructArray.from_arrays(
+        [selected if field.name == "mask_event" else records.field(field.name) for field in fields],
+        fields=fields,
+    )
+    offsets = pc.subtract(lists.offsets, lists.offsets[0])
+    values = pa.LargeListArray.from_arrays(
+        offsets,
+        records,
+        type=MASKED_EVENTS,
+        mask=pc.is_null(lists),
+    )
     return batch.replace(batch.data.set_column(column, "events", values))
 
 

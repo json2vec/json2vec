@@ -46,9 +46,9 @@ IterableDataset mappings → bounded from_pylist() ─┼→ shared Arrow engine
 mapping generator → bounded from_pylist() ────────┘
 ```
 
-The engine does not alternate between Python records, Polars, Arrow, and
-Awkward containers. Awkward may be a temporary computational view for nested
-arrays, but it returns Arrow before crossing a public boundary.
+The engine does not alternate between Python records, Polars, Arrow, and NumPy
+containers. Temporary computational views return to Arrow before crossing a
+public boundary.
 
 See [Data Modules](../guides/data-modules.qmd) to select an ingress adapter.
 

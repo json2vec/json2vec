@@ -31,3 +31,6 @@ private/
 /benchmarks
 
 /.quarto/
+
+**/site_libs/
+docs/**/*.html

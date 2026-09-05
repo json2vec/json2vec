@@ -323,9 +323,8 @@ final `rf.Tokens` state as a shaped NumPy array.
 The extension declaration owns Arrow terminal compatibility; the tensorfield owns
 semantic validation and encoding. `field.place(...)` requires one encoded row
 per retained value and preserves datatype-specific trailing dimensions. This
-is the extension boundary—Awkward may be a convenient temporary view inside an
-upstream preprocessor, but it is not stored in `RaggedField` or passed to a
-datatype codec.
+is the extension boundary: temporary preprocessor representations are not
+stored in `RaggedField` or passed to a datatype codec.
 
 Test `new(...)` with scalar, nested, null, padded, overflow, learned-mask,
 skipped, reconstructed, and source-less prediction projections. If strings are

@@ -71,11 +71,11 @@ be able to trust the object instead of repeating defensive checks.
 Arrow is RelFlow's canonical CPU data plane. Convert supported Python and
 Polars inputs once at ingress. Keep datasets, preprocessors, queries,
 coalescing, prediction output, postprocessors, and writers Arrow-backed.
-Awkward is a transient view for nested transforms; Torch owns model
-computation. Materialize Python objects only inside an extension-local library
-boundary that requires them or at an explicit application/JSON boundary.
+Torch owns model computation. Materialize Python objects only inside an
+extension-local library boundary that requires them or at an explicit
+application/JSON boundary.
 
-Prefer whole-array Arrow, Awkward, NumPy, or Torch operations over Python loops
+Prefer whole-array Arrow, NumPy, or Torch operations over Python loops
 across observations or leaf values. A clear loop over schema nodes, addresses,
 Arrow chunks, or a fixed number of tensor axes is appropriate when those are
 the real units of orchestration.
@@ -88,8 +88,8 @@ deterministic from identity, seed, stratum, and epoch—not from source chunk
 boundaries.
 
 Keep one representation and one execution path wherever possible. Avoid
-round-tripping Arrow through Python rows, maintaining parallel Arrow and
-Awkward models, or adding several adapters for the same boundary.
+round-tripping Arrow through Python rows or adding several adapters for the
+same boundary.
 
 ## Ownership And Extension Boundaries
 

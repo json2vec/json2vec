@@ -3,8 +3,6 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
-    "awkward>=2.13.0",
-    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -16,6 +14,8 @@ Use `Hash` for large or unbounded identifiers when equality is useful but
 the values should not become a learned vocabulary. Typical examples include
 device, account, counterparty, product, and hostname identifiers.
 In serialized schemas, select it with `"type": "hash"`.
+
+Install its native hashing backend with `pip install "relflow[polars]"`.
 
 ```{python .marimo}
 #| echo: true
@@ -39,10 +39,10 @@ no useful signal.
 
 ## Input Values
 
-`Hash` accepts MessagePack-compatible hashable scalar values such as
-strings, integers, floats, booleans, and bytes. `None` has state `null`, and a
-missing branch slot has state `padded`. Lists, mappings, and unsupported Python
-objects are rejected.
+`Hash` accepts Arrow integer, string, and binary values. `None` has state
+`null`, and a missing branch slot has state `padded`. Normalize floats,
+booleans, and application-specific identifiers in a preprocessor. Lists,
+mappings, and unsupported Python objects are rejected.
 
 The same value receives the same representation everywhere in one encoded
 batch, including across different `Hash` leaves. Training and validation
@@ -64,10 +64,18 @@ Shared leaf options are documented in
 
 ## Representation And Learning
 
-Tensorization encodes each value with keyed BLAKE3 into `n_hashes` signed
-64-bit integers. On the model device, each integer is normalized and expanded
-into a sinusoidal representation. The lane representations are summed directly
-in model space. Non-valued states use a field-local learned state embedding.
+Tensorization passes the retained Arrow column directly to Polars' native
+seeded hash operation. The Arrow atom family contributes to the seeds, keeping
+integer, string, and binary identities distinct. Each of the `n_hashes` lanes
+becomes one signed 64-bit integer. On the model device, each integer is
+normalized and expanded into a sinusoidal representation. The lane
+representations are summed directly in model space. Non-valued states use a
+field-local learned state embedding.
+
+These hashes need stability only within one local-rank batch. Training and
+validation share seeds across every `Hash` leaf in that batch, then rotate them
+for the next batch. They are not a durable serialization or cross-version
+identifier format.
 
 For reconstruction, each hash lane is uniformly quantized into `n_buckets` and
 trained with cross entropy. These metrics measure recovery of the fingerprint;

@@ -149,7 +149,6 @@ ingress rather than inside this hot path:
 #| echo: true
 #| output: true
 
-import awkward as ak
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -171,76 +170,141 @@ EVENTS = pa.large_list(
 )
 
 
-def missing(values):
-    valid = ak.zeros_like(values, dtype=np.bool_)
-    return ak.mask(values, valid)
-
 @rf.preprocess(
     requires=("as_of", "login_sessions", "transactions"),
     produces=("events",),
 )
 def customer_window(batch: rf.Batch) -> rf.Batch:
-    rows = ak.from_arrow(batch.data)
+    as_of = batch.data["as_of"].combine_chunks()
+    login_lists = batch.data["login_sessions"].combine_chunks()
+    transaction_lists = batch.data["transactions"].combine_chunks()
 
-    login_as_of, _ = ak.broadcast_arrays(
-        rows.as_of,
-        rows.login_sessions.timestamp,
+    logins = pc.list_flatten(login_lists)
+    login_parents = pc.list_parent_indices(login_lists)
+    login_keep = pc.fill_null(
+        pc.less_equal(
+            logins.field("timestamp"),
+            pc.take(as_of, login_parents),
+        ),
+        False,
     )
-    transaction_as_of, _ = ak.broadcast_arrays(
-        rows.as_of,
-        rows.transactions.timestamp,
-    )
-    logins = rows.login_sessions[
-        rows.login_sessions.timestamp <= login_as_of
-    ]
-    transactions = rows.transactions[
-        rows.transactions.timestamp <= transaction_as_of
-    ]
+    logins = pc.filter(logins, login_keep)
+    login_parents = pc.filter(login_parents, login_keep)
 
-    login_events = ak.zip(
-        {
-            "timestamp": logins.timestamp,
-            "source": ak.full_like(logins.device_id, "login"),
-            "device_id": logins.device_id,
-            "event_type": logins.event_type,
-            "ip_country": logins.ip_country,
-            "amount": missing(
-                ak.zeros_like(logins.timestamp, dtype=np.float64)
+    transactions = pc.list_flatten(transaction_lists)
+    transaction_parents = pc.list_parent_indices(transaction_lists)
+    transaction_keep = pc.fill_null(
+        pc.less_equal(
+            transactions.field("timestamp"),
+            pc.take(as_of, transaction_parents),
+        ),
+        False,
+    )
+    transactions = pc.filter(transactions, transaction_keep)
+    transaction_parents = pc.filter(transaction_parents, transaction_keep)
+
+    timestamp_type = logins.field("timestamp").type
+    working_fields = [
+        pa.field("timestamp", timestamp_type),
+        pa.field("source", pa.large_string()),
+        pa.field("device_id", pa.large_string()),
+        pa.field("event_type", pa.large_string()),
+        pa.field("ip_country", pa.large_string()),
+        pa.field("amount", pa.float64()),
+        pa.field("merchant_category", pa.large_string()),
+    ]
+    login_events = pa.StructArray.from_arrays(
+        [
+            logins.field("timestamp"),
+            pa.repeat(pa.scalar("login", pa.large_string()), len(logins)),
+            pc.cast(logins.field("device_id"), pa.large_string()),
+            pc.cast(logins.field("event_type"), pa.large_string()),
+            pc.cast(logins.field("ip_country"), pa.large_string()),
+            pa.nulls(len(logins), pa.float64()),
+            pa.nulls(len(logins), pa.large_string()),
+        ],
+        fields=working_fields,
+    )
+    transaction_events = pa.StructArray.from_arrays(
+        [
+            transactions.field("timestamp"),
+            pa.repeat(
+                pa.scalar("transaction", pa.large_string()),
+                len(transactions),
             ),
-            "merchant_category": missing(logins.device_id),
-        }
-    )
-    transaction_events = ak.zip(
-        {
-            "timestamp": transactions.timestamp,
-            "source": ak.full_like(transactions.device_id, "transaction"),
-            "device_id": transactions.device_id,
-            "event_type": ak.full_like(transactions.device_id, "purchase"),
-            "ip_country": missing(transactions.device_id),
-            "amount": transactions.amount,
-            "merchant_category": transactions.merchant_category,
-        }
+            pc.cast(transactions.field("device_id"), pa.large_string()),
+            pa.repeat(
+                pa.scalar("purchase", pa.large_string()),
+                len(transactions),
+            ),
+            pa.nulls(len(transactions), pa.large_string()),
+            pc.cast(transactions.field("amount"), pa.float64()),
+            pc.cast(
+                transactions.field("merchant_category"),
+                pa.large_string(),
+            ),
+        ],
+        fields=working_fields,
     )
 
-    events = ak.concatenate([login_events, transaction_events], axis=1)
-    order = ak.argsort(events.timestamp, axis=1, stable=True)
-    events = events[order]
-
-    event_as_of, _ = ak.broadcast_arrays(rows.as_of, events.timestamp)
-    microseconds = ak.values_astype(
-        event_as_of - events.timestamp,
-        np.float64,
+    events = pa.concat_arrays([login_events, transaction_events])
+    parents = pa.concat_arrays([login_parents, transaction_parents])
+    ordinal = pa.array(np.arange(len(events)), type=pa.int64())
+    order = pc.sort_indices(
+        pa.table(
+            {
+                "parent": parents,
+                "timestamp": events.field("timestamp"),
+                "ordinal": ordinal,
+            }
+        ),
+        sort_keys=[
+            ("parent", "ascending"),
+            ("timestamp", "ascending"),
+            ("ordinal", "ascending"),
+        ],
     )
-    events = ak.with_field(
-        events,
-        microseconds / 86_400_000_000,
-        "days_since_event",
-    )
-    events = ak.without_field(events, "timestamp")
+    events = pc.take(events, order)
+    parents = pc.take(parents, order)
 
-    values = pc.cast(
-        ak.to_arrow(events, extensionarray=False),
-        EVENTS,
+    elapsed = pc.subtract(
+        pc.take(as_of, parents),
+        events.field("timestamp"),
+    )
+    microseconds = pc.cast(
+        pc.cast(elapsed, pa.duration("us")),
+        pa.int64(),
+    )
+    days = pc.divide(pc.cast(microseconds, pa.float64()), 86_400_000_000)
+    records = pa.StructArray.from_arrays(
+        [
+            events.field("source"),
+            events.field("device_id"),
+            events.field("event_type"),
+            days,
+            events.field("ip_country"),
+            events.field("amount"),
+            events.field("merchant_category"),
+        ],
+        fields=list(EVENTS.value_type),
+    )
+    counts = np.bincount(
+        parents.to_numpy(zero_copy_only=False),
+        minlength=len(batch),
+    )
+    offsets = pa.array(
+        np.concatenate(([0], np.cumsum(counts))),
+        type=pa.int64(),
+    )
+    parent_null = pc.and_(
+        pc.is_null(login_lists),
+        pc.is_null(transaction_lists),
+    )
+    values = pa.LargeListArray.from_arrays(
+        offsets,
+        records,
+        type=EVENTS,
+        mask=parent_null,
     )
     return batch.replace(batch.data.append_column("events", values))
 ```

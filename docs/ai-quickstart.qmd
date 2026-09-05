@@ -103,7 +103,7 @@ selection and branch atomicity. A policy with a remaining fractional `rate` is
 inactive during ordinary prediction; use a deterministic Boolean selector for
 request-time routing. See
 [Dynamic Mask Preprocessors](guides/dynamic-mask-preprocessors.qmd) for complete
-Arrow and Awkward selector recipes.
+Arrow selector recipes.
 
 ## Run The Lifecycle
 

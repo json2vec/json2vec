@@ -49,7 +49,7 @@ boundary so parsing rules are not hidden inside every batch:
 #| echo: true
 #| output: true
 
-import awkward as ak
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import relflow as rf
@@ -57,20 +57,6 @@ import relflow as rf
 
 @rf.preprocess(requires=("as_of_s", "events"), produces=("history",))
 def trailing_history(batch: rf.Batch, *, window_days: int) -> rf.Batch:
-    events = ak.from_arrow(batch.data["events"])
-    as_of = ak.from_arrow(batch.data["as_of_s"])
-
-    age_days = (as_of[:, None] - events["timestamp_s"]) / 86_400
-    keep = ak.fill_none((age_days >= 0) & (age_days <= window_days), False)
-    selected = events[keep]
-    ages = age_days[keep]
-    prepared = ak.zip(
-        {"kind": selected["kind"], "days_since_event": ages},
-        depth_limit=2,
-    )
-    order = ak.argsort(prepared["days_since_event"], axis=1, ascending=False)
-    prepared = prepared[order]
-
     datatype = pa.large_list(
         pa.struct(
             [
@@ -79,7 +65,48 @@ def trailing_history(batch: rf.Batch, *, window_days: int) -> rf.Batch:
             ]
         )
     )
-    values = pc.cast(ak.to_arrow(prepared, extensionarray=False), datatype)
+    lists = batch.data["events"].combine_chunks()
+    events = pc.list_flatten(lists)
+    parents = pc.list_parent_indices(lists)
+    as_of = pc.take(batch.data["as_of_s"].combine_chunks(), parents)
+    age_days = pc.divide(
+        pc.cast(
+            pc.subtract(as_of, events.field("timestamp_s")),
+            pa.float64(),
+        ),
+        86_400.0,
+    )
+    keep = pc.fill_null(
+        pc.and_(
+            pc.greater_equal(age_days, 0),
+            pc.less_equal(age_days, window_days),
+        ),
+        False,
+    )
+    kinds = pc.filter(events.field("kind"), keep)
+    ages = pc.filter(age_days, keep)
+    parents = pc.filter(parents, keep)
+
+    parent_values = parents.to_numpy(zero_copy_only=False)
+    positions = np.arange(len(parents))
+    order = np.lexsort(
+        (positions, -ages.to_numpy(zero_copy_only=False), parent_values)
+    )
+    records = pa.StructArray.from_arrays(
+        [pc.take(kinds, pa.array(order)), pc.take(ages, pa.array(order))],
+        fields=list(datatype.value_type),
+    )
+    counts = np.bincount(parent_values, minlength=len(lists))
+    offsets = pa.array(
+        np.concatenate(([0], np.cumsum(counts))),
+        type=pa.int64(),
+    )
+    values = pa.LargeListArray.from_arrays(
+        offsets,
+        records,
+        type=datatype,
+        mask=pc.is_null(lists),
+    )
     return batch.replace(batch.data.append_column("history", values))
 
 
@@ -87,8 +114,8 @@ preprocessor = trailing_history.partial(window_days=90)
 ```
 
 Each observation owns its own cutoff, which avoids a split-wide date silently
-being applied to examples with different prediction times. The explicit cast
-makes the produced `history` schema stable for empty and all-null batches.
+being applied to examples with different prediction times. The explicit Arrow
+type keeps the produced `history` schema stable for empty and all-null batches.
 
 Pass the same preprocessor—or the same ordered tuple containing it—to data
 modules and interactive or online inference:

@@ -2,17 +2,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Hashable as HashableValue
 from typing import TYPE_CHECKING, Annotated, Literal
 
-import msgspec
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
-from blake3 import blake3
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
@@ -34,10 +31,30 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Extension = Extension(name="hash", types=(bool, int, float, str, bytes))
+hashable: Extension = Extension(name="hash", types=(int, str, bytes))
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
+_UINT64_MASK: int = (1 << 64) - 1
+_LANE_SEED: int = 0x9E3779B97F4A7C15
+_SEED_1: int = 0xBF58476D1CE4E5B9
+_SEED_2: int = 0x94D049BB133111EB
+_SEED_3: int = 0xD6E8FEB86659FD93
+_INTEGER_SEED: int = 0x69
+_STRING_SEED: int = 0x73
+_BINARY_SEED: int = 0x62
+
+
+def seeds(salt: int, lane: int, family: int) -> tuple[int, int, int, int]:
+    """Derive one Polars seed quartet from batch, lane, and Arrow family."""
+
+    seed = (salt ^ (family << 56) ^ ((lane + 1) * _LANE_SEED)) & _UINT64_MASK
+    return (
+        seed,
+        (seed + _SEED_1) & _UINT64_MASK,
+        (seed + _SEED_2) & _UINT64_MASK,
+        (seed + _SEED_3) & _UINT64_MASK,
+    )
 
 
 @hashable.register
@@ -57,7 +74,7 @@ class Request(RequestBase):
     decoder to identify the correct bucket. Effective identity fingerprint
     capacity is `n_buckets ** n_hashes`.
 
-    During training and validation, the hash key is salted independently for
+    During training and validation, the hash input is salted independently for
     each encoded batch, so the network cannot memorize persistent
     value-specific representations. Every `hash` field in a batch
     receives the same salt, preserving equality relationships within an
@@ -98,10 +115,8 @@ class TensorField(TensorFieldBase):
         request: Request = schema.requests[address]
         n_hashes: int = request.n_hashes
 
-        key = context.salt.to_bytes(32, "big", signed=False)
-
         def encode(field: RaggedField) -> torch.Tensor:
-            values = field.values.combine_chunks() if isinstance(field.values, pa.ChunkedArray) else field.values
+            values = field.values
             if (
                 pa.types.is_list(values.type)
                 or pa.types.is_large_list(values.type)
@@ -112,26 +127,36 @@ class TensorField(TensorFieldBase):
                 raise ValueError(f"hash field at '{address}' expects scalar Arrow values, got {values.type}")
             if pa.types.is_dictionary(values.type):
                 values = pc.dictionary_decode(values)
-            unique = pc.unique(values)
-            unique_hashes = np.empty((len(unique), n_hashes), dtype=np.int64)
-            for index, value in enumerate(unique.to_pylist()):
-                if not isinstance(value, HashableValue):
-                    raise ValueError(
-                        f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
-                    )
-                try:
-                    payload = msgspec.msgpack.encode(value)
-                except (TypeError, ValueError, OverflowError) as error:
-                    raise ValueError(
-                        f"hash field at '{address}' only accepts MessagePack-compatible hashable scalar values"
-                    ) from error
-                digest = blake3(payload, key=key).digest(length=n_hashes * 8)
-                unique_hashes[index] = np.frombuffer(digest, dtype=">i8").astype(np.int64)
+            if not len(values):
+                return torch.zeros((*field.shape, n_hashes), dtype=torch.int64)
 
-            positions = pc.index_in(values, value_set=unique)
-            if positions.null_count:
-                raise RuntimeError(f"hash field at '{address}' failed to resolve an Arrow value")
-            hashes = unique_hashes[positions.to_numpy(zero_copy_only=False)]
+            if pa.types.is_integer(values.type) and not pa.types.is_boolean(values.type):
+                family = _INTEGER_SEED
+            elif pa.types.is_string(values.type) or pa.types.is_large_string(values.type):
+                family = _STRING_SEED
+            elif (
+                pa.types.is_binary(values.type)
+                or pa.types.is_large_binary(values.type)
+                or pa.types.is_fixed_size_binary(values.type)
+            ):
+                family = _BINARY_SEED
+            else:
+                raise ValueError(f"hash field at '{address}' only accepts integer, string, or binary scalar values")
+
+            try:
+                import polars as pl
+            except ImportError as error:
+                raise ImportError("Hash requires `polars`; install `relflow[polars]`.") from error
+
+            series = pl.from_arrow(values, rechunk=False)
+            if not isinstance(series, pl.Series):
+                raise TypeError(f"hash field at '{address}' could not construct a Polars Series from {values.type}")
+            hashes = np.empty((len(values), n_hashes), dtype=np.int64)
+            for lane in range(n_hashes):
+                seed, seed_1, seed_2, seed_3 = seeds(context.salt, lane, family)
+                hashes[:, lane] = (
+                    series.hash(seed=seed, seed_1=seed_1, seed_2=seed_2, seed_3=seed_3).to_numpy().view(np.int64)
+                )
             return torch.from_numpy(field.place(hashes, fill=0, value_shape=(n_hashes,)))
 
         state_tensor = torch.from_numpy(input.dense)

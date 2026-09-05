@@ -3,8 +3,6 @@ marimo-static-output: true
 pyproject: |
   requires-python = ">=3.12"
   dependencies = [
-    "awkward>=2.13.0",
-    "blake3>=1.0.8",
     "marimo>=0.23.8",
     "relflow[serving] @ git+https://github.com/relflow/relflow.git",
   ]
@@ -123,7 +121,8 @@ appropriate way to consult a trained vocabulary during inference
 preprocessing:
 
 ```python
-import awkward as ak
+import numpy as np
+import pyarrow as pa
 import pyarrow.compute as pc
 
 @rf.preprocess
@@ -131,11 +130,33 @@ def keep_known_tags(batch: rf.Batch, *, encoding_context) -> rf.Batch:
     vocabulary = rf.Set.vocabulary(encoding_context, "record/tags")
     index = batch.data.schema.get_field_index("tags")
     field = batch.data.schema.field(index)
-    tags = ak.from_arrow(batch.data.column(index))
-    known = ak.Array(vocabulary)
-    keep = ak.fill_none(ak.any(tags[:, :, None] == known, axis=-1), False)
-    values = ak.to_arrow(tags[keep], extensionarray=False)
-    values = pc.cast(values, field.type)
+    tags = batch.data.column(index).combine_chunks()
+    flattened = pc.list_flatten(tags)
+    keep = pc.fill_null(
+        pc.is_in(flattened, value_set=pa.array(vocabulary, type=flattened.type)),
+        False,
+    )
+    values = pc.filter(flattened, keep)
+    parents = pc.filter(pc.list_parent_indices(tags), keep)
+    counts = np.bincount(
+        parents.to_numpy(zero_copy_only=False),
+        minlength=len(tags),
+    )
+    offsets = pa.array(
+        np.concatenate(([0], np.cumsum(counts))),
+        type=pa.int64(),
+    )
+    mask = pc.is_null(tags)
+    values = (
+        pa.LargeListArray.from_arrays(offsets, values, type=field.type, mask=mask)
+        if pa.types.is_large_list(field.type)
+        else pa.ListArray.from_arrays(
+            pc.cast(offsets, pa.int32()),
+            values,
+            type=field.type,
+            mask=mask,
+        )
+    )
     return batch.replace(batch.data.set_column(index, field, values))
 ```
 

@@ -223,7 +223,7 @@ with both. See
 for selection, branch atomicity, and the distinction between learned masking
 and structural skipping. The
 [preprocessor recipes](https://relflow.github.io/relflow/guides/dynamic-mask-preprocessors.html)
-show data-dependent Arrow and Awkward selectors from source through deployment.
+show data-dependent Arrow selectors from source through deployment.
 Use `embed=True` when you want a representation returned from prediction.
 
 ## Data Modules

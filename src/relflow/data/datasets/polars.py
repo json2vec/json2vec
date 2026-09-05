@@ -47,7 +47,7 @@ class PolarsDataModule(ArrowDataModule):
         try:
             import polars as pl
         except ImportError as error:
-            raise ImportError("PolarsDataModule requires the 'polars' extra: pip install 'relflow[polars]'") from error
+            raise ImportError("PolarsDataModule requires `polars`; install `relflow[polars]`.") from error
 
         frames = {
             "train": train,

@@ -94,9 +94,8 @@ model = rf.Model(
   `Request` and the shared ragged engine.
 - Preprocessors accept and return identity-bearing `rf.Batch` objects before
   query/coalescing. Use them for source renaming, Arrow compute, windowing,
-  joins, normalization, or explicit row expansion/grouping. Awkward is an
-  optional transient view for nested transforms; persisted pipeline values and
-  `RaggedField` members remain Arrow-backed.
+  joins, normalization, or explicit row expansion/grouping. Persisted pipeline
+  values and `RaggedField` members remain Arrow-backed.
 - Postprocessors accept and return same-row, same-identity `rf.Batch` objects
   after prediction writing. Use them to reshape Arrow output for APIs or
   warehouses.
@@ -169,15 +168,14 @@ RelFlow code should read as a short sequence of domain operations.
 Simplicity comes before cleverness. Vectorize work over the value axis when it
 removes repeated Python traversal. A clear loop over schema nodes, addresses,
 chunks, or a fixed number of tensor axes is acceptable; a recursive loop over
-thousands of values is a signal to use Arrow, Awkward, NumPy, or Torch.
+thousands of values is a signal to use Arrow, NumPy, or Torch.
 
 ## Ownership Boundaries
 
 - Keep one canonical representation through a subsystem. Arrow is the CPU data
-  plane; Polars and Python values are ingress adapters, Awkward is a transient
-  nested-operation view, Torch owns model computation, and Python objects
-  reappear only at an extension-local library boundary that requires them or
-  an explicit application/JSON boundary.
+  plane; Polars and Python values are ingress adapters, Torch owns model
+  computation, and Python objects reappear only at an extension-local library
+  boundary that requires them or an explicit application/JSON boundary.
 - Keep the batch dimension and `Batch` identity explicit through every row
   selection, expansion, grouping, shuffle, and postprocessing operation.
 - Shared data code may understand Arrow containers, validity, offsets, shape,

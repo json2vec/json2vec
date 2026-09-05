@@ -22,7 +22,7 @@ Keep those axes separate. Most confusing configurations become mechanical once
 selection, routing, and purpose are considered in that order.
 
 **Example status — tested:** the complete explicit Mask matrix and
-representative Arrow/Awkward recipes are exercised in
+representative Arrow recipes are exercised in
 `tests/examples/test_masking_docs.py`.
 
 ## Choose a Recipe First
@@ -539,7 +539,7 @@ column, such as `produces=("events",)`. They are checked at each pipeline stage
 but never used to reorder stages.
 
 See [Dynamic Mask Preprocessors](../guides/dynamic-mask-preprocessors.qmd) for
-complete Arrow and Awkward recipes covering nested selectors, exact counts,
+complete Arrow recipes covering nested selectors, exact counts,
 shared decisions, stratum-aware rules, user-bound thresholds, schema stability,
 and wiring.
 
@@ -644,6 +644,6 @@ the schema and selected by stratum. For a temporary persistent experiment, use
   complete source-to-model recipes.
 - [Query Paths](querypaths.qmd) defines the node-relative Arrow path grammar.
 - [Working with Arrow](../guides/working-with-arrow.qmd) covers processor scope,
-  lineage, Arrow kernels, and Awkward round trips.
+  lineage and Arrow kernels.
 - [Learning Modes & Embeddings](embeddings.qmd) explains decoder and output
   roles.

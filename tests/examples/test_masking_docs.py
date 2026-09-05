@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import awkward as ak
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
@@ -228,20 +228,33 @@ MASKED_EVENTS = pa.large_list(
 )
 
 
+def masked_lists(
+    lists: pa.LargeListArray,
+    records: pa.StructArray,
+    selected: pa.Array,
+    datatype: pa.LargeListType,
+) -> pa.LargeListArray:
+    """Append a non-null selector while preserving list offsets and records."""
+
+    fields = list(datatype.value_type)
+    values = pa.StructArray.from_arrays(
+        [selected if field.name == "mask_event" else records.field(field.name) for field in fields],
+        fields=fields,
+    )
+    offsets = pc.subtract(lists.offsets, lists.offsets[0])
+    return pa.LargeListArray.from_arrays(offsets, values, type=datatype, mask=pc.is_null(lists))
+
+
 @rf.preprocess(
     requires=("events",),
     produces=("events",),
 )
 def refunds(batch: rf.Batch) -> rf.Batch:
     index = batch.data.schema.get_field_index("events")
-    source = batch.data["events"]
-    if source.null_count == len(source):
-        values = pa.nulls(len(source), type=MASKED_EVENTS)
-    else:
-        events = ak.from_arrow(source)
-        mask = ak.fill_none(events["amount"] < 0, False)
-        events = ak.with_field(events, mask, "mask_event")
-        values = pc.cast(ak.to_arrow(events, extensionarray=False), MASKED_EVENTS)
+    lists = batch.data["events"].combine_chunks()
+    records = pc.list_flatten(lists)
+    selected = pc.fill_null(pc.less(records.field("amount"), 0), False)
+    values = masked_lists(lists, records, selected, MASKED_EVENTS)
     return batch.replace(batch.data.set_column(index, "events", values))
 
 
@@ -260,7 +273,7 @@ def events() -> pa.Table:
     )
 
 
-def test_documented_awkward_selector_is_atomic_for_a_branch():
+def test_documented_arrow_selector_is_atomic_for_a_branch():
     configured = rf.Model(
         d_model=8,
         n_layers=1,
@@ -321,15 +334,13 @@ def test_documented_shared_selector_can_drive_different_leaf_effects():
 )
 def recent(batch: rf.Batch) -> rf.Batch:
     index = batch.data.schema.get_field_index("events")
-    source = batch.data["events"]
-    if source.null_count == len(source):
-        converted = pa.nulls(len(source), type=MASKED_EVENTS)
-    else:
-        values = ak.from_arrow(source)
-        position = ak.local_index(values, axis=1)
-        mask = position >= ak.num(values, axis=1) - 2
-        values = ak.with_field(values, mask, "mask_event")
-        converted = pc.cast(ak.to_arrow(values, extensionarray=False), MASKED_EVENTS)
+    lists = batch.data["events"].combine_chunks()
+    records = pc.list_flatten(lists)
+    offsets = lists.offsets.to_numpy(zero_copy_only=False)
+    lengths = np.diff(offsets)
+    positions = np.arange(len(records)) - np.repeat(offsets[:-1] - offsets[0], lengths)
+    selected = pa.array(positions >= np.repeat(lengths - 2, lengths), type=pa.bool_())
+    converted = masked_lists(lists, records, selected, MASKED_EVENTS)
     return batch.replace(batch.data.set_column(index, "events", converted))
 
 
@@ -384,16 +395,21 @@ MASKED_RISK_EVENTS = pa.large_list(
 )
 def top_risk(batch: rf.Batch, *, count: int = 2) -> rf.Batch:
     index = batch.data.schema.get_field_index("events")
-    source = batch.data["events"]
-    if source.null_count == len(source):
-        converted = pa.nulls(len(source), type=MASKED_RISK_EVENTS)
-    else:
-        values = ak.from_arrow(source)
-        risk = ak.fill_none(values["risk"], float("-inf"))
-        order = ak.argsort(risk, axis=1, ascending=False, stable=True)
-        rank = ak.argsort(order, axis=1, ascending=True, stable=True)
-        values = ak.with_field(values, rank < count, "mask_event")
-        converted = pc.cast(ak.to_arrow(values, extensionarray=False), MASKED_RISK_EVENTS)
+    lists = batch.data["events"].combine_chunks()
+    records = pc.list_flatten(lists)
+    offsets = lists.offsets.to_numpy(zero_copy_only=False)
+    lengths = np.diff(offsets)
+    parents = np.repeat(np.arange(len(lists)), lengths)
+    positions = np.arange(len(records))
+    risk = pc.fill_null(records.field("risk"), float("-inf")).to_numpy(zero_copy_only=False)
+    order = np.lexsort((positions, -risk, parents))
+    ordered_parents = parents[order]
+    starts = np.flatnonzero(np.r_[True, ordered_parents[1:] != ordered_parents[:-1]])
+    group_starts = np.repeat(starts, np.diff(np.r_[starts, len(records)]))
+    rank = np.empty(len(records), dtype=np.int64)
+    rank[order] = np.arange(len(records)) - group_starts
+    selected = pa.array(rank < count, type=pa.bool_())
+    converted = masked_lists(lists, records, selected, MASKED_RISK_EVENTS)
     return batch.replace(batch.data.set_column(index, "events", converted))
 
 
@@ -479,15 +495,12 @@ def test_documented_nested_selectors_preserve_all_null_schema(preprocess, dataty
 )
 def broadcast(batch: rf.Batch) -> rf.Batch:
     index = batch.data.schema.get_field_index("events")
-    source = batch.data["events"]
-    if source.null_count == len(source):
-        converted = pa.nulls(len(source), type=MASKED_EVENTS)
-    else:
-        values = ak.from_arrow(source)
-        denied = ak.from_arrow(pc.fill_null(batch.data["deny_events"], False))
-        mask = ak.broadcast_arrays(values["amount"], denied)[1]
-        values = ak.with_field(values, mask, "mask_event")
-        converted = pc.cast(ak.to_arrow(values, extensionarray=False), MASKED_EVENTS)
+    lists = batch.data["events"].combine_chunks()
+    records = pc.list_flatten(lists)
+    parents = pc.list_parent_indices(lists)
+    denied = pc.fill_null(batch.data["deny_events"], False).combine_chunks()
+    selected = pc.take(denied, parents)
+    converted = masked_lists(lists, records, selected, MASKED_EVENTS)
     return batch.replace(batch.data.set_column(index, "events", converted))
 
 

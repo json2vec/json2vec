@@ -14,7 +14,7 @@ data contract. In ordinary use that means three things:
 2. give the table to `rf.ArrowDataModule`;
 3. use Arrow expressions when a preprocessor or postprocessor must change it.
 
-You do **not** need to manage tensors, Awkward layouts, or RelFlow identity to
+You do **not** need to manage tensors, ragged layouts, or RelFlow identity to
 train a model. This page covers the small amount of Arrow needed at the public
 boundary, then moves the lineage details to the advanced section.
 
@@ -230,11 +230,13 @@ child queries, so malformed content in a discarded child is never inspected.
 Use a preprocessor when you need a predicate, nested sort, or coordinated
 mutation.
 
-Awkward Array is useful inside that preprocessor because it preserves Arrow's
-ragged layout:
+Arrow exposes the flattened child records and list offsets needed for a
+vectorized nested transform:
 
 ```python
-import awkward as ak
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 
 @rf.preprocess(
     requires=("events",),
@@ -244,18 +246,35 @@ def logins(batch: rf.Batch) -> rf.Batch:
     index = batch.data.schema.get_field_index("events")
     field = batch.data.schema.field(index)
 
-    events = ak.from_arrow(batch.data.column(index))
-    keep = ak.fill_none(events["type"] == "login", False)
-    events = events[keep][:, -32:]
+    lists = batch.data.column(index).combine_chunks()
+    records = pc.list_flatten(lists)
+    parents = pc.list_parent_indices(lists)
+    keep = pc.fill_null(pc.equal(records.field("type"), "login"), False)
+    records = pc.filter(records, keep)
+    parents = pc.filter(parents, keep)
 
-    array = ak.to_arrow(events, extensionarray=False)
-    array = pc.cast(array, field.type)
+    counts = np.bincount(
+        parents.to_numpy(zero_copy_only=False),
+        minlength=len(lists),
+    )
+    offsets = np.concatenate(([0], np.cumsum(counts)))
+    positions = np.arange(len(records)) - np.repeat(offsets[:-1], counts)
+    tail = positions >= np.repeat(counts - 32, counts)
+    records = pc.filter(records, pa.array(tail))
+    counts = np.minimum(counts, 32)
+    offsets = pa.array(np.concatenate(([0], np.cumsum(counts))), type=pa.int64())
+    array = pa.LargeListArray.from_arrays(
+        offsets,
+        records,
+        type=field.type,
+        mask=pc.is_null(lists),
+    )
     data = batch.data.set_column(index, field, array)
     return batch.replace(data)
 ```
 
-Awkward is a temporary computational view here. The processor returns an
-ordinary Arrow-backed `rf.Batch`, so the rest of the pipeline has one format.
+The processor returns an Arrow-backed `rf.Batch`, so the pipeline keeps one
+format.
 
 To make one observation per list item, use the lineage operation instead of a
 manual flatten-and-repeat implementation:
