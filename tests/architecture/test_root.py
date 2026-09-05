@@ -13,6 +13,7 @@ from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address
+from relflow.tensorfields.extensions.category import ContentNormalizeCallback
 from relflow.tensorfields.shared.counter import CounterUpdateCallback
 from relflow.tensorfields.shared.vocabulary import (
     OnlineVocabularyModel,
@@ -374,6 +375,7 @@ def test_configure_callbacks_skips_callbacks_already_attached_to_trainer() -> No
                 ThroughputLogger(),
                 VocabularySyncCallback(),
                 CounterUpdateCallback(),
+                ContentNormalizeCallback(),
             ]
         },
     )()

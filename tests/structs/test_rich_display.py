@@ -258,7 +258,7 @@ def test_model_select_pprint_uses_rich_node_display() -> None:
     for output in (rendered, rich_rendered):
         assert "species [category] active target query=[*].species" in output
         assert " pooling=query weight=1 p_mask=0 p_prune=1 n_heads=4 n_linear=1" in output
-        assert " size=4 p_unavailable=0.01 topk=[]" in output
+        assert " size=4 p_unavailable=0.01 scale=30 topk=[]" in output
         assert "Request(name=" not in output
         assert "Selection(" not in output
 
