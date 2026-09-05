@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypeAlias, TypedDic
 
 import pyarrow as pa
 import torch
-from loguru import logger
 from tensordict import TensorDict
 
 from relflow.architecture.contracts import sanitize
@@ -27,6 +26,7 @@ from relflow.data.processors import (
     apply,
 )
 from relflow.distributed import all_reduce_max
+from relflow.logging import logger
 from relflow.structs.enums import Component, Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -486,7 +486,12 @@ class ModelRuntime:
             )
 
         if not participating:
-            logger.warning("no reconstruction objective was selected on any rank, skipping batch")
+            logger.bind(
+                component="runtime",
+                strata=strata.value,
+                rank=module.global_rank,
+                batch=batch_idx,
+            ).warning("no reconstruction objective was selected on any rank, skipping batch")
             if strata == Strata.train:
                 return None
             return Output(loss=torch.tensor(0.0, device=inputs.device))
@@ -528,7 +533,12 @@ class ModelRuntime:
             anchor = torch.zeros((), device=inputs.device)
         if not losses:
             suffix = "anchored zero loss" if strata == Strata.train else "zero loss"
-            logger.warning(f"reconstruction targets are present only on peer ranks, returning {suffix}")
+            logger.bind(
+                component="runtime",
+                strata=strata.value,
+                rank=module.global_rank,
+                batch=batch_idx,
+            ).warning(f"reconstruction targets are present only on peer ranks, returning {suffix}")
             return Output(loss=anchor)
 
         loss = module.track((Metric.loss, strata), value=torch.stack(losses).sum() + anchor)

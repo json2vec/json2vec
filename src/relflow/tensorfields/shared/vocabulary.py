@@ -13,7 +13,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import torch
 from lightning.pytorch import Callback, Trainer
-from loguru import logger
 
 from relflow.distributed import (
     all_gather_object,
@@ -22,6 +21,7 @@ from relflow.distributed import (
     is_rank_zero,
     synchronize_epoch_metrics,
 )
+from relflow.logging import logger
 from relflow.structs.tree import Address
 
 if TYPE_CHECKING:

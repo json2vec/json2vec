@@ -89,6 +89,34 @@ constructing a same-process model that uses the custom request. Importing it
 before `rf.Model.load(...)` does not currently make serialized custom request
 types valid; durable checkpoint, batch, and serving workflows are unsupported.
 
+### Declare Optional Runtime Packages
+
+An extension can declare optional packages without importing them when the
+extension itself is registered. `requires` maps each Python import name to the
+requirement users should pass to pip:
+
+```python
+fast_scalar = rf.Extension(
+    name="fast_scalar",
+    types=(int | float,),
+    requires={"fast_scalar_codec": "fast-scalar[codec]>=2"},
+)
+```
+
+RelFlow checks each extension once at model graph construction, before it
+constructs any runtime node. If `fast_scalar_codec` is absent, model creation
+raises `ModuleNotFoundError` identifying the field and extension and includes
+the exact command `python -m pip install 'fast-scalar[codec]>=2'`. This also
+applies when loading a model or rebuilding its graph after a schema mutation.
+Creating the extension and working with its request schema remain possible
+without the optional package.
+
+Use the importable module name on the left and the published distribution,
+RelFlow extra, or other valid pip requirement on the right. The names may
+differ, as in `requires={"PIL": "Pillow"}`. This contract checks package
+presence; errors inside an installed package still surface from the package's
+normal import boundary.
+
 ### Declare Raw Atom Compatibility
 
 `types` is a required tuple naming the canonical Arrow terminal families that

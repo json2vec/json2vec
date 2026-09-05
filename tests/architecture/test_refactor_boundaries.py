@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import ast
+from logging.handlers import BufferingHandler
 from pathlib import Path
 
 import torch
 from lightning.pytorch.utilities.model_summary.model_summary import summarize
-from loguru import logger
 
 import relflow as rf
 from relflow.architecture.checkpoint import CheckpointState
 from relflow.architecture.graph import ModelGraph
 from relflow.architecture.mutations import SchemaEditor
+from relflow.logging import logger
+from relflow.logging.config import CONTEXT
 from relflow.structs import experiment, selectors
 
 FRAMEWORK_PROTOCOL_METHODS = frozenset(
@@ -45,14 +47,8 @@ def test_model_uses_mutation_facade() -> None:
 
 def test_model_mutations_emit_structured_logs() -> None:
     model = _model()
-    events: list[dict[str, object]] = []
-    messages: list[str] = []
-    sink_id = logger.add(
-        lambda message: (
-            events.append(dict(message.record["extra"])),
-            messages.append(message.record["message"]),
-        )
-    )
+    records = BufferingHandler(capacity=100)
+    logger.logger.addHandler(records)
 
     try:
         model.update(rf.where("name") == "amount", weight=2.0)
@@ -64,7 +60,10 @@ def test_model_mutations_emit_structured_logs() -> None:
             pass
         model.delete(rf.where("name") == "extra")
     finally:
-        logger.remove(sink_id)
+        logger.logger.removeHandler(records)
+
+    events = [getattr(record, CONTEXT) for record in records.buffer]
+    messages = [record.getMessage() for record in records.buffer]
 
     mutation_events = [event for event in events if event.get("component") == "schema_mutation"]
     actions = {event["action"] for event in mutation_events}
@@ -95,19 +94,16 @@ def test_model_mutations_emit_structured_logs() -> None:
 
 def test_model_mutation_logs_include_previous_and_current_address_for_renames() -> None:
     model = _model()
-    events: list[dict[str, object]] = []
-    messages: list[str] = []
-    sink_id = logger.add(
-        lambda message: (
-            events.append(dict(message.record["extra"])),
-            messages.append(message.record["message"]),
-        )
-    )
+    records = BufferingHandler(capacity=10)
+    logger.logger.addHandler(records)
 
     try:
         model.update(rf.where("name") == "amount", name="total")
     finally:
-        logger.remove(sink_id)
+        logger.logger.removeHandler(records)
+
+    events = [getattr(record, CONTEXT) for record in records.buffer]
+    messages = [record.getMessage() for record in records.buffer]
 
     mutation_events = [event for event in events if event.get("component") == "schema_mutation"]
 

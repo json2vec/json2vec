@@ -350,7 +350,7 @@ preprocessor.
 
 ## Use Polars Deliberately
 
-Install the adapter with `pip install "relflow[polars]"`. A collected Polars
+Install the adapter with `pip install "relflow[hash]"`. A collected Polars
 frame crosses into Arrow once:
 
 ```python

@@ -31,7 +31,11 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-hashable: Extension = Extension(name="hash", types=(int, str, bytes))
+hashable: Extension = Extension(
+    name="hash",
+    types=(int, str, bytes),
+    requires={"polars": "relflow[hash]"},
+)
 
 
 _HASH_NORMALIZER: float = float(1 << 63)
@@ -143,10 +147,8 @@ class TensorField(TensorFieldBase):
             else:
                 raise ValueError(f"hash field at '{address}' only accepts integer, string, or binary scalar values")
 
-            try:
-                import polars as pl
-            except ImportError as error:
-                raise ImportError("Hash requires `polars`; install `relflow[polars]`.") from error
+            # polars is the easiest (and fastest) way to hash arrow data (!)
+            import polars as pl
 
             series = pl.from_arrow(values, rechunk=False)
             if not isinstance(series, pl.Series):

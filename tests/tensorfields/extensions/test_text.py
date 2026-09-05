@@ -1,4 +1,4 @@
-import builtins
+import importlib.util
 import sys
 from types import SimpleNamespace
 
@@ -7,6 +7,7 @@ import pytest
 import torch
 from tensordict import TensorDict
 
+import relflow as rf
 from relflow.data.ragged import coalesce
 from relflow.helpers import Jitter
 from relflow.structs.enums import Strata, TensorKey, Tokens
@@ -237,19 +238,18 @@ def test_text_accepts_jitter_normalization_modes(normalize: bool):
 
 
 def test_text_raises_when_transformers_is_missing(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(CachedModel, "_models", {})
     monkeypatch.delitem(sys.modules, "transformers", raising=False)
-    original_import = builtins.__import__
+    find_spec = importlib.util.find_spec
 
-    def fake_import(name, *args, **kwargs):
-        if name == "transformers":
-            raise ImportError("missing transformers")
-        return original_import(name, *args, **kwargs)
+    def missing_transformers(name, *args, **kwargs):
+        return None if name == "transformers" else find_spec(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(importlib.util, "find_spec", missing_transformers)
 
-    with pytest.raises(ImportError, match="relflow\\[text\\]"):
-        CachedModel.get_model("bert-base-uncased")
+    with pytest.raises(ModuleNotFoundError, match="relflow\\[text\\]"):
+        rf.Model(body=rf.Text, d_model=8, n_layers=1, n_heads=2)
+
+    assert TENSORFIELDS["text"].requires == {"transformers": "relflow[text]"}
 
 
 def test_text_cached_model_reuses_same_model(monkeypatch: pytest.MonkeyPatch):

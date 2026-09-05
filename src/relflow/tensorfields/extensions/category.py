@@ -9,10 +9,10 @@ import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
-from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
+from relflow.logging import logger
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -231,9 +231,13 @@ class TensorField(TensorFieldBase):
         target_content = encode(target)
 
         if state is not None and len(state) > (size := schema.requests[address].size):
-            logger.bind(component="tensorfield", field_type="category", address=str(address)).warning(
-                "vocabulary exceeds size={}", size
-            )
+            logger.bind(
+                component="tensorfield",
+                field_type="category",
+                address=str(address),
+                vocabulary_size=len(state),
+                capacity=size,
+            ).warning("vocabulary exceeds configured capacity")
 
         state_tensor = torch.from_numpy(input.dense)
         target_state = torch.from_numpy(target.dense)

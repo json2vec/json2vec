@@ -1,3 +1,4 @@
+from logging.handlers import BufferingHandler
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -5,12 +6,13 @@ from typing import Any
 import pydantic
 import pytest
 import torch
-from loguru import logger
 from tensordict import TensorDict
 
 import relflow as rf
 from relflow.data.ragged import coalesce
 from relflow.helpers import Jitter
+from relflow.logging import logger
+from relflow.logging.config import CONTEXT
 from relflow.structs.enums import Strata, TensorKey, Tokens
 from relflow.structs.experiment import Schema
 from relflow.structs.packages import Prediction
@@ -341,20 +343,17 @@ def test_number_embedder_clamps_unsafe_fourier_inputs_and_warns():
         ],
         dtype=torch.int64,
     )
-    events: list[dict[str, object]] = []
-    messages: list[str] = []
-    sink_id = logger.add(
-        lambda message: (
-            events.append(dict(message.record["extra"])),
-            messages.append(message.record["message"]),
-        ),
-        level="WARNING",
-    )
+    records = BufferingHandler(capacity=10)
+    records.setLevel("WARNING")
+    logger.logger.addHandler(records)
 
     try:
         clamped = embedder.clamp(content=content, state=state)
     finally:
-        logger.remove(sink_id)
+        logger.logger.removeHandler(records)
+
+    events = [getattr(record, CONTEXT) for record in records.buffer]
+    messages = [record.getMessage() for record in records.buffer]
 
     assert torch.isfinite(clamped).all()
     assert torch.allclose(clamped[:3], torch.stack([bound, -bound, bound]))

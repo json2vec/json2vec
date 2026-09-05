@@ -12,9 +12,9 @@ import lightning.pytorch as lit
 import pydantic
 import torch
 from lightning.pytorch import Callback
-from loguru import logger
 
 from relflow.architecture.graph import ModelGraph
+from relflow.logging import logger
 from relflow.structs.enums import Strata
 from relflow.structs.experiment import NodeAttribute, NodePredicate, SchemaField
 from relflow.structs.structure import Branch
@@ -416,12 +416,8 @@ class SchemaEditor:
                 previous_value=previous_value_text,
                 change=f"{change.name}: {previous_value_text} -> {value_text}",
             ).info(
-                "{} {}: {} {} -> {}",
-                "restored" if restored else "mutated",
-                address_context,
-                change.name,
-                previous_value_text,
-                value_text,
+                f"{'restored' if restored else 'mutated'} {address_context}: "
+                f"{change.name} {previous_value_text} -> {value_text}"
             )
 
     def log_node_mutation(self, *, action: str, message: str, node: Node, **kwargs: Any) -> None:
@@ -436,7 +432,7 @@ class SchemaEditor:
             attribute=None,
             definition_attribute=None,
             **extra,
-        ).info("{} {}", message, context)
+        ).info(f"{message} {context}")
 
 
 def has_node_attribute(node: Node, name: str) -> bool:

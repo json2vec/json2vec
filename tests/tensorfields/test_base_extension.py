@@ -1,3 +1,4 @@
+import sys
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -112,6 +113,76 @@ def test_extension_stores_separate_and_union_value_type_families():
         assert extension.types == (str, bytes, int | float)
         with pytest.raises(AttributeError):
             extension.types = (object,)  # ty: ignore[invalid-assignment]
+    finally:
+        TENSORFIELDS.pop(name, None)
+
+
+def test_extension_stores_immutable_runtime_requirements():
+    name = extension_name("requires")
+    extension = Extension(
+        name=name,
+        types=(str,),
+        requires={"example.codec": "example-codec[fast] >= 2"},
+    )
+    try:
+        assert extension.requires == {"example.codec": "example-codec[fast] >= 2"}
+        with pytest.raises(TypeError):
+            extension.requires["other"] = "other"  # type: ignore[index]
+    finally:
+        TENSORFIELDS.pop(name, None)
+
+
+@pytest.mark.parametrize(
+    ("requires", "error"),
+    [
+        pytest.param([], TypeError, id="non-mapping"),
+        pytest.param({"bad-name": "example"}, ValueError, id="invalid-import"),
+        pytest.param({1: "example"}, ValueError, id="non-string-import"),
+        pytest.param({"example": ""}, ValueError, id="empty-requirement"),
+        pytest.param({"example": None}, ValueError, id="non-string-requirement"),
+    ],
+)
+def test_extension_rejects_invalid_runtime_requirements_without_polluting_registry(requires, error):
+    name = extension_name("badrequires")
+
+    with pytest.raises(error):
+        Extension(name=name, types=(str,), requires=requires)
+
+    assert name not in TENSORFIELDS
+
+
+def test_extension_requires_reports_all_missing_imports_and_install_targets():
+    name = extension_name("missingpackages")
+    first = f"missing_{uuid.uuid4().hex}"
+    second = f"missing_{uuid.uuid4().hex}"
+    extension = Extension(
+        name=name,
+        types=(str,),
+        requires={first: "example[first]", second: "example[second]"},
+    )
+    try:
+        with pytest.raises(ModuleNotFoundError) as raised:
+            extension.require(address=Address("record/value"))
+
+        message = str(raised.value)
+        assert raised.value.name == first
+        assert "record/value" in message
+        assert name in message
+        assert first in message
+        assert second in message
+        assert "python -m pip install 'example[first]' 'example[second]'" in message
+    finally:
+        TENSORFIELDS.pop(name, None)
+
+
+def test_extension_requires_accepts_imported_modules_without_specs(monkeypatch: pytest.MonkeyPatch):
+    name = extension_name("loadedpackage")
+    module = f"loaded_{uuid.uuid4().hex}"
+    marker = object()
+    extension = Extension(name=name, types=(str,), requires={module: "example-loaded"})
+    monkeypatch.setitem(sys.modules, module, marker)
+    try:
+        extension.require(address=Address("record/value"))
     finally:
         TENSORFIELDS.pop(name, None)
 

@@ -12,7 +12,6 @@ import pyarrow as pa
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback
-from loguru import logger
 from rich.text import Text
 from tensordict import TensorDict
 from torchmetrics import Metric as TorchMetric
@@ -31,6 +30,7 @@ from relflow.architecture.runtime import ModelRuntime, PredictionInput, Retain, 
 from relflow.data.arrow import Batch, Encoded
 from relflow.data.datasets.base import EncodedInput
 from relflow.data.processors import PostprocessorInput, PreprocessorInput
+from relflow.logging import logger
 from relflow.logging.throughput import ThroughputLogger
 from relflow.structs.enums import AttentionMode, Strata
 from relflow.structs.experiment import (

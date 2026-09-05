@@ -15,7 +15,7 @@ the values should not become a learned vocabulary. Typical examples include
 device, account, counterparty, product, and hostname identifiers.
 In serialized schemas, select it with `"type": "hash"`.
 
-Install its native hashing backend with `pip install "relflow[polars]"`.
+Install its native hashing backend with `pip install "relflow[hash]"`.
 
 ```{python .marimo}
 #| echo: true

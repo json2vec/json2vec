@@ -12,6 +12,7 @@ from relflow.data.datasets.base import EncodedInput
 from relflow.structs.enums import Strata
 from relflow.structs.experiment import Schema
 from relflow.structs.tree import Address, Node
+from relflow.tensorfields.base import TENSORFIELDS
 
 if TYPE_CHECKING:
     from relflow.architecture.root import Model
@@ -34,6 +35,13 @@ class ModelGraph:
         schema: Schema,
         batch_size: int,
     ) -> tuple[torch.nn.ModuleDict, dict[str, EncodedInput | Strata]]:
+        checked: set[str] = set()
+        for address, request in schema.requests.items():
+            if request.type in checked:
+                continue
+            TENSORFIELDS[request.type].require(address=address)
+            checked.add(request.type)
+
         nodes: torch.nn.ModuleDict[str, NodeModule] = torch.nn.ModuleDict()
 
         for address in schema.requests | schema.branches:

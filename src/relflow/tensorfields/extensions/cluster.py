@@ -13,11 +13,11 @@ import pydantic
 import torch
 from beartype import beartype
 from lightning.pytorch import Callback, Trainer
-from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
 from relflow.distributed import broadcast_object
+from relflow.logging import logger
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address
@@ -277,9 +277,13 @@ class TensorField(TensorFieldBase):
         target_content = encode(target)
 
         if state is not None and len(state) > (capacity := schema.requests[address].capacity):
-            logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
-                "vocabulary exceeds size={}", capacity
-            )
+            logger.bind(
+                component="tensorfield",
+                field_type="cluster",
+                address=str(address),
+                vocabulary_size=len(state),
+                capacity=capacity,
+            ).warning("vocabulary exceeds configured capacity")
 
         state_tensor = torch.from_numpy(input.dense)
         target_state = torch.from_numpy(target.dense)
@@ -336,9 +340,8 @@ class Embedder(EmbedderBase):
             # Cluster loss fires only for reconstructed rows; a plain-input
             # Cluster silently freezes n_committed at initialization.
             logger.bind(component="tensorfield", field_type="cluster", address=str(address)).warning(
-                "Cluster field {address!s} has no reconstructing Mask; dynamic K-selection "
-                "will not engage. Add Mask(reconstruct=True) to train the cluster head.",
-                address=address,
+                f"Cluster field {address!s} has no reconstructing Mask; dynamic K-selection "
+                "will not engage. Add Mask(reconstruct=True) to train the cluster head."
             )
 
         self.vocab: OnlineVocabularyModel = OnlineVocabularyModel(size=self.capacity)

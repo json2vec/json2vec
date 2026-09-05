@@ -33,7 +33,11 @@ if TYPE_CHECKING:
     from relflow.structs.experiment import Schema
 
 
-text: Extension = Extension(name="text", types=(str,))
+text: Extension = Extension(
+    name="text",
+    types=(str,),
+    requires={"transformers": "relflow[text]"},
+)
 text.callback(CounterUpdateCallback)
 
 INPUT_IDS = "input_ids"
@@ -76,10 +80,7 @@ class CachedModel:
         key: str,
     ) -> "CachedModel":
         if key not in cls._models:
-            try:
-                from transformers import AutoModel  # ty:ignore[unresolved-import]
-            except ImportError:
-                raise ImportError("Text requires `transformers`; install `relflow[text]`.")
+            from transformers import AutoModel  # ty:ignore[unresolved-import]
 
             model = AutoModel.from_pretrained(key)
             model.eval()
@@ -94,10 +95,7 @@ class CachedModel:
     @classmethod
     def get_tokenizer(cls, key: str):
         if key not in cls._tokenizers:
-            try:
-                from transformers import AutoTokenizer  # ty:ignore[unresolved-import]
-            except ImportError:
-                raise ImportError("Text requires `transformers`; install `relflow[text]`.")
+            from transformers import AutoTokenizer  # ty:ignore[unresolved-import]
 
             tokenizer = AutoTokenizer.from_pretrained(key)
 

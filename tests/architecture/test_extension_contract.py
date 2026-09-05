@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Mapping
 from typing import Literal
 
 import numpy as np
@@ -31,11 +32,13 @@ def build_extension(
     empty: bool = False,
     state: object | None = None,
     contexts: list[rf.Context] | None = None,
+    requires: Mapping[str, str] | None = None,
+    embedders: list[Address] | None = None,
 ):
     """Register one late-bound extension with nested, trailing-axis tensor content."""
 
     name = f"extension_{uuid.uuid4().hex}"
-    extension = Extension(name=name, types=(str, bytes))
+    extension = Extension(name=name, types=(str, bytes), requires=requires)
 
     @extension.register
     class Request(RequestBase):
@@ -102,6 +105,8 @@ def build_extension(
     @extension.register
     class Embedder(EmbedderBase):
         def __init__(self, schema: rf.Schema, address: Address):
+            if embedders is not None:
+                embedders.append(address)
             super().__init__(schema=schema, address=address)
             self.projection = torch.nn.Linear(14, schema.d_model, bias=False)
             if empty:
@@ -151,6 +156,27 @@ def build_extension(
             return prediction.payload[TensorKey.state].sum() * 0.0
 
     return extension, Request
+
+
+def test_model_reports_missing_extension_packages_before_building_runtime_nodes():
+    module = f"missing_{uuid.uuid4().hex}"
+    embedders: list[Address] = []
+    extension, Request = build_extension(
+        requires={module: "example-extension[fast]"},
+        embedders=embedders,
+    )
+    try:
+        with pytest.raises(ModuleNotFoundError) as raised:
+            rf.Model(value=Request(), d_model=8, n_layers=1, n_heads=2)
+
+        message = str(raised.value)
+        assert raised.value.name == module
+        assert "record/value" in message
+        assert extension.name in message
+        assert "python -m pip install 'example-extension[fast]'" in message
+        assert embedders == []
+    finally:
+        TENSORFIELDS.pop(extension.name, None)
 
 
 def test_third_party_extension_receives_one_explicit_context_contract():

@@ -4,8 +4,8 @@ from functools import partialmethod
 from typing import TYPE_CHECKING, Literal
 
 from lightning import Callback, Trainer
-from loguru import logger
 
+from relflow.logging.config import logger
 from relflow.structs.enums import Strata
 
 if TYPE_CHECKING:
@@ -21,6 +21,7 @@ class EpochLifecycleLogger(Callback):
         hook: Literal["start", "end"],
     ):
         logger.bind(
+            component="epoch",
             source="lightning",
             rank=pl_module.global_rank,
             epoch=pl_module.current_epoch,

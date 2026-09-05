@@ -61,7 +61,7 @@ data = rf.ArrowDataModule(
 )
 ```
 
-For existing Polars code, install `relflow[polars]` and keep the small adapter:
+For existing Polars code, install `relflow[hash]` and keep the small adapter:
 
 ```python
 data = rf.PolarsDataModule(

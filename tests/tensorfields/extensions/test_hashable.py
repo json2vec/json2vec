@@ -1,4 +1,5 @@
-import builtins
+import importlib.util
+import sys
 
 import pyarrow as pa
 import pytest
@@ -174,17 +175,18 @@ def test_hashable_rejects_non_identifier_scalars(value):
 
 
 def test_hashable_raises_when_polars_is_missing(monkeypatch: pytest.MonkeyPatch):
-    original_import = builtins.__import__
+    monkeypatch.delitem(sys.modules, "polars", raising=False)
+    find_spec = importlib.util.find_spec
 
-    def fake_import(name, *args, **kwargs):
-        if name == "polars":
-            raise ImportError("missing polars")
-        return original_import(name, *args, **kwargs)
+    def missing_polars(name, *args, **kwargs):
+        return None if name == "polars" else find_spec(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(importlib.util, "find_spec", missing_polars)
 
-    with pytest.raises(ImportError, match="relflow\\[polars\\]"):
-        _hash_matrix(["identifier"], n_hashes=4)
+    with pytest.raises(ModuleNotFoundError, match="relflow\\[hash\\]"):
+        rf.Model(identifier=rf.Hash, d_model=8, n_layers=1, n_heads=2)
+
+    assert hashable.requires == {"polars": "relflow[hash]"}
 
 
 # --- tensorfield content behaviour ------------------------------------------------

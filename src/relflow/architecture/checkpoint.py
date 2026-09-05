@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Any
 import lightning.pytorch as lit
 import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
-from loguru import logger
 
 from relflow._version import UNKNOWN_VERSION
 from relflow.architecture.graph import ModelGraph
+from relflow.logging import logger
 from relflow.structs.experiment import Schema
 
 if TYPE_CHECKING:

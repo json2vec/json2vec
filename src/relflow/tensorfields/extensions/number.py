@@ -11,12 +11,12 @@ import pyarrow.compute as pc
 import pydantic
 import torch
 from beartype import beartype
-from loguru import logger
 from tensordict import TensorDict, tensorclass
 
 from relflow.data.ragged import RaggedField
 from relflow.distributed import all_reduce_sum
 from relflow.helpers import Jitter
+from relflow.logging import logger
 from relflow.structs.enums import Metric, Strata, TensorKey, Tokens
 from relflow.structs.packages import Parcel, Prediction
 from relflow.structs.tree import Address

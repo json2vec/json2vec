@@ -141,6 +141,30 @@ Attach any Lightning logger for durable experiment tracking. The exact naming
 contract, loss composition, and model-selection advice live in
 [Evaluation And Metrics](evaluation.qmd).
 
+### Terminal Event Logs
+
+Operational events such as model construction, schema mutation, checkpoint
+restoration, vocabulary pressure, and numerical safeguards are separate from
+Lightning metrics. RelFlow renders them through Rich with a level column,
+colored component badge, structured context, and Rich tracebacks. Non-terminal
+destinations receive the same information as plain text.
+
+Set `RELFLOW_LOG_LEVEL` before importing RelFlow, or configure the package
+logger directly:
+
+```{python .marimo}
+#| echo: true
+#| output: false
+
+from relflow.logging import configure
+
+configure(level="INFO")
+```
+
+The supported named levels are `DEBUG`, `INFO`, `WARNING`, `ERROR`, and
+`CRITICAL`. This controls RelFlow's operational logger; Lightning experiment
+loggers and progress bars retain their own configuration.
+
 ## Select And Restore Checkpoints
 
 An ordinary Lightning callback records the best path:

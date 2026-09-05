@@ -37,12 +37,12 @@ Verify the installed distribution and import:
 python -c 'from importlib.metadata import version; import relflow; print(version("relflow"))'
 ```
 
-The core install includes PyTorch, Lightning, and PyArrow. Add `polars` for
+The core install includes PyTorch, Lightning, and PyArrow. Add `hash` for
 `Hash` fields and the Polars ingress adapter, `text` for Hugging Face text
 models, or `serving` for the FastAPI runtime:
 
 ```bash
-python -m pip install "relflow[polars] @ git+https://github.com/relflow/relflow.git"
+python -m pip install "relflow[hash] @ git+https://github.com/relflow/relflow.git"
 python -m pip install "relflow[text] @ git+https://github.com/relflow/relflow.git"
 python -m pip install "relflow[serving] @ git+https://github.com/relflow/relflow.git"
 ```

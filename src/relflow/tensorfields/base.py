@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import math
 import re
+import shlex
+import sys
 import warnings
 from abc import abstractmethod
 from collections.abc import Iterator, Mapping
@@ -435,8 +438,9 @@ class Extension:
     of accepted canonical Arrow terminal families. Separate tuple entries are
     incompatible; types joined in one PEP 604 union may share one Arrow column.
     ``arrow`` supplies a physical-type matcher for custom Python atoms or
-    overrides a standard matcher. Creating an extension with an existing name
-    replaces the registry entry and emits a warning.
+    overrides a standard matcher. ``requires`` maps importable module names to
+    their pip installation requirements. Creating an extension with an existing
+    name replaces the registry entry and emits a warning.
     """
 
     def __init__(
@@ -445,6 +449,7 @@ class Extension:
         *,
         types: tuple[ValueTypeFamily, ...],
         arrow: Mapping[type[Any], ArrowMatcher] | None = None,
+        requires: Mapping[str, str] | None = None,
     ):
         if not isinstance(name, str):
             raise TypeError("Extension name must be a string")
@@ -495,12 +500,35 @@ class Extension:
             names = ", ".join(member.__name__ for member in missing)
             raise TypeError(f"Extension custom value type(s) require arrow matchers: {names}")
 
+        if requires is not None and not isinstance(requires, Mapping):
+            raise TypeError("Extension requires must be a mapping from import names to pip requirements")
+        dependencies = {} if requires is None else dict(requires)
+        invalid_imports = [
+            module
+            for module in dependencies
+            if not isinstance(module, str) or not module or any(not part.isidentifier() for part in module.split("."))
+        ]
+        if invalid_imports:
+            names = ", ".join(repr(module) for module in invalid_imports)
+            raise ValueError(f"Extension requires contains invalid Python import name(s): {names}")
+        invalid_requirements = [
+            module
+            for module, requirement in dependencies.items()
+            if not isinstance(requirement, str) or not requirement.strip()
+        ]
+        if invalid_requirements:
+            names = ", ".join(repr(module) for module in invalid_requirements)
+            raise ValueError(f"Extension requires contains empty or non-string pip requirement(s) for: {names}")
+
         self.name: str = name
         self.value_types: tuple[ValueTypeFamily, ...] = types
         self.families: tuple[tuple[type[Any], ...], ...] = tuple(families)
         self.family_by_type: Mapping[type[Any], int] = MappingProxyType(type_to_family)
         self.matchers: Mapping[type[Any], ArrowMatcher] = MappingProxyType(
             {member: declared[member] if member in declared else MATCHERS[member] for member in type_to_family}
+        )
+        self.requires: Mapping[str, str] = MappingProxyType(
+            {module: requirement.strip() for module, requirement in dependencies.items()}
         )
         self.components: dict[Component, ComponentValue | None] = {}
         self.callback_factories: list[CallbackFactory] = []
@@ -518,6 +546,34 @@ class Extension:
     def types(self) -> tuple[ValueTypeFamily, ...]:
         """Registered raw atom compatibility families."""
         return self.value_types
+
+    def require(self, *, address: Address) -> None:
+        """Fail before graph construction when optional runtime packages are absent."""
+
+        missing: list[str] = []
+        for module in self.requires:
+            if module in sys.modules:
+                available = sys.modules[module] is not None
+            else:
+                try:
+                    available = importlib.util.find_spec(module) is not None
+                except (AttributeError, ImportError, ValueError):
+                    available = False
+            if not available:
+                missing.append(module)
+
+        if not missing:
+            return
+
+        requirements = dict.fromkeys(self.requires[module] for module in missing)
+        command = " ".join(shlex.quote(requirement) for requirement in requirements)
+        modules = ", ".join(repr(module) for module in missing)
+        noun = "package" if len(missing) == 1 else "packages"
+        raise ModuleNotFoundError(
+            f"model field '{address}' uses extension '{self.name}', which requires uninstalled {noun}: "
+            f"{modules}; install with `python -m pip install {command}`",
+            name=missing[0],
+        )
 
     def terminals(self, datatype: pa.DataType) -> tuple[pa.DataType, ...]:
         """Return terminal Arrow atom types beneath structural containers."""
